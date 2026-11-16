@@ -2483,6 +2483,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/your-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your tools: sign out one tool
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/memory-and-knowledge/" class="md-nav__link">
         
   
@@ -3721,6 +3749,11 @@ groups and clients.</p>
 <td><strong>v0.47.0</strong></td>
 <td>MEHO ships the "small team" policy file (<code>deploy/policy-profiles/small-team.yaml</code>). While no policy is imported for the whole install, MEHO uses this file as the install's policy. It changes no answer: every operation keeps its risk level, its approval rule and who may approve it. An install policy import (<code>--scope install</code>) that waits for a second admin during the upgrade, on an install without an imported install policy, stops at the approval with "The policy changed after this import was planned." No database migration.</td>
 <td>Run that import again after the upgrade: <code>meho policy diff --scope install &lt;file&gt;</code>, then <code>meho policy import --scope install &lt;file&gt;</code>. A second admin approves it. Tenant imports are not affected. See <a href="../../guides/policy-file/#start-from-the-small-team-file">Start from the "small team" file</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With <code>MCP_CLIENT_PER_TOOL_KIND</code> on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role <code>manage-users</code>. Migration <code>0172</code> adds one index on <code>audit_log</code> (person and time); it changes no row, and on a large audit log it takes a while.</td>
+<td><strong>Built-in Keycloak:</strong> nothing to do; <code>meho-admin</code> already has <code>manage-users</code>. <strong>Your own Keycloak:</strong> give MEHO's Keycloak admin client <code>manage-users</code> before you turn the switch on. Without the role, the button shows an error that names it. See <a href="../keycloak-realm/#the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools</a>.</td>
 </tr>
 </tbody>
 </table>

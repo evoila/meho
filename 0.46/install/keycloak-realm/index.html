@@ -2739,6 +2739,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guides/your-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your tools: sign out one tool
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guides/memory-and-knowledge/" class="md-nav__link">
         
   
@@ -5291,6 +5319,12 @@ adds them to a running realm at the next upgrade.</p>
    Only the client ID and the name differ.</li>
 <li>Give neither client a fixed tenant or role. A person gets their tenant
    and role from their group, as with <code>meho-mcp</code>.</li>
+<li>Give MEHO's Keycloak admin client the realm-management role
+   <code>manage-users</code>. With the switch on, the account page of the web
+   console shows "Your tools", and its "Sign out this tool" button needs
+   this role to list and end the signed-in person's logins. Without the
+   role, the button shows an error that names it. On the built-in
+   Keycloak, <code>meho-admin</code> already has the role.</li>
 </ol>
 <p><strong>Then turn the switch on.</strong> Set <code>MCP_CLIENT_PER_TOOL_KIND=true</code> on the
 backplane (Helm: <code>config.mcpClientPerToolKind: "true"</code>).

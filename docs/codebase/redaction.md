@@ -302,12 +302,17 @@ name in four spellings and with an SNMP prefix, each plain name in four
 spellings, checked in every place below and in the Keycloak scrub. A new
 name is one new row.
 
-The same rule serves the places that had a list of their own: the Keycloak
-scrub (`connectors/keycloak/redaction.py`, used by the Keycloak approval
-previews, its results and its trace) hides its own field names and every
-name the shared rule marks (a flag or a number stays), and the secret query
-names of a link (`redaction/url_secret.py::is_secret_query_name`) are its
-own last words plus every name the shared rule marks.
+The same rule serves the places that had a list of their own:
+
+- The Keycloak approval previews and its trace
+  (`connectors/keycloak/redaction.py`, `redact_preview_fields` and
+  `redact_trace_fields`) hide the Keycloak field names and every name the
+  shared rule marks (a flag or a number stays).
+- The Keycloak read results (`redact_secret_fields`) hide only the Keycloak
+  field names. The dispatcher hides the shared names in the normal answer
+  and keeps their values, so `reveal_secret: true` still returns them.
+- The secret query names of a link (`redaction/url_secret.py::is_secret_query_name`)
+  are its own last words plus every name the shared rule marks.
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number

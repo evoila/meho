@@ -24,9 +24,15 @@ from meho_backplane.broadcast.events import (
     scrub_broadcast_params,
     scrub_secret_named_values,
 )
-from meho_backplane.connectors.keycloak.redaction import REDACTED, redact_secret_fields
+from meho_backplane.connectors.keycloak.ops_read import keycloak_realm_get
+from meho_backplane.connectors.keycloak.redaction import (
+    REDACTED,
+    redact_preview_fields,
+    redact_secret_fields,
+    redact_trace_fields,
+)
 from meho_backplane.operations._preview import _PARAM_REDACTED, _scrub_secret_param_keys
-from meho_backplane.operations._secret_values import hide_secret_values
+from meho_backplane.operations._secret_values import hide_secret_values, reveal_hidden_values
 from meho_backplane.redaction.secret_fields import (
     scrub_secret_fields,
     scrub_secret_fields_in_text,
@@ -114,7 +120,9 @@ def test_secret_name_is_hidden_in_every_place(name: str) -> None:
     assert hide_secret_values("any.op", node) == hidden(_MARK)  # audit row
     assert scrub_broadcast_params(node) == (hidden(_MARK), True)  # broadcast
     assert _scrub_secret_param_keys(node) == hidden(_PARAM_REDACTED)  # preview
-    assert redact_secret_fields(node) == hidden(REDACTED)  # Keycloak preview
+    assert redact_preview_fields(node) == hidden(REDACTED)  # Keycloak preview
+    assert redact_trace_fields(node) == hidden(REDACTED)  # Keycloak trace
+    assert redact_secret_fields(node) == node  # Keycloak result: hidden later, can be revealed
     assert scrub_secret_fields(node, hide_numbers=True) == hidden(_MARK)  # trace
     assert _VALUE not in scrub_secret_fields_in_text(f'{{"{name}": "{_VALUE}"}}')  # error text
     assert is_secret_query_name(name) is True  # a link's query
@@ -130,6 +138,7 @@ def test_plain_name_stays_in_every_place(name: str) -> None:
     assert scrub_broadcast_params(node) == (node, False)
     assert _scrub_secret_param_keys(node) == node
     assert redact_secret_fields(node) == node
+    assert redact_preview_fields(node) == node
     assert scrub_secret_fields(node, hide_numbers=True) == node
     assert scrub_secret_fields_in_text(text) == text
 
@@ -186,6 +195,43 @@ def test_community_outside_an_snmp_place_stays(node: Any) -> None:
     assert scrub_secret_fields(node) == node
 
 
-def test_keycloak_scrub_keeps_flags_under_a_secret_name() -> None:
+def test_keycloak_preview_scrub_keeps_flags_under_a_secret_name() -> None:
     node = {"resetPasswordAllowed": True, "passwordPolicy": "length(8)"}
-    assert redact_secret_fields(node) == {"resetPasswordAllowed": True, "passwordPolicy": REDACTED}
+    assert redact_preview_fields(node) == {"resetPasswordAllowed": True, "passwordPolicy": REDACTED}
+
+
+class _RealmReader:
+    """Stands in for the connector: the Admin REST read returns *realm*."""
+
+    def __init__(self, realm: dict[str, Any]) -> None:
+        self._realm = realm
+
+    async def _get_admin_json(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return self._realm
+
+
+async def test_keycloak_read_hides_shared_names_by_default_and_reveal_returns_them() -> None:
+    realm = {
+        "realm": "demo",
+        "resetPasswordAllowed": True,
+        "passwordPolicy": "length(8)",
+        "attributes": {"snmpAuthKey": _VALUE},
+        "smtpServer": {"host": "smtp.example.invalid", "password": _VALUE},
+    }
+    raw = await keycloak_realm_get(_RealmReader(realm), None, None, {})  # type: ignore[arg-type]
+
+    # The Keycloak list hides the SMTP password at the source, for good.
+    assert raw["realm"]["smtpServer"]["password"] == REDACTED
+    # The shared names stay in the result, so the dispatcher can keep them.
+    assert raw["realm"]["passwordPolicy"] == "length(8)"
+    assert raw["realm"]["attributes"]["snmpAuthKey"] == _VALUE
+
+    shown = hide_secret_values("keycloak.realm.get", raw)
+    assert shown["realm"]["passwordPolicy"] == _MARK
+    assert shown["realm"]["attributes"]["snmpAuthKey"] == _MARK
+    assert shown["realm"]["resetPasswordAllowed"] is True
+
+    revealed = reveal_hidden_values(raw, raw, shown)
+    assert revealed["realm"]["passwordPolicy"] == "length(8)"
+    assert revealed["realm"]["attributes"]["snmpAuthKey"] == _VALUE
+    assert revealed["realm"]["smtpServer"]["password"] == REDACTED

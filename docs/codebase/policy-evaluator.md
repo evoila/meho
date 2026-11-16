@@ -260,6 +260,80 @@ policy_shadow_mismatch kind=call op_id=<op-id> principal_kind=<kind>
 For an approval line, `today_may_approve` and `shadow_may_approve` are
 the two answers.
 
+## The parity test
+
+`backend/tests/test_policy_evaluate_parity.py` runs every case through
+today's code and through the evaluator. It fails on any difference. It
+runs in the normal unit test job, in about 20 seconds.
+
+- **Calls** (9,216 cases): 6 caller kinds (a person in the web
+  interface, a person with a token, an agent, a `read_only` agent, a
+  service login, a hosted agent run) x 6 logins (the five login groups,
+  and a platform admin in another tenant) x 4 risk levels x 32
+  combinations of five marks (requires approval, write, shows a secret,
+  connects to an address the caller gives, needs the `tenant_admin`
+  role) x with and without a grant. Today's side is `policy_gate`; the
+  evaluator's side is `evaluate_call`, with the same lookups. Both must
+  give the same verdict, the same reason class, the same approver
+  groups and the same `waits_because`.
+- **Approvals** (19,200 cases): 5 approver kinds x 6 logins x own change
+  or not x 5 risk levels (also none) x token wait x requires approval x
+  role floor x pending or decided x change of rights x the break-glass
+  switch. Today's side is `approve_right`; the evaluator's side is
+  `may_approve`. Both must allow or refuse, for the same reason.
+- **Routes and tools**: every REST route with a `require_role` check and
+  every MCP tool, for each of the six logins. The evaluator has no route
+  table, so the test checks that the evaluator reads the login the same
+  way: its role floor for an operation that needs the route's role gives
+  the same answer as the door.
+
+The "small team" file is checked in `test_policy_small_team_parity.py`:
+its export on a fresh install equals the file, and importing it changes
+no answer of any registered operation.
+
+### How to read a failing case
+
+The test prints up to 20 differing cases, each like this:
+
+```
+caller=service login=Operators grant=True level=dangerous marks=[write]
+  today={'verdict': 'run', 'class': 'standing_grant', ...} reason='auto-granted by ...'
+  evaluator={'verdict': 'wait', 'class': 'wait', ...} trace=['default service.dangerous: wait', ...]
+```
+
+- The first line is the case: who asks, the login, the grant, the risk
+  level and the marks of the operation.
+- `today` is what MEHO does now, with today's reason text. `evaluator`
+  is the evaluator's answer, with every step it took (`trace`).
+- The reason class says what let a call run (`default`,
+  `standing_grant`, `run_approval`, `agent_grant`) or what refused it
+  (`role_floor`, `read_scope`, `agent_no_grant`, `agent_rule`). Every
+  call that waits has the class `wait`.
+- `approvers` are the login groups that may approve another person's
+  call. On today's side they come from `approve_right`, one person of
+  each group.
+- Find the step in the trace where the two answers part. Then fix the
+  evaluator, or add today's rule to it. Never change today's code in the
+  same change: report a difference in today's code on its own issue.
+
+An approval case prints the approver, the request and both answers:
+today's `may_approve_reason` and rule, and the evaluator's rule.
+
+### What the table does not cover
+
+- Sandbox mode, and a preview hash. A service login's `destructive` call
+  in sandbox mode with a preview hash can differ: today's gate checks the
+  hash and the blast radius before a delete grant counts, and the shadow
+  looks the grant up without these checks. The sandbox cases without a
+  hash are in `test_policy_shadow.py`.
+- A change of rights on the call side. `Decision.approvers` does not
+  know it yet (only another admin approves it), so the call table uses
+  no such operation. The approval table covers it.
+- Run approvals and `AGENT_GRANT_REQUIRED=on`. They are in
+  `test_policy_small_team_parity.py` and `test_policy_shadow.py`.
+- Read scopes. The evaluator's read scope step is in
+  `test_policy_evaluate.py`.
+
 ## Cost
 
 The evaluator itself is a few dictionary and set checks. The added time
@@ -292,6 +366,8 @@ switch off and on.
   and `backend/tests/migrations/test_migration_0168_add_policy_rule_columns.py`:
   the rule on audit rows, approval requests and the console, and the
   migration on PostgreSQL with the append-only trigger (#6044).
+- `backend/tests/test_policy_evaluate_parity.py`: the parity test (see
+  "The parity test").
 - `backend/tests/test_policy_shadow_load.py`: the load check.
 - `backend/tests/test_policy_explain.py`: `meho policy explain`: one
   answer per verdict, the floor, the switch off, a file that is not

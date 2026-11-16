@@ -22,8 +22,12 @@ first people log in.
     - **An agent makes the requests** and you approve them. This is the
       agent-requester pattern in
       [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
-      The agent needs no grant for this: an agent's `dangerous` request
-      waits for a person's approval by default.
+      The agent needs a grant only when the switch
+      `AGENT_GRANT_REQUIRED` is `on`. With `off` (the default) or
+      `observe`, an agent's `dangerous` request waits for a person's
+      approval also with no grant. With `on`, a request with no grant
+      is refused. A grant never lets it run alone: it still waits for a
+      person's approval.
 
     The group operations stay at the dangerous risk level (decision
     record:
@@ -342,12 +346,32 @@ writes below wait for your current approver, as before.
 1. **Register the agent.** The new `tenant_admin`, logged in to the new
    tenant, registers the agent principal. The test write
    (`vault.kv.put`, risk level `caution`) and the cleanup
-   (`vault.kv.delete`, risk level `dangerous`) both wait for approval
-   without a grant: an agent's request above `safe` always waits for a
-   person.
+   (`vault.kv.delete`, risk level `dangerous`) must wait for a
+   person's approval. What the agent needs for that depends on the
+   switch `AGENT_GRANT_REQUIRED`:
+
+   - `off` (the default) or `observe`: both wait for approval, also
+     with no grant.
+   - `on`: with no grant, both are refused (`agent_no_grant`). With a
+     grant, both wait for approval.
+
+   So register the agent with no starting grant (`--grants none`). The
+   new tenant has no target yet. After you add the Vault target below,
+   you give the agent two grants with `needs-approval`: one for
+   `vault.kv.put` and one for `vault.kv.delete`, both on that target
+   only. Then the write and the cleanup wait for a person in every
+   state of the switch. What else the agent may run also depends on
+   the switch:
+
+   - `on`: nothing else. Every other call is refused
+     (`agent_no_grant`).
+   - `off` or `observe`: the two grants do not limit the agent. A call
+     that no grant covers gets the default for its risk level: a
+     `safe` read runs at once, on any target of the tenant. A call
+     above `safe` waits for a person's approval.
 
    ```bash
-   meho agent-principal register tenant-check
+   meho agent-principal register tenant-check --grants none
    ```
 
 2. **Find the agent's login id.** The agent logs in to Vault with its own
@@ -372,20 +396,41 @@ writes below wait for your current approver, as before.
    member list replaces the old one: list the approver's entity id and
    the agent's entity id together.
 
-4. **Create the agent definition and schedule the run.** Follow the
-   four steps of the agent-requester pattern. The run must be a
+4. **Create the agent definition and schedule the run.** Do this after
+   you added the Vault target and the agent's grants below. Follow
+   steps 2 to 4 of the agent-requester pattern (step 1 is the
+   registration above). The agent then has a grant, so
+   `meho agent create` needs no `--grants`. The run must be a
    scheduled one. An agent you start by hand acts for you, and the
    request then carries your `sub`, so you could not approve it.
 
 The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
 with the person's own token. `meho targets add` waits for approval and
-prints an approval id, so approve it before you use the target. Then
-write one test secret, let the approver approve it, and read it back:
+prints an approval id, so approve it before you use the target:
 
 ```bash
 meho targets add vault-main --product vault --host vault.example.com --no-secret-ref
 meho approvals approve <approval-id-from-targets-add>
+```
+
+**With the agent requester:** give the agent its two grants now. A grant
+names its target by UUID: it is the `id:` line of `meho targets describe`.
+Then do step 4 above.
+
+```bash
+meho targets describe vault-main
+meho agent grant create --principal agent:tenant-check \
+  --op vault.kv.put --target <vault-main-uuid> --verdict needs-approval
+meho agent grant create --principal agent:tenant-check \
+  --op vault.kv.delete --target <vault-main-uuid> --verdict needs-approval
+```
+
+Then write one test secret, let the approver approve it, and read it
+back. With the agent requester, the scheduled run makes the write and
+the cleanup:
+
+```bash
 meho vault kv put --target vault-main secret tenants/<tenant-uuid>/smoke-test --data '{"ok": "yes"}'
 # The approver, logged in to the new tenant:
 meho approvals list

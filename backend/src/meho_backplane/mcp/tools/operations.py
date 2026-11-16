@@ -76,6 +76,7 @@ from meho_backplane.mcp.tools._operation_recall import (
     recall_schema_for_settings,
     with_recall,
 )
+from meho_backplane.mcp.tools._preview_policy_fields import PREVIEW_POLICY_OUTPUT_SCHEMA
 from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
 from meho_backplane.mcp.tools._search_classification import (
     CLASSIFICATION_PROPERTIES,
@@ -1124,6 +1125,7 @@ register_mcp_tool(
                         "it gives none (a person's call that runs at once)."
                     ),
                 },
+                **PREVIEW_POLICY_OUTPUT_SCHEMA,
                 "proposed_effect": {
                     "type": "object",
                     "description": (

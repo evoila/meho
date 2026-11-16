@@ -1632,6 +1632,7 @@ from meho_backplane.auth.operator import Operator, TenantRole  # noqa: E402
 from meho_backplane.connectors.rke2.ops_write import (  # noqa: E402
     _ROTATED_TOKEN_MARKER,
     WRITE_OPS,
+    Rke2WriteOwnMessageError,
     _build_rotate_script,
     parse_rke2_release,
     rke2_token_rotate,
@@ -1917,10 +1918,9 @@ async def test_token_rotate_missing_sudo_credential_refuses() -> None:
         patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
     ):
         mock_secret.return_value = {"username": "root"}  # no password / sudo_password
-        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+        with pytest.raises(Rke2WriteOwnMessageError):
+            await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
         mock_cmd.assert_not_awaited()
-    assert result["rotated"] is False
-    assert result["gate"] == "credentials"
 
 
 @pytest.mark.asyncio

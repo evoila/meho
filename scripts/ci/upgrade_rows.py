@@ -251,7 +251,7 @@ def released_versions(root: Path = REPO_ROOT) -> list[str]:
 def check_frozen_tables(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> None:
     """Fail on a row added by hand below the frozen rows of a table."""
     released = set(released_versions(root))
-    written = {row.as_table_line() for row in collect_rows(rows_dir) if row.version in released}
+    written = [row for row in collect_rows(rows_dir) if row.version in released]
     for rel, heading in TABLE_FILES.items():
         lines = (root / rel).read_text(encoding="utf-8").splitlines()
         rows = _data_rows(lines, heading)
@@ -261,10 +261,32 @@ def check_frozen_tables(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> No
                 f"{rel}: the table has {len(rows)} rows, expected at least {frozen}; "
                 "do not remove rows"
             )
-        allowed = written if rel == DEPLOYING else set()
+        allowed = {row.as_table_line() for row in written} if rel == DEPLOYING else set()
         for index in rows[frozen:]:
-            if lines[index] not in allowed:
-                raise UpgradeRowError(f"{rel}:{index + 1}: this row has no row file. {_MOVE_HINT}")
+            if lines[index] in allowed:
+                continue
+            if rel == DEPLOYING:
+                _fail_on_changed_row(lines, index, written)
+            raise UpgradeRowError(f"{rel}:{index + 1}: this row has no row file. {_MOVE_HINT}")
+
+
+def _fail_on_changed_row(lines: list[str], index: int, written: list[Row]) -> None:
+    """Fail when a written row of ``docs/deploying.md`` and its row file differ.
+
+    The row has the version of row files whose own line is not in the table:
+    one of the two was changed without the other.
+    """
+    table = set(lines)
+    changed = [
+        f"{row.version}/{row.name}.md"
+        for row in written
+        if lines[index].startswith(f"| **{row.version}** |") and row.as_table_line() not in table
+    ]
+    if changed:
+        raise UpgradeRowError(
+            f"{DEPLOYING}:{index + 1}: this row differs from {' or '.join(changed)}; "
+            "change both in the same pull request"
+        )
 
 
 def add_rows_to_table(text: str, heading: str, rows: list[Row]) -> str:
@@ -328,9 +350,12 @@ def check_released_rows(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> No
     missing = _missing_released_rows(root, rows_dir)
     if missing:
         names = ", ".join(f"{row.version}/{row.name}.md" for row in missing)
+        version = missing[0].version
         raise UpgradeRowError(
-            f"{DEPLOYING} lacks rows of released versions ({names}); "
-            "run python scripts/ci/upgrade_rows.py --write"
+            f"{DEPLOYING} lacks rows of released versions ({names}). "
+            f"In the release pull request of {version}, run "
+            "python scripts/ci/upgrade_rows.py --write. "
+            f"Else {version} is already released; put the row in the folder of the next release"
         )
 
 

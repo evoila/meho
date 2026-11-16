@@ -261,8 +261,12 @@ def test_a_released_row_missing_in_deploying_fails(
 ) -> None:
     rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
     _row_file(rows_dir, "v0.2.0", "x", _GOOD)
-    with pytest.raises(ur.UpgradeRowError, match=r"v0\.2\.0/x\.md.*--write"):
+    with pytest.raises(ur.UpgradeRowError, match=r"v0\.2\.0/x\.md.*--write") as err:
         ur.check_released_rows(tmp_path, rows_dir)
+    # The same state is a late row for a release that had no row files.
+    assert "v0.2.0 is already released; put the row in the folder of the next release" in str(
+        err.value
+    )
     ur.write_deploying(tmp_path, rows_dir)
     ur.check_released_rows(tmp_path, rows_dir)
 
@@ -342,7 +346,11 @@ def test_an_edited_row_file_after_write_needs_the_same_edit_in_deploying(
     row = _row_file(rows_dir, "v0.2.0", "x", _GOOD)
     ur.write_deploying(tmp_path, rows_dir)
     row.write_text(_GOOD.replace("What to do.", "What to do now."), encoding="utf-8")
-    with pytest.raises(ur.UpgradeRowError, match="this row has no row file"):
+    with pytest.raises(
+        ur.UpgradeRowError,
+        match=r"docs/deploying\.md:\d+: this row differs from v0\.2\.0/x\.md; "
+        "change both in the same pull request",
+    ):
         ur.check_all(tmp_path, rows_dir)
 
     path = tmp_path / ur.DEPLOYING
@@ -360,3 +368,19 @@ def test_a_file_outside_a_version_folder_fails(tmp_path: Path) -> None:
     (tmp_path / "rows" / "my-row.md").write_text(_GOOD, encoding="utf-8")
     with pytest.raises(ur.UpgradeRowError, match="belongs in a version folder"):
         ur.collect_rows(tmp_path / "rows")
+
+
+def test_an_edited_written_row_in_deploying_names_its_row_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    ur.write_deploying(tmp_path, rows_dir)
+    path = tmp_path / ur.DEPLOYING
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("What to do.", "Edited here."),
+        encoding="utf-8",
+    )
+    with pytest.raises(ur.UpgradeRowError, match=r"this row differs from v0\.2\.0/x\.md") as err:
+        ur.check_all(tmp_path, rows_dir)
+    assert "Move your row" not in str(err.value)

@@ -183,7 +183,9 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
     and the system is not contacted. Service exceptions (unknown target,
     no connector, a connector that fails) are re-raised as
     :class:`ValueError`, like the other ``targets.*`` ops; nothing is
-    stored then.
+    stored then. A target secret MEHO cannot read passes unchanged, so
+    the dispatcher answers ``target_secret_not_found`` or
+    ``connector_vault_forbidden`` with its ``error_code``, as for a call.
     """
     if operator.tenant_role is TenantRole.READ_ONLY:
         raise ValueError(

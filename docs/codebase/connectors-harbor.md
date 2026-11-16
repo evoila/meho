@@ -362,6 +362,14 @@ not one of the 9.
 | `harbor.artifact.vulnerabilities` *(standalone typed read, #2857)* | `harbor-artifacts` | `GET …/artifacts/{reference}/additions/vulnerabilities` |
 | `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}/summary` |
 | `harbor.quota.list` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/quotas?reference=project` |
+| `harbor.project.create` *(typed write, `caution` + approval)* | `harbor-projects` | `POST /api/v2.0/projects` |
+
+`harbor.project.create` (`ops_project_create.py`) creates a project from
+`project_name`, `public` (default `false`, so private) and an optional
+`storage_limit` in bytes. It is safe to run twice: Harbor answers `409` for a
+taken name, and the handler returns `created: false` without a change. Any
+other HTTP error is raised. The result names `harbor.project.info` as the
+read back. Its tests are in `tests/test_connectors_harbor_project_create.py`.
 
 **Quota lives on the summary endpoint, not on `Project`**: `harbor.project.info`
 (`GET /projects/{name}`) returns the vendor `Project` object, which has no
@@ -385,7 +393,7 @@ single `encode_segment` helper percent-encodes caller-controlled segments — so
 these constants ARE the dispatched surface. The lane
 [`test_connectors_harbor_spec_reconcile.py`](../../backend/tests/test_connectors_harbor_spec_reconcile.py)
 (parse-only, in the required unit sweep; uniform skip when the shelf is
-unconfigured) introspects those live constants and asserts all 14 hand-coded
+unconfigured) introspects those live constants and asserts all 16 hand-coded
 `METHOD:/path` op_ids are served by the pinned `harbor-2.12` shelf spec
 (`harbor-swagger.yaml` — `goharbor/harbor@v2.12.2` `api/v2.0/swagger.yaml`,
 Apache-2.0). The spec is Swagger 2.0 (ingest rejects it, #2090), so the lane
@@ -395,7 +403,7 @@ names (`{project_name_or_id}` on the project detail / `/summary` routes,
 `{project_name}` / `{repository_name}` / `{reference}` on the repository
 sub-tree, `{robot_id}` on the robot read and delete). All 14 were served on the
 first armed run — no repoints, no exclusions. The robot read before the delete
-(`GET /api/v2.0/robots/{robot_id}`) is the 15th. Standard:
+(`GET /api/v2.0/robots/{robot_id}`) is the 15th, and the project create (`POST /api/v2.0/projects`) is the 16th. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## CLI verbs

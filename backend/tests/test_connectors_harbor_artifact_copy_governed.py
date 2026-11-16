@@ -22,7 +22,6 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.connectors.harbor  # noqa: F401 -- registers the connector at import
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.harbor import HarborConnector
 from meho_backplane.connectors.harbor.ops_artifact_copy import (

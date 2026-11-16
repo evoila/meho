@@ -1135,17 +1135,18 @@ that header from one place, so every verb gets it without its own flag.
   backplane (below): it refuses a blank value, a value over 256
   characters, and a value with a control character (also a tab or a line
   break), an invisible format character or a line or paragraph
-  separator. Text that is not valid UTF-8 is refused too. Two small
-  differences, on purpose. The CLI does not make the text NFC (the
-  backplane does), so a decomposed id that is only longer than 256
-  characters before that step is refused by the CLI. And the CLI looks
-  for control characters before it strips white space, so a trailing
-  line break is refused, although the backplane would strip it. A given
+  separator. Text that is not valid UTF-8 is refused too. Like the
+  backplane, the CLI counts the length after it strips white space and
+  makes the text NFC, so 130 decomposed letters (260 characters as typed)
+  pass. One difference, on purpose: the CLI looks for control characters
+  before it strips white space, so a trailing line break is refused,
+  although the backplane would strip it. Such a line break in a flag or
+  variable value is most likely a mistake. A given
   flag is always checked, so `--work-ref ""` is refused. An empty
   `MEHO_WORK_REF` means "not set". A bad value stops the command before
   any request leaves the CLI. A good value is cleaned with
-  `api.CleanWorkRef` (it strips like Python's `str.strip`) and goes on
-  the command context (`api.WithWorkRef`).
+  `api.CleanWorkRef` (it strips like Python's `str.strip` and makes the
+  text NFC) and goes on the command context (`api.WithWorkRef`).
 - One case list, `testdata/work_ref_cases.json`, is read by the Go test
   (`TestValidWorkRef_SharedCases`) and by the Python test
   (`backend/tests/test_work_ref_rule.py`), so the two rules cannot drift.
@@ -1210,16 +1211,21 @@ that header from one place, so every verb gets it without its own flag.
   ticket X. For one release, a `--work-ref` on these commands still
   filters too when `--filter-work-ref` is not given, and
   `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
-  line on stderr that names `--filter-work-ref`. A filter value that
-  `api.ValidWorkRef` refuses (for example one with a line break) does
-  not fail in the CLI: `applyWorkRef` skips the tag on these commands, and
-  the backplane refuses the filter value with the ticket id rule (HTTP
-  422). The backplane matches a filter value both cleaned (stripped and
-  made NFC, like a stored ticket id) and exactly as typed. So a search
-  finds an id however it is typed, and a search with the exact old text
-  still finds a row stored before the rule. When `--filter-work-ref` is given, also
-  empty (`--filter-work-ref=""` means no filter), `--work-ref` only
-  tags, and a bad value is an error like on every other command.
+  line on stderr that names `--filter-work-ref`.
+- The CLI sends a filter value as typed and does not check it. The
+  backplane checks it with the ticket id rule. It strips white space at
+  both ends and makes the text NFC, so a value with a line break at the
+  end still finds the ticket. A value that the rule refuses (only white
+  space, a tab or an invisible character inside, or more than 256
+  characters after stripping) gets HTTP 422 with a message that names
+  the rule. The backplane matches the cleaned id and also the text
+  exactly as typed, so a search with the exact old text still finds a
+  row stored before the rule. An empty `--filter-work-ref=""` means no
+  filter.
+- While the old `--work-ref` still filters (no `--filter-work-ref`
+  given), `applyWorkRef` does not check it and does not tag the request
+  with it. When `--filter-work-ref` is given, also empty, `--work-ref`
+  only tags, and a bad value is an error like on every other command.
   `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
   the command tree and fails when a command adds its own `--work-ref`
   that is not a tag; `TestFilterWorkRefOnReadCommands` checks the

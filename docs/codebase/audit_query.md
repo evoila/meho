@@ -549,7 +549,7 @@ and NFC.
   the refused ticket id, for example a missing field, which carries the
   whole body. A header
   that is refused leaves one log line, `work_ref_header_refused`, with
-  the request id, the method, the route and the rule that failed
+  the request id, the method, the URL path (`path`) and the rule that failed
   (`empty`, `invisible_character` or `too_long`). It never holds the
   value. So an operator can find a client that sends a blank or bad
   header after an upgrade.
@@ -585,18 +585,41 @@ only `CHG1`. The filters are:
   `meho_broadcast_recent` and `meho_broadcast_watch`, key
   `filter.work_ref`).
 
-An empty or blank filter is refused, not read as "no filter". Leave the
-filter out for no filter. The console approvals filter box treats a blank
-box as no filter.
+An empty or blank filter is refused on every REST filter and on the
+nested broadcast filter (`filter.work_ref` of `meho_broadcast_recent` and
+`meho_broadcast_watch`). Leave the filter out for no filter. On the
+top-level filter of the MCP list tools `meho_approvals_list`,
+`meho_agents_list_runs`, `meho_scheduler_list` and
+`meho_runbook_list_runs`, a blank value means "no filter": MCP drops
+blank optional text arguments of read tools before it checks them
+(`mcp/handlers.py`). `tests/test_mcp_empty_optional_filter.py` pins this.
+
+The console search boxes of the agent runs, the scheduler and the audit
+pages check the value with the same rule (`filter_work_ref` in
+`ui/routes/work_ref_form.py`): they clean first and then count the
+length, and a bad value is a 422 that names the rule. A blank box means
+no filter. The approvals search box treats a blank box as no filter and
+sends any other value to the same search.
 
 ### How a new door is found
 
-`tests/test_work_ref_doors.py` walks every REST request model field,
-every REST query, path and header parameter, and every MCP tool argument
-named `work_ref`. It fails when one does not use the shared type
-`WorkRef` or the shared function (`normalize_work_ref`,
-`work_ref_argument` for MCP), unless it is on a short list with a
-reason (the `Meho-Work-Ref` header of the agent run routes). The
+`tests/test_work_ref_doors.py` walks every REST and console request
+model field, every query, path, header and form parameter, and every MCP
+tool argument named `work_ref`. It fails when one does not use the
+shared type (`WorkRef`, or `WorkRefFilter` for a search filter) or the
+shared function (`normalize_work_ref`, `work_ref_argument` for MCP),
+unless it is on a short list with a reason (`_REST_OTHER_DOORS`, 13
+entries):
+
+- the `Meho-Work-Ref` header of the two agent run routes;
+- the four console forms that store a ticket id (`form_work_ref`);
+- the four console search boxes that check the value with
+  `filter_work_ref` (agent runs, scheduler, audit page and audit
+  results);
+- the two approvals search boxes and the approvals "in order" page,
+  which use the search of the REST filter.
+
+The test fails too when an entry of the list matches no route. The
 command line tool has the same rule in `cli/internal/api/workref.go`.
 Both tests read one case list, `testdata/work_ref_cases.json`.
 

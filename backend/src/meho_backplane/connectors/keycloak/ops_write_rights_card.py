@@ -31,6 +31,12 @@ When MEHO cannot read the object (no live connection, an unknown client,
 an error), the card says ``current_values_available: false`` (or
 ``current_mappers_available: false``) and shows the new values only. It
 never shows an empty "now" side as if the object had no values.
+
+The cards are behind the switch ``KEYCLOAK_RIGHTS_CHANGE_CARDS``
+(``Settings.keycloak_rights_change_cards``, off by default). Off,
+``keycloak.client.update`` and ``keycloak.protocol_mapper.create`` show
+the generic params echo, and ``keycloak.realm.update`` shows the realm
+card of :mod:`.ops_write_realm_smtp` without ``current_values``.
 """
 
 from __future__ import annotations
@@ -54,6 +60,7 @@ from meho_backplane.operations._preview import (
     _redact_echoed_params,
     register_preview_builder,
 )
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
@@ -62,6 +69,10 @@ __all__ = ["CLIENT_UPDATE_OP_ID", "PROTOCOL_MAPPER_CREATE_OP_ID"]
 
 CLIENT_UPDATE_OP_ID = "keycloak.client.update"
 PROTOCOL_MAPPER_CREATE_OP_ID = "keycloak.protocol_mapper.create"
+
+
+def _cards_on() -> bool:
+    return get_settings().keycloak_rights_change_cards
 
 
 def _text(value: Any) -> str | None:
@@ -192,8 +203,8 @@ async def _client_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
 async def _realm_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
     """Card for ``keycloak.realm.update``: the realm card plus the realm's values now."""
     card = await _realm_update_preview(ctx)
-    if card is None:
-        return None
+    if card is None or not _cards_on():
+        return card
     return _add_current_values(card, ctx, await _read_realm(ctx), _representation(ctx))
 
 
@@ -225,6 +236,8 @@ async def _protocol_mapper_create_card(ctx: PreviewContext) -> dict[str, Any] | 
     return card
 
 
-register_preview_builder(CLIENT_UPDATE_OP_ID, _client_update_card)
+register_preview_builder(CLIENT_UPDATE_OP_ID, _client_update_card, enabled=_cards_on)
 register_preview_builder(REALM_UPDATE_OP_ID, _realm_update_card)
-register_preview_builder(PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card)
+register_preview_builder(
+    PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card, enabled=_cards_on
+)

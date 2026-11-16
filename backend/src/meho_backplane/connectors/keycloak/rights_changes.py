@@ -66,6 +66,14 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     "keycloak.role_mapping.assign": "gives a user realm roles",
     "keycloak.group.member.add": "puts a user into a group and gives them its roles",
     "keycloak.group.update_attributes": ("group attributes fill the tenant claims of every member"),
+    "keycloak.authflow.ensure_approval_flow": (
+        "maps the acr name 'meho-approve' to a sign-in level in the realm; MEHO reads "
+        "that acr claim of a token to accept an approval"
+    ),
+    "keycloak.authflow.ensure_approval_touch": (
+        "adds or changes the client's 'amr' protocol mapper, which puts a claim into "
+        "every token, and maps the acr name 'meho-touch' to a sign-in level"
+    ),
 }
 
 #: op_id -> why the write cannot change what a token says or who has a role.
@@ -87,17 +95,9 @@ NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     "keycloak.group.delete": "removes a group; it only takes away",
     "keycloak.client.delete": "removes a client; it only takes away",
     "keycloak.realm.delete": "removes a realm; it only takes away",
-    "keycloak.authflow.ensure_approval_flow": (
-        "adds MEHO's own approval sign-in step to a client; it changes how a person "
-        "signs in, not what the token says"
-    ),
     "keycloak.authflow.ensure_passkey_code_skip": (
-        "binds MEHO's own copy of the browser sign-in flow; it changes sign-in steps, "
-        "not roles or claims"
-    ),
-    "keycloak.authflow.ensure_approval_touch": (
-        "adds MEHO's own touch sign-in flow to a client; it changes sign-in steps, "
-        "not roles or claims"
+        "binds MEHO's own copy of the browser sign-in flow; it writes no mapper and "
+        "no acr name, so it changes sign-in steps, not roles or claims"
     ),
 }
 

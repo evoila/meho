@@ -2613,6 +2613,15 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The approval cards of three Keycloak changes of rights, behind a
+    #: switch that is off by default. When on, ``keycloak.client.update`` and
+    #: ``keycloak.realm.update`` show the values now of each field the
+    #: request sends next to the new values, and
+    #: ``keycloak.protocol_mapper.create`` shows the client's mappers now and
+    #: the new one (:mod:`meho_backplane.connectors.keycloak.ops_write_rights_card`).
+    #: The approval request and ``preview_operation`` both show these cards.
+    #: Off: the same answers as before. Set via ``KEYCLOAK_RIGHTS_CHANGE_CARDS``.
+    keycloak_rights_change_cards: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3669,6 +3678,9 @@ def get_settings() -> Settings:
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),
+        ),
+        keycloak_rights_change_cards=parse_bool_env(
+            os.environ.get("KEYCLOAK_RIGHTS_CHANGE_CARDS"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

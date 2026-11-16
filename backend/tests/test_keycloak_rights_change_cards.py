@@ -8,6 +8,9 @@
 and show it next to the new values. Secrets are hidden on both sides, and
 a failed read says so instead of showing an empty "now" side.
 
+The cards are behind the switch ``KEYCLOAK_RIGHTS_CHANGE_CARDS``. The
+tests turn it on, except the tests that check the answers with it off.
+
 Fixture values are made up.
 """
 
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock
@@ -24,11 +28,36 @@ import pytest
 import meho_backplane.connectors.keycloak  # noqa: F401 -- registers the cards
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
-from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.connectors.keycloak.ops_write_realm_smtp import _realm_update_preview
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    build_proposed_effect,
+    has_preview_builder,
+)
+from meho_backplane.settings import get_settings
+from tests.mcp_test_fixtures import (
+    required_settings_env,  # noqa: F401 -- autouse fixture: pins the env get_settings needs
+)
 
 _CLIENT_UUID = "33333333-3333-3333-3333-333333333333"
 _CLIENT_SECRET = "made-up-client-secret-value-7f3a"
 _SMTP_PASSWORD = "made-up-smtp-password-1c9e"
+
+
+@pytest.fixture(autouse=True)
+def _cards_switch(
+    required_settings_env: None,  # noqa: F811 -- runs first, so get_settings has its env
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_RIGHTS_CHANGE_CARDS", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KEYCLOAK_RIGHTS_CHANGE_CARDS", raising=False)
+    get_settings.cache_clear()
 
 
 @dataclass
@@ -246,3 +275,44 @@ async def test_protocol_mapper_create_says_when_the_client_cannot_be_read() -> N
     assert card["current_mappers_available"] is False
     assert "current_mappers" not in card
     assert card["new_mapper"] == {"name": "role"}
+
+
+def test_the_switch_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch_off(monkeypatch)
+
+    assert get_settings().keycloak_rights_change_cards is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["keycloak.client.update", "keycloak.protocol_mapper.create"])
+async def test_switch_off_client_update_and_mapper_create_echo_the_params(
+    op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch_off(monkeypatch)
+    connector = _connector(_CLIENT_NOW)
+    params = {"client_id": "example-app", "representation": {"name": "example"}}
+
+    effect = await build_proposed_effect(_ctx(op_id, params, connector))
+
+    assert not has_preview_builder(op_id)
+    assert effect is not None
+    assert "preview" not in effect
+    assert effect["params_echo"]["representation"] == {"name": "example"}
+    connector._get_admin_json.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_switch_off_realm_update_shows_the_realm_card_without_values_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_off(monkeypatch)
+    connector = _connector({"realm": "example", "registrationAllowed": False})
+    params = {"representation": {"registrationAllowed": True}}
+    ctx = _ctx("keycloak.realm.update", params, connector)
+
+    card = await _card("keycloak.realm.update", params, connector)
+
+    assert card == await _realm_update_preview(ctx)
+    assert "current_values" not in card
+    assert "current_values_available" not in card
+    connector._get_admin_json.assert_not_awaited()  # type: ignore[attr-defined]

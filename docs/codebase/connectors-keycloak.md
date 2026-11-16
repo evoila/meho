@@ -450,12 +450,15 @@ whom, or what a sign-in asks for:
 - `user.required_actions.update`: taking a required action away (for
   example the one-time code set-up) makes a user's sign-in weaker.
 
-At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
-another person's request. The single-operator self-approval switch
-(`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
-`backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
-against the registered levels of the first five. The test of the one-time
-code set-up checks that `user.required_actions.update` is `dangerous`.
+The first five are also changes of rights (next section): another admin
+(a tenant admin or a platform admin) must approve each call, and a
+MEHO-SA-Operator who is not an admin cannot. The single-operator
+self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them.
+The test `backend/tests/test_keycloak_identity_write_approvers.py` checks
+both rules for the first five. `user.required_actions.update` is
+`dangerous` and not a change of rights: a MEHO-SA-Operator or a tenant
+admin may approve another person's request. The test of the one-time code
+set-up checks that it is `dangerous`.
 
 ### Writes that are changes of rights
 
@@ -484,13 +487,15 @@ Keycloak write, with the reason:
 | `role_mapping.assign` | yes | gives a user realm roles |
 | `group.member.add` | yes | puts a user into a group and gives them its roles |
 | `group.update_attributes` | yes | group attributes fill the tenant claims of every member |
+| `authflow.ensure_approval_flow` | yes | maps the `acr` name `meho-approve` to a sign-in level; MEHO reads that `acr` claim of a token to accept an approval |
+| `authflow.ensure_approval_touch` | yes | adds or changes the client's `amr` protocol mapper, which puts a claim into every token, and maps the `acr` name `meho-touch` to a sign-in level |
 | `user.required_actions.update` | no | changes the next sign-in steps, not roles or claims |
 | `user.check_login` | no | tests one sign-in and changes nothing |
 | `user.logout`, `user.disable`, `user.delete` | no | they only take away |
 | `user.enable` | no | turns a login back on with the roles it already has |
 | `group.create` | no | a new group has no members; adding one is `group.member.add` |
 | `group.member.remove`, `group.delete`, `client.delete`, `realm.delete` | no | they only take away |
-| `authflow.ensure_approval_flow`, `.ensure_passkey_code_skip`, `.ensure_approval_touch` | no | they set MEHO's own sign-in steps, not roles or claims |
+| `authflow.ensure_passkey_code_skip` | no | it adds a step to a copy of the browser sign-in flow; it writes no mapper and no `acr` name |
 
 The core has no ingested (spec-based) Keycloak operations, so the table
 covers the typed writes only. `backend/tests/test_keycloak_rights_change_writes.py`
@@ -524,6 +529,16 @@ the card says `current_values_available: false` (or
 `current_mappers_available: false`) and shows the new values only. The
 writes that make a new object show the new values; there is nothing to
 read yet.
+
+These cards are behind the switch `KEYCLOAK_RIGHTS_CHANGE_CARDS`
+(`Settings.keycloak_rights_change_cards`, off by default), because the
+same card is also the answer of `preview_operation` that an agent reads.
+Off, `client.update` and `protocol_mapper.create` show the generic params
+echo, and `realm.update` shows the realm card of `ops_write_realm_smtp.py`
+without `current_values`. The card builders of `client.update` and
+`protocol_mapper.create` are registered with
+`register_preview_builder(..., enabled=...)`, so with the switch off the
+op previews as if it had no builder.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /

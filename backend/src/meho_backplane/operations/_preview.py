@@ -75,7 +75,7 @@ writes are the separate follow-up #1452).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
@@ -400,23 +400,45 @@ class PermissionPreflight(Protocol):
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
 
+#: ``op_id`` -> the switch of its builder. The builder counts only while the
+#: switch returns ``True``; off, the op previews as if it had no builder.
+_PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
+
 #: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
 #: preflight (and no entry in the approval row's ``permission_preflight``).
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
 
 
-def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
+def register_preview_builder(
+    op_id: str, builder: PreviewBuilder, *, enabled: Callable[[], bool] | None = None
+) -> None:
     """Register *builder* as the preview computation for *op_id*.
+
+    With *enabled*, the builder is used only while ``enabled()`` is true;
+    off, the op previews as if it had no builder (the generic params echo).
+    A new card for an op the agent already sees goes behind a switch this way.
 
     Idempotent re-registration overwrites -- registration happens at
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+    if enabled is None:
+        _PREVIEW_BUILDER_SWITCHES.pop(op_id, None)
+    else:
+        _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
+
+
+def _preview_builder(op_id: str) -> PreviewBuilder | None:
+    """The builder of *op_id*, or ``None`` when it has none or its switch is off."""
+    switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
+    if switch is not None and not switch():
+        return None
+    return _PREVIEW_BUILDERS.get(op_id)
 
 
 def has_preview_builder(op_id: str) -> bool:
-    """True when *op_id* has a bespoke preview builder registered."""
-    return op_id in _PREVIEW_BUILDERS
+    """True when *op_id* has a bespoke preview builder registered and switched on."""
+    return _preview_builder(op_id) is not None
 
 
 def register_permission_preflight(op_id: str, preflight: PermissionPreflight) -> None:
@@ -473,7 +495,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     """
     op_id = ctx.descriptor.op_id
     op_class = classify_op(op_id)
-    builder = _PREVIEW_BUILDERS.get(op_id)
+    builder = _preview_builder(op_id)
     if op_class in _SENSITIVE_CLASSES and builder is None:
         # A credential-class op with NO bespoke builder must not surface
         # request/response detail in a durable row -- the *generic*

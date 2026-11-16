@@ -223,8 +223,7 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
 #:
 #: The hazard is on the **read** side. ``classify_op`` is re-run at render
 #: time against the stored op-id by the audit drawer
-#: (:mod:`meho_backplane.ui.routes.audit.routes`) and the broadcast event
-#: drawer (:mod:`meho_backplane.ui.routes.broadcast.event`), where it
+#: (:mod:`meho_backplane.ui.routes.audit.routes`), where it
 #: supplies the row's displayed class and badge and feeds
 #: :func:`~meho_backplane.ui.routes.broadcast.aggregate_gate.is_aggregate_only`.
 #: A prefix branch would therefore relabel every gateway row as
@@ -784,7 +783,13 @@ _HAND_WRITTEN_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"typed", "composi
 _CHANGE_SAFETY_LEVELS: Final[frozenset[str]] = frozenset({"caution", "dangerous", "destructive"})
 
 
-def resolve_operation_op_class(op_id: str, *, source_kind: str, safety_level: str | None) -> str:
+def resolve_operation_op_class(
+    op_id: str,
+    *,
+    source_kind: str,
+    safety_level: str | None,
+    stored_op_class: str | None = None,
+) -> str:
     """Return the class of one run of a registered operation.
 
     The dispatcher stores this class on the audit row, and the announce
@@ -805,7 +810,10 @@ def resolve_operation_op_class(op_id: str, *, source_kind: str, safety_level: st
     * The credential and audit-query classes always win, as in
       :func:`resolve_op_class`.
     * Ingested operations, and a row with no risk level, keep
-      ``classify_op(op_id)``.
+      ``classify_op(op_id)``, unless the row stores a class
+      (*stored_op_class*, set by a connector's safety floor at ingest).
+      The stored class is a declared class: it never replaces a
+      credential or audit class that the op id already gives.
 
     >>> resolve_operation_op_class("vmware.host.usage", source_kind="typed", safety_level="safe")
     'read'
@@ -824,6 +832,8 @@ def resolve_operation_op_class(op_id: str, *, source_kind: str, safety_level: st
             declared = "write"
         elif safety_level == "safe" and classify_op(op_id) == "other":
             declared = "read"
+    if stored_op_class is not None:
+        declared = stored_op_class
     return resolve_op_class(op_id, declared)
 
 

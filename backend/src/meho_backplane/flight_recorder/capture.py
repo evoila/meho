@@ -139,6 +139,9 @@ class _OpContext:
     tags: tuple[str, ...]
     body_paths: tuple[str, ...]
     delete_shaped_patterns: tuple[str, ...] | None
+    # The class stored on the row of an ingested op (a connector's safety
+    # floor sets it). A stored ``credential_read`` records no body.
+    stored_op_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -151,6 +154,9 @@ class _CaptureScope:
     spans: list[SpanInput] = field(default_factory=list)
     total_bytes: int = 0
     redaction_uncertain: bool = False
+    #: Request id and caller of the root dispatch, stored on the trace header.
+    request_id: uuid.UUID | None = None
+    operator_sub: str | None = None
     #: Per-kind count of spans dropped by the span-count / byte caps (F3).
     overflow: dict[str, int] = field(default_factory=dict)
 
@@ -259,7 +265,13 @@ async def begin_dispatch_capture(
         if not await should_capture(tenant_id=tenant_id, target_id=target_id):
             return _INACTIVE_HANDLE
 
-        scope = _CaptureScope(audit_id=audit_id, tenant_id=tenant_id, target_id=target_id)
+        scope = _CaptureScope(
+            audit_id=audit_id,
+            tenant_id=tenant_id,
+            target_id=target_id,
+            request_id=coerce_uuid(request_id()),
+            operator_sub=getattr(operator, "sub", None),
+        )
         cap_token = _active_capture_var.set(scope)
         op_token = _op_context_var.set(_op_context_from(descriptor, connector_id))
         return CaptureHandle(owns=True, scope=scope, op_token=op_token, cap_token=cap_token)
@@ -297,6 +309,8 @@ async def _persist(scope: _CaptureScope) -> None:
             tenant_id=scope.tenant_id,
             spans=scope.spans,
             redaction_uncertain=scope.redaction_uncertain,
+            request_id=scope.request_id,
+            operator_sub=scope.operator_sub,
         )
     except Exception:
         # ``record_trace`` already swallows its own errors; this guard covers
@@ -439,6 +453,7 @@ def _redact_vendor_call(
         connector_id=op.connector_id if op else None,
         method=method,
         tags=op.tags if op else (),
+        stored_op_class=op.stored_op_class if op else None,
         request_headers=as_mapping(request_headers),
         response_headers=as_mapping(getattr(response, "headers", None)),
         request_body=req_body,
@@ -576,4 +591,5 @@ def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
         # every body until a connector declares its paths.
         body_paths=(),
         delete_shaped_patterns=delete_shaped,
+        stored_op_class=getattr(descriptor, "op_class", None),
     )

@@ -1368,6 +1368,11 @@ async def _write_audit_row(
         "principal_sub": request.principal_sub,
         "result_status": path.split(".")[-1],  # "request" | "decision"
     }
+    # The class of the operation that waits, as the approval request stores
+    # it (the stored class of an ingested row counts). Only on the "request" row.
+    op_class = (request.proposed_effect or {}).get("op_class")
+    if path == "approval.request" and isinstance(op_class, str):
+        payload["op_class"] = op_class
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
     # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)
@@ -1382,6 +1387,11 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The group kind the policy file's bindings gave the person who acted on
+    # this row (POLICY_APPROVER_ROUTING), so a decision row says where the
+    # approver's right came from.
+    if operator.bound_kind is not None:
+        payload["bound_kind"] = operator.bound_kind.value
     # The login client of the person who acted on this row (the requester on
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.

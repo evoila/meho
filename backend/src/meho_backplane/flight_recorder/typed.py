@@ -202,6 +202,7 @@ def _record_typed_bodies(
         op_id=op.op_id if op else None,
         connector_id=op.connector_id if op else None,
         tags=op.tags if op else (),
+        stored_op_class=op.stored_op_class if op else None,
         request_headers=None,
         response_headers=None,
         request_body=req_body,

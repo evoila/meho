@@ -362,6 +362,58 @@ async def test_robot_create_sends_chosen_access(
 
 
 @pytest.mark.asyncio
+async def test_pull_only_robot_lists_with_only_pull(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A robot made with access=['pull'] shows only pull in harbor.robot.list.
+
+    The fake Harbor keeps the robot it was sent and returns it on
+    ``GET /robots``, like Harbor does.
+    """
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+    connector = _make_connector()
+    robots: list[dict] = []
+
+    def _create(request: respx.models.Request) -> respx.MockResponse:
+        import json as _json
+
+        sent = _json.loads(request.content)
+        robots.append(
+            {
+                "id": 11,
+                "name": f"robot$alpha+{sent['name']}",
+                "level": sent["level"],
+                "disable": sent["disable"],
+                "expires_at": -1,
+                "permissions": sent["permissions"],
+            }
+        )
+        return respx.MockResponse(201, json={"id": 11, "name": robots[-1]["name"], "secret": "s"})
+
+    with respx.mock() as mock:
+        mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(side_effect=_create)
+        mock.get("https://harbor.test.invalid/api/v2.0/robots").mock(
+            side_effect=lambda _request: respx.MockResponse(200, json=robots)
+        )
+        await connector.robot_create(
+            _make_operator(),
+            _TARGET,
+            {"name": "puller", "project": "alpha", "duration": -1, "access": ["pull"]},
+        )
+        listed = await connector.robot_list(_make_operator(), _TARGET, {})
+
+    assert [robot["name"] for robot in listed] == ["robot$alpha+puller"]
+    permissions = listed[0]["permissions"]
+    assert len(permissions) == 1
+    assert permissions[0]["kind"] == "project"
+    assert permissions[0]["namespace"] == "alpha"
+    assert permissions[0]["access"] == [{"resource": "repository", "action": "pull"}]
+    assert "secret" not in listed[0]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("access", [[], ["delete"], ["pull", "delete"]])
 async def test_robot_create_refuses_bad_access_before_calling_harbor(
     monkeypatch: pytest.MonkeyPatch, access: list[str]

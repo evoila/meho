@@ -1584,7 +1584,10 @@ class Settings(BaseModel):
         logs ``policy_shadow_mismatch`` and counts a metric when the two
         answers differ. It also writes the rule it matched and the policy
         file version on the audit row and the approval request, marked
-        ``(shadow)``. Today's checks still decide. When off, the
+        ``(shadow)``. A preview also shows the rule and the groups that
+        may approve (``policy_rule``, ``approvers``), and
+        ``meho policy explain`` lists every rule it matched. Today's
+        checks still decide. When off, the
         evaluator does not run and nothing is written. Env ``POLICY_ENGINE_SHADOW``; Helm
         ``config.policy.engineShadow``.
     policy_approver_routing:

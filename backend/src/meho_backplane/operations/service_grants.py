@@ -108,6 +108,7 @@ from meho_backplane.op_classes import needs_per_call_approval
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
+from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 __all__ = [
@@ -702,6 +703,8 @@ class ServicePrincipalGrantService:
         """
         from meho_backplane.settings import get_settings
 
+        if payload.principal_sub == WHAT_IF_SUB:
+            raise GrantValidationError(WHAT_IF_SUB_REFUSAL)
         _reject_wildcards(payload)
         secret_reason = credential_read_grant_reason(payload.op_id)
         if secret_reason is not None:

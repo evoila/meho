@@ -307,6 +307,7 @@ from meho_backplane.connectors import (
 )
 from meho_backplane.connectors._shared.vault_creds import (
     SecretRefReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -1954,7 +1955,13 @@ async def _run_branch_with_error_handling(
             )
         else:
             expected_secret_ref: str | None = None
-            target_name = getattr(target, "name", None)
+            # A refused read of a target's own ref names its target: the
+            # ``targets.probe`` op reads a target that is not the dispatch target.
+            target_name = (
+                vault_exc.target_name
+                if isinstance(vault_exc, TargetSecretForbiddenError)
+                else getattr(target, "name", None)
+            )
             if target_name:
                 # Call-time import on purpose (the ingest-arm precedent above):
                 # ``tenant_paths`` drags the vault ops module in via its

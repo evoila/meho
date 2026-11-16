@@ -46,6 +46,7 @@ from meho_backplane.broadcast.claim_state import is_active_claim_step
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.untrusted_text import wrap_untrusted_strings, wrap_untrusted_text
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
@@ -149,7 +150,7 @@ def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: 
     and the operations it drove. Events with an unset ``work_ref`` never
     qualify (``None != <filter>``).
     """
-    return event.work_ref == work_ref
+    return event.work_ref in work_ref_filter_values(work_ref)
 
 
 def _is_active(event: BroadcastEvent | AgentAnnouncementEvent, now: datetime) -> bool:

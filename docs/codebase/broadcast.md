@@ -618,8 +618,12 @@ cannot make:
   person's write is never refused for a missing claim. An AI tool that
   works with a person's own login counts as that person. Every other
   caller is asked: agents, hosted agent runs, service logins and runner
-  logins. A service login and a runner login cannot make a claim, so in
-  a tenant with the gate on their caution-or-higher writes are refused.
+  logins. In a tenant with the gate on, a caution-or-higher write that
+  would run at once is refused when the caller holds no active claim. A
+  write that waits for approval is not asked. A claim counts only when it
+  is trusted, not completed, and its TTL has not run out. A service login
+  and a runner login cannot make a claim, so their `caution`-or-higher
+  writes that would run at once are refused.
   See [reflex-advisory.md](reflex-advisory.md).
 - **Reads use trusted claims.** The target advisory and the reflex claim
   lookup use only trusted claims, judged by their newest step (see *When

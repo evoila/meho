@@ -59,7 +59,6 @@ from meho_backplane.connectors.keycloak.ops_write_user_credential import (
     read_credentials,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -84,8 +83,8 @@ async def _holders(
         _CLIENT_ROLE_USERS_PATH,
         {
             "realm": realm,
-            "client-uuid": quote_segment(client_uuid),
-            "role-name": quote_segment(role),
+            "client-uuid": client_uuid,
+            "role-name": role,
         },
     )
     ids: list[str] = []
@@ -180,7 +179,7 @@ async def _current_user(ctx: PreviewContext) -> dict[str, Any] | None:
         )
         row = await connector._get_admin_json(
             ctx.target,
-            fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)}),
+            fill_path(_USER_PATH, {"realm": realm, "user-id": uuid}),
             operator=ctx.operator,
         )
     except Exception:

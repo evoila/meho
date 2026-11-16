@@ -45,7 +45,6 @@ from meho_backplane.connectors.keycloak.ops_write_merge import (
     merge_representation,
     unrequested_changes,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -108,7 +107,7 @@ async def keycloak_user_update(
     op_id = "keycloak.user.update"
     changes = _requested_changes(params)
     uuid, username, realm = await resolve_user(self, operator, target, params, op_id=op_id)
-    path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)})
+    path = fill_path(_USER_PATH, {"realm": realm, "user-id": uuid})
     try:
         before = await self._get_admin_json(target, path, operator=operator)
         merged = merge_representation(before, changes)

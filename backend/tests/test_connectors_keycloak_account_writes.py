@@ -714,6 +714,24 @@ async def test_delete_by_id_removes_only_that_credential(kc: KeycloakConnector) 
     assert not other.called
 
 
+async def test_a_credential_id_with_a_slash_reaches_keycloak_encoded_once(
+    kc: KeycloakConnector,
+) -> None:
+    odd = {**_CREDENTIALS[0], "id": "cred/../pw"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_CREDENTIALS_PATH).mock(
+            side_effect=[httpx.Response(200, json=[odd]), httpx.Response(200, json=[])]
+        )
+        delete = mock.delete(url__regex=r".*/credentials/.*").respond(204)
+        result = await _run(
+            "keycloak.user.credential.delete", {"id": _USER_UUID, "credential_id": "cred/../pw"}
+        )
+    assert result["status"] == "ok", result
+    assert delete.call_count == 1
+    assert delete.calls.last.request.url.raw_path.endswith(b"/credentials/cred%2F%2E%2E%2Fpw")
+
+
 async def test_delete_with_no_match_names_the_types_the_user_has_and_deletes_nothing(
     kc: KeycloakConnector,
 ) -> None:

@@ -435,18 +435,29 @@ def test_handlers_pass_raw_values_and_fill_path_encodes_them() -> None:
     """Every value is encoded once, by ``fill_path``; the handlers pass raw values.
 
     A handler that encoded a value itself would encode it twice (``%2F``
-    becomes ``%252F``), so the three handler modules call no
-    ``quote_segment`` at all.
+    becomes ``%252F``). So no module of the Keycloak connector, also a new
+    one, calls ``quote_segment`` inside a ``fill_path`` call.
     """
-    import inspect
+    import ast
+    from pathlib import Path
 
-    import meho_backplane.connectors.keycloak.ops_read as ops_read_mod
-    import meho_backplane.connectors.keycloak.ops_write as ops_write_mod
-    import meho_backplane.connectors.keycloak.ops_write_groups as ops_write_groups_mod
+    import meho_backplane.connectors.keycloak as keycloak_pkg
     from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 
-    for mod in (ops_read_mod, ops_write_mod, ops_write_groups_mod):
-        assert "quote_segment(" not in inspect.getsource(mod), mod.__name__
+    def _name(call: ast.Call) -> str:
+        func = call.func
+        return func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+
+    offenders: list[str] = []
+    for path in sorted(Path(keycloak_pkg.__file__).parent.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and _name(node) == "fill_path":
+                offenders.extend(
+                    f"{path.name}:{inner.lineno}"
+                    for inner in ast.walk(node)
+                    if isinstance(inner, ast.Call) and _name(inner) == "quote_segment"
+                )
+    assert offenders == []
     assert (
         fill_path(_USER_PATH, {"realm": "a.b", "user-id": "../x"})
         == "/admin/realms/a%2Eb/users/%2E%2E%2Fx"

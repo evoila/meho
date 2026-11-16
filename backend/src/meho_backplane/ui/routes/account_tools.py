@@ -21,8 +21,10 @@ off, the account page has no such section and the route answers 404.
 
 A Keycloak failure answers the section with an error line; the audit row
 of the failed try says what ended before it, if anything. When the audit
-row cannot be written, the line is an error too, never "signed out". The
-logic is in :mod:`meho_backplane.auth.tool_sign_out`.
+row cannot be written, the line is an error too, never "signed out". When
+the last uses cannot be read after a sign-out, the card still shows its
+result line, and each row says its last use is unknown. The logic is in
+:mod:`meho_backplane.auth.tool_sign_out`.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import (
@@ -119,6 +122,7 @@ class ToolRow:
     client_id: str
     can_sign_out: bool
     last_used_at: datetime | None
+    last_use_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,21 @@ async def tools_section(
             last_used_at=last_use.get(k.client_id),
         )
         for k in kinds
+    ]
+
+
+def _rows_without_last_use() -> list[ToolRow]:
+    """Return the rows of "Your tools" with an unknown last use."""
+    return [
+        ToolRow(
+            key=k.key,
+            label=k.label,
+            client_id=k.client_id,
+            can_sign_out=k.can_sign_out,
+            last_used_at=None,
+            last_use_known=False,
+        )
+        for k in tool_kinds(get_settings())
     ]
 
 
@@ -217,8 +236,20 @@ def build_account_tools_router() -> APIRouter:
         """``POST /ui/account/tools/sign-out`` -- the tool kind key is a form field."""
         kind = _find_kind(tool)
         result = await _do_sign_out(session_ctx, kind)
+        tools: list[ToolRow] | None
+        try:
+            tools = await tools_section(db_session, session_ctx)
+        except (SQLAlchemyError, OSError) as exc:
+            # The result line must reach the person even when the database
+            # is down (the audit write may have failed for the same reason).
+            _log.warning(
+                "ui_account_tools_last_use_read_failed",
+                operator_sub=session_ctx.operator_sub,
+                reason=type(exc).__name__,
+            )
+            tools = _rows_without_last_use()
         context: dict[str, object] = {
-            "tools": await tools_section(db_session, session_ctx),
+            "tools": tools,
             "tools_result": result,
             "now_utc": datetime.now(UTC),
         }

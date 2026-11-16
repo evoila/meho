@@ -64,6 +64,7 @@ from meho_backplane.ui.auth.session_store import (
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir, static_src_dir
+from meho_backplane.ui.routes import account_tools
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.account_tools import (
     ADMIN_CONSOLE_TEXT,
@@ -781,3 +782,38 @@ def test_failed_audit_write_shows_an_error_and_logs_what_ended(
     failed = next(e for e in logs if e["event"] == "tool_sign_out_audit_failed")
     assert failed["reason"] == "OperationalError"
     assert "made-up-admin-secret" not in str(logs)
+
+
+def test_failed_audit_write_and_failed_last_use_read_still_show_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The database is gone: the audit write fails, then the read of the last uses fails.
+
+    The card still shows the audit error line, not an HTTP 500, and each
+    row says its last use is unknown.
+    """
+
+    async def _no_audit(**_kwargs: Any) -> uuid.UUID:
+        raise OperationalError("INSERT INTO audit_log", {}, Exception("database is gone"))
+
+    async def _no_read(*_args: Any, **_kwargs: Any) -> dict[str, datetime]:
+        raise OperationalError("SELECT audit_log.occurred_at", {}, Exception("database is gone"))
+
+    monkeypatch.setattr(tool_sign_out, "write_internal_audit_row", _no_audit)
+    monkeypatch.setattr(account_tools, "last_use_by_client", _no_read)
+    client, csrf = _client_for(_ME)
+    pairs = {(_ME, "meho-mcp-desktop")}
+    with respx.mock(assert_all_called=False) as router, structlog.testing.capture_logs() as logs:
+        _FakeKeycloak(router, pairs, offline=pairs)
+        response = _post(client, csrf, "claude-desktop")
+    assert response.status_code == 200, response.text
+    text = html.unescape(response.text)
+    assert 'data-result="error"' in response.text
+    assert AUDIT_FAILED_TEXT.format(label="Claude Desktop") in text
+    assert "is signed out" not in text
+    assert 'data-tool-row="claude-desktop"' in response.text
+    assert "unknown: MEHO could not read the audit log" in text
+    assert _NONE_FOUND not in text
+    failed = next(e for e in logs if e["event"] == "ui_account_tools_last_use_read_failed")
+    assert failed["operator_sub"] == _ME
+    assert failed["reason"] == "OperationalError"

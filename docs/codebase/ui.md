@@ -1115,7 +1115,10 @@ A kind whose client id is not set is left out.
   When the write fails, `sign_out_tool` raises `ToolSignOutAuditError`
   and logs `tool_sign_out_audit_failed`. The card shows an error line,
   never "signed out": Keycloak may already have ended logins, but the
-  sign-out has no audit row.
+  sign-out has no audit row. After the sign-out, the route reads the last
+  uses again. When that read fails too (the database is down), the route
+  logs `ui_account_tools_last_use_read_failed` and still shows the card
+  with its result line. Each row then says its last use is unknown.
 - The tool's last access token works until it ends: the access token
   lifetime of the realm (about five and a half minutes on the built-in
   realm: 300 seconds plus 30 seconds leeway). The card says so. Signing out is not a

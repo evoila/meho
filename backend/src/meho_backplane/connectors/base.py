@@ -161,6 +161,15 @@ class Connector(ABC):
     #: so a target can be probed again after its system is upgraded.
     strict_version_range: bool = False
 
+    #: The products a probe must report for this class to serve a target
+    #: (the ``product`` of the target's fingerprint). ``None`` (the
+    #: default): any product, and a target that was never probed. When set,
+    #: the resolver picks the class only for a probed target whose product
+    #: is in the set. Use it when two products share one product slug and
+    #: overlapping version numbers, so the version range alone cannot tell
+    #: them apart.
+    fingerprint_products: frozenset[str] | None = None
+
     #: One plain sentence on what the connector does, shown in the
     #: "What it does" column of the generated connector list on the docs
     #: site. ``None`` (the default) leaves the column empty for this row.

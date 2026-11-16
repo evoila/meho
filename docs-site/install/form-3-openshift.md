@@ -40,8 +40,9 @@ Two people take part. They can be the same person.
 
 - `oc`, the OpenShift command line, to log in. The web console has it
   under **?** → **Command line tools**.
-- `kubectl`, at most one minor version away from the cluster. `oc` can do
-  everything `kubectl` does here, so `oc` alone is enough too.
+- `kubectl`, at most one minor version away from the cluster. The check
+  scripts of Steps 5 and 7 call `kubectl` and stop without it, so `oc`
+  alone is not enough.
 - [Helm](https://helm.sh/) 3.8 or newer.
 - `curl`, `jq` and `uuidgen`.
 - `skopeo`, only for Step 2 (no internet) and Step 3.3 (v0.46.0 or
@@ -313,16 +314,18 @@ kubectl get image.config.openshift.io/cluster -o jsonpath='{.spec.additionalTrus
 
 **If it prints nothing**, put the registry's authority (`registry-ca.crt`)
 into a new ConfigMap and name it there. The key is the registry's host
-name. With a port, write the port after two dots, for example
-`harbor.example.com..5000`.
+name. With a port, the port comes after two dots instead of a colon,
+for example `harbor.example.com..5000`: the first line makes that key.
 
 ```bash
-kubectl -n openshift-config create configmap registry-ca --from-file=$REG_HOST=registry-ca.crt
+REG_KEY=${REG_HOST/:/..}; echo "key: $REG_KEY"
+kubectl -n openshift-config create configmap registry-ca --from-file=$REG_KEY=registry-ca.crt
 kubectl patch image.config.openshift.io/cluster --type=merge \
   -p '{"spec":{"additionalTrustedCA":{"name":"registry-ca"}}}'
 ```
 
-**If it prints a name**, add your key to that ConfigMap instead:
+**If it prints a name**, add your key (`$REG_KEY`, with the two dots) to
+that ConfigMap instead:
 `kubectl -n openshift-config edit configmap <that name>`.
 
 The nodes take the change without a restart, within a few minutes.

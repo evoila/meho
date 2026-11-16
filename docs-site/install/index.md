@@ -159,6 +159,30 @@ because Kubernetes reads a rule with no `to` as "every destination". The
 chart also refuses keys it does not know, so a typo such as `port:` for
 `ports:` cannot remove the port limit.
 
+#### Push services for approval notifications
+
+Only when you turn on approval notifications (`webPush.enabled: true`,
+off by default): MEHO sends each notification to the push service of the
+browser maker of the person's phone or laptop. So MEHO needs outbound
+HTTPS (TCP 443) to these hosts:
+
+| Browser maker | Host | Used by |
+|---|---|---|
+| Apple | `*.push.apple.com` | Safari on iPhone, iPad and Mac |
+| Google | `fcm.googleapis.com` | Chrome on Android, Mac and Windows |
+| Microsoft | `*.notify.windows.com` | Edge on Windows |
+| Mozilla | `updates.push.services.mozilla.com` | Firefox |
+
+MEHO sends to no other host: it refuses a browser whose push address is
+not on this list. The browser makers do not publish fixed address ranges
+for these hosts. So allow the host names in your firewall or outgoing
+proxy. MEHO uses the `HTTPS_PROXY` and `NO_PROXY` variables of its
+container for these sends. In the Kubernetes network rules, the second
+rule of the example above (public addresses on port 443) covers them.
+
+What a notification carries, and what leaves your network:
+[MEHO on your phone and laptop](../guides/phone-and-laptop.md#what-leaves-your-network).
+
 ### Step 3 — Install the chart
 
 The chart is published as an OCI artefact. Install:

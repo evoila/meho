@@ -455,10 +455,17 @@ _RENAME_CASES = [
         (op_id, {"group_id": _GROUP_UUID, "user_id": _USER_UUID, "username": "event-guest"})
         for op_id in _MEMBER_OPS
     ),
+    # A request by id alone: the run compares the stored name with the card.
+    *((op_id, {"id": _USER_UUID, **extra}) for op_id, extra in sorted(_USER_OP_PARAMS.items())),
+    *((op_id, {"group_id": _GROUP_UUID, "user_id": _USER_UUID}) for op_id in _MEMBER_OPS),
 ]
 
 
-@pytest.mark.parametrize(("op_id", "params"), _RENAME_CASES, ids=[c[0] for c in _RENAME_CASES])
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    _RENAME_CASES,
+    ids=[f"{c[0]}-{'by-name' if 'username' in c[1] else 'by-id'}" for c in _RENAME_CASES],
+)
 async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
     kc: KeycloakConnector, op_id: str, params: dict[str, Any]
 ) -> None:

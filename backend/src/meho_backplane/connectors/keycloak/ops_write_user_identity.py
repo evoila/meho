@@ -27,8 +27,9 @@ Three pieces, used at three moments:
   card shows it as ``requested_username``.
 * :func:`read_user_for_write` runs when the call runs. In the approved run
   it acts on the user id on the card, not on a new lookup of the name. It
-  reads the user and refuses the run when the sent username is not the
-  stored one (for example the user was renamed after the request).
+  reads the user and refuses the run when the sent username, or the
+  username on the card, is not the stored one (for example the user was
+  renamed after the request).
 """
 
 from __future__ import annotations
@@ -132,18 +133,6 @@ def check_card_username(op_id: str, card: dict[str, Any], user: dict[str, Any]) 
         )
 
 
-def _approved_user_id(op_id: str, id_key: str) -> str | None:
-    """The user id on the approval card, during the approved run of this op.
-
-    ``None`` when the call is not the approved run of a request. An approved
-    run whose card shows no user id is refused (:func:`card_user_id`).
-    """
-    preview = approved_preview(op_id)
-    if preview is None:
-        return None
-    return card_user_id(op_id, preview, id_key)
-
-
 async def read_user_for_write(
     connector: KeycloakConnector,
     operator: Operator,
@@ -157,13 +146,15 @@ async def read_user_for_write(
 
     Raises :exc:`KeycloakUserNotFoundError` for a user that does not exist,
     and :exc:`ValueError` when the request names no user, or its ``username``
-    is not the one stored for the user.
+    (or, in the approved run, the card's ``username``) is not the one stored
+    for the user.
     """
     # Imported late: ``ops_write`` imports this module for its handlers.
     from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 
     realm = resolve_realm_config(target).managed_realm
-    uuid = _approved_user_id(op_id, id_key) or _opt_str(params.get(id_key))
+    card = approved_preview(op_id)
+    uuid = card_user_id(op_id, card, id_key) if card is not None else _opt_str(params.get(id_key))
     username = _opt_str(params.get("username"))
     if uuid is None:
         if username is None:
@@ -179,6 +170,9 @@ async def read_user_for_write(
         raise KeycloakUserNotFoundError(f"{op_id}: no user with id={uuid!r} in realm {realm!r}")
     if not user_matches_username(params, user):
         raise ValueError(other_user_reason(op_id, id_key))
+    # A request by id alone sends no username, so compare with the card too.
+    if card is not None and _opt_str(card.get("username")) is not None:
+        check_card_username(op_id, card, user)
     return UserOfWrite(uuid=uuid, path=path, user=user)
 
 

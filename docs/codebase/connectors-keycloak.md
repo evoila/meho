@@ -881,7 +881,10 @@ of them does not use this check.
   `username` is only the stored name. For a user that does not exist, the
   card shows the sent name as `requested_username`.
 - After approval, the op acts on the user id shown on the card. It does not
-  look the username up again. A card without a user id is refused.
+  look the username up again. A card without a user id is refused. When
+  the card shows a stored username, the run also compares it with the
+  name Keycloak stores now. So a request sent with only an id is refused
+  too when the user was renamed while it waited. Nothing is written.
 - `user.delete` after approval: it uses the user id and the realm on the
   card. The run is refused when the card said the user does not exist, or
   when the username stored for that id is not the one on the card (the

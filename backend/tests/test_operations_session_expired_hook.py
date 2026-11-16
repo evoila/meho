@@ -200,6 +200,13 @@ class _CompositeWriteConnector(_TypedWriteConnector):
     impl_id = "vcfops-composite-write"
 
 
+class _Status401Connector(_TypedWriteConnector):
+    """The known session-ended status (401): no hook is needed for it."""
+
+    impl_id = "vcfops-status-401"
+    first_status: ClassVar[int] = 401
+
+
 _TYPED_REF = f"{__name__}._TypedWriteConnector.write_then_read"
 _COMPOSITE_REF = f"{__name__}._composite_write_then_read"
 
@@ -518,6 +525,110 @@ async def test_server_error_never_asks_the_hook(
     assert result.extras["error_code"] == "connector_error"
     assert connector.calls == 1
     assert connector.invalidations == 0
+
+
+def _assert_401_not_resent(result: Any, connector: _NoHook403Connector) -> None:
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["cause"] == "session_ended_401_not_resent"
+    assert "may or may not have been made" in result.extras["remediation"]
+    assert connector.calls == 1
+    assert connector.invalidations == 1
+
+
+@pytest.mark.asyncio
+async def test_401_on_a_safe_read_is_repeated_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(_Status401Connector, stub_embedding_service, session)
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 2
+    assert connector.invalidations == 1
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_relogin"] is True
+    assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["session_relogin_status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_401_on_an_ingested_write_with_one_request_is_repeated_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="POST",
+        safety_level="caution",
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_401_on_a_typed_write_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        source_kind="typed",
+        handler_ref=_TYPED_REF,
+        safety_level="caution",
+    )
+
+    _assert_401_not_resent(result, connector)
+    assert isinstance(connector, _TypedWriteConnector)
+    assert connector.writes == 1
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_relogin"] is False
+    assert rows[0].payload["session_resent"] is False
+    assert rows[0].payload["session_relogin_status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_401_on_a_multi_step_operation_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    class _Composite401(_Status401Connector):
+        impl_id = "vcfops-composite-401"
+
+    result, connector = await _run(
+        _Composite401,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        source_kind="composite",
+        handler_ref=_COMPOSITE_REF,
+        safety_level="caution",
+    )
+
+    _assert_401_not_resent(result, connector)
+    assert isinstance(connector, _TypedWriteConnector)
+    assert connector.writes == 1
+
+
+@pytest.mark.asyncio
+async def test_401_on_an_approved_call_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        approved=True,
+        method="POST",
+        safety_level="caution",
+    )
+
+    _assert_401_not_resent(result, connector)
 
 
 @pytest.mark.parametrize("resent", [True, False])

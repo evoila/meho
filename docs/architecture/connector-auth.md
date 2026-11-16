@@ -258,7 +258,10 @@ reject the system caller; the loader and the cache guards do.)
 ### A connector says an answer means "the session ended"
 
 The dispatcher signs in again once for a known session-ended status (401,
-vRLI's 440, or a profile's `expiry_statuses`). Some products answer an ended
+vRLI's 440, or a profile's `expiry_statuses`). A 401 means the product refused
+that one request. It does not mean a typed handler or a multi-step operation
+sent no change before it. So the 401 path follows the same repeat rule as the
+hook path below (`may_resend_after_session_end`). Some products answer an ended
 session with another status, for example 403 with a body of their own. Treating
 every 403 that way would be wrong: a real 403 means missing rights, and more
 sign-in tries can lock an account.
@@ -281,7 +284,8 @@ next call signs in again. Then it decides whether to repeat the call
   risk level is `safe`, or it is an ingested operation that sent exactly one
   request (that request was refused, so nothing ran). A write is always one
   request; a read sends more only when the connector follows pages
-  (`dispatcher._retry_after_expired_session_answer`).
+  (`dispatcher._retry_after_session_invalidation` for a known status,
+  `dispatcher._retry_after_expired_session_answer` for the hook).
 - **Do not repeat** in every other case: a typed handler or a multi-step
   operation that is not `safe` may have sent a write before the refused
   request. A call that runs after a person's approval is never repeated: one
@@ -309,7 +313,7 @@ Rules for the repeat:
   trace has one `typed` span named `session_relogin`. Both are written
   whether the operation was repeated or not.
 
-The code is in `operations/_session_expired_hook.py` (the hook check, the
+The code is in `operations/_session_expired_hook.py` (the hook check, the repeat rule, the
 audit and trace mark, the error text) and the dispatcher function above.
 The connector kit needs no new name: the method is found by name, like
 `invalidate_session`.

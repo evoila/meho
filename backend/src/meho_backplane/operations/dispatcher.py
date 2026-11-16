@@ -2416,10 +2416,15 @@ async def _handle_http_status_error(
     without coupling; a connector with no session state (stateless / Basic)
     exposes no hook and is never retried.
 
-    Retry-once on an auth-class status is safe even for non-idempotent verbs:
-    a ``401`` / ``440`` means the upstream rejected the request *before*
-    executing it (the session token was stale), so no side effect occurred.
-    The recovery is gated strictly on the auth-class set; a 5xx / timeout --
+    A ``401`` / ``440`` means the upstream refused *that* request before
+    executing it. It does not mean the handler sent no change before it: a
+    typed handler or a multi-step operation may have sent a write first. So
+    the repeat is gated by :func:`may_resend_after_session_end`, the same
+    rule as the "session ended" hook below: only a ``safe`` operation, or an
+    ingested one that sent one request, and never a run after an approval.
+    Otherwise the session is dropped and the caller gets
+    ``connector_auth_failed`` (:func:`_session_ended_not_resent`). The
+    recovery is gated strictly on the auth-class set; a 5xx / timeout --
     which may have executed -- is never retried (it classifies straight to
     ``connector_error`` with no invalidation).
 
@@ -2443,30 +2448,30 @@ async def _handle_http_status_error(
         status_code, _profile_expiry_statuses(connector_instance)
     )
     invalidate_session = getattr(connector_instance, "invalidate_session", None)
-    if is_auth_failure and callable(invalidate_session):
-        recovered = await _retry_after_session_invalidation(
-            invalidate_session=invalidate_session,
-            rejected=http_exc.request,
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            op_id=op_id,
-            started=started,
-        )
-        return recovered
-
-    if callable(invalidate_session) and session_expired_by_hook(
-        connector_instance, http_exc.response
+    if callable(invalidate_session) and (
+        is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response)
     ):
+        # One rule for both paths: repeat only when it cannot send a change twice.
         if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
             return await _session_ended_not_resent(
                 invalidate_session=invalidate_session,
                 rejected_exc=http_exc,
                 descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                op_id=op_id,
+                started=started,
+            )
+        if is_auth_failure:
+            mark_session_relogin(status_code, resent=True)
+            return await _retry_after_session_invalidation(
+                invalidate_session=invalidate_session,
+                rejected=http_exc.request,
+                descriptor=descriptor,
+                connector_instance=connector_instance,
                 operator=operator,
                 target=target,
                 params=params,

@@ -1013,6 +1013,8 @@
   "tests/test_secret_broker_keycloak_client_secret_source.py": 0.44,
   "tests/test_secret_broker_keycloak_sink.py": 0.46,
   "tests/test_secret_broker_linux_sink.py": 15.67,
+  "tests/test_secret_broker_vault_target.py": 1.75,
+  "tests/test_secret_broker_vault_target_policy.py": 2.5,
   "tests/test_secret_leak_checks.py": 7.23,
   "tests/test_secret_move_approval.py": 5.96,
   "tests/test_secret_move_per_call_approval.py": 0.2,

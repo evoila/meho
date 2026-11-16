@@ -4853,6 +4853,7 @@ meho secret move [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--from` — source '<kind>:<ref>' reference the credential is read from (required)
 - `--json` — emit the full OperationResult envelope as JSON
+- `--merge` — keep the other fields of the sink secret; change only the named field (Vault sinks)
 - `--reason` — justification recorded for the approver and the audit trail (required)
 - `--to` — sink '<kind>:<ref>' reference the credential is written to (required)
 

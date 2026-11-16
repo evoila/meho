@@ -1632,7 +1632,11 @@ early-return, and the group rules for another person's change apply
 MEHO-Admin). The full subject/actor lineage stays intact (the
 decision audit row records the human approver; the request row records
 the agent requester). Since #3980 every agent request above `safe`
-waits for a person, also a `dangerous` or `destructive` one.
+waits for a person, also a `dangerous` or `destructive` one. There are
+two exceptions. A matching `deny` grant refuses the request in every
+state of the switch. And with `AGENT_GRANT_REQUIRED` `on`, a request
+that no grant covers is refused (`agent_no_grant`). In both cases the
+request never waits.
 
 ### How the agent becomes the requester
 
@@ -1673,8 +1677,13 @@ and it is the difference between the two agent-run entry points in
 
 1. **Register the agent principal** —
    [`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)
-   (`meho agent-principal register <name>` → a `agent:<name>`
-   `client_credentials` client carrying `principal_kind=agent`).
+   (`meho agent-principal register <name> --grants none` → a `agent:<name>`
+   `client_credentials` client carrying `principal_kind=agent`). Then
+   give it one grant for the write, on the one target:
+   `meho agent grant create --principal agent:<name> --op <write-op-id>
+   --target <target-uuid> --verdict needs-approval`. With the switch
+   `AGENT_GRANT_REQUIRED` `on`, an agent with no grant is refused, so
+   the write would never wait. The grant never lets it run alone.
 2. **Author an agent definition whose `identity_ref` is that client** —
    [`agent-definition.md`](agent-definition.md); `identity_ref` is
    validated against `agent_principal.keycloak_client_id`, and
@@ -4787,7 +4796,7 @@ never approves. The rule is recorded in
 
 | Principal kind | Destructive op | Code |
 |---|---|---|
-| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
+| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. With no matching grant, it waits while `AGENT_GRANT_REQUIRED` is `off` (the default) or `observe`, and is refused (`agent_no_grant`) with `on`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
 | `service` | Waits for approval. No grant can approve it in advance, except a delete grant on an instance in sandbox mode (see [service-principal-grants.md](service-principal-grants.md)). | `operations/_validate.py` `_non_agent_park_reason` (the `destructive` branch, called by `_non_agent_verdict`); `operations/service_grants.py:1272` `consult_and_record_grant` refuses the tier before any grant lookup |
 | `user` | Waits for approval. | `operations/_validate.py:724` `_non_agent_verdict` |
 

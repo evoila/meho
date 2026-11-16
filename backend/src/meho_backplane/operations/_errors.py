@@ -2765,6 +2765,10 @@ def result_connector_auth_failed(
     )
 
 
+#: HTTP methods with which hvac changes a secret.
+_VAULT_WRITE_METHODS = frozenset({"PUT", "POST", "PATCH", "DELETE"})
+
+
 def _vault_path_of(exc: BaseException) -> str | None:
     """Return the Vault API path hvac names in *exc*, without the address.
 
@@ -2834,11 +2838,10 @@ def result_connector_vault_forbidden(
         secret_ref = getattr(target, "secret_ref", None)
         target_name = getattr(target, "name", None) or "the target"
         exception_class = type(exc).__name__
-    derived = (
-        bool(secret_ref)
-        and expected_secret_ref is not None
-        and (str(secret_ref).strip() == expected_secret_ref)
-    )
+    # Call-time import: ``tenant_paths`` pulls in the Vault ops module.
+    from meho_backplane.connectors.vault.tenant_paths import secret_ref_matches
+
+    derived = secret_ref_matches(str(secret_ref) if secret_ref else None, expected_secret_ref)
     extras: dict[str, Any] = {
         "error_code": "connector_vault_forbidden",
         "secret_ref": secret_ref,
@@ -2849,11 +2852,12 @@ def result_connector_vault_forbidden(
     if own_ref and derived:
         summary = (
             f"connector_vault_forbidden: Vault denied the credential read for "
-            f"{target_name} (permission denied). The target has no secret_ref "
-            f"of its own, so MEHO used {secret_ref!r}: this is the default "
-            f"path MEHO builds from the target name. This install does not let "
-            f"MEHO read that path. To fix, store the credential at a path MEHO "
-            f"may read, then run "
+            f"{target_name} (permission denied). The secret_ref {secret_ref!r} "
+            f"is the default path MEHO builds from the target name. MEHO set it "
+            f"when the target was added without a secret_ref, or a person set "
+            f"the same path. This install does not let MEHO read that path. To "
+            f"fix, store the credential at another path MEHO may read (not "
+            f"{secret_ref!r}), then run "
             f"`meho targets update {target_name} --secret-ref <path>` and "
             f"retry. Do NOT widen the backplane's Vault policy — it is "
             f"deploy-owned and re-applied on every upgrade. See "
@@ -2889,13 +2893,17 @@ def result_connector_vault_forbidden(
         refused_path = _vault_path_of(exc)
         extras["refused_path"] = refused_path
         refused = repr(refused_path) if refused_path else "a Vault path"
+        # hvac keeps the request method on the error: PUT, POST, PATCH and
+        # DELETE change a secret, the rest read it.
+        method = str(getattr(exc, "method", None) or "").upper()
+        action = "write" if method in _VAULT_WRITE_METHODS else "read"
         summary = (
-            f"connector_vault_forbidden: Vault refused to read {refused} for "
+            f"connector_vault_forbidden: Vault refused to {action} {refused} for "
             f"this operation on {target_name} (permission denied). This is not "
-            f"the target's own secret_ref: the operation reads a second Vault "
-            f"path, and this install does not let MEHO read it. Check the path "
+            f"the target's own secret_ref: the operation {action}s a second Vault "
+            f"path, and this install does not let MEHO {action} it. Check the path "
             f"the operation names (for example in its parameters) and use a "
-            f"path MEHO may read. Do NOT widen the backplane's Vault policy — "
+            f"path MEHO may {action}. Do NOT widen the backplane's Vault policy — "
             f"it is deploy-owned and re-applied on every upgrade. See "
             f"docs/codebase/connectors-vault-tenant-scope.md for the "
             f"namespace convention and "

@@ -142,8 +142,10 @@ spans. Migration `0169` added `request_id` and `operator_sub` to
 `dispatch_trace`; an older trace has neither and is found by time only.
 Access rules are those of the single trace read: a person reads every trace
 of the tenant, an agent reads none unless the tenant lets agents read
-traces, and never a trace marked `redaction_uncertain`. There is no CLI
-command for it yet.
+traces, and never a trace marked `redaction_uncertain`. `since` also limits a search by
+`request_id`: it is a filter on the capture time, and it applies together
+with `request_id`. To find an older trace by its request id, give a wider
+`since`, for example `since=30d`. There is no CLI command for it yet.
 
 ### Results a handler returns: error, wait, deny (#4274, #4275)
 

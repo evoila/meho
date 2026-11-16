@@ -19,7 +19,7 @@ classification hold end to end.
 What this harness proves (issue #551 DoD)
 =========================================
 
-* ``hashicorp/vault:1.18`` dev-mode container (and ``quay.io/openbao/openbao:2.7.1``,
+* ``hashicorp/vault:1.18`` dev-mode container (and ``openbao/openbao:2.7.1``,
   overridable via ``MEHO_TEST_OPENBAO_IMAGE``), image overridable via
   ``MEHO_TEST_VAULT_IMAGE`` so the CI runner pulls through the
   in-cluster Harbor proxy (same env-knob shape as
@@ -187,7 +187,7 @@ class _VaultTarget:
 #: has no "latest" tag in use here so a new release never breaks a PR.
 _SERVERS: list[tuple[str, str, str, str]] = [
     ("vault-1.18", "MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18", "vault"),
-    ("openbao-2.x", "MEHO_TEST_OPENBAO_IMAGE", "quay.io/openbao/openbao:2.7.1", "openbao"),
+    ("openbao-2.x", "MEHO_TEST_OPENBAO_IMAGE", "openbao/openbao:2.7.1", "openbao"),
 ]
 
 #: Address of a running server -> the product its fingerprint must report.
@@ -235,7 +235,10 @@ def vault_dev_addr(request: pytest.FixtureRequest) -> Iterator[str]:
     except Exception as exc:
         # Any boot failure (privileged denied, image pull rate-limit,
         # cgroup refusal) → clean skip, not a red suite — same stance
-        # the k3d / pgvector container fixtures take.
+        # the k3d / pgvector container fixtures take. Under CI the OpenBao
+        # case fails instead, so a broken image or proxy cannot hide it.
+        if expected_product == "openbao" and os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(f"openbao dev container failed to start ({type(exc).__name__}): {exc}")
         pytest.skip(f"vault dev container failed to start ({type(exc).__name__}): {exc}")
 
     try:

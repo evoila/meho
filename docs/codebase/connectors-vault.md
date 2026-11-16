@@ -151,7 +151,10 @@ target registration) is documented in
   known version outside both ranges (Vault below 1.18, HashiCorp Vault
   2.x, anything 3.0 or higher) gets a `no_connector` answer that names
   the ranges. A target with no known version still resolves to
-  `VaultConnector`, and a probe skips the range check.
+  `VaultConnector`, and a probe skips the range check. A version that
+  an operator typed by hand as `1.x` or `1` is read as `1.0`, which is
+  below 1.18, so that target gets `no_connector`. Set the full version
+  (for example `1.18.4`) or clear the field so the probe fills it in.
 - **Operator-aware JWT (G0.8-T3 #629)** — the operator's bearer token
   is request-scoped state on the `Operator` the dispatcher threads to
   handlers whose signature names an `operator` parameter
@@ -1215,7 +1218,7 @@ underlying mistake would otherwise produce.
 The unit suites mock hvac through `tests/_vault_fakes.py` (the
 `_build_client` seam). The real-Vault layer lives in
 `backend/tests/integration/test_connectors_vault_dev_e2e.py`: it boots
-a `hashicorp/vault:1.18` server and an OpenBao 2.x server (`quay.io/openbao/openbao`, set with `MEHO_TEST_OPENBAO_IMAGE`) in dev mode via testcontainers'
+a `hashicorp/vault:1.18` server and an OpenBao 2.x server (`openbao/openbao` from Docker Hub, set with `MEHO_TEST_OPENBAO_IMAGE`) in dev mode via testcontainers'
 `DockerContainer`, seeds the surfaces every op touches, then
 dispatches every registered `vault.kv.*` / `vault.sys.*` /
 `vault.auth.*` op through the real `dispatch()` against the live Vault

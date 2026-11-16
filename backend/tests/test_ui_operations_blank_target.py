@@ -36,6 +36,7 @@ from tests.test_ui_operations import (
     _register_recording_gh_connector,
     _seed_ingested_op,
     _seed_tenant,
+    _wait_for_the_answer,  # noqa: F401 -- autouse fixture: a run ends inside its response
 )
 
 _TARGETLESS_OP = "demo.ping"

@@ -33,7 +33,11 @@ from meho_backplane.connectors.keycloak import (  # loading the package register
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.mcp.tools.approvals import _get_handler, _list_handler
-from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    build_proposed_effect,
+    proposed_effect_for_agent,
+)
 from meho_backplane.settings import get_settings
 from tests.test_ui_approvals import (
     _REVIEWER_SUB,
@@ -223,3 +227,19 @@ def test_switch_off_mcp_tools_leave_other_requests_unchanged(
     got, listed = _mcp_effects(rid)
 
     assert got == listed == stored
+
+
+def test_a_request_without_a_stored_effect_reads_as_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=False)
+
+    shown = proposed_effect_for_agent(
+        "keycloak.client.update",
+        None,
+        params={"id": _CLIENT_UUID},
+        connector_id=_CONNECTOR_ID,
+        tenant=str(_TENANT_A),
+    )
+
+    assert shown is None

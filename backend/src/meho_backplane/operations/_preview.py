@@ -460,12 +460,12 @@ def register_person_only_preview_keys(
 
 def proposed_effect_for_agent(
     op_id: str,
-    effect: dict[str, Any],
+    effect: dict[str, Any] | None,
     *,
     params: Mapping[str, Any] | None,
     connector_id: str | None,
     tenant: str | None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """The stored ``proposed_effect`` of an approval request, as a caller reads it.
 
     The request a person reads always holds the builder's card. A caller
@@ -479,6 +479,8 @@ def proposed_effect_for_agent(
 
     Every other ``proposed_effect`` comes back unchanged.
     """
+    if not isinstance(effect, dict):
+        return effect
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
     if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
         shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}

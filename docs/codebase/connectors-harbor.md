@@ -125,8 +125,9 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
    `register_harbor_project_quota_operations`.
    The import also loads `op_classes.py`, which declares
    `harbor.robot.create` as `credential_mint` for the broadcast classifier,
-   and `ops_robot_delete_preview.py`, which registers the preview builder
-   for `harbor.robot.delete`.
+   `ops_robot_create_preview.py`, which registers the approval card preview
+   of `harbor.robot.create`, and `ops_robot_delete_preview.py`, which
+   registers the preview builder for `harbor.robot.delete`.
 3. At lifespan startup `run_typed_op_registrars` invokes the queued registrars,
    landing the 12 read + 2 write descriptor rows before the first dispatch. No
    `meho connector ingest` is required — the read core dispatches on a fresh
@@ -191,6 +192,15 @@ and `harbor.health` expose these same two reads as operator-callable typed ops.
 ### robot_create / robot_delete
 
 Both robot writes register in the `robot` group (not `harbor-robots`).
+
+`robot_create` takes an optional `access` list (`pull`, `push`; default both,
+so old callers are unchanged). `["pull"]` makes a pull-only robot. Delete is not
+offered. A `credential_mint` op gets no plain parameter echo on the approval
+card, so `ops_robot_create_preview.py` builds its own card: robot name,
+project, level, duration and the effective `access` (the default shows as
+push and pull). It reads only the call params and holds no secret. The handler
+and the card use the same `robot_access_actions` helper, so the card shows
+what Harbor gets.
 
 `robot_create` (op `harbor.robot.create`) is classified `credential_mint`.
 The connector declares this class in `op_classes.py` with
@@ -472,6 +482,8 @@ waits until a second person approves. `operation call` takes `--params`
 - `tests/test_connectors_harbor_robot.py` — `harbor.robot.create` /
   `harbor.robot.delete` handlers, operator threading into the Vault read,
   their broadcast classes, and the aggregate-only `credential_mint` payload.
+- `tests/test_connectors_harbor_robot_create_preview.py` — the approval card
+  of `harbor.robot.create` shows the effective access.
 - `tests/test_connectors_harbor_robot_delete.py` — the `destructive` +
   approval rules of `harbor.robot.delete` and its park-time blast radius.
 - `tests/integration/test_connectors_harbor_container.py` — env-gated real

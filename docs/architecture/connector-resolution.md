@@ -98,6 +98,14 @@ connector of the product. A probe (`resolve_connector(target,
 for_probe=True)`) skips this check, so a target can be probed again
 after its system was upgraded.
 
+A class can also set `fingerprint_products`, a set of product names.
+Then the class matches only a target whose last probe reported one of
+those products (the `product` of the target's fingerprint). A target
+that was never probed does not match it. The Vault connector uses this:
+OpenBao 2.x and HashiCorp Vault 2.x share the product `vault` and the
+same version numbers, so `OpenBaoConnector` matches only a target whose
+probe found `openbao`.
+
 The resolver reads a version with build text after the number by its
 leading number. PostgreSQL reports versions such as
 `13.16 (Debian 13.16-1.pgdg120+1)`; the range check sees `13.16`, also

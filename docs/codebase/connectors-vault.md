@@ -146,8 +146,13 @@ target registration) is documented in
 
   Both register under the product `vault`, so a target with product
   `vault` is served by the class whose range holds its probed version.
-  The operations are registered once, under `vault-1.x`, and run on
-  either class. `VaultConnector` sets `strict_version_range`, so a
+  `OpenBaoConnector` also sets `fingerprint_products = {"openbao"}`: it
+  serves only a target whose probe found OpenBao. So a HashiCorp Vault
+  2.x target gets `no_connector`, and so does a 2.x target that was
+  never probed (probe it first). The operations are registered once,
+  under `vault-1.x`, and run on either class. A Sensor on `vault-1.x`
+  fits an OpenBao target too: the Sensor check accepts a connector when
+  the resolver picks a subclass of it for the target. `VaultConnector` sets `strict_version_range`, so a
   known version outside both ranges (Vault below 1.18, HashiCorp Vault
   2.x, anything 3.0 or higher) gets a `no_connector` answer that names
   the ranges. A target with no known version still resolves to

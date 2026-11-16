@@ -374,10 +374,13 @@ class OpenBaoConnector(VaultConnector):
     OpenBao speaks the same API as HashiCorp Vault. It registers under the
     same product slug ``vault``, so a target of product ``vault`` on an
     OpenBao server resolves here: the resolver picks this class by the
-    version range. The operations stay registered once, under
+    version range and by the probed product. HashiCorp Vault 2.x uses the
+    same numbers, so ``fingerprint_products`` limits this class to a target
+    whose probe found OpenBao. The operations stay registered once, under
     ``vault-1.x``; this class adds only the range.
     """
 
     version = "2.x"
     impl_id = "vault-openbao"
     supported_version_range = ">=2.0,<3.0"
+    fingerprint_products = frozenset({"openbao"})

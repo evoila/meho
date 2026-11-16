@@ -174,7 +174,7 @@ class _VaultTarget:
         self.id = uuid.uuid4()
         self.preferred_impl_id: str | None = None
 
-        self.fingerprint = SimpleNamespace(version=self.version)
+        self.fingerprint = SimpleNamespace(version=self.version, product="vault")
 
 
 # ---------------------------------------------------------------------------
@@ -459,10 +459,11 @@ async def vault_e2e(
     get_settings.cache_clear()
 
     target = _VaultTarget()
-    # What a probe of this server stores: the real version number.
+    # What a probe of this server stores: the real version number and product.
     target.fingerprint.version = _root_client(vault_dev_addr).sys.read_health_status(method="GET")[
         "version"
     ]
+    target.fingerprint.product = _EXPECTED_PRODUCT[vault_dev_addr]
     try:
         yield target, vault_dev_addr
     finally:

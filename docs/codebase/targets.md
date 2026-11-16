@@ -29,7 +29,9 @@ is refused. A call that sets `secret_field_map` or
 `flight_recorder_capture` waits for a person on every call, whoever makes
 it: no standing grant and no run approval covers it
 (`declare_wait_when_set` in `connectors/targets/__init__.py`). A call
-without these two fields keeps the usual rules. `vpn_required` (boolean, default `false`) records that a
+without these two fields keeps the usual rules. These two fields do not
+open the agent's `preview_operation`: with `PREVIEW_TYPED_WRITES` off,
+the preview of `targets.register` stays `unavailable`. `vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every
 `target` argument elsewhere resolves
@@ -639,7 +641,10 @@ with a token becomes a call of this op.
   each sent field with its stored value and its new value
   (`{"host": {"from": "<stored>", "to": "<new>"}}`), so the approver sees
   what the call changes. Secret-shaped values are hidden the same way as
-  in the generic parameter echo; `secret_ref` is a path and shows.
+  in the generic parameter echo; `secret_ref` is a path and shows. The
+  approval request always holds `changes`. The agent's own
+  `preview_operation` holds it only with the `PREVIEW_TYPED_WRITES`
+  switch on (off by default).
 - **Fields.** Every field of `TargetUpdate` except `name`. Only the sent
   fields change; an explicit `null` clears a nullable field. A call with
   no field besides `target_id` is refused, and nothing changes.

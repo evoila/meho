@@ -450,10 +450,11 @@ def _gate_and_validate(
     connector_id: str,
     op_id: str,
     params: dict[str, Any],
+    previewable: bool,
 ) -> dict[str, Any] | None:
     """Run the previewability gate + dispatch Step 3; return an envelope on a fault.
 
-    Returns ``None`` when the op is previewable (:func:`_is_previewable` —
+    Returns ``None`` when the op is *previewable* (:func:`_is_previewable` —
     ``source_kind='ingested'``, or a governed-tier non-ingested op) and its
     params pass the schema. Otherwise returns the structured envelope the
     caller propagates:
@@ -469,7 +470,7 @@ def _gate_and_validate(
     # A non-ingested op previews as "unavailable" unless it is in a governed
     # approval tier (destructive #3198 / non-credential requires_approval
     # #3312), which routes to the synthetic preview.
-    if not _is_previewable(descriptor):
+    if not previewable:
         return _preview_unavailable_envelope(
             op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
@@ -893,6 +894,9 @@ async def preview_dispatch(
     # that asks for the hidden values of a secret read gets the floor.
     params, reveal_secret = split_reveal_secret(params)
     raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+    # A param that makes the call wait does not open the preview: whether
+    # the agent sees one follows the op and PREVIEW_TYPED_WRITES alone.
+    previewable = _is_previewable(descriptor)
     raise_descriptor_for_params(descriptor, params)
     # The park check and the governance fields each run the policy gate.
     with agent_no_grant_log_scope():
@@ -910,6 +914,7 @@ async def preview_dispatch(
             descriptor=descriptor,
             target=target,
             params=params,
+            previewable=previewable,
         )
         governance = await _governance_fields(
             operator=operator,
@@ -929,10 +934,15 @@ async def _preview_resolved_op(
     descriptor: EndpointDescriptor,
     target: Any,
     params: dict[str, Any],
+    previewable: bool,
 ) -> dict[str, Any]:
     """The preview envelope for a resolved descriptor, before the governance fields."""
     fault = _gate_and_validate(
-        descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+        descriptor=descriptor,
+        connector_id=connector_id,
+        op_id=op_id,
+        params=params,
+        previewable=previewable,
     )
     if fault is not None:
         return fault  # structured unavailable / invalid_params / invalid_op_schema

@@ -40,7 +40,10 @@ from meho_backplane.api.v1.targets import router as targets_router
 from meho_backplane.api.v1.topology import router as topology_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.targets.ops import register_targets_registry_operations
+from meho_backplane.connectors.targets.ops import (
+    TARGETS_REGISTRY_CONNECTOR_ID,
+    register_targets_registry_operations,
+)
 from meho_backplane.connectors.targets.update import register_targets_update_operation
 from meho_backplane.connectors.topology.ops import register_topology_graph_operations
 from meho_backplane.db.engine import get_sessionmaker
@@ -48,10 +51,12 @@ from meho_backplane.db.models import ApprovalRequest, AuditLog, GraphEdge, Graph
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import DEFAULT_TENANT_ID, make_rsa_keypair, mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
@@ -296,9 +301,16 @@ async def test_a_token_change_with_no_field_answers_422_at_once(client: TestClie
         ("secret_ref", f"tenants/{_TENANT_ID}/old-ref", f"tenants/{_TENANT_ID}/new-ref"),
     ],
 )
+@pytest.mark.parametrize("switch", [False, True], ids=["switch-off", "switch-on"])
 async def test_a_token_change_shows_the_stored_and_the_new_value_on_the_approval(
-    client: TestClient, field: str, stored: str, new: str
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    stored: str,
+    new: str,
+    switch: bool,
 ) -> None:
+    _set_preview_typed_writes(monkeypatch, switch)
     await _insert_target(name=_EXISTING, **{"host": _EXISTING_HOST, field: stored})
     response = _send(client, "PATCH", f"/api/v1/targets/{_EXISTING}", {field: new})
 
@@ -307,6 +319,62 @@ async def test_a_token_change_shows_the_stored_and_the_new_value_on_the_approval
     assert request.proposed_effect is not None
     preview = request.proposed_effect["preview"]
     assert preview["changes"] == {field: {"from": stored, "to": new}}
+
+
+def _set_preview_typed_writes(monkeypatch: pytest.MonkeyPatch, on: bool) -> None:
+    monkeypatch.setenv("PREVIEW_TYPED_WRITES", "true" if on else "false")
+    get_settings.cache_clear()
+
+
+async def _agent_preview(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    operator = Operator(
+        sub="admin-1",
+        name=None,
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    return await preview_dispatch(
+        operator=operator,
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+        op_id=op_id,
+        target=None,
+        params=params,
+    )
+
+
+async def test_the_agent_preview_of_a_change_shows_the_values_only_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = await _insert_target(name=_EXISTING, host=_EXISTING_HOST)
+    params = {"target_id": str(row.id), "host": "other.example"}
+
+    _set_preview_typed_writes(monkeypatch, False)
+    off = (await _agent_preview("targets.update", params))["proposed_effect"]["preview"]
+    _set_preview_typed_writes(monkeypatch, True)
+    on = (await _agent_preview("targets.update", params))["proposed_effect"]["preview"]
+
+    assert "changes" not in off
+    assert off["fields"] == ["host"]
+    assert on["changes"] == {"host": {"from": _EXISTING_HOST, "to": "other.example"}}
+    assert {key: value for key, value in on.items() if key != "changes"} == off
+
+
+@pytest.mark.parametrize("capture", [None, True], ids=["plain", "capture-set"])
+@pytest.mark.parametrize("switch", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_field_that_makes_a_create_wait_does_not_open_the_agent_preview(
+    monkeypatch: pytest.MonkeyPatch, capture: bool | None, switch: bool
+) -> None:
+    _set_preview_typed_writes(monkeypatch, switch)
+    params: dict[str, Any] = {"name": "new-system", "product": "ssh", "host": "new.example"}
+    if capture is not None:
+        params["flight_recorder_capture"] = capture
+
+    envelope = await _agent_preview("targets.register", params)
+
+    assert envelope["status"] == ("ok" if switch else "unavailable"), envelope
+    assert envelope["requires_approval"] is (capture is not None)
 
 
 async def test_a_token_delete_waits_and_runs_after_approval(client: TestClient) -> None:

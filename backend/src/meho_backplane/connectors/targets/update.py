@@ -62,6 +62,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
 from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
@@ -350,7 +351,8 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
 
     Names the target (id, name, host) and its connector link. ``changes``
     holds each sent field with its stored value and its new value, so the
-    approver sees for example the new host. When no live target with the
+    approver sees for example the new host. The agent's own preview holds
+    ``changes`` only with ``PREVIEW_TYPED_WRITES`` on. When no live target with the
     id exists in the caller's tenant, it says so; the call would fail.
     Reads only.
     """
@@ -367,7 +369,7 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
             "result_if_run": "fails",
             "note": "no live target with this id in your tenant",
         }
-    return {
+    preview: dict[str, Any] = {
         "action": TARGETS_UPDATE_OP_ID,
         "target": {"id": str(row.id), "name": row.name, "host": row.host},
         "connector": {
@@ -376,9 +378,13 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
             "preferred_impl_id": row.preferred_impl_id,
         },
         "fields": fields,
-        "changes": _preview_changes(row, ctx.params, ctx),
         "result_if_run": "updated" if fields else "fails",
     }
+    # The approver always sees each change; the agent's own preview only
+    # with PREVIEW_TYPED_WRITES on.
+    if not ctx.agent_preview or get_settings().preview_typed_writes:
+        preview["changes"] = _preview_changes(row, ctx.params, ctx)
+    return preview
 
 
 async def register_targets_update_operation(

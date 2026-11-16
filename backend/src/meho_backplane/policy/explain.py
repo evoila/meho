@@ -60,6 +60,7 @@ from meho_backplane.policy.classification import (
     _scope_wait,
     classify,
     entries_from_document,
+    label_text_ok,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.evaluate import Decision, RuleRef, Verdict
@@ -257,7 +258,7 @@ def _entry_view(entry: ClassificationEntry) -> ExplainEntry:
     return ExplainEntry(
         path=entry.ref,
         category=entry.category,
-        labels=dict(entry.labels),
+        labels={k: v for k, v in entry.labels.items() if label_text_ok(k, v)},
         risk=entry.risk,
         always_wait=entry.always_wait,
     )

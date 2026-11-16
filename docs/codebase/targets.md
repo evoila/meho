@@ -303,6 +303,21 @@ from Vault there.
   that path, or run `meho targets update <name> --secret-ref <path>`.
   It never shows the hvac text or the Vault URL. The builder is
   `operations/_errors_target_secret.py`.
+- **A refused read names its cause.** When Vault refuses to read the
+  target's own ref, the loader raises `TargetSecretForbiddenError` and a
+  dispatch answers `connector_vault_forbidden` about that ref, with
+  `secret_ref_derived`. For a ref MEHO built, the error says "this is the
+  default path MEHO builds from the target name" and advises a path MEHO
+  may read plus `meho targets update <name> --secret-ref <path>`. A
+  refused read of any other Vault path names that path
+  (`extras.refused_path`), not the target's ref. Neither shows the Vault
+  text or the Vault address.
+- **A probe answers the same way.** `POST /api/v1/targets/{name}/probe`
+  answers a missing secret with 422 `target_secret_not_found` and a
+  refused read with 422 `connector_vault_forbidden`, with the fields and
+  text of the call's answer. The console re-probe shows the same text in
+  a 422 alert. The `targets.probe` operation gives the same result as a
+  call, with its `error_code`.
 - **A machine login gets only the own path, unless a person approves.**
   A call of `targets.register` from an agent, a service login or a
   runner can run with no person, under a standing grant or an approved
@@ -438,7 +453,10 @@ meho targets probe web-01
 `POST /api/v1/targets/{name}/probe` (`meho targets probe`) reads the
 target's secret when the target has a map, and checks that every mapped
 **source** field exists. If one is missing, the probe fails with a 422 and
-does not save a fingerprint:
+does not save a fingerprint. When Vault has no secret at the ref during
+this check, the probe answers 422 `target_secret_not_found`; when Vault
+refuses the read, 422 `connector_vault_forbidden`. A missing source field
+answers:
 
 ```json
 {"detail": {"kind": "secret_field_map_source_missing",

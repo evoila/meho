@@ -3804,7 +3804,7 @@ MEHO passes that error on and changes nothing.</p>
 <tr>
 <td>Dispatch fails, <code>connector_vault_forbidden</code> — Vault answered <em>permission denied</em></td>
 <td>Nine times out of ten the secret is staged at the wrong path, <strong>not</strong> a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path.</td>
-<td><code>vault kv put</code> the credential at the expected path. Do <strong>not</strong> widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade.</td>
+<td><code>vault kv put</code> the credential at the expected path. If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run <code>meho targets update &lt;name&gt; --secret-ref &lt;path&gt;</code>. If the error says it is not the target's own <code>secret_ref</code>, check the path the operation names. Do <strong>not</strong> widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422.</td>
 </tr>
 <tr>
 <td>Dispatch fails, <code>connector_auth_failed</code> (HTTP 401 at session establish)</td>

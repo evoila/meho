@@ -307,6 +307,7 @@ from meho_backplane.connectors import (
 )
 from meho_backplane.connectors._shared.vault_creds import (
     SecretRefReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -322,6 +323,7 @@ from meho_backplane.operations._audit import (
     descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
+    policy_rule_var,
     restore_audit_extras,
     reveal_secret_var,
     snapshot_audit_extras,
@@ -334,6 +336,7 @@ from meho_backplane.operations._branches import (
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
 from meho_backplane.operations._errors import (
+    MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
@@ -347,6 +350,7 @@ from meho_backplane.operations._errors import (
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
+    result_connector_http_410,
     result_connector_http_422,
     result_connector_not_found,
     result_connector_probe_refused,
@@ -419,8 +423,17 @@ from meho_backplane.operations._secret_values import (
     reveal_hidden_values,
     split_reveal_secret,
 )
+from meho_backplane.operations._session_expired_hook import (
+    mark_session_relogin,
+    may_resend_after_session_end,
+    same_answer_after_signin_error,
+    session_ended_not_resent_error,
+    session_expired_by_hook,
+    with_refused_signin_remediation,
+)
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._target_version_range import refuse_version_outside_range
+from meho_backplane.operations._tls_presented import probe_presented_leaf
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     InvalidOpSchemaError,
@@ -461,6 +474,7 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_policy import approval_classification
 from meho_backplane.operations.reducer import (
     SECRET_REVEAL_CONTEXT_KEY,
     PassThroughReducer,
@@ -477,6 +491,7 @@ from meho_backplane.operations.shutdown_drain import (
     track_operation,
 )
 from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -1822,8 +1837,17 @@ async def _run_branch_with_error_handling(
         is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
             "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
         )
+        presented = (
+            await probe_presented_leaf(
+                getattr(target, "host", None) or "",
+                getattr(target, "port", None),
+                getattr(target, "tls_server_name", None),
+            )
+            if is_tls_verify_failure and getattr(target, "tls_ca_pin", None)
+            else None
+        )
         conn_result = (
-            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
+            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms, presented)
             if is_tls_verify_failure
             else result_connector_error(op_id, conn_exc, duration_ms)
         )
@@ -1931,7 +1955,13 @@ async def _run_branch_with_error_handling(
             )
         else:
             expected_secret_ref: str | None = None
-            target_name = getattr(target, "name", None)
+            # A refused read of a target's own ref names its target: the
+            # ``targets.probe`` op reads a target that is not the dispatch target.
+            target_name = (
+                vault_exc.target_name
+                if isinstance(vault_exc, TargetSecretForbiddenError)
+                else getattr(target, "name", None)
+            )
             if target_name:
                 # Call-time import on purpose (the ingest-arm precedent above):
                 # ``tenant_paths`` drags the vault ops module in via its
@@ -2090,6 +2120,20 @@ def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
     return dict(extras) if extras else None
 
 
+def _without_message_source(result: OperationResult) -> OperationResult:
+    """Drop the own-message mark from an error result a handler returned.
+
+    Only :func:`~meho_backplane.operations._errors.result_connector_error`
+    sets the mark, from the type of the raised error. A handler that returns
+    its own result cannot set it, so the vendor text of an operation that
+    sends a secret stays hidden.
+    """
+    if MESSAGE_SOURCE_KEY not in result.extras:
+        return result
+    extras = {key: value for key, value in result.extras.items() if key != MESSAGE_SOURCE_KEY}
+    return result.model_copy(update={"extras": extras})
+
+
 async def _audit_returned_result(
     raw: Any,
     *,
@@ -2139,7 +2183,7 @@ async def _audit_returned_result(
     duration_ms = _elapsed_ms(started)
     if raw.status == "error":
         return await _audit_error_and_return(
-            raw,
+            _without_message_source(raw),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -2294,6 +2338,8 @@ def _classify_http_status_error(
 
     * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
       authenticated but lacks the op's required scope.
+    * ``410`` -> :func:`result_connector_http_410` -- the product version
+      removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
       parsed the request and rejected its content.
     * an auth-class status (``401`` / vRLI's ``440``, scoped by the connector's
@@ -2312,6 +2358,8 @@ def _classify_http_status_error(
     status_code = http_exc.response.status_code
     if status_code == 403:
         return result_connector_http_403(op_id, http_exc, duration_ms)
+    if status_code == 410:
+        return result_connector_http_410(op_id, http_exc, duration_ms)
     if status_code == 422:
         return result_connector_http_422(op_id, http_exc, duration_ms)
     if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
@@ -2377,6 +2425,14 @@ async def _handle_http_status_error(
     dispatcher's never-raises contract holds on every path. Scoped to
     403 + 422 + the auth-class set; every other status (404, 429, 5xx)
     flattens to the unchanged generic ``connector_error`` shape.
+
+    A connector may also say that a 4xx status outside the auth-class set
+    means "the session ended" (``is_session_expired(response)``, see
+    :mod:`~meho_backplane.operations._session_expired_hook`). MEHO then drops
+    the kept session. It repeats the call once
+    (:func:`_retry_after_expired_session_answer`) only when a repeat cannot
+    send a change twice; otherwise it returns ``connector_auth_failed`` and
+    does not send the operation again (:func:`_session_ended_not_resent`).
     """
     status_code = http_exc.response.status_code
     is_auth_failure = is_auth_failed_status(
@@ -2399,6 +2455,36 @@ async def _handle_http_status_error(
         )
         return recovered
 
+    if callable(invalidate_session) and session_expired_by_hook(
+        connector_instance, http_exc.response
+    ):
+        if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
+            return await _session_ended_not_resent(
+                invalidate_session=invalidate_session,
+                rejected_exc=http_exc,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                op_id=op_id,
+                started=started,
+            )
+        return await _retry_after_expired_session_answer(
+            invalidate_session=invalidate_session,
+            rejected_exc=http_exc,
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            audit_id=audit_id,
+            op_id=op_id,
+            started=started,
+        )
+
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
         _classify_http_status_error(
@@ -2415,6 +2501,147 @@ async def _handle_http_status_error(
         params=params,
         params_hash=params_hash,
         duration_ms=duration_ms,
+    )
+
+
+async def _session_ended_not_resent(
+    *,
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected_exc: httpx.HTTPStatusError,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    op_id: str,
+    started: float,
+) -> OperationResult:
+    """Drop the kept session after "the session ended", without a repeat.
+
+    The operation may already have changed the product (a typed handler or a
+    multi-step operation that sent a write before the refused request, or a
+    call that ran after a person's approval). So MEHO does not send it again.
+    The next call signs in again on a fresh session. The caller gets
+    ``connector_auth_failed`` that says the change may or may not have been
+    made.
+    """
+    await invalidate_session(target, rejected=rejected_exc.request)
+    mark_session_relogin(rejected_exc.response.status_code, resent=False)
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        result_connector_auth_failed(
+            op_id, session_ended_not_resent_error(rejected_exc, target), target, duration_ms
+        ),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=duration_ms,
+    )
+
+
+async def _retry_after_expired_session_answer(
+    *,
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected_exc: httpx.HTTPStatusError,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    op_id: str,
+    started: float,
+) -> Any | OperationResult:
+    """Sign in again once, after the connector said an answer means "session ended".
+
+    The connector's ``is_session_expired(response)`` method said yes for a
+    4xx status outside the known set (a product that answers an ended
+    session with 403, for example), and a repeat cannot send a change twice
+    (:func:`may_resend_after_session_end`). Like
+    :func:`_retry_after_session_invalidation`, this drops the kept login and
+    repeats the call once. Differences:
+
+    * It is never a loop. The repeated call is not asked again.
+    * The audit row and the trace show that MEHO signed in again
+      (:func:`mark_session_relogin`).
+    * When the fresh sign-in is refused, the caller gets
+      ``connector_auth_failed`` with the text "the product refused the
+      sign-in" (wrong password or locked account), never "grant a
+      permission". When the repeated call gets the same "session ended"
+      answer, the text says the product took the new sign-in and still
+      ended the session.
+
+    Any other answer to the repeated call is classified as it would be on
+    its own, so a real 403 still reads as "insufficient permission".
+    """
+    await invalidate_session(target, rejected=rejected_exc.request)
+    mark_session_relogin(rejected_exc.response.status_code, resent=True)
+    try:
+        raw = await _run_source_kind_branch(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            audit_id=audit_id,
+        )
+    except httpx.HTTPStatusError as retry_exc:
+        duration_ms = _elapsed_ms(started)
+        if session_expired_by_hook(connector_instance, retry_exc.response):
+            result = result_connector_auth_failed(
+                op_id,
+                same_answer_after_signin_error(retry_exc, target),
+                target,
+                duration_ms,
+                relogin="reestablished",
+            )
+        else:
+            result = _classify_http_status_error(
+                http_exc=retry_exc,
+                op_id=op_id,
+                connector_instance=connector_instance,
+                target=target,
+                duration_ms=duration_ms,
+                relogin="reestablished",
+            )
+    except ConnectorAuthError as retry_exc:
+        # The fresh sign-in was refused. Drop the kept credential too, so a
+        # restage is read on the next call.
+        await _evict_connector_credentials(connector_instance, target)
+        result = result_connector_auth_failed(
+            op_id,
+            with_refused_signin_remediation(retry_exc),
+            target,
+            _elapsed_ms(started),
+            relogin="attempted_failed",
+        )
+    except Exception as retry_exc:
+        result = result_connector_error(op_id, retry_exc, _elapsed_ms(started))
+    else:
+        return await _audit_returned_result(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+    return await _audit_error_and_return(
+        result,
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=_elapsed_ms(started),
     )
 
 
@@ -3160,6 +3387,10 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #6041: the category, labels and classification rule, so an
+        # approver sees at once what kind of change waits. Nothing while
+        # the POLICY_CLASSIFICATION switch is off.
+        base.update(approval_classification(descriptor))
         # #3980: a person's ``caution`` call that waits only because it came
         # with a token says so on the request. The same person may then
         # approve it with a click in the web interface.
@@ -3562,10 +3793,17 @@ async def _handle_needs_approval(
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
+                category=descriptor.policy_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):
-            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
+            return result_awaiting_approval(
+                op_id,
+                request.id,
+                duration_ms,
+                reused=True,
+                audit_id=request.request_audit_id,
+            )
         # Record the add-on step events AFTER commit so a phantom event
         # cannot outlive a failed transaction (the helper is fail-open).
         expired_request = getattr(request, "_expired_request", None)
@@ -3582,7 +3820,9 @@ async def _handle_needs_approval(
             decision="pending",
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
-        return result_awaiting_approval(op_id, request.id, duration_ms)
+        return result_awaiting_approval(
+            op_id, request.id, duration_ms, audit_id=request.request_audit_id
+        )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(
             result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),
@@ -3709,39 +3949,47 @@ async def dispatch(
     call is kept in the list of running calls, so the stopping pod can wait
     for it and record it when it does not finish.
     """
-    if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-        with agent_no_grant_log_scope():
-            return await _dispatch_now(
-                operator=operator,
-                connector_id=connector_id,
+    # #6044: no policy rule until this call's own policy gate runs. A step
+    # of a multi-step operation that is refused before its gate (wrong
+    # target, bad params, rate limit) must not write the parent's rule on
+    # its audit row. The reset puts the parent's rule back.
+    rule_token = policy_rule_var.set(None)
+    try:
+        if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+            with agent_no_grant_log_scope():
+                return await _dispatch_now(
+                    operator=operator,
+                    connector_id=connector_id,
+                    op_id=op_id,
+                    target=target,
+                    params=params,
+                    _approved=_approved,
+                    preview_hash=preview_hash,
+                    idempotency_key=idempotency_key,
+                )
+        if is_draining() and not _approved:
+            _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+            return shutting_down_result(op_id)
+        with agent_no_grant_log_scope(new=True):
+            async with track_operation(
                 op_id=op_id,
-                target=target,
-                params=params,
-                _approved=_approved,
-                preview_hash=preview_hash,
-                idempotency_key=idempotency_key,
-            )
-    if is_draining() and not _approved:
-        _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
-        return shutting_down_result(op_id)
-    with agent_no_grant_log_scope(new=True):
-        async with track_operation(
-            op_id=op_id,
-            connector_id=connector_id,
-            operator_sub=operator.sub,
-            tenant_id=operator.tenant_id,
-            approved_run=_approved,
-        ):
-            return await _dispatch_now(
-                operator=operator,
                 connector_id=connector_id,
-                op_id=op_id,
-                target=target,
-                params=params,
-                _approved=_approved,
-                preview_hash=preview_hash,
-                idempotency_key=idempotency_key,
-            )
+                operator_sub=operator.sub,
+                tenant_id=operator.tenant_id,
+                approved_run=_approved,
+            ):
+                return await _dispatch_now(
+                    operator=operator,
+                    connector_id=connector_id,
+                    op_id=op_id,
+                    target=target,
+                    params=params,
+                    _approved=_approved,
+                    preview_hash=preview_hash,
+                    idempotency_key=idempotency_key,
+                )
+    finally:
+        policy_rule_var.reset(rule_token)
 
 
 async def _dispatch_now(
@@ -4029,6 +4277,8 @@ async def _dispatch_now(
                 preview_hash=preview_hash,
                 params=params,
             )
+            # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
+            policy_rule_var.set(take_rule())
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
@@ -4122,10 +4372,11 @@ async def _dispatch_now(
 
             # --- Opt-in announce gate (#3133) --------------------------
             # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
-            # announce gate, a caution-or-higher write-class op is rejected
-            # before execution unless the caller holds an active announce
-            # claim covering it. Off by default and fail-open, so an
-            # ordinary dispatch reaches this line and proceeds unchanged.
+            # announce gate, a caller's caution-or-higher write-class op is
+            # rejected before execution unless the caller holds an active
+            # announce claim covering it; a person is never asked (#3762).
+            # Off by default and fail-open, so an ordinary dispatch
+            # reaches this line and proceeds unchanged.
             # Not run on the ``_approved`` resume path -- an operator
             # already approved that exact call; re-gating it here would
             # strand an approved op behind an announce it can no longer add.

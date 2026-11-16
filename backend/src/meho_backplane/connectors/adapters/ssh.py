@@ -392,13 +392,15 @@ async def _dial(target: Target, auth_kwargs: dict[str, Any]) -> asyncssh.SSHClie
     still matched against the name (``host_key_alias``).
     """
 
+    port = target.port or 22
+
     async def _open(address: str) -> asyncssh.SSHClientConnection:
         alias_kwargs: dict[str, Any] = (
             {"host_key_alias": target.host} if address != target.host else {}
         )
         return await asyncssh.connect(
             address,
-            port=target.port or 22,
+            port=port,
             username=auth_kwargs["username"],
             client_keys=auth_kwargs.get("client_keys"),
             password=auth_kwargs.get("password"),
@@ -406,7 +408,7 @@ async def _dial(target: Target, auth_kwargs: dict[str, Any]) -> asyncssh.SSHClie
             **alias_kwargs,
         )
 
-    return await connect_checked(target.host, _open)
+    return await connect_checked(target.host, _open, port=port)
 
 
 class SshConnector(Connector):

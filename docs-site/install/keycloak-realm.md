@@ -518,8 +518,13 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
 ```
 
 - The flow is missing: MEHO makes it with its settings, maps
-  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, and
-  binds the flow. The binding is the last change.
+  `meho-touch` to level 3, adds the `amr` mapper to `meho-web`, gives the
+  flow the company login default when the realm's browser flow has one,
+  and binds the flow. The binding is the last change.
+- Keycloak refuses a request with HTTP 403: MEHO names the missing role
+  and the account. When it was making the flow, the flow may be half-made.
+  Delete it in Keycloak before you run again, or the next run stops with
+  "another shape".
 - Everything is there: MEHO changes nothing, and every change flag in
   the result is `false`. So the call is safe to run twice.
 - The flow is there with other steps or other settings: MEHO stops,
@@ -731,6 +736,30 @@ top of one of the five groups.
 
 To fill the groups from your company directory instead of by hand, see
 [Company login](login/index.md).
+
+### Team groups for the policy file (optional)
+
+The policy file can say which group is which team, in `bindings`
+([The policy file](../guides/policy-file.md#which-login-group-is-which-team)).
+This needs the setting `POLICY_APPROVER_ROUTING`. MEHO matches a team
+group by its full path or by a group attribute, never by its short name:
+a short name can belong to more than one group. So the token must carry
+one of the two:
+
+- **Full path.** On the `groups-claim` mapper, turn **Full group path**
+  on. The `groups` claim then holds `/MEHO-Operators/Network` instead of
+  `Network`. A binding names this full path.
+- **Group attribute.** Give each team group the attribute `meho_group`,
+  for example `<tenant>-network`. Add a User Attribute mapper
+  `meho-groups` (**User Attribute** = `meho_group`, **Token Claim Name** =
+  `meho_groups`, **Claim JSON Type** `String`, **Multivalued** on,
+  **Aggregate attribute values** on, **Add to access token** on). A
+  binding names the value. Leave the person's own `meho_group` attribute
+  empty, as for the other attributes above.
+
+A team group inside a role group (for example `Network` inside
+`MEHO-Operators`) takes `tenant_id` and `tenant_role` from its parent
+group. A binding never changes the role in the token.
 
 ## Step 6 — Create an operator user
 

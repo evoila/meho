@@ -673,3 +673,157 @@ async def test_dispatch_timeout_of_a_change_is_uncertain_only_after_sending(
     else:
         assert "execution_outcome" not in result.extras
         assert "retry" not in result.extras
+
+
+# ---------------------------------------------------------------------------
+# Target with a tls_ca_pin: the pin is stale (#3867)
+# ---------------------------------------------------------------------------
+
+_PRESENTED: dict[str, str] = {
+    "issuer": "CN=Example VMCA Root,O=Example",
+    "subject": "CN=esx01.example.test",
+    "sha256": "AA:BB:CC",
+}
+
+
+class _PinnedTarget(_FakeTarget):
+    tls_ca_pin = "-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n"
+    tls_server_name = None
+
+
+def test_pinned_target_says_the_pin_is_stale_and_shows_the_presented_certificate() -> None:
+    out = result_connector_tls_verify_failed(
+        "GET:/version",
+        _make_tls_verify_connect_error(),
+        _PinnedTarget(host="esx01.example.test"),
+        duration_ms=1.0,
+        presented=_PRESENTED,
+    )
+
+    assert out.error is not None
+    assert "pin is stale" in out.error
+    assert "VMCA root" in out.error
+    assert "CN=Example VMCA Root,O=Example" in out.error
+    # The unpinned advice ("set tls_ca_pin", last resort) is not repeated.
+    assert "SSL_CERT_FILE" not in out.error
+    assert "verify_tls=false" not in out.error
+    extras = out.extras
+    assert extras["error_code"] == "connector_tls_verify_failed"
+    assert extras["pin_stale"] is True
+    assert extras["presented_certificate"] == _PRESENTED
+    assert "remediation_secure" not in extras
+
+
+def test_pinned_target_without_a_readable_certificate_says_so() -> None:
+    out = result_connector_tls_verify_failed(
+        "GET:/version",
+        _make_tls_verify_connect_error(),
+        _PinnedTarget(),
+        duration_ms=1.0,
+        presented=None,
+    )
+
+    assert out.error is not None
+    assert "pin is stale" in out.error
+    assert "could not read the certificate" in out.error
+    assert out.extras["presented_certificate"] is None
+    assert out.extras["error_code"] == "connector_tls_verify_failed"
+
+
+def test_unpinned_target_keeps_the_original_advice() -> None:
+    out = result_connector_tls_verify_failed(
+        "GET:/version",
+        _make_tls_verify_connect_error(),
+        _FakeTarget(),
+        duration_ms=1.0,
+        presented=_PRESENTED,
+    )
+
+    assert out.error is not None
+    assert "pin is stale" not in out.error
+    assert "pin_stale" not in out.extras
+    assert "presented_certificate" not in out.extras
+
+
+def test_presented_certificate_text_is_sanitized() -> None:
+    out = result_connector_tls_verify_failed(
+        "GET:/version",
+        _make_tls_verify_connect_error(),
+        _PinnedTarget(),
+        duration_ms=1.0,
+        presented={"issuer": "CN=x\n" + "y" * 600, "subject": "CN=s", "sha256": "AA"},
+    )
+
+    issuer = out.extras["presented_certificate"]["issuer"]
+    assert len(issuer) <= 256 + len("...<truncated>")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pinned_target_reads_the_presented_certificate(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, int | None, str | None]] = []
+
+    async def _fake_probe(host: str, port: int | None, server_name: str | None) -> dict[str, str]:
+        seen.append((host, port, server_name))
+        return _PRESENTED
+
+    monkeypatch.setattr("meho_backplane.operations.dispatcher.probe_presented_leaf", _fake_probe)
+    register_connector_v2(
+        product="vcfops", version="9", impl_id="vcfops-rest", cls=_TlsVerifyFailConnector
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest",
+        op_id="GET:/version",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-9",
+        op_id="GET:/version",
+        target=_PinnedTarget(host="esx01.example.test"),
+        params={},
+    )
+
+    assert seen == [("esx01.example.test", 443, None)]
+    assert result.extras["pin_stale"] is True
+    assert result.extras["presented_certificate"] == _PRESENTED
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unpinned_target_does_not_probe(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _boom(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("an unpinned target must not be probed")
+
+    monkeypatch.setattr("meho_backplane.operations.dispatcher.probe_presented_leaf", _boom)
+    register_connector_v2(
+        product="vcfops", version="9", impl_id="vcfops-rest", cls=_TlsVerifyFailConnector
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest",
+        op_id="GET:/version",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-9",
+        op_id="GET:/version",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert "pin_stale" not in result.extras

@@ -41,6 +41,8 @@ from meho_backplane.db.models import (
     TenantPolicy,
 )
 from meho_backplane.policy.classification import (
+    LABEL_KEY_MAX,
+    LABEL_VALUE_MAX,
     Classification,
     ClassificationEntry,
     OpCoordinates,
@@ -51,6 +53,7 @@ from meho_backplane.policy.classification import (
     entries_from_document,
     install_wait_text,
     install_wait_undone,
+    label_text_ok,
     taxonomy_from_documents,
 )
 from meho_backplane.settings import get_settings
@@ -70,8 +73,6 @@ __all__ = [
 ]
 
 _MAX_LABELS = 32
-_MAX_LABEL_KEY = 63
-_MAX_LABEL_VALUE = 255
 
 
 class InvalidStoredPolicyError(ValueError):
@@ -296,11 +297,16 @@ def _check_labels(labels: Mapping[str, str]) -> None:
     if len(labels) > _MAX_LABELS:
         raise ValueError(f"At most {_MAX_LABELS} labels are allowed.")
     for key, value in labels.items():
-        if not key or len(key) > _MAX_LABEL_KEY:
-            raise ValueError(f"Label key {key!r} must have 1 to {_MAX_LABEL_KEY} characters.")
-        if not value or len(value) > _MAX_LABEL_VALUE:
+        if not key or len(key) > LABEL_KEY_MAX:
+            raise ValueError(f"Label key {key!r} must have 1 to {LABEL_KEY_MAX} characters.")
+        if not value or len(value) > LABEL_VALUE_MAX:
             raise ValueError(
-                f"The value of label {key!r} must have 1 to {_MAX_LABEL_VALUE} characters."
+                f"The value of label {key!r} must have 1 to {LABEL_VALUE_MAX} characters."
+            )
+        if not label_text_ok(key, value):
+            raise ValueError(
+                f"Label {key!r}: a key may use only letters, digits and . _ / -, "
+                "and a value only printable characters with no line breaks."
             )
 
 
@@ -461,7 +467,9 @@ async def plan_edit(
         after=[*install_entries, *new_tenant_entries, *overrides],
         matched=matched,
         tenant_row=tenant,
-        install_wait_refusal=install_wait_text("This edit", *undone) if undone else None,
+        install_wait_refusal=(
+            install_wait_text("This edit", *undone, single_edit=True) if undone else None
+        ),
     )
 
 

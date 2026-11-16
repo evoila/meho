@@ -97,6 +97,8 @@ async def _seed_audit_row(
     parent_audit_id: uuid.UUID | None = None,
     work_ref: str | None = None,
     event_class: AuditEventClass = AuditEventClass.LEGACY_REQUEST,
+    policy_rule: str | None = None,
+    policy_version: int | None = None,
 ) -> uuid.UUID:
     """Insert one :class:`AuditLog` row and return its ``id``."""
     row_id = uuid.uuid4()
@@ -116,6 +118,8 @@ async def _seed_audit_row(
             parent_audit_id=parent_audit_id,
             work_ref=work_ref,
             event_class=event_class.value,
+            policy_rule=policy_rule,
+            policy_version=policy_version,
         ),
     )
     return row_id
@@ -713,6 +717,41 @@ async def test_work_ref_surfaced_on_every_returned_entry(
     by_id = {entry.id: entry.work_ref for entry in result.rows}
     assert by_id[bound_id] == "jira:OPS-42"
     assert by_id[unbound_id] is None
+
+
+@pytest.mark.asyncio
+async def test_policy_rule_and_version_surfaced_from_the_row(
+    session: AsyncSession,
+) -> None:
+    """#6044: each returned entry carries its row's policy rule and version.
+
+    A row with a rule and a version returns both; a row without them returns
+    ``None`` for both.
+    """
+    tenant_id = uuid.uuid4()
+    stamped_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        policy_rule="default:person.safe (shadow)",
+        policy_version=3,
+    )
+    empty_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    by_id = {entry.id: (entry.policy_rule, entry.policy_version) for entry in result.rows}
+    assert by_id[stamped_id] == ("default:person.safe (shadow)", 3)
+    assert by_id[empty_id] == (None, None)
 
 
 # ---------------------------------------------------------------------------

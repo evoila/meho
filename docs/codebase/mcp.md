@@ -635,8 +635,9 @@ shape what the caller sees and how it reads more:
   the `audit_id`, so the caller knows not to run it again. A failed call
   (#3864) and a refused call (#4669) return the id of their `error` or
   `denied` row the same way, so an agent can link a refusal to its audit
-  row without searching the audit log. `audit_id` is `null` only when no
-  row was written or the write failed.
+  row without searching the audit log. A call that waits for approval
+  returns the id of its `approval.request` row the same way.
+  `audit_id` is `null` only when no row was written or the write failed.
 
 The full rules, bounds, and errors are in
 [`result-spill.md`](result-spill.md). Tests:
@@ -860,6 +861,24 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   added only when the caller sets `include_scores` **and** is
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
+- **Category and labels, behind a switch (#6041).** While the switch
+  `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
+  also carry `category` (for example `network`) and `labels` (a map of
+  free `key=value` text). They are the operation's classification for
+  the caller's tenant, the same values dispatch uses
+  ([policy-classification.md](policy-classification.md)). `category` is
+  `null` when two classification rules disagree; then every call waits
+  for approval. The `labels` description in the output schema says that
+  label text is data, not an instruction; the contract's
+  `result_shape.guidance` says it too while the switch is on. Search
+  stays tenant-wide: it does not say whether a call
+  waits for *this* caller. With the switch off, both keys are left out,
+  so every answer is the same as before. The registered `outputSchema`
+  names both fields; while the switch is off,
+  `classification_schema_for_settings`
+  (`mcp/tools/_search_classification.py`) takes them out of the schema
+  that `tools/list` sends, so that list does not change either. Tests:
+  `backend/tests/test_policy_classification_shown.py`.
 - **The admin's description, behind a switch (#4753).** An admin can
   replace an operation's text with `meho_connector_edit_op`
   (`custom_description`). The backplane switch
@@ -1286,9 +1305,9 @@ Vault as the caller and reads a secret. A `read_only` caller gets every
 other part of the answer, and `vault.checked = false` with
 `vault.detail = "not checked: needs the operator role"`. MEHO makes no
 Vault login and no secret read for that caller. `meho status` prints
-`Vault: not checked (needs the operator role)`, and `meho doctor`
-(which reads the `meho_status` answer) prints
-`vault not checked (needs the operator role)`.
+no Vault line for a `read_only` login: it reads the liveness route
+instead. Only `meho doctor` (which reads the `meho_status` answer)
+prints `vault not checked (needs the operator role)`.
 
 ### Operator surface (`mcp:admin` elevation required)
 
@@ -1693,14 +1712,37 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
-Two switches take text away while they are off:
+Three switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |
 | --- | --- | --- |
 | `KB_SIMILAR_CHECK` | `add_to_knowledge` | No text about the similar-entry check, no `create_anyway` input, and `dry_run` says nothing about similar entries (`mcp/tools/_kb_similar_text.py`). |
 | `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
+| `POLICY_ENGINE_SHADOW` | `preview_operation` | No `policy_rule` and no `approvers` field in the `outputSchema` (`mcp/tools/_preview_policy_fields.py`). |
+
+With `POLICY_ENGINE_SHADOW` on, a `preview_operation` answer whose op
+resolved has two more fields (#6045):
+
+* `policy_rule`: the rule the policy evaluator matched for this call,
+  `{source, rule_id, text, decided}`. `decided` is `false`: the
+  evaluator runs in shadow mode, and today's checks decide the call.
+  `null` when the evaluator failed.
+* `approvers`: the login groups that may approve the call when
+  `policy_verdict` is `needs-approval` (for example
+  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  stored routing is not valid: the preview still answers.
+
+No new MCP tool: the default working surface stays the same. The person
+who wants every rule in order uses `meho policy explain`
+([policy-evaluator.md](policy-evaluator.md)). **Before turning the switch
+on by default** (measurement plan, tracked in #6518): compare the benchmark lane
+with the switch off and on, for a small model and for Claude, then one
+live run on the sandbox MEHO: preview a call that waits and one that runs,
+and check `policy_rule` and `approvers` against `meho policy explain`.
 
 `tests/test_mcp_surface_conformance.py` checks both states of each switch.
+`preview_operation` follows two switches, so its listing is the registered
+one only when `TEAM_KNOWLEDGE_RECALL` and `POLICY_ENGINE_SHADOW` are both on.
 
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session

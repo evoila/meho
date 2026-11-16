@@ -390,6 +390,33 @@ const (
 	EventSourceStatusPaused EventSourceStatus = "paused"
 )
 
+// Defines values for ExplainAskerVia.
+const (
+	ExplainAskerViaToken ExplainAskerVia = "token"
+	ExplainAskerViaWeb   ExplainAskerVia = "web"
+)
+
+// Defines values for ExplainEvaluatorVerdict.
+const (
+	ExplainEvaluatorVerdictDeny ExplainEvaluatorVerdict = "deny"
+	ExplainEvaluatorVerdictRun  ExplainEvaluatorVerdict = "run"
+	ExplainEvaluatorVerdictWait ExplainEvaluatorVerdict = "wait"
+)
+
+// Defines values for ExplainRuleVerdict.
+const (
+	ExplainRuleVerdictDeny ExplainRuleVerdict = "deny"
+	ExplainRuleVerdictRun  ExplainRuleVerdict = "run"
+	ExplainRuleVerdictWait ExplainRuleVerdict = "wait"
+)
+
+// Defines values for ExplainTodayVerdict.
+const (
+	ExplainTodayVerdictDeny ExplainTodayVerdict = "deny"
+	ExplainTodayVerdictRun  ExplainTodayVerdict = "run"
+	ExplainTodayVerdictWait ExplainTodayVerdict = "wait"
+)
+
 // Defines values for FilterPredicateOp.
 const (
 	FilterPredicateOpEmpty            FilterPredicateOp = "!="
@@ -581,6 +608,44 @@ const (
 	PermissionVerdictAutoExecute   PermissionVerdict = "auto-execute"
 	PermissionVerdictDeny          PermissionVerdict = "deny"
 	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
+)
+
+// Defines values for PolicyExplainBodyPrincipal.
+const (
+	PolicyExplainBodyPrincipalAgent   PolicyExplainBodyPrincipal = "agent"
+	PolicyExplainBodyPrincipalPerson  PolicyExplainBodyPrincipal = "person"
+	PolicyExplainBodyPrincipalService PolicyExplainBodyPrincipal = "service"
+)
+
+// Defines values for PolicyExplainBodyScope.
+const (
+	PolicyExplainBodyScopeInstall PolicyExplainBodyScope = "install"
+	PolicyExplainBodyScopeTenant  PolicyExplainBodyScope = "tenant"
+)
+
+// Defines values for PolicyExplainBodyVia.
+const (
+	PolicyExplainBodyViaToken PolicyExplainBodyVia = "token"
+	PolicyExplainBodyViaWeb   PolicyExplainBodyVia = "web"
+)
+
+// Defines values for PolicyExplainResponseAnswer.
+const (
+	PolicyExplainResponseAnswerDeny PolicyExplainResponseAnswer = "deny"
+	PolicyExplainResponseAnswerRun  PolicyExplainResponseAnswer = "run"
+	PolicyExplainResponseAnswerWait PolicyExplainResponseAnswer = "wait"
+)
+
+// Defines values for PolicyExplainResponseEngine.
+const (
+	PolicyExplainResponseEngineOff    PolicyExplainResponseEngine = "off"
+	PolicyExplainResponseEngineShadow PolicyExplainResponseEngine = "shadow"
+)
+
+// Defines values for PolicyExplainResponseStatus.
+const (
+	PolicyExplainResponseStatusError PolicyExplainResponseStatus = "error"
+	PolicyExplainResponseStatusOk    PolicyExplainResponseStatus = "ok"
 )
 
 // Defines values for PolicyImportResponseScope.
@@ -2249,6 +2314,7 @@ type AuditClassCounts struct {
 type AuditClassCountsRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
+	FullRowLost    *bool               `json:"full_row_lost"`
 	OpClass        *string             `json:"op_class"`
 	OpId           *string             `json:"op_id"`
 	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
@@ -2256,6 +2322,7 @@ type AuditClassCountsRequest struct {
 	ResultStatus   *string             `json:"result_status"`
 	Since          *string             `json:"since"`
 	Target         *string             `json:"target"`
+	TextChanged    *bool               `json:"text_changed"`
 	Until          *string             `json:"until"`
 	WorkRef        *string             `json:"work_ref"`
 }
@@ -2309,6 +2376,8 @@ type AuditEntry struct {
 	Path             string                 `json:"path"`
 	Payload          map[string]interface{} `json:"payload"`
 	PolicyDecision   *string                `json:"policy_decision"`
+	PolicyRule       *string                `json:"policy_rule"`
+	PolicyVersion    *int                   `json:"policy_version"`
 	PrincipalName    *string                `json:"principal_name"`
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
@@ -2401,6 +2470,7 @@ type AuditQueryRequest struct {
 	//   with it on they write a decision or execution class, or no row
 	//   (#3757, :mod:`meho_backplane.audit_cutover`).
 	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	FullRowLost   *bool               `json:"full_row_lost"`
 	HasTrace      *bool               `json:"has_trace"`
 	Limit         *int                `json:"limit,omitempty"`
 	OpClass       *string             `json:"op_class"`
@@ -2410,6 +2480,7 @@ type AuditQueryRequest struct {
 	ResultStatus  *string             `json:"result_status"`
 	Since         *string             `json:"since"`
 	Target        *string             `json:"target"`
+	TextChanged   *bool               `json:"text_changed"`
 	Until         *string             `json:"until"`
 	WorkRef       *string             `json:"work_ref"`
 }
@@ -2528,6 +2599,15 @@ type AuditTraceResult struct {
 	// traces the agent could not.
 	Trace        *TraceView `json:"trace,omitempty"`
 	TracePresent bool       `json:"trace_present"`
+}
+
+// AuditTraceSearchResult 200 body for “GET /api/v1/audit/traces“ (#6452).
+//
+// The stored traces that match the request id, caller and time window,
+// newest first. A trace is listed even when its audit row was never
+// stored.
+type AuditTraceSearchResult struct {
+	Items []TraceView `json:"items"`
 }
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
@@ -4345,7 +4425,7 @@ type CheckSourceKind string
 
 // ClassificationEditBody One edit: the match and the values it sets. Set at least one value.
 type ClassificationEditBody struct {
-	// AlwaysWait true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it.
+	// AlwaysWait true: every call of a matched operation waits for approval. false: back to the operation's own value, never below it. false is refused when the install's policy makes a matched operation always wait.
 	AlwaysWait *bool `json:"always_wait"`
 
 	// Category A category of the taxonomy, for example network or storage.
@@ -6569,6 +6649,107 @@ type EventSourceUpdate struct {
 	Status *EventSourceStatus `json:"status,omitempty"`
 }
 
+// ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
+type ExplainApprovers struct {
+	Groups []string `json:"groups"`
+
+	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	Rule *string `json:"rule"`
+}
+
+// ExplainAsker Who the question is for.
+type ExplainAsker struct {
+	Groups *[]string       `json:"groups,omitempty"`
+	Kind   string          `json:"kind"`
+	Me     bool            `json:"me"`
+	Role   string          `json:"role"`
+	Via    ExplainAskerVia `json:"via"`
+}
+
+// ExplainAskerVia defines model for ExplainAsker.Via.
+type ExplainAskerVia string
+
+// ExplainClassification The values the call is checked with, and the classification entries that matched.
+type ExplainClassification struct {
+	// Category Category, labels and entries are shown only to a tenant admin or a platform admin.
+	Category *string `json:"category"`
+
+	// Entries Every matching entry, least specific first.
+	Entries          *[]ExplainEntry    `json:"entries,omitempty"`
+	Labels           *map[string]string `json:"labels,omitempty"`
+	RequiresApproval bool               `json:"requires_approval"`
+	RiskLevel        string             `json:"risk_level"`
+}
+
+// ExplainEntry One classification entry that matches the operation.
+type ExplainEntry struct {
+	AlwaysWait *bool              `json:"always_wait"`
+	Category   *string            `json:"category"`
+	Labels     *map[string]string `json:"labels,omitempty"`
+	Path       string             `json:"path"`
+	Risk       *string            `json:"risk"`
+}
+
+// ExplainEvaluator The answer of the policy evaluator. It decides nothing yet (shadow mode).
+type ExplainEvaluator struct {
+	// Floor One rule. ``path`` is its place in the policy, when the policy set it.
+	Floor *ExplainRule `json:"floor,omitempty"`
+
+	// Rule One rule. ``path`` is its place in the policy, when the policy set it.
+	Rule ExplainRule `json:"rule"`
+
+	// Rules Every rule the evaluator matched, in order.
+	Rules       []ExplainRule           `json:"rules"`
+	SameAsToday bool                    `json:"same_as_today"`
+	Verdict     ExplainEvaluatorVerdict `json:"verdict"`
+}
+
+// ExplainEvaluatorVerdict defines model for ExplainEvaluator.Verdict.
+type ExplainEvaluatorVerdict string
+
+// ExplainRule One rule. “path“ is its place in the policy, when the policy set it.
+type ExplainRule struct {
+	// Path Place in the policy, for example tenant:classifications[2].
+	Path   *string `json:"path"`
+	RuleId string  `json:"rule_id"`
+
+	// Source floor, role_floor, default, agent_grant, standing_grant, ...
+	Source string `json:"source"`
+	Text   string `json:"text"`
+
+	// Verdict The answer of this step.
+	Verdict *ExplainRuleVerdict `json:"verdict"`
+}
+
+// ExplainRuleVerdict The answer of this step.
+type ExplainRuleVerdict string
+
+// ExplainStoredRequest The rule stored on an approval request.
+type ExplainStoredRequest struct {
+	// Approvers The login groups that may approve another person's call, and the rule that says so.
+	Approvers   ExplainApprovers `json:"approvers"`
+	ConnectorId string           `json:"connector_id"`
+	OpId        string           `json:"op_id"`
+
+	// PolicyRule {source, rule_id, text, decided}; null when none was stored.
+	PolicyRule    *map[string]interface{} `json:"policy_rule"`
+	PolicyVersion *int                    `json:"policy_version"`
+	RequestId     openapi_types.UUID      `json:"request_id"`
+	RiskLevel     *string                 `json:"risk_level"`
+	Status        string                  `json:"status"`
+}
+
+// ExplainToday Today's answer: what the policy gate does with the call now.
+type ExplainToday struct {
+	// PolicyVerdict auto-execute, needs-approval or deny.
+	PolicyVerdict string              `json:"policy_verdict"`
+	Reason        *string             `json:"reason"`
+	Verdict       ExplainTodayVerdict `json:"verdict"`
+}
+
+// ExplainTodayVerdict defines model for ExplainToday.Verdict.
+type ExplainTodayVerdict string
+
 // FeatureStatus One gated feature from “/ready“'s “features“ block (#4830).
 //
 // “configured“ is the feature's state; “missing_env“ lists the
@@ -8698,11 +8879,95 @@ type PairingHealth struct {
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
 
+// PolicyExplainBody The question of “POST /api/v1/policy/explain“.
+//
+// Ask about one call (“connector_id“ and “op_id“) for yourself
+// (“me“) or for a login with “groups“ (“principal“ says which kind),
+// or about a stored approval request (“request_id“) alone.
+type PolicyExplainBody struct {
+	ConnectorId *string `json:"connector_id"`
+
+	// File A policy file (policy: v1) that is not imported; it replaces the stored policy of `scope`.
+	File *string `json:"file"`
+
+	// Groups Login group kinds, e.g. Operators.
+	Groups    *[]string                   `json:"groups,omitempty"`
+	Me        *bool                       `json:"me,omitempty"`
+	OpId      *string                     `json:"op_id"`
+	Principal *PolicyExplainBodyPrincipal `json:"principal,omitempty"`
+	RequestId *openapi_types.UUID         `json:"request_id"`
+	Scope     *PolicyExplainBodyScope     `json:"scope,omitempty"`
+
+	// Target The target's name.
+	Target *string `json:"target"`
+
+	// Via For a person: web interface or token. Default: as you call with `me`, token with `groups`.
+	Via *PolicyExplainBodyVia `json:"via"`
+}
+
+// PolicyExplainBodyPrincipal defines model for PolicyExplainBody.Principal.
+type PolicyExplainBodyPrincipal string
+
+// PolicyExplainBodyScope defines model for PolicyExplainBody.Scope.
+type PolicyExplainBodyScope string
+
+// PolicyExplainBodyVia For a person: web interface or token. Default: as you call with `me`, token with `groups`.
+type PolicyExplainBodyVia string
+
+// PolicyExplainResponse The answer of “POST /api/v1/policy/explain“.
+//
+// “status“ is “error“ when the operation or the target cannot be
+// found; “error“ and “extras“ then say why, as in the preview.
+type PolicyExplainResponse struct {
+	// Answer What MEHO does with the call now: run, wait or deny.
+	Answer *PolicyExplainResponseAnswer `json:"answer"`
+
+	// Approvers The login groups that may approve another person's call, and the rule that says so.
+	Approvers *ExplainApprovers `json:"approvers,omitempty"`
+
+	// Asker Who the question is for.
+	Asker *ExplainAsker `json:"asker,omitempty"`
+
+	// Classification The values the call is checked with, and the classification entries that matched.
+	Classification *ExplainClassification `json:"classification,omitempty"`
+	ConnectorId    *string                `json:"connector_id"`
+	DecidedBy      *string                `json:"decided_by"`
+
+	// Engine off: the evaluator does not run. shadow: it runs, but today's checks decide.
+	Engine PolicyExplainResponseEngine `json:"engine"`
+	Error  *string                     `json:"error"`
+
+	// Evaluator The answer of the policy evaluator. It decides nothing yet (shadow mode).
+	Evaluator *ExplainEvaluator       `json:"evaluator,omitempty"`
+	Extras    *map[string]interface{} `json:"extras"`
+
+	// File True when a policy file that is not imported was asked.
+	File *bool   `json:"file,omitempty"`
+	OpId *string `json:"op_id"`
+
+	// Request The rule stored on an approval request.
+	Request *ExplainStoredRequest       `json:"request,omitempty"`
+	Status  PolicyExplainResponseStatus `json:"status"`
+	Target  *string                     `json:"target"`
+
+	// Today Today's answer: what the policy gate does with the call now.
+	Today *ExplainToday `json:"today,omitempty"`
+}
+
+// PolicyExplainResponseAnswer What MEHO does with the call now: run, wait or deny.
+type PolicyExplainResponseAnswer string
+
+// PolicyExplainResponseEngine off: the evaluator does not run. shadow: it runs, but today's checks decide.
+type PolicyExplainResponseEngine string
+
+// PolicyExplainResponseStatus defines model for PolicyExplainResponse.Status.
+type PolicyExplainResponseStatus string
+
 // PolicyImportResponse The preview and the import answer.
 //
-// “diff“ has the sections “description“, “taxonomy“ and
-// “classifications“, each with “added“, “changed“ (“before“ and
-// “after“) and “removed“. Each classification entry also says how many
+// “diff“ has the sections “description“, “taxonomy“,
+// “classifications“ and “bindings“, each with “added“, “changed“
+// (“before“ and “after“) and “removed“. Each classification entry also says how many
 // operations it “matches“ and how many of those it “changes“.
 // “operations_changed“ counts the operations whose values change. “diff“
 // is “null“ when the file has mistakes. “based_on“ is the SHA-256 of
@@ -8849,6 +9114,9 @@ type PreviewOperationBody_Target struct {
 // target-resolution or rate-limit envelope adds (“duration_ms“,
 // “retry_after_seconds“, ...) on the wire unchanged.
 type PreviewOperationResponse struct {
+	// Approvers Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise.
+	Approvers *[]string `json:"approvers"`
+
 	// ConnectorId The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target.
 	ConnectorId *string `json:"connector_id"`
 
@@ -8872,6 +9140,9 @@ type PreviewOperationResponse struct {
 
 	// PolicyReason The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once).
 	PolicyReason *string `json:"policy_reason"`
+
+	// PolicyRule Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed.
+	PolicyRule *map[string]interface{} `json:"policy_rule"`
 
 	// PolicyVerdict Three-state verdict returned by the permission resolver.
 	//
@@ -9241,6 +9512,8 @@ type ReplayNode struct {
 	Path             string                 `json:"path"`
 	Payload          map[string]interface{} `json:"payload"`
 	PolicyDecision   *string                `json:"policy_decision"`
+	PolicyRule       *string                `json:"policy_rule"`
+	PolicyVersion    *int                   `json:"policy_version"`
 	PrincipalName    *string                `json:"principal_name"`
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
@@ -9307,25 +9580,26 @@ type RerunResponseBody_DispatchResult struct {
 // is ever embedded (the runner spools assignments on disk, so a value
 // would durably persist — a locked no-durable-artifact violation).
 type ResolvedTargetDescriptor struct {
-	Aliases         *[]string               `json:"aliases,omitempty"`
-	AuthModel       *string                 `json:"auth_model,omitempty"`
-	Extras          *map[string]interface{} `json:"extras,omitempty"`
-	Fingerprint     *map[string]interface{} `json:"fingerprint"`
-	Fqdn            *string                 `json:"fqdn"`
-	Host            string                  `json:"host"`
-	Id              openapi_types.UUID      `json:"id"`
-	Name            string                  `json:"name"`
-	Port            *int                    `json:"port"`
-	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         string                  `json:"product"`
-	SecretFieldMap  *map[string]string      `json:"secret_field_map,omitempty"`
-	SecretRef       *string                 `json:"secret_ref"`
-	TenantId        openapi_types.UUID      `json:"tenant_id"`
-	TlsCaPin        *string                 `json:"tls_ca_pin"`
-	TlsServerName   *string                 `json:"tls_server_name"`
-	UpdatedAt       *time.Time              `json:"updated_at"`
-	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
-	Version         *string                 `json:"version"`
+	Aliases             *[]string               `json:"aliases,omitempty"`
+	AuthModel           *string                 `json:"auth_model,omitempty"`
+	ConnectionChangedAt *time.Time              `json:"connection_changed_at"`
+	Extras              *map[string]interface{} `json:"extras,omitempty"`
+	Fingerprint         *map[string]interface{} `json:"fingerprint"`
+	Fqdn                *string                 `json:"fqdn"`
+	Host                string                  `json:"host"`
+	Id                  openapi_types.UUID      `json:"id"`
+	Name                string                  `json:"name"`
+	Port                *int                    `json:"port"`
+	PreferredImplId     *string                 `json:"preferred_impl_id"`
+	Product             string                  `json:"product"`
+	SecretFieldMap      *map[string]string      `json:"secret_field_map,omitempty"`
+	SecretRef           *string                 `json:"secret_ref"`
+	TenantId            openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin            *string                 `json:"tls_ca_pin"`
+	TlsServerName       *string                 `json:"tls_server_name"`
+	UpdatedAt           *time.Time              `json:"updated_at"`
+	VerifyTls           *bool                   `json:"verify_tls,omitempty"`
+	Version             *string                 `json:"version"`
 }
 
 // ResultIngestResponse “POST /checks/results“ response — idempotency accounting.
@@ -12241,13 +12515,15 @@ type TraceSpanView struct {
 // flag rather than acting on it -- an operator sees everything, and sees which
 // traces the agent could not.
 type TraceView struct {
-	AuditId            openapi_types.UUID `json:"audit_id"`
-	CreatedAt          time.Time          `json:"created_at"`
-	ExpiresAt          time.Time          `json:"expires_at"`
-	RedactionUncertain bool               `json:"redaction_uncertain"`
-	Spans              []TraceSpanView    `json:"spans"`
-	TenantId           openapi_types.UUID `json:"tenant_id"`
-	TraceId            openapi_types.UUID `json:"trace_id"`
+	AuditId            openapi_types.UUID  `json:"audit_id"`
+	CreatedAt          time.Time           `json:"created_at"`
+	ExpiresAt          time.Time           `json:"expires_at"`
+	OperatorSub        *string             `json:"operator_sub"`
+	RedactionUncertain bool                `json:"redaction_uncertain"`
+	RequestId          *openapi_types.UUID `json:"request_id"`
+	Spans              []TraceSpanView     `json:"spans"`
+	TenantId           openapi_types.UUID  `json:"tenant_id"`
+	TraceId            openapi_types.UUID  `json:"trace_id"`
 }
 
 // UISessionContext Per-request session identity exposed on “request.state“.
@@ -12889,6 +13165,16 @@ type ShowApiV1AuditShowAuditIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// SearchTracesApiV1AuditTracesGetParams defines parameters for SearchTracesApiV1AuditTracesGet.
+type SearchTracesApiV1AuditTracesGetParams struct {
+	RequestId     *openapi_types.UUID `form:"request_id,omitempty" json:"request_id,omitempty"`
+	Caller        *string             `form:"caller,omitempty" json:"caller,omitempty"`
+	Since         *string             `form:"since,omitempty" json:"since,omitempty"`
+	Until         *string             `form:"until,omitempty" json:"until,omitempty"`
+	Limit         *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // WhoTouchedApiV1AuditWhoTouchedTargetGetParams defines parameters for WhoTouchedApiV1AuditWhoTouchedTargetGet.
 type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -13451,6 +13737,11 @@ type PreviewClassificationApiV1PolicyClassificationPreviewPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ExplainApiV1PolicyExplainPostParams defines parameters for ExplainApiV1PolicyExplainPost.
+type ExplainApiV1PolicyExplainPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ExportApiV1PolicyExportGetParams defines parameters for ExportApiV1PolicyExportGet.
 type ExportApiV1PolicyExportGetParams struct {
 	Scope         *ExportApiV1PolicyExportGetParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
@@ -13791,11 +14082,17 @@ type RevokeRunApprovalApiV1ServicePrincipalsRunApprovalsRunApprovalIdRevokePostP
 
 // ListAgentSessionsApiV1SessionsGetParams defines parameters for ListAgentSessionsApiV1SessionsGet.
 type ListAgentSessionsApiV1SessionsGetParams struct {
-	Project       *string                                       `form:"project,omitempty" json:"project,omitempty"`
-	State         *ListAgentSessionsApiV1SessionsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit         *int                                          `form:"limit,omitempty" json:"limit,omitempty"`
-	Cursor        *string                                       `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Authorization *string                                       `json:"authorization,omitempty"`
+	Project *string                                       `form:"project,omitempty" json:"project,omitempty"`
+	State   *ListAgentSessionsApiV1SessionsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
+	Limit   *int                                          `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor  *string                                       `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Since Only sessions with an upload at or after this time.
+	Since *time.Time `form:"since,omitempty" json:"since,omitempty"`
+
+	// Until Only sessions that started before this time.
+	Until         *time.Time `form:"until,omitempty" json:"until,omitempty"`
+	Authorization *string    `json:"authorization,omitempty"`
 }
 
 // ListAgentSessionsApiV1SessionsGetParamsState defines parameters for ListAgentSessionsApiV1SessionsGet.
@@ -14138,33 +14435,17 @@ type UiAuthLoginUiAuthLoginGetParams struct {
 
 // UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
 type UiBroadcastFeedUiBroadcastGetParams struct {
-	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
 	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
-	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
 
 	// Wall Render the minimal full-screen wall-monitor layout (no sidebar / top bar / filter bar).
 	Wall *bool `form:"wall,omitempty" json:"wall,omitempty"`
 }
 
-// UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams defines parameters for UiBroadcastEventDetailUiBroadcastEventAuditIdGet.
-type UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams struct {
-	// EventId Broadcast (Valkey-stream) event id, for display only.
-	EventId *string `form:"event_id,omitempty" json:"event_id,omitempty"`
-}
-
 // UiBroadcastFeedFragmentUiBroadcastFeedGetParams defines parameters for UiBroadcastFeedFragmentUiBroadcastFeedGet.
 type UiBroadcastFeedFragmentUiBroadcastFeedGetParams struct {
-	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
 	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
-	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
-}
-
-// UiBroadcastHistoryUiBroadcastHistoryGetParams defines parameters for UiBroadcastHistoryUiBroadcastHistoryGet.
-type UiBroadcastHistoryUiBroadcastHistoryGetParams struct {
-	// Kind Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.
-	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
 }
 
 // UiBroadcastOverridesUiBroadcastOverridesGetParams defines parameters for UiBroadcastOverridesUiBroadcastOverridesGet.
@@ -14174,7 +14455,6 @@ type UiBroadcastOverridesUiBroadcastOverridesGetParams struct {
 
 // UiBroadcastStreamUiBroadcastStreamGetParams defines parameters for UiBroadcastStreamUiBroadcastStreamGet.
 type UiBroadcastStreamUiBroadcastStreamGetParams struct {
-	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
 	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
 
@@ -14593,6 +14873,9 @@ type RequestClassificationApiV1PolicyClassificationPostJSONRequestBody = Classif
 
 // PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody defines body for PreviewClassificationApiV1PolicyClassificationPreviewPost for application/json ContentType.
 type PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody = ClassificationEditBody
+
+// ExplainApiV1PolicyExplainPostJSONRequestBody defines body for ExplainApiV1PolicyExplainPost for application/json ContentType.
+type ExplainApiV1PolicyExplainPostJSONRequestBody = PolicyExplainBody
 
 // ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
 type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
@@ -15126,6 +15409,14 @@ func (a *PreviewOperationResponse) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if raw, found := object["approvers"]; found {
+		err = json.Unmarshal(raw, &a.Approvers)
+		if err != nil {
+			return fmt.Errorf("error reading 'approvers': %w", err)
+		}
+		delete(object, "approvers")
+	}
+
 	if raw, found := object["connector_id"]; found {
 		err = json.Unmarshal(raw, &a.ConnectorId)
 		if err != nil {
@@ -15188,6 +15479,14 @@ func (a *PreviewOperationResponse) UnmarshalJSON(b []byte) error {
 			return fmt.Errorf("error reading 'policy_reason': %w", err)
 		}
 		delete(object, "policy_reason")
+	}
+
+	if raw, found := object["policy_rule"]; found {
+		err = json.Unmarshal(raw, &a.PolicyRule)
+		if err != nil {
+			return fmt.Errorf("error reading 'policy_rule': %w", err)
+		}
+		delete(object, "policy_rule")
 	}
 
 	if raw, found := object["policy_verdict"]; found {
@@ -15289,6 +15588,13 @@ func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
 	var err error
 	object := make(map[string]json.RawMessage)
 
+	if a.Approvers != nil {
+		object["approvers"], err = json.Marshal(a.Approvers)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'approvers': %w", err)
+		}
+	}
+
 	if a.ConnectorId != nil {
 		object["connector_id"], err = json.Marshal(a.ConnectorId)
 		if err != nil {
@@ -15342,6 +15648,13 @@ func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
 		object["policy_reason"], err = json.Marshal(a.PolicyReason)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling 'policy_reason': %w", err)
+		}
+	}
+
+	if a.PolicyRule != nil {
+		object["policy_rule"], err = json.Marshal(a.PolicyRule)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'policy_rule': %w", err)
 		}
 	}
 
@@ -17091,6 +17404,9 @@ type ClientInterface interface {
 	// ShowApiV1AuditShowAuditIdGet request
 	ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// SearchTracesApiV1AuditTracesGet request
+	SearchTracesApiV1AuditTracesGet(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// WhoTouchedApiV1AuditWhoTouchedTargetGet request
 	WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17410,6 +17726,11 @@ type ClientInterface interface {
 	PreviewClassificationApiV1PolicyClassificationPreviewPostWithBody(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExplainApiV1PolicyExplainPostWithBody request with any body
+	ExplainApiV1PolicyExplainPostWithBody(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ExplainApiV1PolicyExplainPost(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ExportApiV1PolicyExportGet request
 	ExportApiV1PolicyExportGet(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17988,14 +18309,11 @@ type ClientInterface interface {
 	// UiBroadcastFeedUiBroadcastGet request
 	UiBroadcastFeedUiBroadcastGet(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiBroadcastEventDetailUiBroadcastEventAuditIdGet request
-	UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
 	// UiBroadcastFeedFragmentUiBroadcastFeedGet request
 	UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastHistoryUiBroadcastHistoryGet request
-	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastOverridesUiBroadcastOverridesGet request
 	UiBroadcastOverridesUiBroadcastOverridesGet(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18467,6 +18785,9 @@ type ClientInterface interface {
 
 	// OperationsRunUiOperationsRunDescriptorIdGet request
 	OperationsRunUiOperationsRunDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OperationsRunStateUiOperationsRunsRunIdGet request
+	OperationsRunStateUiOperationsRunsRunIdGet(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// OperationsSearchUiOperationsSearchGet request
 	OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19528,6 +19849,18 @@ func (c *Client) ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context,
 
 func (c *Client) ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewShowApiV1AuditShowAuditIdGetRequest(c.Server, auditId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchTracesApiV1AuditTracesGet(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchTracesApiV1AuditTracesGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -20932,6 +21265,30 @@ func (c *Client) PreviewClassificationApiV1PolicyClassificationPreviewPostWithBo
 
 func (c *Client) PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExplainApiV1PolicyExplainPostWithBody(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExplainApiV1PolicyExplainPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExplainApiV1PolicyExplainPost(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExplainApiV1PolicyExplainPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23510,18 +23867,6 @@ func (c *Client) UiBroadcastFeedUiBroadcastGet(ctx context.Context, params *UiBr
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiBroadcastEventDetailUiBroadcastEventAuditIdGetRequest(c.Server, auditId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
 func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(c.Server, params)
 	if err != nil {
@@ -23534,8 +23879,8 @@ func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server, params)
+func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -25708,6 +26053,18 @@ func (c *Client) OperationsPreviewUiOperationsPreviewPostWithFormdataBody(ctx co
 
 func (c *Client) OperationsRunUiOperationsRunDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewOperationsRunUiOperationsRunDescriptorIdGetRequest(c.Server, descriptorId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsRunStateUiOperationsRunsRunIdGet(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsRunStateUiOperationsRunsRunIdGetRequest(c.Server, runId)
 	if err != nil {
 		return nil, err
 	}
@@ -29885,6 +30242,134 @@ func NewShowApiV1AuditShowAuditIdGetRequest(server string, auditId openapi_types
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSearchTracesApiV1AuditTracesGetRequest generates requests for SearchTracesApiV1AuditTracesGet
+func NewSearchTracesApiV1AuditTracesGetRequest(server string, params *SearchTracesApiV1AuditTracesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/traces")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.RequestId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "request_id", runtime.ParamLocationQuery, *params.RequestId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Caller != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "caller", runtime.ParamLocationQuery, *params.Caller); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -35642,6 +36127,61 @@ func NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody
 	return req, nil
 }
 
+// NewExplainApiV1PolicyExplainPostRequest calls the generic ExplainApiV1PolicyExplainPost builder with application/json body
+func NewExplainApiV1PolicyExplainPostRequest(server string, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewExplainApiV1PolicyExplainPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewExplainApiV1PolicyExplainPostRequestWithBody generates requests for ExplainApiV1PolicyExplainPost with any type of body
+func NewExplainApiV1PolicyExplainPostRequestWithBody(server string, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/explain")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewExportApiV1PolicyExportGetRequest generates requests for ExportApiV1PolicyExportGet
 func NewExportApiV1PolicyExportGetRequest(server string, params *ExportApiV1PolicyExportGetParams) (*http.Request, error) {
 	var err error
@@ -39207,6 +39747,38 @@ func NewListAgentSessionsApiV1SessionsGetRequest(server string, params *ListAgen
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -44916,22 +45488,6 @@ func NewUiBroadcastFeedUiBroadcastGetRequest(server string, params *UiBroadcastF
 	if params != nil {
 		queryValues := queryURL.Query()
 
-		if params.OpClass != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		if params.Principal != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
@@ -44964,81 +45520,9 @@ func NewUiBroadcastFeedUiBroadcastGetRequest(server string, params *UiBroadcastF
 
 		}
 
-		if params.OpId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		if params.Wall != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wall", runtime.ParamLocationQuery, *params.Wall); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewUiBroadcastEventDetailUiBroadcastEventAuditIdGetRequest generates requests for UiBroadcastEventDetailUiBroadcastEventAuditIdGet
-func NewUiBroadcastEventDetailUiBroadcastEventAuditIdGetRequest(server string, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "audit_id", runtime.ParamLocationPath, auditId)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/ui/broadcast/event/%s", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.EventId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_id", runtime.ParamLocationQuery, *params.EventId); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -45085,22 +45569,6 @@ func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *
 	if params != nil {
 		queryValues := queryURL.Query()
 
-		if params.OpClass != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		if params.Principal != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
@@ -45133,22 +45601,6 @@ func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *
 
 		}
 
-		if params.OpId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -45161,7 +45613,7 @@ func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *
 }
 
 // NewUiBroadcastHistoryUiBroadcastHistoryGetRequest generates requests for UiBroadcastHistoryUiBroadcastHistoryGet
-func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string, params *UiBroadcastHistoryUiBroadcastHistoryGetParams) (*http.Request, error) {
+func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -45177,28 +45629,6 @@ func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string, params *Ui
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Kind != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -45353,22 +45783,6 @@ func NewUiBroadcastStreamUiBroadcastStreamGetRequest(server string, params *UiBr
 
 	if params != nil {
 		queryValues := queryURL.Query()
-
-		if params.OpClass != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
 
 		if params.Principal != nil {
 
@@ -50292,6 +50706,40 @@ func NewOperationsRunUiOperationsRunDescriptorIdGetRequest(server string, descri
 	return req, nil
 }
 
+// NewOperationsRunStateUiOperationsRunsRunIdGetRequest generates requests for OperationsRunStateUiOperationsRunsRunIdGet
+func NewOperationsRunStateUiOperationsRunsRunIdGetRequest(server string, runId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/operations/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewOperationsSearchUiOperationsSearchGetRequest generates requests for OperationsSearchUiOperationsSearchGet
 func NewOperationsSearchUiOperationsSearchGetRequest(server string, params *OperationsSearchUiOperationsSearchGetParams) (*http.Request, error) {
 	var err error
@@ -53687,6 +54135,9 @@ type ClientWithResponsesInterface interface {
 	// ShowApiV1AuditShowAuditIdGetWithResponse request
 	ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error)
 
+	// SearchTracesApiV1AuditTracesGetWithResponse request
+	SearchTracesApiV1AuditTracesGetWithResponse(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*SearchTracesApiV1AuditTracesGetResponse, error)
+
 	// WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request
 	WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error)
 
@@ -54006,6 +54457,11 @@ type ClientWithResponsesInterface interface {
 	PreviewClassificationApiV1PolicyClassificationPreviewPostWithBodyWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error)
 
 	PreviewClassificationApiV1PolicyClassificationPreviewPostWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error)
+
+	// ExplainApiV1PolicyExplainPostWithBodyWithResponse request with any body
+	ExplainApiV1PolicyExplainPostWithBodyWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error)
+
+	ExplainApiV1PolicyExplainPostWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error)
 
 	// ExportApiV1PolicyExportGetWithResponse request
 	ExportApiV1PolicyExportGetWithResponse(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1PolicyExportGetResponse, error)
@@ -54584,14 +55040,11 @@ type ClientWithResponsesInterface interface {
 	// UiBroadcastFeedUiBroadcastGetWithResponse request
 	UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error)
 
-	// UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse request
-	UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse, error)
-
 	// UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse request
 	UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error)
 
 	// UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request
-	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
+	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
 
 	// UiBroadcastOverridesUiBroadcastOverridesGetWithResponse request
 	UiBroadcastOverridesUiBroadcastOverridesGetWithResponse(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesUiBroadcastOverridesGetResponse, error)
@@ -55063,6 +55516,9 @@ type ClientWithResponsesInterface interface {
 
 	// OperationsRunUiOperationsRunDescriptorIdGetWithResponse request
 	OperationsRunUiOperationsRunDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, reqEditors ...RequestEditorFn) (*OperationsRunUiOperationsRunDescriptorIdGetResponse, error)
+
+	// OperationsRunStateUiOperationsRunsRunIdGetWithResponse request
+	OperationsRunStateUiOperationsRunsRunIdGetWithResponse(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*OperationsRunStateUiOperationsRunsRunIdGetResponse, error)
 
 	// OperationsSearchUiOperationsSearchGetWithResponse request
 	OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error)
@@ -56445,6 +56901,29 @@ func (r ShowApiV1AuditShowAuditIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ShowApiV1AuditShowAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SearchTracesApiV1AuditTracesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditTraceSearchResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchTracesApiV1AuditTracesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchTracesApiV1AuditTracesGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -58416,6 +58895,29 @@ func (r PreviewClassificationApiV1PolicyClassificationPreviewPostResponse) Statu
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PreviewClassificationApiV1PolicyClassificationPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ExplainApiV1PolicyExplainPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PolicyExplainResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExplainApiV1PolicyExplainPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExplainApiV1PolicyExplainPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -61877,28 +62379,6 @@ func (r UiBroadcastFeedUiBroadcastGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON422      *HTTPValidationError
-}
-
-// Status returns HTTPResponse.Status
-func (r UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
 type UiBroadcastFeedFragmentUiBroadcastFeedGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -61924,7 +62404,6 @@ func (r UiBroadcastFeedFragmentUiBroadcastFeedGetResponse) StatusCode() int {
 type UiBroadcastHistoryUiBroadcastHistoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -64336,6 +64815,28 @@ func (r OperationsRunUiOperationsRunDescriptorIdGetResponse) StatusCode() int {
 	return 0
 }
 
+type OperationsRunStateUiOperationsRunsRunIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationsRunStateUiOperationsRunsRunIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationsRunStateUiOperationsRunsRunIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type OperationsSearchUiOperationsSearchGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -66312,6 +66813,15 @@ func (c *ClientWithResponses) ShowApiV1AuditShowAuditIdGetWithResponse(ctx conte
 	return ParseShowApiV1AuditShowAuditIdGetResponse(rsp)
 }
 
+// SearchTracesApiV1AuditTracesGetWithResponse request returning *SearchTracesApiV1AuditTracesGetResponse
+func (c *ClientWithResponses) SearchTracesApiV1AuditTracesGetWithResponse(ctx context.Context, params *SearchTracesApiV1AuditTracesGetParams, reqEditors ...RequestEditorFn) (*SearchTracesApiV1AuditTracesGetResponse, error) {
+	rsp, err := c.SearchTracesApiV1AuditTracesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchTracesApiV1AuditTracesGetResponse(rsp)
+}
+
 // WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request returning *WhoTouchedApiV1AuditWhoTouchedTargetGetResponse
 func (c *ClientWithResponses) WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error) {
 	rsp, err := c.WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx, target, params, reqEditors...)
@@ -67332,6 +67842,23 @@ func (c *ClientWithResponses) PreviewClassificationApiV1PolicyClassificationPrev
 		return nil, err
 	}
 	return ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp)
+}
+
+// ExplainApiV1PolicyExplainPostWithBodyWithResponse request with arbitrary body returning *ExplainApiV1PolicyExplainPostResponse
+func (c *ClientWithResponses) ExplainApiV1PolicyExplainPostWithBodyWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error) {
+	rsp, err := c.ExplainApiV1PolicyExplainPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExplainApiV1PolicyExplainPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ExplainApiV1PolicyExplainPostWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error) {
+	rsp, err := c.ExplainApiV1PolicyExplainPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExplainApiV1PolicyExplainPostResponse(rsp)
 }
 
 // ExportApiV1PolicyExportGetWithResponse request returning *ExportApiV1PolicyExportGetResponse
@@ -69195,15 +69722,6 @@ func (c *ClientWithResponses) UiBroadcastFeedUiBroadcastGetWithResponse(ctx cont
 	return ParseUiBroadcastFeedUiBroadcastGetResponse(rsp)
 }
 
-// UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse request returning *UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse
-func (c *ClientWithResponses) UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse, error) {
-	rsp, err := c.UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx, auditId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseUiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse(rsp)
-}
-
 // UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse request returning *UiBroadcastFeedFragmentUiBroadcastFeedGetResponse
 func (c *ClientWithResponses) UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error) {
 	rsp, err := c.UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx, params, reqEditors...)
@@ -69214,8 +69732,8 @@ func (c *ClientWithResponses) UiBroadcastFeedFragmentUiBroadcastFeedGetWithRespo
 }
 
 // UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request returning *UiBroadcastHistoryUiBroadcastHistoryGetResponse
-func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
-	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, params, reqEditors...)
+func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
+	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -70777,6 +71295,15 @@ func (c *ClientWithResponses) OperationsRunUiOperationsRunDescriptorIdGetWithRes
 		return nil, err
 	}
 	return ParseOperationsRunUiOperationsRunDescriptorIdGetResponse(rsp)
+}
+
+// OperationsRunStateUiOperationsRunsRunIdGetWithResponse request returning *OperationsRunStateUiOperationsRunsRunIdGetResponse
+func (c *ClientWithResponses) OperationsRunStateUiOperationsRunsRunIdGetWithResponse(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*OperationsRunStateUiOperationsRunsRunIdGetResponse, error) {
+	rsp, err := c.OperationsRunStateUiOperationsRunsRunIdGet(ctx, runId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsRunStateUiOperationsRunsRunIdGetResponse(rsp)
 }
 
 // OperationsSearchUiOperationsSearchGetWithResponse request returning *OperationsSearchUiOperationsSearchGetResponse
@@ -73152,6 +73679,39 @@ func ParseShowApiV1AuditShowAuditIdGetResponse(rsp *http.Response) (*ShowApiV1Au
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSearchTracesApiV1AuditTracesGetResponse parses an HTTP response from a SearchTracesApiV1AuditTracesGetWithResponse call
+func ParseSearchTracesApiV1AuditTracesGetResponse(rsp *http.Response) (*SearchTracesApiV1AuditTracesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchTracesApiV1AuditTracesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditTraceSearchResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -75917,6 +76477,39 @@ func ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ClassificationPreviewResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExplainApiV1PolicyExplainPostResponse parses an HTTP response from a ExplainApiV1PolicyExplainPostWithResponse call
+func ParseExplainApiV1PolicyExplainPostResponse(rsp *http.Response) (*ExplainApiV1PolicyExplainPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExplainApiV1PolicyExplainPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PolicyExplainResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -80420,32 +81013,6 @@ func ParseUiBroadcastFeedUiBroadcastGetResponse(rsp *http.Response) (*UiBroadcas
 	return response, nil
 }
 
-// ParseUiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse parses an HTTP response from a UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse call
-func ParseUiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse(rsp *http.Response) (*UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON422 = &dest
-
-	}
-
-	return response, nil
-}
-
 // ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse parses an HTTP response from a UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse call
 func ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse(rsp *http.Response) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -80483,16 +81050,6 @@ func ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp *http.Response) (*
 	response := &UiBroadcastHistoryUiBroadcastHistoryGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON422 = &dest
-
 	}
 
 	return response, nil
@@ -83256,6 +83813,32 @@ func ParseOperationsRunUiOperationsRunDescriptorIdGetResponse(rsp *http.Response
 	}
 
 	response := &OperationsRunUiOperationsRunDescriptorIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationsRunStateUiOperationsRunsRunIdGetResponse parses an HTTP response from a OperationsRunStateUiOperationsRunsRunIdGetWithResponse call
+func ParseOperationsRunStateUiOperationsRunsRunIdGetResponse(rsp *http.Response) (*OperationsRunStateUiOperationsRunsRunIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationsRunStateUiOperationsRunsRunIdGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

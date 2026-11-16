@@ -254,15 +254,15 @@ analyzed commit SHA — see `quality-gate.yml`'s `SonarCloud Scan` step), which 
 > setting is applied.
 
 **Scan trigger = the nightly run only.** `quality-gate.yml`'s job carries
-`if: … && github.event.workflow_run.event == 'schedule'`. CI runs on `push`,
+`if: … && github.event.workflow_run.event == 'schedule'`. CI runs on
 `pull_request`, `merge_group` and once a night on `schedule` (`cron: '17 2 * * *'`
 in `ci.yml`, #4910). SonarCloud stores a single analysis per project keyed by
 branch — so before the event filter, every PR-branch CI completion triggered a
 scan that **overwrote** the main-branch analysis, churning the activity history
 and misaligning the new-code window with real merges. Since #4910 only the
-nightly run produces the `python-coverage` artifact, so a scan of a push run
-would import 0% backend coverage. With the filter, only the nightly run is
-analyzed; push, PR and merge-queue completions are skipped (the job shows as
+nightly run produces the `python-coverage` artifact, so a scan of any other
+run would import 0% backend coverage. With the filter, only the nightly run is
+analyzed; PR and merge-queue completions are skipped (the job shows as
 skipped in the Actions run). PR-level decoration is therefore not produced — an
 accepted trade-off while the gate is advisory.
 

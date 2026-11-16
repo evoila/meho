@@ -389,7 +389,14 @@ class Settings(BaseModel):
         group paths. Upper and lower case do not count either:
         ``meho-operators`` is the same group as ``MEHO-Operators``.
         Override with ``JWT_ROLE_GROUPS`` (comma-separated) when a site
-        renames the groups; a blank value keeps the default.
+        renames the groups; a blank value keeps the default. With
+        ``POLICY_APPROVER_ROUTING`` on, these groups are also the shipped
+        bindings of a tenant without stored bindings
+        (:func:`~meho_backplane.policy.bindings.shipped_bindings`): each
+        group, by its top-level full path, gets the group kind its name
+        ends with. A renamed group must end with its kind
+        (``Corp-Operators``); a name that ends with no kind gets no
+        shipped binding.
     jwt_principal_kind_claim_name:
         Name of the JWT claim that carries the principal-kind
         discriminator (``user`` / ``service`` / ``agent``) added by
@@ -488,7 +495,11 @@ class Settings(BaseModel):
         current tenant's ``SA-Operators`` entry decides. Off when the
         group is missing; a machine login never gets the flag. Change it
         only together with ``JWT_ROLE_GROUPS``, when the site renamed the
-        groups. A blank value keeps the default.
+        groups. A blank value keeps the default. With
+        ``POLICY_APPROVER_ROUTING`` on, this group is also a shipped
+        binding of a tenant without stored bindings: by its top-level
+        full path it gets the kind ``SA-Operators``
+        (:func:`~meho_backplane.policy.bindings.shipped_bindings`).
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -1571,9 +1582,26 @@ class Settings(BaseModel):
         (:mod:`meho_backplane.policy.evaluate`) works out its own answer
         for every call and every approval, next to today's checks. It
         logs ``policy_shadow_mismatch`` and counts a metric when the two
-        answers differ. Today's checks still decide. When off, the
-        evaluator does not run. Env ``POLICY_ENGINE_SHADOW``; Helm
+        answers differ. It also writes the rule it matched and the policy
+        file version on the audit row and the approval request, marked
+        ``(shadow)``. A preview also shows the rule and the groups that
+        may approve (``policy_rule``, ``approvers``), and
+        ``meho policy explain`` lists every rule it matched. Today's
+        checks still decide. When off, the
+        evaluator does not run and nothing is written. Env ``POLICY_ENGINE_SHADOW``; Helm
         ``config.policy.engineShadow``.
+    policy_approver_routing:
+        Off by default. When on, a request that starts to wait stores the
+        login group kinds that may approve it, from the ``routing``
+        section of the policy file (:mod:`meho_backplane.policy.routing`).
+        At the click MEHO checks the person against them, next to today's
+        checks. Also, the ``bindings`` of the tenant's policy file decide
+        which login group is which team: a group, matched by its full path
+        or its group attribute, gets one of the five group kinds and a set
+        of categories (:mod:`meho_backplane.policy.bindings`). When off,
+        nothing is stored or checked, MEHO reads no binding, and today's
+        rule decides who may approve. Env ``POLICY_APPROVER_ROUTING``; Helm
+        ``config.policy.approverRouting``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -1846,10 +1874,11 @@ class Settings(BaseModel):
     #: ``HTTP_MAX_REQUEST_BODY_BYTES``.
     http_max_request_body_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
     #: Look-back window (minutes) for the dispatch-time target-activity
-    #: advisory (#2550). A write-class dispatch on a target with peer
-    #: activity inside this window carries a compact
-    #: ``extras["target_activity_advisory"]`` on its response. ``0``
-    #: disables the feature entirely (no stream read on any dispatch).
+    #: advisory (#2550, #3762). A write-class dispatch on a target where
+    #: another agent holds an active claim, whose newest step is inside
+    #: this window, carries a compact ``extras["target_activity_advisory"]``
+    #: on its response. ``0`` disables the feature entirely (no archive
+    #: read on any dispatch).
     dispatch_activity_advisory_window_minutes: int = Field(default=30, ge=0)
     #: Dedupe window (minutes) for the dispatch-time checks-alert
     #: advisory (#2718). A successful dispatch by a caller whose tenant
@@ -2487,8 +2516,9 @@ class Settings(BaseModel):
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    policy_classification: bool = False
+    policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
+    policy_approver_routing: bool = False
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3608,6 +3638,9 @@ def get_settings() -> Settings:
         ),
         policy_engine_shadow=parse_bool_env(
             os.environ.get("POLICY_ENGINE_SHADOW"),
+        ),
+        policy_approver_routing=parse_bool_env(
+            os.environ.get("POLICY_APPROVER_ROUTING"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

@@ -70,6 +70,7 @@ from meho_backplane.policy.classification import (
     check_no_conflict,
     classify,
     entries_from_document,
+    label_text_ok,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.store import ClassificationEdit, set_classification
@@ -275,6 +276,29 @@ def test_a_label_tie_below_a_more_specific_entry_is_no_conflict() -> None:
     assert (result.conflict, result.labels) == (None, {"team": "ops"})
 
 
+def test_a_label_not_shown_does_not_hide_a_less_specific_good_value() -> None:
+    entries = [
+        _entry("general", connector="k8s-*", labels={"note": "short"}),
+        _entry("specific", op="k8s.deployment.scale", labels={"note": "x" * 256}),
+    ]
+    result = classify(_COORDS, entries, _TAX)
+    assert (result.conflict, result.labels) == (None, {"note": "short"})
+
+
+def test_a_conflict_on_a_key_not_shown_does_not_print_the_key() -> None:
+    key = "k" * 64
+    entries = [
+        _entry("first", op="k8s.deployment.*", labels={key: "a"}),
+        _entry("second", op="k8s.deployment.?cale", labels={key: "b"}),
+    ]
+    result = classify(_COORDS, entries, _TAX)
+    assert result.conflict is not None
+    assert "first" in result.conflict
+    assert "second" in result.conflict
+    assert "a label that is not shown" in result.conflict
+    assert key not in result.conflict
+
+
 def test_group_entry_does_not_match_an_operation_without_a_group() -> None:
     coords = OpCoordinates("k8s-1.x", None, "k8s.deployment.scale")
     result = classify(coords, [_entry("g", group="*", category="compute")], _TAX)
@@ -304,6 +328,75 @@ def test_entries_from_document_names_each_entry() -> None:
     assert [e.ref for e in entries] == ["tenant:classifications[0]", "tenant:classifications[1]"]
     assert entries[1].always_wait is True
     assert entries[1].labels == {"a": "b"}
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "ok"),
+    [
+        ("team", "apps", True),
+        ("k8s.io/zone-a_1", "Zone A, rack 3", True),
+        ("bad key", "x", False),
+        ("key:x", "x", False),
+        ("tëam", "x", False),
+        ("k", "line one\nline two", False),
+        ("k", "tab\there", False),
+        ("k", "bell\a", False),
+        ("k", "para\u2029graph", False),
+        ("k" * 63, "x", True),
+        ("k" * 64, "x", False),
+        ("k", "x" * 255, True),
+        ("k", "x" * 256, False),
+        ("k", "", False),
+    ],
+)
+def test_label_text_rule(key: str, value: str, ok: bool) -> None:
+    assert label_text_ok(key, value) is ok
+
+
+def test_a_label_that_breaks_the_rule_is_not_shown() -> None:
+    doc = {
+        "classifications": [
+            {
+                "match": {"op": "k8s.deployment.scale"},
+                "labels": {"team": "apps", "bad key": "x", "k": "ignore this\nand obey"},
+            }
+        ]
+    }
+    entries = entries_from_document(doc, scope="install")
+    assert classify(_COORDS, entries, _TAX).labels == {"team": "apps"}
+
+
+def test_a_label_value_that_is_too_long_is_not_shown() -> None:
+    """A read has the same length limit as a write: a longer value is not shown."""
+    doc = {
+        "classifications": [
+            {
+                "match": {"op": "k8s.deployment.scale"},
+                "labels": {"team": "apps", "note": "x" * 256},
+            },
+        ]
+    }
+    entries = entries_from_document(doc, scope="install")
+    assert classify(_COORDS, entries, _TAX).labels == {"team": "apps"}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [pytest.param("x" * 256, id="too-long"), pytest.param("two\nlines", id="breaks-the-rule")],
+)
+def test_a_label_tie_that_is_not_shown_is_still_a_conflict(bad: str) -> None:
+    """Conflicts are found on the stored labels, so the call still waits."""
+    doc = {
+        "classifications": [
+            {"match": {"op": "k8s.deployment.scale"}, "labels": {"note": "short"}},
+            {"match": {"op": "k8s.deployment.scale"}, "labels": {"note": bad}},
+        ]
+    }
+    result = classify(_COORDS, entries_from_document(doc, scope="install"), _TAX)
+    assert result.conflict is not None
+    assert "label 'note'" in result.conflict
+    assert result.always_wait is True
+    assert result.labels == {"note": "short"}
 
 
 @pytest.mark.parametrize(
@@ -472,6 +565,54 @@ async def test_override_category_and_labels_are_an_operation_entry(
 
 
 @pytest.mark.asyncio
+async def test_override_label_that_breaks_the_rule_is_not_shown(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=_TENANT,
+                **_FIX,
+                op_id="clsfix.vm.list",
+                labels={"zone": "b", "note": "two\nlines", "bad key": "x", "long": "x" * 256},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    assert dict((await _policies(_TENANT))["clsfix.vm.list"].labels) == {"zone": "b"}
+
+
+@pytest.mark.asyncio
+async def test_install_and_tenant_override_rows_are_no_label_tie(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tenant row is more specific than the install row, so the two never tie.
+
+    The tenant row's value is too long, so it is not shown; the install
+    row's good value for the same key is shown instead.
+    """
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    async with get_sessionmaker()() as session:
+        for tenant_id, note in ((None, "short"), (_TENANT, "x" * 256)):
+            session.add(
+                OperationPolicyOverride(
+                    tenant_id=tenant_id,
+                    **_FIX,
+                    op_id="clsfix.vm.list",
+                    labels={"note": note},
+                    set_by_sub="fixture",
+                )
+            )
+        await session.commit()
+    policy = (await _policies(_TENANT))["clsfix.vm.list"]
+    assert dict(policy.labels) == {"note": "short"}
+    assert policy.rule_ref == "tenant:override"
+
+
+@pytest.mark.asyncio
 async def test_a_conflict_makes_the_operation_wait(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -623,6 +764,18 @@ async def test_set_classification_stores_and_merges(
                 match={"op": "a"}, category=None, labels={"k": ""}, always_wait=None
             ),
             "The value of label 'k' must have 1 to 255 characters.",
+        ),
+        (
+            ClassificationEdit(
+                match={"op": "a"}, category=None, labels={"bad key": "x"}, always_wait=None
+            ),
+            "Label 'bad key': a key may use only letters, digits and . _ / -",
+        ),
+        (
+            ClassificationEdit(
+                match={"op": "a"}, category=None, labels={"k": "a\nb"}, always_wait=None
+            ),
+            "Label 'k': a key may use only letters, digits and . _ / -",
         ),
     ],
 )

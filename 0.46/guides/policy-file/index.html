@@ -2459,6 +2459,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#start-from-the-small-team-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Start from the "small team" file
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-small-example" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3150,6 +3161,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#start-from-the-small-team-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Start from the "small team" file
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-small-example" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3285,6 +3307,46 @@ import with one sentence.</p>
 </div>
 <p>The policy file is not part of the <a href="../settings-file/">settings file</a>. It
 has its own command, <code>meho policy</code>.</p>
+<h2 id="start-from-the-small-team-file">Start from the "small team" file<a class="headerlink" href="#start-from-the-small-team-file" title="Permanent link">&para;</a></h2>
+<p>MEHO ships a default policy file, "small team":
+<a href="https://github.com/evoila/meho/blob/main/deploy/policy-profiles/small-team.yaml"><code>deploy/policy-profiles/small-team.yaml</code></a>.
+It describes what MEHO does when no policy file is imported:</p>
+<ul>
+<li>it lists the six built-in categories (<code>network</code>, <code>storage</code>, <code>compute</code>,
+  <code>identity</code>, <code>secrets</code>, <code>other</code>),</li>
+<li>every operation has the category <code>other</code>,</li>
+<li>it has no entries, so every operation keeps the risk level and the
+  approval rule it has in MEHO's code.</li>
+</ul>
+<p>Until you import a file for the whole install, MEHO uses this file. So
+importing it changes nothing:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>policy<span class="w"> </span>validate<span class="w"> </span>--scope<span class="w"> </span>install<span class="w"> </span>small-team.yaml<span class="w"> </span><span class="c1"># no mistakes</span>
+meho<span class="w"> </span>policy<span class="w"> </span>diff<span class="w"> </span>--scope<span class="w"> </span>install<span class="w"> </span>small-team.yaml<span class="w">     </span><span class="c1"># answers "No change."</span>
+</code></pre></div>
+<p>Check this file with <code>--scope install</code>. Without it, <code>validate</code> checks the
+file as a tenant's file and reports <code>taxonomy.default</code> as a mistake.</p>
+<p>On a fresh install, the diff of an install file with no <code>taxonomy</code> block
+shows the six built-in categories as removed, but they still apply. An
+install file with no entries and no <code>taxonomy</code> block is not the same as the
+"small team" file, so its import waits for a second admin to approve it.</p>
+<p>On a fresh install, <code>meho policy export --scope install</code> writes the same
+policy, without the comments. To start your own policy:</p>
+<ol>
+<li>Export the install's policy, or copy <code>small-team.yaml</code>.</li>
+<li>Add your entries under <code>classifications</code>, and your own categories under
+   <code>taxonomy.categories</code>.</li>
+<li>Run <code>meho policy validate --scope install</code> to check it, and
+   <code>meho policy diff --scope install</code> to see what changes.</li>
+<li>Import it. A second admin approves the import.</li>
+</ol>
+<p>An import replaces the whole stored policy of its scope. When your install
+already has a policy, importing <code>small-team.yaml</code> removes every entry of
+that policy, also an entry that made an operation stricter. So export the
+install's policy first and add your entries to that file. A second admin
+must approve every import that changes something, and the changes made to
+single operations (<code>meho connector edit-op</code>) stay.</p>
+<p>The "small team" file is for the whole install (<code>--scope install</code>). A
+tenant's own file cannot set <code>taxonomy.default</code>.</p>
 <h2 id="a-small-example">A small example<a class="headerlink" href="#a-small-example" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="nt">policy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v1</span>
 <span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Rules</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">network</span><span class="nv"> </span><span class="s">team"</span>

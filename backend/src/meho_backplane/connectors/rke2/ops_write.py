@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.rke2._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.rke2.ops import SSH_TRANSPORT_NOTE, Rke2Op
 
@@ -122,6 +123,14 @@ class Rke2WriteError(ValueError):
     Subclass of :class:`ValueError` so the dispatcher's
     ``result_connector_error`` envelope picks it up uniformly. The message
     names the failed gate without echoing any secret material.
+    """
+
+
+class Rke2WriteOwnMessageError(ConnectorOwnMessage, Rke2WriteError):
+    """An :class:`Rke2WriteError` whose message is a fixed sentence of MEHO.
+
+    The message holds no host output and no secret, so an operation that sends
+    a secret still shows it (:class:`ConnectorOwnMessage`).
     """
 
 
@@ -292,14 +301,14 @@ async def _resolve_sudo_password(
 
     Keys on a dedicated ``sudo_password`` field first, falling back to the
     SSH ``password`` (the consumer-wrapper convention). Raises
-    :class:`Rke2WriteError` when neither is set -- the safe-sudo primitive
+    :class:`Rke2WriteOwnMessageError` when neither is set -- the safe-sudo primitive
     requires a non-empty single-line credential and the rotate cannot
     legitimately proceed without root.
     """
     secret = await connector._resolve_secret(target, operator)
     password = secret.get("sudo_password") or secret.get("password")
     if not password:
-        raise Rke2WriteError(
+        raise Rke2WriteOwnMessageError(
             "the target's Vault secret carries no sudo_password / password; "
             "rke2.token.rotate needs a sudo credential to run as root"
         )
@@ -492,10 +501,9 @@ async def rke2_token_rotate(
             "gate": "operator",
         }
 
-    try:
-        sudo_password = await _resolve_sudo_password(connector, target, operator)
-    except Rke2WriteError as exc:
-        return {"rotated": False, "error": str(exc), "gate": "credentials"}
+    # No sudo credential raises :class:`Rke2WriteOwnMessageError`. It is not
+    # caught here: the dispatcher records an error and shows its fixed sentence.
+    sudo_password = await _resolve_sudo_password(connector, target, operator)
 
     gate_error = await _fingerprint_gate(connector, target, operator)
     if gate_error is not None:
@@ -984,9 +992,12 @@ _RKE2_TOKEN_ROTATE_OP = Rke2Op(
             "{rotated, node, exit_status, token_ref: {backend, mount, "
             "path, key, kv_version}}. token_ref points at the Vault KV-v2 "
             "location the new token was stashed at -- the token VALUE is "
-            "never returned. On a gate refusal or failure: {rotated: "
-            "false, error, gate}. If the rotate succeeded but the Vault "
-            "stash failed: {rotated: true, token_ref: null, vault_error}. "
+            "never returned. On a gate refusal (operator, role, service, "
+            "version, rotate): {rotated: false, error, gate}. A target secret "
+            "with no sudo password is not returned as that dict: the call "
+            "fails with an error that says the sudo credential is missing. "
+            "If the rotate succeeded but the Vault stash failed: "
+            "{rotated: true, token_ref: null, vault_error}. "
             "If it succeeded but the rotated token could not be read back: "
             "{rotated: true, token_ref: null, readback_error}."
         ),

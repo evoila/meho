@@ -139,6 +139,9 @@ class _OpContext:
     tags: tuple[str, ...]
     body_paths: tuple[str, ...]
     delete_shaped_patterns: tuple[str, ...] | None
+    # The class stored on the row of an ingested op (a connector's safety
+    # floor sets it). A stored ``credential_read`` records no body.
+    stored_op_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -450,6 +453,7 @@ def _redact_vendor_call(
         connector_id=op.connector_id if op else None,
         method=method,
         tags=op.tags if op else (),
+        stored_op_class=op.stored_op_class if op else None,
         request_headers=as_mapping(request_headers),
         response_headers=as_mapping(getattr(response, "headers", None)),
         request_body=req_body,
@@ -587,4 +591,5 @@ def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
         # every body until a connector declares its paths.
         body_paths=(),
         delete_shaped_patterns=delete_shaped,
+        stored_op_class=getattr(descriptor, "op_class", None),
     )

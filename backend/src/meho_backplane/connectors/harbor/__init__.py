@@ -52,6 +52,7 @@ from typing import Final
 
 from meho_backplane.connectors.harbor import (
     op_classes,  # noqa: F401 -- declares the op classes
+    ops_robot_create_preview,  # noqa: F401 -- registers the approval card preview of robot.create at import
     ops_robot_delete_preview,  # noqa: F401 -- registers the destructive-tier blast-radius preview builder at import
     ops_robot_vault,  # noqa: F401 -- registers the vault_target params check and permission preflight at import
 )
@@ -60,6 +61,9 @@ from meho_backplane.connectors.harbor.ops import (
     register_harbor_artifact_operations,
     register_harbor_project_quota_operations,
     register_harbor_robot_operations,
+)
+from meho_backplane.connectors.harbor.ops_project_create import (
+    register_harbor_project_create_operation,
 )
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
@@ -129,6 +133,10 @@ register_typed_op_registrar(register_harbor_artifact_operations)
 # deferred read-core ingest state.
 register_typed_op_registrar(register_harbor_project_quota_operations)
 
+# Queue the project create write (harbor.project.create): a typed write that
+# waits for approval and is safe to run twice.
+register_typed_op_registrar(register_harbor_project_create_operation)
+
 __all__ = [
     "HARBOR_CONNECTOR_ID",
     "HARBOR_IMPL_ID",
@@ -143,6 +151,7 @@ __all__ = [
     "SessionCredentials",
     "load_credentials_from_vault",
     "register_harbor_artifact_operations",
+    "register_harbor_project_create_operation",
     "register_harbor_project_quota_operations",
     "register_harbor_robot_operations",
     "register_harbor_typed_operations",

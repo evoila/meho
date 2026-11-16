@@ -18,8 +18,16 @@ see ``docs/codebase/policy.md``. The work is in
   switch is off.
 * ``GET /api/v1/policy/export`` -- the stored policy as a file.
 * ``GET /api/v1/policy/history`` -- the imported files, newest first.
+* ``POST /api/v1/policy/explain`` -- why a call runs, waits or is denied,
+  and who may approve it (:mod:`meho_backplane.policy.explain`). Runs
+  nothing and writes nothing. Asking for yourself (``me``) needs the
+  ``operator`` role, like the preview. Asking for login groups or with a
+  file that is not imported needs a ``tenant_admin`` or a
+  ``platform_admin``. Asking about an approval request (``request_id``)
+  needs the right to read approvals. Only a tenant admin or a platform
+  admin sees the entries of the policy and their places in it.
 
-Every route takes ``scope``: ``tenant`` (the caller's own tenant, the
+Every file route takes ``scope``: ``tenant`` (the caller's own tenant, the
 default) or ``install`` (the whole install, only a platform admin who is a
 person). Who may
 call: a ``tenant_admin`` or a ``platform_admin``; every other role gets 403
@@ -38,16 +46,26 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
-from meho_backplane.auth.rbac import ensure_human_principal
+from meho_backplane.auth.rbac import ensure_human_principal, require_approvals_access
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID, SWITCH_OFF_IMPORT
 from meho_backplane.db.engine import get_session
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations.approval_queue import ApprovalNotFoundError
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.policy.document import MAX_POLICY_BYTES
+from meho_backplane.policy.explain import (
+    FILE_NEEDS_CLASSIFICATION,
+    CallQuestion,
+    explain_call,
+    explain_request,
+    without_policy,
+)
+from meho_backplane.policy.explain_asker import ExplainInputError, Principal, what_if_operator
+from meho_backplane.policy.explain_models import PolicyExplainResponse
 from meho_backplane.policy.service import (
     KEEP_REVISIONS,
     NO_CHANGE,
@@ -56,7 +74,7 @@ from meho_backplane.policy.service import (
     export_policy,
     list_history,
 )
-from meho_backplane.policy.store import classification_enabled
+from meho_backplane.policy.store import InvalidStoredPolicyError, classification_enabled
 
 __all__ = ["router"]
 
@@ -67,9 +85,13 @@ _POLICY_CONNECTOR_ID: Final[str] = "policy-registry-1.x"
 PolicyScope = Literal["tenant", "install"]
 
 
+def _is_policy_admin(operator: Operator) -> bool:
+    return operator.platform_admin or operator.tenant_role == TenantRole.TENANT_ADMIN
+
+
 def _require_policy_admin(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
     """``tenant_admin`` or ``platform_admin``; anyone else gets 403 ``insufficient_role``."""
-    if operator.platform_admin or operator.tenant_role == TenantRole.TENANT_ADMIN:
+    if _is_policy_admin(operator):
         return operator
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient_role")
 
@@ -306,3 +328,152 @@ async def history(
     _check_scope(operator, scope)
     rows = await list_history(session, scope=scope, tenant_id=operator.tenant_id, limit=limit)
     return [PolicyRevisionView.model_validate(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Explain
+# ---------------------------------------------------------------------------
+
+
+class PolicyExplainBody(BaseModel):
+    """The question of ``POST /api/v1/policy/explain``.
+
+    Ask about one call (``connector_id`` and ``op_id``) for yourself
+    (``me``) or for a login with ``groups`` (``principal`` says which kind),
+    or about a stored approval request (``request_id``) alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector_id: str | None = Field(default=None, min_length=1)
+    op_id: str | None = Field(default=None, min_length=1)
+    target: str | None = Field(default=None, min_length=1, description="The target's name.")
+    me: bool = False
+    groups: list[str] = Field(
+        default_factory=list, max_length=5, description="Login group kinds, e.g. Operators."
+    )
+    principal: Principal = "person"
+    via: Literal["web", "token"] | None = Field(
+        default=None,
+        description="For a person: web interface or token. Default: as you call with `me`, "
+        "token with `groups`.",
+    )
+    file: str | None = Field(
+        default=None,
+        max_length=MAX_POLICY_BYTES,
+        description="A policy file (policy: v1) that is not imported; it replaces the "
+        "stored policy of `scope`.",
+    )
+    scope: PolicyScope = "tenant"
+    request_id: UUID | None = None
+
+
+def _unprocessable(text: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=text)
+
+
+async def _explain_request(
+    operator: Operator, body: PolicyExplainBody, request_id: UUID
+) -> PolicyExplainResponse:
+    other = body.model_dump(exclude={"request_id", "scope"}, exclude_defaults=True)
+    if other:
+        raise _unprocessable("Ask about a request alone: request_id takes no other field.")
+    require_approvals_access(operator)
+    try:
+        return await explain_request(tenant_id=operator.tenant_id, request_id=request_id)
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+        ) from exc
+
+
+def _asker(operator: Operator, body: PolicyExplainBody) -> Operator:
+    if body.me == bool(body.groups):
+        raise _unprocessable("Ask for yourself (me) or for login groups (groups): one of the two.")
+    if not body.me:
+        _require_policy_admin(operator)
+        return what_if_operator(
+            operator, groups=body.groups, principal=body.principal, via=body.via
+        )
+    if body.principal != "person":
+        raise _unprocessable("principal works only with groups.")
+    if operator.tenant_role == TenantRole.READ_ONLY:
+        # The same role the preview and the call need.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient_role")
+    if body.via is None:
+        return operator
+    if not is_human_principal(operator):
+        raise _unprocessable("via works only for a person.")
+    return operator.model_copy(update={"web_session": body.via == "web"})
+
+
+async def _file_document(
+    operator: Operator, body: PolicyExplainBody, session: AsyncSession
+) -> dict[str, Any] | None:
+    if body.file is None:
+        return None
+    _require_policy_admin(operator)
+    _check_scope(operator, body.scope)
+    if not classification_enabled():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FILE_NEEDS_CLASSIFICATION)
+    plan = await build_plan(
+        session,
+        scope=body.scope,
+        tenant_id=operator.tenant_id,
+        content=body.file.encode("utf-8"),
+    )
+    # The plan only read; end that transaction before explain opens its own.
+    await session.rollback()
+    if plan.mistakes:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": "The file has mistakes.", "mistakes": plan.mistakes},
+        )
+    return plan.document
+
+
+@router.post("/explain", response_model=PolicyExplainResponse)
+async def explain(
+    body: PolicyExplainBody,
+    operator: Annotated[Operator, Depends(verify_jwt_and_bind)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PolicyExplainResponse:
+    """Why a call runs, waits or is denied, and who may approve it. Runs nothing.
+
+    The answer is today's answer (the policy gate, decide-only), the policy
+    evaluator's answer with every rule it matched (with
+    ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
+    the groups that may approve. No audit row for a call, no approval
+    request, no call to an outside system. A caller who is not a tenant
+    admin or a platform admin gets the answer without the policy's entries
+    (:func:`~meho_backplane.policy.explain.without_policy`).
+    """
+    _bind_audit("policy.explain", "read")
+    answer = await _explain(operator, body, session)
+    return answer if _is_policy_admin(operator) else without_policy(answer)
+
+
+async def _explain(
+    operator: Operator, body: PolicyExplainBody, session: AsyncSession
+) -> PolicyExplainResponse:
+    if body.request_id is not None:
+        return await _explain_request(operator, body, body.request_id)
+    if body.connector_id is None or body.op_id is None:
+        raise _unprocessable("Name the operation: connector_id and op_id.")
+    try:
+        asker = _asker(operator, body)
+        question = CallQuestion(
+            asker=asker,
+            me=body.me,
+            connector_id=body.connector_id,
+            op_id=body.op_id,
+            groups=tuple(body.groups),
+            target=body.target,
+            file_document=await _file_document(operator, body, session),
+            file_scope=body.scope,
+        )
+        return await explain_call(question)
+    except ExplainInputError as exc:
+        raise _unprocessable(str(exc)) from exc
+    except InvalidStoredPolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

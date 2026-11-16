@@ -141,6 +141,18 @@ _HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
             "default": -1,
         },
+        "access": {
+            "type": "array",
+            "items": {"enum": ["pull", "push"]},
+            "minItems": 1,
+            "uniqueItems": True,
+            "default": ["push", "pull"],
+            "description": (
+                "What the robot may do on the project's repositories: "
+                "['pull'] for pull only, or ['push', 'pull']. "
+                "Default is push and pull. Delete is not offered."
+            ),
+        },
         "vault_target": {
             "type": "string",
             "minLength": 1,
@@ -231,6 +243,12 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
             "Validity in days. -1 = never expires. "
             "Prefer a short duration (e.g. 90) for temporary access. "
             "Use -1 only for long-lived CI credentials."
+        ),
+        "access": (
+            "Optional. ['pull'] makes a pull-only robot, for a cluster that "
+            "only runs images. ['push', 'pull'] (the default) is for CI. "
+            "Choose the least access the robot needs. The approval request "
+            "shows this value."
         ),
         "vault_target": (
             "Optional but required for an agent. 'vault:<path>#<field>', for example "

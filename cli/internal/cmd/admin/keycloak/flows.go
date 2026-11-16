@@ -84,10 +84,7 @@ func (c *adminClient) listFlows(ctx context.Context) ([]flowRep, error) {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, &errKeycloakAPI{
-			method: http.MethodGet, url: "authentication/flows",
-			statusCode: status, body: string(body),
-		}
+		return nil, flowAPIError(http.MethodGet, "authentication/flows", status, body)
 	}
 	var flows []flowRep
 	if err := json.Unmarshal(body, &flows); err != nil {
@@ -105,11 +102,23 @@ func (c *adminClient) flowCall(
 		return nil, err
 	}
 	if status != want {
-		return nil, &errKeycloakAPI{
-			method: method, url: path, statusCode: status, body: string(resp),
-		}
+		return nil, flowAPIError(method, path, status, resp)
 	}
 	return resp, nil
+}
+
+// flowAPIError is the error for a flow call that got the wrong status.
+// On HTTP 403 it names the role that login flow calls need, like the
+// bootstrap Job of the realm stage does.
+func flowAPIError(method, path string, status int, body []byte) error {
+	apiErr := &errKeycloakAPI{method: method, url: path, statusCode: status, body: string(body)}
+	if status != http.StatusForbidden {
+		return apiErr
+	}
+	return fmt.Errorf("%w\n  The account lacks the realm-management role manage-realm, which "+
+		"login flow calls need. Give the account that role in Keycloak, then run the "+
+		"command again. Keycloak can keep the old roles in a sign-in token for a few "+
+		"minutes", apiErr)
 }
 
 func flowExecutionsPath(alias string) string {

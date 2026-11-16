@@ -2511,7 +2511,13 @@ run, not a broken `main`.
   imports the changed file itself, all the shards run. Docs pick nothing.
   Every other file means all the shards: a migration, a template or data
   file, a `conftest.py` or test helper, `pyproject.toml`, `uv.lock`, a
-  workflow, the Go CLI, a source file the map does not know (a new one).
+  workflow, the Go CLI, a source file the map does not know that is gone
+  from the tree. A new source file (in the tree, not in the map) is
+  handled by import analysis like a file no test ran, and picks nothing
+  of its own: the tests come from the files that import it. A new file
+  that no file imports means all the shards, because it may be loaded by
+  name at run time (#6590: on 16 Nov 2026 about a third of the pull request
+  runs with a backend change ran all six shards only for this reason).
   No map, a map older than 7 days, 2,000 or more picked tests, or any
   error also means all the shards. Every selected run also runs
   `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.

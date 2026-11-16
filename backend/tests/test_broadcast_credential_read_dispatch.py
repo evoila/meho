@@ -161,7 +161,7 @@ def _make_operator() -> Operator:
 class _FakeFingerprint:
     """Duck-typed fingerprint — the resolver reads only ``version``."""
 
-    def __init__(self, version: str | None = "1.x") -> None:
+    def __init__(self, version: str | None = "1.18.0") -> None:
         self.version = version
 
 
@@ -183,7 +183,7 @@ class _VaultDispatchTarget:
 
     def __init__(self) -> None:
         self.product = "vault"
-        self.fingerprint = _FakeFingerprint(version="1.x")
+        self.fingerprint = _FakeFingerprint(version="1.18.0")
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
         self.name = "vault-prod"

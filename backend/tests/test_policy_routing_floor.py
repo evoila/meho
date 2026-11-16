@@ -328,7 +328,7 @@ async def test_a_request_from_before_the_category_is_refused_when_a_category_ent
         with pytest.raises(ApprovalRoutingError) as caught:
             await _approve(request_id, person)
         assert caught.value.reason_text.startswith(
-            "This request started to wait before MEHO stored the category of a change"
+            "MEHO does not know the category the install's policy gives this change"
         )
 
 

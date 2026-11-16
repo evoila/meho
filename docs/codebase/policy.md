@@ -258,7 +258,11 @@ tenant's routing can only narrow it)". For a waiting request
 (`--request`) the groups and the floor come from the install's routing
 as it is now, as at the click (`install_floor`). A request that the click
 refuses for its unknown category shows no group and the rule
-`category_not_stored`.
+`category_not_stored`. The install's category is also not known when the
+install's classification entries give the operation two categories (an
+operation registered after the install's import can match two such
+entries). Then explain shows no group for the call too, and the click
+refuses it, when an install entry that matches on a `category` could fit.
 
 All of this runs only while `POLICY_APPROVER_ROUTING` is on.
 

@@ -353,3 +353,43 @@ async def test_the_click_routes_the_install_entries_with_the_install_category(
         "The install's routing (`install:routing[0]`) lets only MEHO-Admins approve this "
         "change. You are in MEHO-Operators. A tenant's routing can only narrow it."
     )
+
+
+# ---------------------------------------------------------------------------
+# The install's classification gives the operation two categories
+# ---------------------------------------------------------------------------
+
+_INSTALL_TWO_CATEGORIES = (
+    "policy: v1\n"
+    "classifications:\n"
+    "  - {match: {connector: 'clsroute-*'}, category: network}\n"
+    "  - {match: {connector: 'clsroute-?.x'}, category: storage}\n"
+    "routing:\n"
+    "  - {match: {category: network}, approvers: [Admins]}\n"
+    "  - {match: {category: storage}, approvers: [Admins]}\n"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tenant_moves", [True, False])
+async def test_an_install_category_that_is_not_known_lets_no_group_approve(
+    embedding: AsyncMock, tenant_moves: bool
+) -> None:
+    """The operation is registered after the install's import, so the import saw no conflict."""
+    await _import(_INSTALL_TWO_CATEGORIES)
+    await _register(embedding)
+    if tenant_moves:
+        await _move_by_file_to_own_category()
+
+    call = await call_operation(_service(), _CALL)
+
+    assert call["status"] == "awaiting_approval", call
+    row = await _request()
+    assert row.approver_install_category == ""
+    assert row.approver_roles == []
+    assert row.approver_rule == "category_not_stored"
+    assert await _explained(row) == ((), ())
+    with pytest.raises(ApprovalRoutingError):
+        await _approve(row.id, _person("person-operator", TenantRole.OPERATOR))
+    with pytest.raises(ApprovalRoutingError):
+        await _approve(row.id, _person("person-admin", TenantRole.TENANT_ADMIN))

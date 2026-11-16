@@ -1353,6 +1353,11 @@ category is the one the classification gave the looked-up operation
 `apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
 install's category is `EndpointDescriptor.policy_install_category`: the
 category from the install's classification entries and overrides alone.
+When those entries give the operation two categories, it is the empty
+text: MEHO does not know it (an operation registered after the install's
+import can match two such entries). Then no group may approve the change
+when an install entry that matches on a `category` could fit it (rule
+`category_not_stored`); the click refuses it and explain shows no group.
 The dispatcher and the step gate pass both to `create_pending_request`. A request
 without a category fits only entries without `category`.
 
@@ -1371,9 +1376,10 @@ example "The install's routing (`install:routing[0]`) lets only
 MEHO-SA-Operators or MEHO-Admins approve this change. You are in
 MEHO-Operators. A tenant's routing can only narrow it." An install routing
 that is not valid refuses the click. A request whose category is the
-empty text (stored before migration `0173`) is refused when an install
-entry that matches on a `category` could fit it: MEHO cannot check who
-may approve it, so it must be rejected and started again. When no such
+empty text (stored before migration `0173`, or the install's entries
+gave the change two categories) is refused when an install entry that
+matches on a `category` could fit it: MEHO cannot check who may approve
+it, so it must be rejected. When no such
 entry could fit, the category does not change the answer. A change of
 rights is not checked here. `meho policy explain --request` uses the same
 install routing (`install_floor`), so it names the groups the click
@@ -1420,11 +1426,10 @@ warn for each such entry, and `/ready` shows the same sentence under
 `features.policy.notes`.
 
 **Old requests and the switch.** A request without stored kinds (made while
-the switch was off, or before migration `0167`) keeps today's rule, but
-the click still checks the install's current routing for it. Such a
-request has no stored category (`NULL`), so only install entries without
-`category` can fit it. A request with stored kinds from before migration
-`0173` has the empty text as category (see the click above). With
+the switch was off, or before migration `0167`) keeps today's rule until it
+is decided or expires: the click does not check the install's routing for
+it. A request with stored kinds from before migration `0173` has the empty
+text as category (see the click above). With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail

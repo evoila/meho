@@ -69,9 +69,10 @@ class ExplainApprovers(_Frozen):
     rule: str | None = Field(
         default=None,
         description="default, rights_change, or the routing entries that fit, the install's "
-        "first, such as install:routing[0], tenant:routing[1]. For a waiting request: "
-        "category_not_stored when it started to wait before MEHO stored its category and an "
-        "install entry that matches on a category could fit it; then no group may approve it. "
+        "first, such as install:routing[0], tenant:routing[1]. category_not_stored when MEHO "
+        "does not know the category the install's policy gives the change (it gives it two "
+        "categories, or a waiting request started before MEHO stored it) and an install entry "
+        "that matches on a category could fit it; then no group may approve it. "
         "Null for a caller who is not a tenant admin or a platform admin.",
     )
     floor: str | None = Field(

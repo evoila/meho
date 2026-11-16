@@ -47,9 +47,11 @@ off: it keeps today's rule. At the approve click MEHO
 routes the request again with the install's current routing
 (:func:`install_floor_refusal`). So a tenant entry stored before this rule,
 or an install file that changed later, never widens anything: where the
-tenant entry is wider, its extra kinds do not count. A request that
-started to wait before MEHO stored its category is refused when an
-install entry that matches on a category could fit it. ``meho policy
+tenant entry is wider, its extra kinds do not count. When MEHO does not
+know the install's category of a request (the empty text: the install's
+classification gives the change two categories, or the request started to
+wait before MEHO stored it), the click is refused when an install entry
+that matches on a category could fit it. ``meho policy
 explain --request`` uses the same install routing (:func:`install_floor`).
 
 **Install import.** The import diff of the install's file lists the
@@ -72,6 +74,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import ApprovalRequest, TenantPolicy
 from meho_backplane.policy.routing import (
+    CATEGORY_NOT_STORED,
     DEFAULT_RULE,
     ApproverSet,
     RouteEntry,
@@ -205,10 +208,6 @@ def floor_warnings(found: Sequence[Mapping[str, Any]]) -> list[str]:
     ]
 
 
-CATEGORY_NOT_STORED: Final[str] = "category_not_stored"
-"""The rule of :func:`install_floor` when MEHO cannot check the install's routing."""
-
-
 def _level(request: ApprovalRequest) -> str | None:
     level = (request.proposed_effect or {}).get("safety_level")
     return level if isinstance(level, str) and level else None
@@ -218,31 +217,19 @@ def _route_install(entries: Sequence[RouteEntry], request: ApprovalRequest) -> A
     """Route *request* with the install's *entries* and the install's category it stored.
 
     The category is the one the install's policy alone gave the change
-    (``approver_install_category``), not the tenant's. A request that
-    started to wait before MEHO stored categories has the empty text
-    (migration ``0173``). Its category is not known. When an install entry
-    that matches on a category could fit it, no group may approve it (rule
-    :data:`CATEGORY_NOT_STORED`). Else the category does not change the
-    answer.
+    (``approver_install_category``), not the tenant's. The empty text means
+    MEHO does not know it: the install's classification entries gave the
+    change two categories, or the request started to wait before MEHO
+    stored categories (migration ``0173``). Then :func:`route` lets no group
+    approve it when an install entry that matches on a category could fit
+    it (rule :data:`CATEGORY_NOT_STORED`).
     """
-    level = _level(request)
-    category = request.approver_install_category
-    if category == "":
-        if any(
-            entry.category is not None
-            and entry.matches(
-                category=entry.category, connector_id=request.connector_id, level=level
-            )
-            for entry in entries
-        ):
-            return ApproverSet(kinds=(), rule=CATEGORY_NOT_STORED)
-        category = None
     return route(
         entries,
-        category=category,
-        install_category=category,
+        category=None,
+        install_category=request.approver_install_category,
         connector_id=request.connector_id,
-        level=level,
+        level=_level(request),
         op_id=request.op_id,
     )
 
@@ -292,9 +279,12 @@ async def install_floor_refusal(
         return None
     if found.rule == CATEGORY_NOT_STORED:
         return (
-            "This request started to wait before MEHO stored the category of a change, and "
-            "the install's routing matches on a category. So MEHO cannot check who may approve "
-            "it. Reject it and start the call again."
+            "MEHO does not know the category the install's policy gives this change: the "
+            "install's classification gives it two categories, or the request started to wait "
+            "before MEHO stored categories. The install's routing matches on a category, so MEHO "
+            "cannot check who may approve it. Reject it. When the install's classification gives "
+            "the operation two categories, give it one in the install's policy file, then start "
+            "the call again."
         )
     kind = kind_of(operator)
     if kind in found.kinds:

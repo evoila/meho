@@ -7305,9 +7305,11 @@ class ApprovalRequest(Base):
       routes the request again with the install's current routing and this
       category
       (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
-      NULL and the empty text as for ``approver_category``; the click
-      refuses a row with the empty text when an install entry that matches
-      on a category could fit it. Added by migration ``0173``.
+      NULL and the empty text as for ``approver_category``. The empty text
+      also when the install's classification entries give the change two
+      categories. The click refuses a row with the empty text when an
+      install entry that matches on a category could fit it. Added by
+      migration ``0173``.
 
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;

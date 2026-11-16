@@ -32,6 +32,11 @@ The rules:
   the classification gives it. So a tenant that moves an operation to
   another category for its own rules does not take it away from the
   install's routing.
+* The install's category is not known (the empty text) when the install's
+  classification entries give the change two categories, and on a request
+  that started to wait before MEHO stored it. Then no group may approve
+  the change when an install entry that matches on a category could fit
+  it (``approver_rule`` ``"category_not_stored"``).
 * Routing only narrows. The stored kinds are the kinds of the fitting
   entries that may approve the change today (:func:`today_kinds`). A file
   never lets a group approve what it may not approve today.
@@ -70,6 +75,7 @@ from meho_backplane.policy.store import _documents
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "CATEGORY_NOT_STORED",
     "DEFAULT_RULE",
     "ROUTING_INVALID_RULE",
     "ApproverSet",
@@ -91,6 +97,11 @@ __all__ = [
 
 #: ``approver_rule`` when no routing entry fits: today's rule.
 DEFAULT_RULE: Final[str] = "default"
+
+#: ``approver_rule`` when the install's category of the change is not known
+#: (the empty text) and an install entry that matches on a category could
+#: fit it: no group may approve the change.
+CATEGORY_NOT_STORED: Final[str] = "category_not_stored"
 
 #: ``approver_rule`` on the audit row of a park refused because the stored
 #: routing is not valid.
@@ -232,8 +243,17 @@ def route(
     that fits. The kinds are the kinds of both entries that may approve
     the change today: a tenant entry only narrows the install's. An
     install entry matches on *install_category*, a tenant entry on
-    *category*. No entry fits: today's kinds.
+    *category*. No entry fits: today's kinds. An *install_category* of
+    the empty text is not known: when an install entry that matches on a
+    category could fit, no kind may approve (:data:`CATEGORY_NOT_STORED`).
     """
+    if install_category == "" and any(
+        e.install
+        and e.category is not None
+        and e.matches(category=e.category, connector_id=connector_id, level=level)
+        for e in entries
+    ):
+        return ApproverSet(kinds=(), rule=CATEGORY_NOT_STORED)
     kinds = today_kinds(level, op_id)
     fitting: list[RouteEntry] = []
     for install, fit_category in ((True, install_category), (False, category)):

@@ -28,7 +28,7 @@ URL contract::
     GET /ui/scheduler
         [?kind=cron|one_off|event
          &status=active|paused|cancelled|fired
-         &work_ref=<exact-match string>]
+         &work_ref=<ticket id, checked with the shared rule>]
 
 Out-of-enum ``kind`` / ``status`` -> 422 (the ``StrEnum`` query validator
 at the HTTP boundary). The agent-definition names that label each row are
@@ -60,6 +60,7 @@ from meho_backplane.ui.routes.scheduler.views import (
     build_agent_name_map,
     project_trigger_to_view,
 )
+from meho_backplane.ui.routes.work_ref_form import filter_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_list_router"]
@@ -170,7 +171,7 @@ def build_list_router() -> APIRouter:
         request: Request,
         kind: Annotated[KindFilterValue | None, EMPTY_STR_TO_NONE, Query()] = None,
         status: Annotated[StatusFilterValue | None, EMPTY_STR_TO_NONE, Query()] = None,
-        work_ref: str | None = Query(default=None, max_length=256),
+        work_ref: str | None = Query(default=None),
         session_ctx: UISessionContext = _require_operator_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
@@ -179,7 +180,7 @@ def build_list_router() -> APIRouter:
             request,
             kind=kind,
             status_filter=status,
-            work_ref=work_ref,
+            work_ref=filter_work_ref(work_ref),
             session_ctx=session_ctx,
             is_tenant_admin=role_probe.is_tenant_admin,
         )

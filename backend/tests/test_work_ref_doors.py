@@ -60,6 +60,10 @@ _SHARED_VALIDATORS = (normalize_work_ref_input, check_work_ref_filter_input)
 # ---------------------------------------------------------------- REST doors
 
 _CONSOLE_FORM = "console form: the handler cleans it with form_work_ref (the shared rule)"
+_CONSOLE_FILTER = (
+    "console search box: the handler checks it with filter_work_ref, the rule of the "
+    "REST filters; a blank box means no filter"
+)
 _CONSOLE_SEARCH = "console search box: matched with work_ref_filter_values like the REST filter"
 
 #: Parameters that read a ticket id without the shared type. Each has a
@@ -80,16 +84,18 @@ _REST_OTHER_DOORS: dict[tuple[str, str], str] = {
     ("/ui/operations/call", "work_ref"): _CONSOLE_FORM,
     ("/ui/runbooks/runs", "work_ref"): _CONSOLE_FORM,
     ("/ui/scheduler/create", "work_ref"): _CONSOLE_FORM,
-    # Console search boxes: the value goes to the same search as the REST
-    # filter (work_ref_filter_values), which finds the cleaned id and the
-    # exact stored text. A bad value finds nothing; the page shows an empty
-    # list instead of a 422.
-    ("/ui/agents/runs", "work_ref"): _CONSOLE_SEARCH,
+    # Console search boxes that check the value with the rule of the REST
+    # filters (filter_work_ref): a bad value is a 422 that names the rule.
+    ("/ui/agents/runs", "work_ref"): _CONSOLE_FILTER,
+    ("/ui/audit", "work_ref"): _CONSOLE_FILTER,
+    ("/ui/audit/results", "work_ref"): _CONSOLE_FILTER,
+    ("/ui/scheduler", "work_ref"): _CONSOLE_FILTER,
+    # The approvals search box: the value goes to the same search as the
+    # REST filter (work_ref_filter_values), which finds the cleaned id and
+    # the exact stored text. A bad value finds nothing; the page shows an
+    # empty list instead of a 422.
     ("/ui/approvals", "work_ref"): _CONSOLE_SEARCH,
     ("/ui/approvals/list", "work_ref"): _CONSOLE_SEARCH,
-    ("/ui/audit", "work_ref"): _CONSOLE_SEARCH,
-    ("/ui/audit/results", "work_ref"): _CONSOLE_SEARCH,
-    ("/ui/scheduler", "work_ref"): _CONSOLE_SEARCH,
     ("/ui/approvals/in-order", "work_ref"): (
         "console: reads the pending requests of one ticket with the approvals "
         "search (work_ref_filter_values); it stores no ticket id, and each step "

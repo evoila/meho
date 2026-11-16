@@ -43,7 +43,8 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `rabbitmq-management-3.x` | `rabbitmq` | — | >=3.8,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rabbitmq.md) |
 | `rke2-ssh-1.x` | `rke2` | — | >=1.32,<1.38 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
 | `tempo-api-2.x` | `tempo` | — | >=2.0,<3.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-tempo.md) |
-| `vault-1.x` | `vault` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
+| `vault-1.x` | `vault` | — | >=1.18,<2.0 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
+| `vault-openbao-2.x` | `vault` | — | >=2.0,<3.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
 | `windns-ssh-2016.x` | `windns` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-windows-dns.md) |
 | `winsrv-ssh-2022.x` | `winsrv` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-winsrv.md) |
 | `wsfc-ssh-2022.x` | `wsfc` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-wsfc.md) |

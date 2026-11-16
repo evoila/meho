@@ -132,9 +132,26 @@ target registration) is documented in
   this connector and the same API. An OpenBao health answer has no
   `enterprise` key (every HashiCorp answer has one) and its version is
   2.0 or higher. Then the fingerprint says vendor and product
-  `openbao`; otherwise `hashicorp` and `vault`. The connector still
-  declares no version range, so a target of either product resolves to
-  it as before.
+  `openbao`; otherwise `hashicorp` and `vault`.
+- **`OpenBaoConnector`** (`connector.py`) — a small subclass of
+  `VaultConnector` for OpenBao. `product="vault"`, `version="2.x"`,
+  `impl_id="vault-openbao"`. It exists because one class holds one
+  version range, and OpenBao 2.x uses the same numbers as HashiCorp
+  Vault 2.x. The two ranges:
+
+  | Product | Class | Range |
+  |---|---|---|
+  | HashiCorp Vault | `VaultConnector` | `>=1.18,<2.0` |
+  | OpenBao | `OpenBaoConnector` | `>=2.0,<3.0` |
+
+  Both register under the product `vault`, so a target with product
+  `vault` is served by the class whose range holds its probed version.
+  The operations are registered once, under `vault-1.x`, and run on
+  either class. `VaultConnector` sets `strict_version_range`, so a
+  known version outside both ranges (Vault below 1.18, HashiCorp Vault
+  2.x, anything 3.0 or higher) gets a `no_connector` answer that names
+  the ranges. A target with no known version still resolves to
+  `VaultConnector`, and a probe skips the range check.
 - **Operator-aware JWT (G0.8-T3 #629)** — the operator's bearer token
   is request-scoped state on the `Operator` the dispatcher threads to
   handlers whose signature names an `operator` parameter
@@ -1198,7 +1215,7 @@ underlying mistake would otherwise produce.
 The unit suites mock hvac through `tests/_vault_fakes.py` (the
 `_build_client` seam). The real-Vault layer lives in
 `backend/tests/integration/test_connectors_vault_dev_e2e.py`: it boots
-a `hashicorp/vault:1.18` server in dev mode via testcontainers'
+a `hashicorp/vault:1.18` server and an OpenBao 2.x server (`quay.io/openbao/openbao`, set with `MEHO_TEST_OPENBAO_IMAGE`) in dev mode via testcontainers'
 `DockerContainer`, seeds the surfaces every op touches, then
 dispatches every registered `vault.kv.*` / `vault.sys.*` /
 `vault.auth.*` op through the real `dispatch()` against the live Vault
@@ -1212,7 +1229,11 @@ and a real Postgres audit store (reusing the integration conftest's
   overridable via `MEHO_TEST_VAULT_IMAGE` (same env-knob shape as
   `MEHO_TEST_PGVECTOR_IMAGE`); `ci.yml` sets it to the Harbor proxy
   mirror. Docker-socket-absent sandbox skips cleanly — the gate
-  matches `tests/integration/conftest.py`.
+  matches `tests/integration/conftest.py`. The OpenBao container runs
+  `server -dev` with the same flags on the command line. The module
+  fixture has two parameters, so every test runs once on each server,
+  and `test_fingerprint_and_range_against_dev_server` checks the
+  detected product and the class the resolver picks.
 - **Seed.** Dev mode mounts KV-v2 at `secret/`. The fixture writes a
   plain secret, a twice-written secret (so `vault.kv.versions` sees
   `current_version == 2`), and a `bulk/` folder with > 50 child keys

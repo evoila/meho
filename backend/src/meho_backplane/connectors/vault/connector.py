@@ -82,7 +82,7 @@ from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.schemas import Target
 
-__all__ = ["VaultConnector"]
+__all__ = ["OpenBaoConnector", "VaultConnector"]
 
 _log = structlog.get_logger(__name__)
 
@@ -128,15 +128,20 @@ class VaultConnector(Connector):
     entry point is **not** used for this connector post-refactor — the
     parallel v2 entry is the canonical registration.
 
-    :attr:`supported_version_range` is left ``None`` for now; the
-    connector handles every shipped Vault release. G3.3 (#366) will
-    pin a range when the operator-facing op surface starts depending
-    on version-specific KV-v2 semantics.
+    :attr:`supported_version_range` is ``>=1.18,<2.0``, the lines HashiCorp
+    still supports. OpenBao has its own class, :class:`OpenBaoConnector`,
+    because one class holds one range and OpenBao 2.x overlaps the numbers
+    of HashiCorp Vault 2.x. ``strict_version_range`` makes the fallback
+    registration respect the range too, so a known version outside it
+    (Vault below 1.18, Vault 2.x) gets no connector. A target with no known
+    version still resolves here.
     """
 
     product = "vault"
     version = "1.x"
     impl_id = "vault"
+    supported_version_range = ">=1.18,<2.0"
+    strict_version_range = True
 
     async def fingerprint(
         self,
@@ -361,3 +366,18 @@ class VaultConnector(Connector):
             tenant_id=_SYSTEM_TENANT_ID,
             tenant_role=TenantRole.OPERATOR,
         )
+
+
+class OpenBaoConnector(VaultConnector):
+    """OpenBao 2.x, served by the same code as :class:`VaultConnector`.
+
+    OpenBao speaks the same API as HashiCorp Vault. It registers under the
+    same product slug ``vault``, so a target of product ``vault`` on an
+    OpenBao server resolves here: the resolver picks this class by the
+    version range. The operations stay registered once, under
+    ``vault-1.x``; this class adds only the range.
+    """
+
+    version = "2.x"
+    impl_id = "vault-openbao"
+    supported_version_range = ">=2.0,<3.0"

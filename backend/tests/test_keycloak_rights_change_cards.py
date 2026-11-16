@@ -8,8 +8,10 @@
 and show it next to the new values. Secrets are hidden on both sides, and
 a failed read says so instead of showing an empty "now" side.
 
-The cards are behind the switch ``KEYCLOAK_RIGHTS_CHANGE_CARDS``. The
-tests turn it on, except the tests that check the answers with it off.
+The approval request a person reads always shows these cards. What the
+caller gets back from ``preview_operation`` is behind the switch
+``KEYCLOAK_RIGHTS_CHANGE_CARDS``. The tests turn it on, except the tests
+that check a default install, with the switch off.
 
 Fixture values are made up.
 """
@@ -88,7 +90,9 @@ def _connector(current: Any = None, *, error: Exception | None = None) -> Keyclo
     return connector
 
 
-def _ctx(op_id: str, params: dict[str, Any], connector: Any) -> PreviewContext:
+def _ctx(
+    op_id: str, params: dict[str, Any], connector: Any, *, for_agent: bool = False
+) -> PreviewContext:
     return PreviewContext(
         descriptor=_FakeDescriptor(op_id=op_id),  # type: ignore[arg-type]
         connector_instance=connector,
@@ -96,11 +100,14 @@ def _ctx(op_id: str, params: dict[str, Any], connector: Any) -> PreviewContext:
         target=_FakeTarget(),
         params=params,
         connector_id="keycloak-admin-26.x",
+        for_agent=for_agent,
     )
 
 
-async def _card(op_id: str, params: dict[str, Any], connector: Any) -> dict[str, Any]:
-    effect = await build_proposed_effect(_ctx(op_id, params, connector))
+async def _card(
+    op_id: str, params: dict[str, Any], connector: Any, *, for_agent: bool = False
+) -> dict[str, Any]:
+    effect = await build_proposed_effect(_ctx(op_id, params, connector, for_agent=for_agent))
     assert effect is not None
     card: dict[str, Any] = effect["preview"]
     return card
@@ -286,14 +293,14 @@ def test_the_switch_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", ["keycloak.client.update", "keycloak.protocol_mapper.create"])
-async def test_switch_off_client_update_and_mapper_create_echo_the_params(
+async def test_switch_off_the_agent_preview_of_client_update_and_mapper_create_echoes_the_params(
     op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _switch_off(monkeypatch)
     connector = _connector(_CLIENT_NOW)
     params = {"client_id": "example-app", "representation": {"name": "example"}}
 
-    effect = await build_proposed_effect(_ctx(op_id, params, connector))
+    effect = await build_proposed_effect(_ctx(op_id, params, connector, for_agent=True))
 
     assert not has_preview_builder(op_id)
     assert effect is not None
@@ -303,17 +310,81 @@ async def test_switch_off_client_update_and_mapper_create_echo_the_params(
 
 
 @pytest.mark.asyncio
-async def test_switch_off_realm_update_shows_the_realm_card_without_values_now(
+async def test_switch_off_the_agent_preview_of_realm_update_has_no_values_now(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch_off(monkeypatch)
     connector = _connector({"realm": "example", "registrationAllowed": False})
     params = {"representation": {"registrationAllowed": True}}
-    ctx = _ctx("keycloak.realm.update", params, connector)
+    ctx = _ctx("keycloak.realm.update", params, connector, for_agent=True)
 
-    card = await _card("keycloak.realm.update", params, connector)
+    card = await _card("keycloak.realm.update", params, connector, for_agent=True)
 
     assert card == await _realm_update_preview(ctx)
     assert "current_values" not in card
     assert "current_values_available" not in card
     connector._get_admin_json.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+# -- a default install: the person who approves always sees the values -------
+
+
+@pytest.mark.asyncio
+async def test_default_install_client_update_card_shows_the_values_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_off(monkeypatch)
+    params = {"id": _CLIENT_UUID, "representation": {"fullScopeAllowed": True}}
+
+    card = await _card("keycloak.client.update", params, _connector(_CLIENT_NOW))
+
+    assert card["current_values"] == {"fullScopeAllowed": False}
+    assert card["new_values"] == {"fullScopeAllowed": True}
+
+
+@pytest.mark.asyncio
+async def test_default_install_realm_update_card_shows_the_values_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_off(monkeypatch)
+    connector = _connector({"realm": "example", "registrationAllowed": False})
+    params = {"representation": {"registrationAllowed": True}}
+
+    card = await _card("keycloak.realm.update", params, connector)
+
+    assert card["current_values"] == {"registrationAllowed": False}
+
+
+@pytest.mark.asyncio
+async def test_default_install_protocol_mapper_create_card_shows_the_mappers_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_off(monkeypatch)
+    client = {**_CLIENT_NOW, "protocolMappers": [{"name": "groups", "protocolMapper": "x"}]}
+    params = {"id": _CLIENT_UUID, "representation": {"name": "role"}}
+
+    card = await _card("keycloak.protocol_mapper.create", params, _connector(client))
+
+    assert [m["name"] for m in card["current_mappers"]] == ["groups"]
+    assert card["new_mapper"] == {"name": "role"}
+
+
+@pytest.mark.asyncio
+async def test_default_install_card_hides_a_client_attribute_with_a_secret_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_off(monkeypatch)
+    attribute_now = "made-up-rotated-secret-old-4a1e"
+    attribute_new = "made-up-rotated-secret-new-9c2f"
+    client = {**_CLIENT_NOW, "attributes": {"client.secret.rotated": attribute_now}}
+    params = {
+        "id": _CLIENT_UUID,
+        "representation": {"attributes": {"client.secret.rotated": attribute_new}},
+    }
+
+    card = await _card("keycloak.client.update", params, _connector(client))
+
+    text = json.dumps(card)
+    assert attribute_now not in text
+    assert attribute_new not in text
+    assert card["current_values_available"] is True

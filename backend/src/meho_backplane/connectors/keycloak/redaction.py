@@ -79,6 +79,9 @@ _SECRET_FIELDS: frozenset[str] = frozenset(
     {
         # Keycloak representation secret fields (camelCase, as Keycloak emits).
         "secret",  # ClientRepresentation.secret (confidential client secret)
+        # ClientRepresentation.attributes: the old client secret, kept while
+        # a secret rotation is in progress.
+        "client.secret.rotated",
         "credentials",  # UserRepresentation.credentials (list of credential records)
         "value",  # CredentialRepresentation.value (raw credential value)
         "secretdata",  # CredentialRepresentation.secretData (hash + salt blob)

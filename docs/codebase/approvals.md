@@ -2561,9 +2561,12 @@ The per-op preview is opt-in via a builder registry in
   `PreviewContext` carries the resolved connector instance + descriptor +
   operator + target + params.
   `register_preview_builder_switch(op_id, enabled)` (core only, not in
-  the connector kit) makes the builder count only while `enabled()`
-  returns true; off, the op previews as if it had no builder. A new card
-  for an op that agents already see goes behind a switch this way.
+  the connector kit) puts the builder behind a switch for the caller's
+  side only: with `enabled()` false, the preview the caller gets back
+  (`preview_operation`, `PreviewContext.for_agent` true) is the one of an
+  op with no builder. The approval request a person reads always uses the
+  builder. A new card for an op that agents already see goes behind a
+  switch this way.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as

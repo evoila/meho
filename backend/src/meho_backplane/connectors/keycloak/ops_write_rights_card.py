@@ -32,11 +32,14 @@ an error), the card says ``current_values_available: false`` (or
 ``current_mappers_available: false``) and shows the new values only. It
 never shows an empty "now" side as if the object had no values.
 
-The cards are behind the switch ``KEYCLOAK_RIGHTS_CHANGE_CARDS``
-(``Settings.keycloak_rights_change_cards``, off by default). Off,
-``keycloak.client.update`` and ``keycloak.protocol_mapper.create`` show
-the generic params echo, and ``keycloak.realm.update`` shows the realm
-card of :mod:`.ops_write_realm_smtp` without ``current_values``.
+The approval request a person reads (the approval card and the approvals
+API) always shows these cards. What the caller gets back from
+``preview_operation`` is behind the switch ``KEYCLOAK_RIGHTS_CHANGE_CARDS``
+(``Settings.keycloak_rights_change_cards``, off by default). Off, that
+preview of ``keycloak.client.update`` and
+``keycloak.protocol_mapper.create`` is the generic params echo, and the one
+of ``keycloak.realm.update`` is the realm card of
+:mod:`.ops_write_realm_smtp` without ``current_values``.
 """
 
 from __future__ import annotations
@@ -204,7 +207,7 @@ async def _client_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
 async def _realm_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
     """Card for ``keycloak.realm.update``: the realm card plus the realm's values now."""
     card = await _realm_update_preview(ctx)
-    if card is None or not _cards_on():
+    if card is None or (ctx.for_agent and not _cards_on()):
         return card
     return _add_current_values(card, ctx, await _read_realm(ctx), _representation(ctx))
 

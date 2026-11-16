@@ -351,6 +351,11 @@ class PreviewContext:
             the generic params-echo default. ``None`` (the default) falls
             back to the conservative connector-boundary default policy --
             the same behaviour as an unmatched override.
+        for_agent: ``True`` when the preview goes back to the caller
+            (``preview_operation``), ``False`` (the default) for the
+            approval request a person reads. A builder switch
+            (:func:`register_preview_builder_switch`) applies only to the
+            caller's side.
     """
 
     descriptor: EndpointDescriptor
@@ -359,6 +364,7 @@ class PreviewContext:
     target: Any
     params: dict[str, Any]
     connector_id: str | None = None
+    for_agent: bool = False
 
 
 class PreviewBuilder(Protocol):
@@ -401,8 +407,9 @@ class PermissionPreflight(Protocol):
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
 
-#: ``op_id`` -> the switch of its builder. The builder counts only while the
-#: switch returns ``True``; off, the op previews as if it had no builder.
+#: ``op_id`` -> the switch of its builder for the caller's side. Off, the
+#: preview the caller gets back is the one of an op with no builder; the
+#: approval request a person reads always uses the builder.
 _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 
 #: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
@@ -420,25 +427,27 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
 
 
 def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> None:
-    """Use the builder of *op_id* only while ``enabled()`` is true.
+    """Use the builder of *op_id* for the caller's preview only while ``enabled()`` is true.
 
-    Off, the op previews as if it had no builder (the generic params echo).
-    A new card for an op the agent already sees goes behind a switch this way.
+    Off, the preview the caller gets back (``preview_operation``) is the one
+    of an op with no builder (the generic params echo). The approval request
+    a person reads always uses the builder. A new card for an op the agent
+    already sees goes behind a switch this way.
     """
     _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
 
 
-def _preview_builder(op_id: str) -> PreviewBuilder | None:
-    """The builder of *op_id*, or ``None`` when it has none or its switch is off."""
+def _preview_builder(op_id: str, *, for_agent: bool) -> PreviewBuilder | None:
+    """The builder of *op_id*; ``None`` when it has none, or for the caller when it is off."""
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
-    if switch is not None and not switch():
+    if for_agent and switch is not None and not switch():
         return None
     return _PREVIEW_BUILDERS.get(op_id)
 
 
 def has_preview_builder(op_id: str) -> bool:
-    """True when *op_id* has a bespoke preview builder registered and switched on."""
-    return _preview_builder(op_id) is not None
+    """True when *op_id* has a bespoke preview builder for the caller's preview."""
+    return _preview_builder(op_id, for_agent=True) is not None
 
 
 def register_permission_preflight(op_id: str, preflight: PermissionPreflight) -> None:
@@ -495,7 +504,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     """
     op_id = ctx.descriptor.op_id
     op_class = classify_op(op_id)
-    builder = _preview_builder(op_id)
+    builder = _preview_builder(op_id, for_agent=ctx.for_agent)
     if op_class in _SENSITIVE_CLASSES and builder is None:
         # A credential-class op with NO bespoke builder must not surface
         # request/response detail in a durable row -- the *generic*

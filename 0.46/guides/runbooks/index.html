@@ -3383,7 +3383,15 @@ advance:</p>
 </code></pre></div>
 <p><code>next</code> runs the step's <code>verify</code> — the <strong>substrate is the oracle</strong>. A
 <code>confirm</code> verify asks you to confirm; an <code>operation_call</code> verify
-dispatches its op and checks the result against <code>expect</code>. The run only
+dispatches its op and checks the result against <code>expect</code>. The op runs as
+you, the caller who advances the run: your grants, read scope and role
+apply, the same as when you call the op directly. The check follows the
+token rule on every path, also when you advance the run from the web
+console: for a person, only a <code>safe</code> check runs at once, and a <code>caution</code>
+or higher check waits for approval. See the
+<a href="https://github.com/evoila/meho/blob/main/docs/codebase/runbook-step-identity.md">developer notes on step identity</a>.
+If MEHO refuses the call, or the call waits for approval, the step fails
+and the message says why. The run only
 advances when verify passes. A failing verify marks the step <code>failed</code>.
 To try a failed step again, fix the cause and run
 <code>meho runbook next --retry</code> (over MCP: <code>"retry": true</code>). The step's

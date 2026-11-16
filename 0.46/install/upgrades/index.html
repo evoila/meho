@@ -3674,6 +3674,11 @@ groups and clients.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td><strong>Action needed.</strong> A runbook check step (<code>verify.type: operation_call</code>) runs with the identity of the person, agent or service login who advances the run. The check follows the token rule on every path, also from the web console: for a person, only a <code>safe</code> check runs at once, and a <code>caution</code> or higher check waits for approval. A check that reads a secret value never runs at once. A step whose check waits or is refused fails, and the message says why.</td>
+<td>An agent that advances runs needs a grant for the operation and the target of each check step. A service login needs its read scope for the target. A target that reads its login from a secret store per caller reads it as that caller. Check your runbook templates for check steps above <code>safe</code>: approve the waiting request, then retry the step with <code>meho runbook next --retry</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td>With <code>POLICY_CLASSIFICATION</code> on: when the install's policy file makes an operation always wait for approval, it now waits in every tenant. A tenant's entry can make more operations wait, but cannot set an install-wide "always wait" back. A tenant policy import or a single classification edit that tries it is refused, and the message names the install entry. A tenant entry stored before the upgrade that set such a wait back no longer has that effect (its category and labels still count). No database migration.</td>
 <td><strong>Nothing to do</strong> while <code>POLICY_CLASSIFICATION</code> is off. Otherwise run <code>meho policy export</code> for each tenant: an entry with a <code># Has no effect:</code> comment above it no longer ends the wait. Remove it from the file before the next import, or the import is refused. See <a href="../../guides/policy-file/#rules-that-no-file-can-loosen">Rules that no file can loosen</a>.</td>
 </tr>

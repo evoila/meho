@@ -51,10 +51,14 @@ tables. Do not edit the tables. Add one file per row:
 `docs/upgrade-rows/<version>/<short-name>.md`, with a `## Note` and an
 `## Action` section of one line each (see `docs/upgrade-rows/README.md`).
 `mkdocs build` adds the rows to the end of the table in
-`docs-site/install/upgrades.md`. The checks are in
+`docs-site/install/upgrades.md`. The release pull request runs
+`python3 scripts/ci/upgrade_rows.py --write`, which adds them to the end of
+the table in `docs/deploying.md`. The checks are in
 `scripts/ci/upgrade_rows.py`: the build fails on a broken row file, and
 `backend/tests/test_upgrade_rows.py` fails on a conflict marker line, a row
-with the wrong number of columns, or a doubled row in either table.
+with the wrong number of columns, or a doubled row in either table, and when
+a row of a released version (a `## [X.Y.Z]` heading in `CHANGELOG.md`) is
+missing in `docs/deploying.md`.
 
 Why not a `merge=union` line in `.gitattributes`? It works with a local
 `git merge`. But GitHub does not read `.gitattributes` merge rules when it

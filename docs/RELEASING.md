@@ -323,6 +323,12 @@ merge to `main`.
       shows in the version-specific upgrade-notes table of the docs site). This is the discipline
       that #2393's `startupProbe` (the Helm-4 SSA field-conflict caveat)
       would have triggered.
+- [ ] **Upgrade rows into `deploying.md`.** In the release-cutting PR, after
+      the CHANGELOG roll, check that the row folders under `docs/upgrade-rows/`
+      carry the version you release (rename a folder if not). Then run
+      `python3 scripts/ci/upgrade_rows.py --write` and commit
+      `docs/deploying.md`. The script adds the new rows to the end of its
+      table. A test fails while a row of a released version is missing there.
 
 Before merging, run the **release-body path-freshness gate**. The same
 recurring class of defect that motivated #928 at PR time (snapshot

@@ -274,7 +274,7 @@ Read these when your upgrade crosses the version in question:
 
 Rows for v0.48.0 and later come from one small file per row in
 [`docs/upgrade-rows/`](https://github.com/evoila/meho/tree/main/docs/upgrade-rows).
-The older rows are also in
+Each release also adds them to
 [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes);
 release notes for each version are on the
 [releases page](https://github.com/evoila/meho/releases) with the full

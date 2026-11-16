@@ -604,7 +604,9 @@ discipline is enforced by a checklist line in
 [`RELEASING.md`](RELEASING.md)). Do not edit this table: add the row as its
 own file in [`upgrade-rows/`](upgrade-rows/README.md), so two pull requests
 never conflict here. The rows in that folder (v0.48.0 and later) show on the
-[Upgrades page](https://evoila.github.io/meho/latest/install/upgrades/).
+[Upgrades page](https://evoila.github.io/meho/latest/install/upgrades/) at
+once. The release pull request adds them to this table
+(`python3 scripts/ci/upgrade_rows.py --write`).
 
 | Version | Upgrade note | Action |
 |---|---|---|

@@ -20,7 +20,9 @@ What the operator does.
 
 When the docs site is built, `scripts/ci/upgrade_rows.py` adds these rows
 to the end of the table in `docs-site/install/upgrades.md`. The build fails
-on a broken row. Run `python scripts/ci/upgrade_rows.py` to check your row
-and see the table line it makes. Do not add new rows to the tables in
-`docs/deploying.md` or `docs-site/install/upgrades.md`: two pull requests
-that edit the end of the same table conflict.
+on a broken row. The release pull request runs
+`python scripts/ci/upgrade_rows.py --write`, which adds the new rows to the
+end of the table in `docs/deploying.md`. Run `python scripts/ci/upgrade_rows.py`
+to check your row and see the table line it makes. Do not add new rows to
+the tables in `docs/deploying.md` or `docs-site/install/upgrades.md`
+yourself: two pull requests that edit the end of the same table conflict.

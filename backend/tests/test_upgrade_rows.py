@@ -53,6 +53,7 @@ _GOOD = "## Note\nWhat changes.\n\n## Action\nWhat to do.\n"
 def test_the_real_tables_and_rows_pass() -> None:
     ur.check_table_files()
     ur.collect_rows()
+    ur.check_released_rows()
 
 
 def test_script_exits_zero_on_the_repo() -> None:
@@ -83,7 +84,13 @@ def test_doubled_row_fails() -> None:
 
 @pytest.mark.parametrize(
     "row",
-    ["| **v0.2.0** | Only two. |", "| **v0.2.0** | a | b | c |", "| **v0.2.0** | a | b"],
+    [
+        "| **v0.2.0** | Only two. |",
+        "| **v0.2.0** | a | b | c |",
+        "| **v0.2.0** | a | b",
+        "| **v0.2.0** | A | B | C",
+        "| **v0.2.0** | A | B \\|",
+    ],
 )
 def test_row_with_wrong_column_count_fails(row: str) -> None:
     text = _TABLE.replace("\nAfter", f"{row}\n\nAfter")
@@ -172,3 +179,57 @@ def test_a_row_already_in_the_table_fails(tmp_path: Path) -> None:
 
 def test_no_rows_leaves_the_page_unchanged() -> None:
     assert ur.add_rows_to_table(_TABLE, _HEADING, []) == _TABLE
+
+
+def _repo_copy(root: Path, changelog: str) -> Path:
+    """A small repo: the two tables, a CHANGELOG and an empty rows folder."""
+    for rel, heading in ur.TABLE_FILES.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_TABLE.replace(_HEADING, heading), encoding="utf-8")
+    (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    rows_dir = root / "docs" / "upgrade-rows"
+    rows_dir.mkdir(parents=True)
+    return rows_dir
+
+
+class _Page:
+    class file:  # noqa: N801 - the shape mkdocs passes to the hook
+        src_uri = ur.SITE_PAGE
+
+
+def test_a_new_row_file_reaches_both_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n")
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    line = "| **v0.2.0** | What changes. | What to do. |"
+    monkeypatch.setattr(ur, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ur, "ROWS_DIR", rows_dir)
+
+    site = ur.on_page_markdown(_TABLE, _Page(), None, None)
+    assert line in site.splitlines()
+
+    deploying = tmp_path / ur.DEPLOYING
+    assert [r.name for r in ur.write_deploying(tmp_path, rows_dir)] == ["x"]
+    assert line in deploying.read_text(encoding="utf-8").splitlines()
+    ur.check_table_files(tmp_path)
+
+    before = deploying.read_text(encoding="utf-8")
+    assert ur.write_deploying(tmp_path, rows_dir) == []
+    assert deploying.read_text(encoding="utf-8") == before
+
+
+def test_a_released_row_missing_in_deploying_fails(tmp_path: Path) -> None:
+    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n")
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    with pytest.raises(ur.UpgradeRowError, match=r"v0\.2\.0/x\.md.*--write"):
+        ur.check_released_rows(tmp_path, rows_dir)
+    ur.write_deploying(tmp_path, rows_dir)
+    ur.check_released_rows(tmp_path, rows_dir)
+
+
+def test_an_unreleased_row_need_not_be_in_deploying(tmp_path: Path) -> None:
+    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n")
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    ur.check_released_rows(tmp_path, rows_dir)

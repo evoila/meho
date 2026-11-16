@@ -7456,6 +7456,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-policy-explain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy explain
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-policy-export" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -14926,6 +14937,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-policy-explain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy explain
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-policy-export" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -20857,7 +20879,7 @@
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h2 id="meho-policy"><code>meho policy</code><a class="headerlink" href="#meho-policy" title="Permanent link">&para;</a></h2>
-<p>Manage the policy file (validate / diff / import / export / history)</p>
+<p>Manage the policy file (validate / diff / import / export / history / explain)</p>
 <div class="highlight"><pre><span></span><code>meho policy
 </code></pre></div>
 <h3 id="meho-policy-diff"><code>meho policy diff</code><a class="headerlink" href="#meho-policy-diff" title="Permanent link">&para;</a></h3>
@@ -20868,6 +20890,22 @@
 <li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — print the server's answer as JSON</li>
 <li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
+</ul>
+<h3 id="meho-policy-explain"><code>meho policy explain</code><a class="headerlink" href="#meho-policy-explain" title="Permanent link">&para;</a></h3>
+<p>Say why a call runs, waits or is denied, and who may approve it</p>
+<div class="highlight"><pre><span></span><code>meho policy explain [CONNECTOR_ID OP_ID] [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--file</code> — a policy file that is not imported</li>
+<li><code>--groups</code> — ask for a login in these groups: Readers, Operators, SA-Operators, Admins, Approvers</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--me</code> — ask for yourself</li>
+<li><code>--principal</code> — with --groups: person, agent or service</li>
+<li><code>--request</code> — show the rule stored on this approval request</li>
+<li><code>--scope</code> — with --file: tenant or install</li>
+<li><code>--target</code> — the target's name</li>
+<li><code>--via</code> — for a person: web or token (default: as you call with --me, token with --groups)</li>
 </ul>
 <h3 id="meho-policy-export"><code>meho policy export</code><a class="headerlink" href="#meho-policy-export" title="Permanent link">&para;</a></h3>
 <p>Write the stored policy as a policy file</p>

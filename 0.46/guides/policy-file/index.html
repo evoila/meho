@@ -2514,6 +2514,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#why-does-a-call-run-wait-or-fail-meho-policy-explain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why does a call run, wait or fail? meho policy explain
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-an-import-does" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3194,6 +3205,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#why-does-a-call-run-wait-or-fail-meho-policy-explain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why does a call run, wait or fail? meho policy explain
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-an-import-does" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3420,6 +3442,70 @@ meho<span class="w"> </span>policy<span class="w"> </span><span class="nb">histo
 </code></pre></div>
 <p>Add <code>--scope install</code> to work on the policy of the whole install. Only a
 platform admin may do that.</p>
+<h2 id="why-does-a-call-run-wait-or-fail-meho-policy-explain">Why does a call run, wait or fail? <code>meho policy explain</code><a class="headerlink" href="#why-does-a-call-run-wait-or-fail-meho-policy-explain" title="Permanent link">&para;</a></h2>
+<p><code>meho policy explain</code> says what MEHO does with one call: it <strong>runs</strong>,
+<strong>waits</strong> for approval, or is <strong>denied</strong>. It also says why, and who may
+approve it. Nothing runs and nothing is written.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"> </span>&lt;connector-id&gt;<span class="w"> </span>&lt;op-id&gt;<span class="w"> </span>--me
+meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"> </span>&lt;connector-id&gt;<span class="w"> </span>&lt;op-id&gt;<span class="w"> </span>--groups<span class="w"> </span>Operators<span class="w"> </span>--target<span class="w"> </span>&lt;target-name&gt;
+meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"> </span>&lt;connector-id&gt;<span class="w"> </span>&lt;op-id&gt;<span class="w"> </span>--groups<span class="w"> </span>Operators<span class="w"> </span>--principal<span class="w"> </span>agent
+meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"> </span>&lt;connector-id&gt;<span class="w"> </span>&lt;op-id&gt;<span class="w"> </span>--groups<span class="w"> </span>Operators<span class="w"> </span>--file<span class="w"> </span>policy.yaml
+meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"> </span>--request<span class="w"> </span>&lt;request-id&gt;
+</code></pre></div>
+<ul>
+<li><code>--me</code> asks for yourself. You need the operator role, as for a call.</li>
+<li><code>--groups</code> asks for a login in these groups, with no grants of its own.
+  <code>--principal</code> says if it is a <code>person</code> (the default), an <code>agent</code> or a
+  <code>service</code> login. <code>--via web</code> asks for a person in the web interface.
+  For a person, <code>--via</code> is <code>token</code> by default with <code>--groups</code>, and as you
+  call with <code>--me</code>. Only a tenant admin or a platform admin may ask for
+  other groups.</li>
+<li><code>--file</code> asks with a policy file that is not imported. The file takes
+  the place of your stored policy. It needs <code>POLICY_CLASSIFICATION</code>.</li>
+<li><code>--request</code> shows the rule stored on an approval request, and the
+  groups that may approve it. The groups stored on the request count only
+  while <code>POLICY_APPROVER_ROUTING</code> is on. With it off, explain shows
+  today's groups, the same groups the approve check uses.</li>
+</ul>
+<p>Good to know:</p>
+<ul>
+<li>explain asks about a call <strong>with no parameters</strong>. For an operation
+  whose answer depends on its parameters, the answer is the one of a call
+  without parameters.</li>
+<li>explain works with <code>POLICY_ENGINE_SHADOW</code> off. It then shows today's
+  answer only.</li>
+<li>Only a tenant admin or a platform admin sees the entries of the policy
+  and their places in it. Everyone else gets the answer, the reason, the
+  risk level and who may approve.</li>
+</ul>
+<p>An example answer, for a person with a token who asks for a <code>caution</code>
+operation that a file makes always wait:</p>
+<div class="highlight"><pre><span></span><code>Answer: wait (today's checks decide)
+Who may approve: MEHO-Operators, MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers (rule: default)
+Today: needs-approval: &lt;today's reason&gt;
+Policy evaluator (shadow): wait, same as today
+Decided by: floor token_runs_only_safe: wait (&lt;rule text&gt;)
+Floor: floor token_runs_only_safe: wait (&lt;rule text&gt;)
+Rules in order:
+  1. default person.token.caution: wait (risk level caution waits)
+  2. default always_wait: wait (the operation always waits) at file:classifications[1]
+  3. floor token_runs_only_safe: wait (&lt;rule text&gt;)
+Risk level: caution, always waits: yes, category: compute
+  matched file:classifications[0]
+  matched file:classifications[1]
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">The policy evaluator is off by default</p>
+<p>The lines about the policy evaluator need the setting
+<code>POLICY_ENGINE_SHADOW</code> (Helm <code>config.policy.engineShadow</code>). With it
+on, the evaluator works out its own answer next to today's checks, and
+explain lists every rule it matched, in order. Only the <code>always_wait</code>
+step carries a place in the policy file (for example
+<code>file:classifications[1]</code>). The other classification entries that
+match are listed under the classification (the <code>matched</code> lines).
+Today's checks still decide. With the setting off, explain shows
+today's answer only.</p>
+</div>
 <h2 id="what-an-import-does">What an import does<a class="headerlink" href="#what-an-import-does" title="Permanent link">&para;</a></h2>
 <ol>
 <li>MEHO checks the file and works out the diff.</li>
@@ -3473,10 +3559,15 @@ import the file again.</p>
 <td><code>GET /api/v1/policy/history</code></td>
 <td>the imported files</td>
 </tr>
+<tr>
+<td><code>POST /api/v1/policy/explain</code></td>
+<td>why a call runs, waits or is denied; runs nothing</td>
+</tr>
 </tbody>
 </table>
 <p>Send the file as the request body with <code>Content-Type: application/yaml</code>.
-Every route takes <code>?scope=tenant</code> (the default) or <code>?scope=install</code>.</p>
+Every file route takes <code>?scope=tenant</code> (the default) or <code>?scope=install</code>.
+<code>explain</code> takes a JSON body with the same questions as the command.</p>
 
 
 

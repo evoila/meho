@@ -82,6 +82,7 @@ from meho_backplane.db.models import (
 from meho_backplane.events.outbox import publish as publish_event
 from meho_backplane.operations.addon_step_events import AddonStepEventService
 from meho_backplane.operations.identity_budget import TokenUsage
+from meho_backplane.session_store.hosted_runs import end_run_session
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
 #: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
@@ -589,6 +590,17 @@ async def transition(
     return row
 
 
+async def _end(session: AsyncSession, row: AgentRun, to_status: AgentRunStatus) -> AgentRun:
+    """Move *row* to the end state *to_status* and end its hosted-run session.
+
+    The session record (if the run has one) gets the outcome in the same
+    transaction (:func:`~meho_backplane.session_store.hosted_runs.end_run_session`).
+    """
+    await transition(session, row, to_status)
+    await end_run_session(session, run_id=row.id, outcome=to_status.value)
+    return row
+
+
 async def start_run(
     session: AsyncSession,
     row: AgentRun,
@@ -867,7 +879,7 @@ async def succeed_run(
         row.output_tokens = usage.output_tokens
         row.cache_read_tokens = usage.cache_read_tokens
         row.cache_write_tokens = usage.cache_write_tokens
-    return await transition(session, row, AgentRunStatus.SUCCEEDED)
+    return await _end(session, row, AgentRunStatus.SUCCEEDED)
 
 
 async def fail_run(
@@ -900,7 +912,7 @@ async def fail_run(
     row.error = error
     if cost is not None:
         row.cost = cost
-    return await transition(session, row, AgentRunStatus.FAILED)
+    return await _end(session, row, AgentRunStatus.FAILED)
 
 
 async def cancel_run(
@@ -949,4 +961,4 @@ async def cancel_run(
     if row is None:
         raise AgentRunNotFoundError(run_id)
 
-    return await transition(session, row, AgentRunStatus.CANCELLED)
+    return await _end(session, row, AgentRunStatus.CANCELLED)

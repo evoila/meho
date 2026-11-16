@@ -8,8 +8,10 @@
 #      deployed with govc; a build-only SSH key and the placeholder host
 #      name go in through the image's user-data property; 4 processors,
 #      16 GB, a 120 GB thin disk (section 5)
-#   2. the form-2 install from the form-2 download, with the placeholder
-#      host name and no settings
+#   2. every package update of the build day and a restart, so the install,
+#      the hardening and its scan run on the newest kernel; then the form-2
+#      install from the form-2 download, with the placeholder host name and
+#      no settings
 #   3. the appliance pieces under /opt/meho/appliance, and cloud-init off;
 #      then the OS hardening to the CIS Ubuntu 24.04 Benchmark, Level 1 -
 #      Server, and its scan (cis/harden.sh); the scan's result list goes
@@ -112,8 +114,8 @@ Settings, from the environment:
                            the CIS content between builds. Default:
                            <out-dir>/.cache.
 
-The build VM must reach the Ubuntu archive in step 3: the hardening
-installs packages.
+The build VM must reach the Ubuntu archive in steps 2 and 3: the package
+updates and the hardening install packages.
 
 Tools on PATH: govc, ssh, scp, ssh-keygen, curl, tar, sha256sum,
 sha512sum, base64.
@@ -338,10 +340,12 @@ EOT
     ok "the build VM $VM runs: $CPUS processors, $((MEMORY_MB / 1024)) GB, a $DISK_SIZE thin disk, hardware version $HARDWARE_VERSION"
 }
 
+# wait_for_ssh [boot id]: wait until the build VM answers over SSH. With the
+# boot id from before a restart, wait until it answers from a new boot.
 wait_for_ssh() {
-    local waited=0
+    local old_boot=${1:-} boot waited=0
     note "waiting for SSH at ${MEHO_BUILD_ADDRESS%/*}"
-    until ssh_build true 2>/dev/null; do
+    until boot=$(ssh_build cat /proc/sys/kernel/random/boot_id 2>/dev/null) && [[ $boot != "$old_boot" ]]; do
         ((waited += 10))
         ((waited < SSH_WAIT_SECONDS)) ||
             fail "The build VM did not answer over SSH within $((SSH_WAIT_SECONDS / 60)) minutes." \
@@ -349,6 +353,25 @@ wait_for_ssh() {
         sleep 10
     done
     ok "the build VM answers over SSH"
+}
+
+# update_os: every package update of the build day, as in step 1 of
+# cis/harden.sh, then a restart, so the form-2 install, the hardening and
+# its scan run on the newest kernel (#5778). Only here may the build VM
+# restart: from step 3 on, a restart would run first start, and after the
+# hardening SSH no longer lets the build user in.
+update_os() {
+    local boot
+    ssh_build "sudo DEBIAN_FRONTEND=noninteractive apt-get update -q --error-on=any &&
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -y -q -o APT::Get::Always-Include-Phased-Updates=true \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs" ||
+        fail "The build VM could not install the package updates." \
+            "check that it reaches the Ubuntu archive (archive.ubuntu.com and security.ubuntu.com over HTTP) and read apt-get's message above; then go on with --from-step 2."
+    boot=$(ssh_build cat /proc/sys/kernel/random/boot_id)
+    # The restart ends the SSH session, so ssh's exit code says nothing.
+    ssh_build "sudo systemctl reboot" || true
+    wait_for_ssh "$boot"
+    ok "installed every package update of today; the build VM restarted into the kernel $(ssh_build uname -r)"
 }
 
 run_form2_install() {
@@ -500,8 +523,9 @@ main() {
         wait_for_ssh
     fi
     if ((FROM_STEP <= 2)); then
-        step "Step 2: the form-2 install"
+        step "Step 2: the package updates and the form-2 install"
         wait_for_ssh
+        update_os
         run_form2_install
     fi
     if ((FROM_STEP <= 3)); then

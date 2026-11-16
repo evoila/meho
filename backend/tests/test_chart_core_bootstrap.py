@@ -136,7 +136,8 @@ def test_bootstrap_job_is_a_post_install_hook_under_the_hook_account() -> None:
     assert annotations["helm.sh/hook-weight"] == "10"
     assert annotations["helm.sh/hook-delete-policy"] == "before-hook-creation,hook-succeeded"
     assert job["spec"]["backoffLimit"] == 3
-    assert job["spec"]["ttlSecondsAfterFinished"] == 600
+    # A failed Job keeps its log until the next install or upgrade (#6336).
+    assert "ttlSecondsAfterFinished" not in job["spec"]
 
     pod = job["spec"]["template"]["spec"]
     assert pod["serviceAccountName"] == f"{_RELEASE}-core-bootstrap"

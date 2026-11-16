@@ -50,6 +50,12 @@ systems.
 Everything else — the activity-feed store (Valkey), database
 migrations, the operations catalog — ships inside the Helm release.
 
+With the default values, the whole release asks for 0.77 CPU and 2.2 GiB
+of memory, may use up to 4.2 CPU and 5.1 GiB, and needs 20 GiB of disk.
+Bigger estates need more. The web console is made for Chrome 111,
+Safari 16.4 and Firefox 128 or newer. Details are in
+[Install on your Kubernetes](form-3-your-kubernetes.md).
+
 ### Step 1 — Decide ingress, TLS, and trust
 
 The backplane serves one hostname (set as `ingress.host`), and that

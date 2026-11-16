@@ -76,6 +76,10 @@
             <dt class="opacity-60">Fire at</dt>
             <dd>{% if trigger.fire_at %}<time datetime="{{ trigger.fire_at.isoformat() }}">{{ trigger.fire_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}—{% endif %}</dd>
           {% else %}
+            {% if trigger.starts_on %}
+              <dt class="opacity-60">Starts on</dt>
+              <dd>{{ trigger.starts_on }}</dd>
+            {% endif %}
             <dt class="opacity-60">Event filter</dt>
             <dd>
               {% if trigger.event_filter_json %}

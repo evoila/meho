@@ -47,7 +47,7 @@ model (decision #11 in :file:`docs/decisions/locked-decisions.md`):
 * ``HttpOnly`` -- JS cannot read the cookie. Defeats every
   XSS-to-token exfiltration vector.
 * ``Secure`` -- TLS-only. The backplane terminates TLS at
-  ``meho.evba.lab``; a downgrade to HTTP would silently fail because
+  ``meho.example.test``; a downgrade to HTTP would silently fail because
   the cookie would not be sent.
 * ``SameSite=Strict`` -- the cookie is omitted from cross-site
   navigations, blocking the entire CSRF class on state-changing
@@ -125,6 +125,7 @@ from meho_backplane.ui.auth.session_store import (
 )
 from meho_backplane.ui.auth.tenant import TENANT_PICKER_PATH, can_switch_tenant
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.web_push.store import refresh_at_sign_in
 
 __all__ = [
     "AUTHORIZATION_STATE_EXPIRED_DETAIL",
@@ -626,6 +627,8 @@ async def _persist_session_from_tokens(
             tenant_chosen=operator.tenant_chosen,
             can_switch_tenant=can_switch_tenant(operator),
         )
+    # The push messages decide who may approve from these facts.
+    await refresh_at_sign_in(operator)
     return decrypted.id, operator.sub, operator.tenant_id, operator.tenant_chosen
 
 

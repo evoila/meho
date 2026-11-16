@@ -42,6 +42,7 @@ session context carries it, and the page dependency binds it again with
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from contextvars import ContextVar
 from typing import Any, Final, Literal
 
@@ -59,6 +60,34 @@ _SID_HASH_LENGTH: Final[int] = 16
 _request_client: ContextVar[dict[str, Any] | None] = ContextVar(
     "audit_request_client", default=None
 )
+
+
+#: Longest client text kept by default: the client name, version and
+#: ``User-Agent`` on the MCP session row.
+CLIENT_TEXT_MAX_CHARS: Final[int] = 200
+
+#: Unicode groups removed from client texts: control (``Cc``), format
+#: (``Cf``), line and paragraph separators (``Zl`` U+2028, ``Zp`` U+2029),
+#: and lone surrogates (``Cs``).
+_DROPPED_CHAR_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
+
+
+def clean_client_text(value: object, max_chars: int = CLIENT_TEXT_MAX_CHARS) -> str | None:
+    """Return *value* without unsafe characters, cut to *max_chars* characters.
+
+    A tool sends these texts about itself (its MCP client name, its
+    ``User-Agent``), so they are not trusted. A control character or a line
+    separator could break a log line or a terminal. A lone surrogate cannot
+    be stored as UTF-8, so the row write would fail. A value that is not a
+    string, or is empty after cleaning, gives ``None``. Every stored client
+    text goes through this one function.
+    """
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(
+        ch for ch in value if unicodedata.category(ch) not in _DROPPED_CHAR_CATEGORIES
+    )
+    return cleaned[:max_chars] or None
 
 
 def client_identity_enabled() -> bool:

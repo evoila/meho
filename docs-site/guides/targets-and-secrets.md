@@ -99,6 +99,15 @@ Mapping rules the importer applies:
   it, dispatch fails with `connector_tls_verify_failed`, carrying
   Python's own *"IP address mismatch"* text inside
   `extras.exception_message`.
+- If a target has a `tls_ca_pin` and TLS fails, the error says the pin
+  is stale. It does not tell you to set a pin. `extras.pin_stale` is
+  `true`, and `extras.presented_certificate` shows the issuer, the
+  subject and the SHA-256 fingerprint of the certificate the host
+  presents now. This happens when the host certificate was re-issued.
+  For an ESXi host or a vCenter whose certificates come from the VMCA
+  (the vCenter's own certificate authority), pin the **VMCA root CA**,
+  not the host certificate. Then a later re-issue does not break the
+  target. Update the pin with `--update`.
 
 You can leave `secret_ref` out entirely — see the next section.
 
@@ -327,13 +336,36 @@ meho targets discover k8s           # candidate systems a connector can see
                                     # from an already-registered seed target
 ```
 
+## Network ports and account rights: the VMware family
+
+Open these ports from MEHO to the target, and give the target login at
+least these rights. These are the vendor's own role names and standard
+ports.
+
+| Target system | Port MEHO opens | Rights for reads | Extra rights for changes |
+| --- | --- | --- | --- |
+| vCenter | HTTPS 443 | The built-in `Read-only` role, set on the top of the inventory with "propagate to children". | A role that holds the rights of each change, for example power operations or snapshots on virtual machines. Set it only on the folders or clusters MEHO may change. |
+| ESXi host | HTTPS 443 | The built-in `Read-only` role on the host. | A role with the rights of each change. |
+| NSX | HTTPS 443 to NSX Manager | The built-in `Auditor` role. | `Network Admin`, or `Enterprise Admin` for the whole estate. |
+| SDDC Manager | HTTPS 443 | The `VIEWER` role. | `OPERATOR`, or `ADMIN` for lifecycle tasks. |
+| VCF Operations | HTTPS 443 | The `ReadOnly` role. | A role that may edit the object a change touches. |
+| VCF Automation | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
+| Operations for logs | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
+
+Use a separate login for reads and for changes where you can. MEHO also
+asks a person to approve a risky change before it runs
+([Approvals and break-glass](approvals-and-break-glass.md)).
+
+When a right is missing, the call fails with the vendor's own error.
+MEHO passes that error on and changes nothing.
+
 ## What can go wrong here
 
 Real failure modes, with the errors they actually produce:
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. |
+| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
 | 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |

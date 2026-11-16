@@ -90,6 +90,11 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "knowledge": "memory_knowledge",
     "memory": "memory_knowledge",
     "operations": "typed_connector_reads",
+    # Classification of operations (#6038) and the policy file (policy: v1:
+    # validate / preview / import / export / history): new and behind the
+    # POLICY_CLASSIFICATION switch, so they ride the beta ``write_surfaces``
+    # tier, like the settings file.
+    "policy": "write_surfaces",
     "retrieval": "memory_knowledge",
     "runbooks": "write_surfaces",
     "runner-principals": "satellite_gateway",
@@ -136,6 +141,7 @@ PATH_FEATURE_OVERRIDES: Final[dict[str, str]] = {
     "/api/v1/connectors/{connector_id}/operations/{op_id}": "connector_ingest",
     "/api/v1/connectors/operation-overrides": "connector_ingest",
     "/api/v1/connectors/{connector_id}/operation-overrides/{op_id}": "connector_ingest",
+    "/api/v1/connectors/{connector_id}/classification": "write_surfaces",
 }
 
 

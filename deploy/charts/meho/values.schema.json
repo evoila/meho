@@ -456,7 +456,7 @@
         },
         "targetSsrfAllowlist": {
           "type": "string",
-          "description": "Target-destination SSRF allowlist exemptions, rendered into the `MEHO_TARGET_SSRF_ALLOWLIST` env var the backplane guard reads per request (`backend/src/meho_backplane/targets/ssrf_guard.py`; v0.20.0, PR #2191). Comma-separated CIDR ranges (`10.0.0.0/8`), bare IPs (`192.168.7.10`), and/or hostname literals (`vcenter.lab.internal`); whitespace around commas is ignored. Default `\"\"` keeps the default-deny guard fully on — deliberately absent from `config.required` and carrying no `minLength` so the empty default validates on every install (copying the adjacent `forwardedAllowIps` `minLength: 1` would break it). MEHO is on-prem, so a deploy that registers appliances on RFC 1918 space MUST allowlist those ranges (e.g. `10.0.0.0/8,192.168.0.0/16`); a scoped opt-in, never a global off-switch. Value shape is validated at the backend — a malformed CIDR fails loudly at runtime naming the offending token. See CHANGELOG v0.20.0 (\"Deployment impact — action likely required\") and `docs/codebase/target-ssrf-guard.md`."
+          "description": "Target-destination SSRF allowlist exemptions, rendered into the `MEHO_TARGET_SSRF_ALLOWLIST` env var the backplane guard reads per request (`backend/src/meho_backplane/targets/ssrf_guard.py`; v0.20.0). Comma-separated CIDR ranges (`10.0.0.0/8`), bare IPs (`192.168.7.10`), and/or hostname literals (`vcenter.lab.internal`); an IP or hostname entry can end in a port (`vcenter.lab.internal:8443`, `192.168.7.10:8443`, `[fd00::5]:8443`) and then admits that host on that port only, while an entry without a port admits every port; whitespace around commas is ignored. Default `\"\"` keeps the default-deny guard fully on — deliberately absent from `config.required` and carrying no `minLength` so the empty default validates on every install (copying the adjacent `forwardedAllowIps` `minLength: 1` would break it). MEHO is on-prem, so a deploy that registers appliances on RFC 1918 space MUST allowlist those ranges (e.g. `10.0.0.0/8,192.168.0.0/16`); a scoped opt-in, never a global off-switch. Value shape is validated at the backend — a malformed CIDR or a port that is not a number from 1 to 65535 fails loudly at runtime naming the offending token. See CHANGELOG v0.20.0 (\"Deployment impact — action likely required\") and `docs/codebase/target-ssrf-guard.md`."
         },
         "ingestJobTimeoutSeconds": {
           "type": "string",
@@ -506,6 +506,11 @@
           "type": "string",
           "description": "Comma-separated `acr` values that mean a one-time code step (#3979). Rendered into `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (default) = off."
         },
+        "approvalSignInLevel": {
+          "type": "string",
+          "enum": ["off", "observe", "auto", "required"],
+          "description": "Does an approve on the command line or REST need the approval level `meho-approve` (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `auto` (default: required unless the approval sign-in check shows the realm does not give the level), `off`, `observe` or `required`."
+        },
         "teamKnowledgeRecall": {
           "type": "string",
           "enum": ["true", "false"],
@@ -520,6 +525,32 @@
           "type": "string",
           "enum": ["true", "false"],
           "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpClientPerToolKind": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Claude Code and Claude Desktop sign in with their own login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client only when it finds it in Keycloak, through the admin client. Rendered into `MCP_CLIENT_PER_TOOL_KIND`. Default `\"false\"`: both tools keep the shared `meho-mcp` client. See `docs-site/install/keycloak-realm.md`."
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "classification": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Let each connector, operation group and operation carry a category, labels and an \"always wait\" mark. Rendered into `POLICY_CLASSIFICATION`. Default `\"false\"`: MEHO reads none of it. See `docs/codebase/policy-classification.md`."
+            },
+            "engineShadow": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "Run the policy evaluator next to today's checks, log every difference, and write the rule it matched on audit rows and approval requests. A preview shows the rule and who may approve. It decides nothing. Rendered into `POLICY_ENGINE_SHADOW`. Default `\"false\"`: the evaluator does not run. See `docs/codebase/policy-evaluator.md`."
+            },
+            "approverRouting": {
+              "type": "string",
+              "enum": ["true", "false"],
+              "description": "A waiting request stores the login group kinds that may approve it, from the policy file's routing section, and MEHO checks them at the click. The bindings of the tenant's policy file give login groups, matched by full path or group attribute, a group kind and categories. Rendered into `POLICY_APPROVER_ROUTING`. Default `\"false\"`: MEHO reads no binding and today's rule decides who may approve. See `docs/codebase/approvals.md` and `docs/codebase/policy-bindings.md`."
+            }
+          }
         },
         "sessionStore": {
           "type": "object",

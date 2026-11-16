@@ -48,7 +48,7 @@ as untrusted:
   ``<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>`` wrapper around
   agent-untrusted operational rules
   (:mod:`meho_backplane.conventions.preamble`). Enforced at the read
-  boundary since evoila-bosnia/meho-internal#154:
+  boundary:
   :func:`~meho_backplane.broadcast.history.dump_event_wire` wraps
   ``activity`` / ``scope`` / ``target`` in the untrusted-content
   envelope (:mod:`meho_backplane.untrusted_text`) on every LLM-facing
@@ -273,7 +273,8 @@ class AgentAnnouncementEvent(BaseModel):
     * ``ttl_minutes`` -- optional claim lifetime in minutes
       (:data:`TTL_MIN_MINUTES`..:data:`TTL_MAX_MINUTES`). Consumers
       derive ``expires_at = ts + ttl``; the ``active_only`` read filter
-      drops claims whose ``expires_at`` has elapsed. TRUSTED int.
+      drops claims whose ``expires_at`` has elapsed, and completed
+      claims. TRUSTED int.
     * ``work_ref`` -- optional opaque change-ticket reference
       (``"gh:evoila/meho#123"``), same convention + cap
       (:data:`WORK_REF_MAX_CHARS`) as

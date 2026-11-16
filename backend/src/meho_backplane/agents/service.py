@@ -73,7 +73,15 @@ import uuid
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.agents.grant_sets import (
+    StartingGrantsError,
+    has_live_grant,
+    require_pick,
+    resolve_scopes,
+    write_starting_grants,
+)
 from meho_backplane.agents.identity_ref import (
     AgentIdentityRefInvalidError,
 )
@@ -100,6 +108,7 @@ __all__ = [
     # import path; the validator was extracted in G11.2-T9 (#1112) and
     # ``_validate_identity_ref`` below is the alias internal call sites use.
     "AgentIdentityRefInvalidError",
+    "StartingGrantsError",
 ]
 
 
@@ -179,6 +188,10 @@ class AgentDefinitionService:
         AgentIdentityRefInvalidError
             When ``identity_ref`` does not resolve to a registered,
             non-revoked agent principal in *tenant_id* (G11.2-T8 #1099).
+        StartingGrantsError
+            No starting grant pick while the switch is not ``off`` and the
+            agent has no live grant, or a target name that does not
+            resolve (#6191). Nothing is written.
         ValueError
             When *name* contains characters outside the safe set.
         """
@@ -195,6 +208,7 @@ class AgentDefinitionService:
             # authoritative runtime gate are explained in the new
             # :mod:`meho_backplane.agents.identity_ref` module docstring.
             await _validate_identity_ref(session, tenant_id, payload.identity_ref)
+            grant_scopes = await self._starting_grant_scopes(session, tenant_id, payload)
             session.add(row)
             try:
                 await session.flush()
@@ -203,6 +217,13 @@ class AgentDefinitionService:
                 if _is_unique_violation(exc):
                     raise AgentDefinitionExistsError(payload.name) from exc
                 raise
+            await write_starting_grants(
+                session,
+                tenant_id=tenant_id,
+                principal_sub=payload.identity_ref,
+                created_by_sub=created_by_sub,
+                scopes=grant_scopes,
+            )
             # Refresh so DB-side defaults (created_at / updated_at on PG)
             # are visible on the returned row before the session closes.
             await session.refresh(row)
@@ -215,6 +236,22 @@ class AgentDefinitionService:
             created_by_sub=created_by_sub,
         )
         return entry
+
+    @staticmethod
+    async def _starting_grant_scopes(
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        payload: AgentDefinitionCreate,
+    ) -> list[str]:
+        """Check the starting grant pick and return the scopes of its rows (#6191).
+
+        The pick is required only when the agent has no live grant yet.
+        """
+        if payload.starting_grants is None and not await has_live_grant(
+            session, tenant_id, payload.identity_ref
+        ):
+            require_pick(None)
+        return await resolve_scopes(session, tenant_id, payload.starting_grants)
 
     async def list_(
         self,

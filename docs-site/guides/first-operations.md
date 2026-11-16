@@ -139,6 +139,11 @@ Two honest limits:
   operation that writes a credential (for example `vault.kv.put`) is
   not previewable. It stays `status: "unavailable"`, so its secret
   params never surface.
+  With the backplane switch `PREVIEW_TYPED_WRITES` on (off by default),
+  every typed or composite write previews, also one that waits for
+  approval only for some callers. A credential write with its own safe
+  preview (for example `keycloak.user.reset_password`) then shows only
+  that plan and never copies the params.
 - It is available over MCP, REST (`POST /api/v1/operations/preview`),
   and the CLI (`meho operation preview <connector_id> <op_id>`).
 

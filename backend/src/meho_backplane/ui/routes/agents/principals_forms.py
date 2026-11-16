@@ -72,18 +72,31 @@ shapes the REST surface emits, surfaced inline in the modal banner:
   gold-standard
   :data:`~meho_backplane.scheduler.vault_credentials.SCHEDULER_VAULT_TOKEN_INVALID_DETAIL`
   naming the re-mint. Same 502 either way; only the remediation differs.
+
+Starting grants
+---------------
+
+The form asks for the agent's first grants (#6192, helpers in
+:mod:`~meho_backplane.ui.routes.agents.starting_grants`). A missing or
+wrong pick, and a target name the service cannot resolve, re-render the
+modal (422) with the text next to the pick. After a pick that writes
+grants the console opens the grants page of the new agent.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import structlog
 from fastapi import Request, status
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.agents.grant_sets import StartingGrantsError, writes_rows
 from meho_backplane.auth.agent_principals import (
     AgentPrincipalCreate,
     AgentPrincipalExistsError,
     AgentPrincipalNotFoundError,
+    AgentPrincipalRead,
     AgentPrincipalService,
 )
 from meho_backplane.auth.keycloak_admin import (
@@ -98,6 +111,7 @@ from meho_backplane.scheduler.vault_credentials import (
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.agents import starting_grants
 from meho_backplane.ui.routes.agents.principals_views import fetch_principal_or_404
 from meho_backplane.ui.templating import get_templates
 
@@ -159,19 +173,21 @@ async def render_register_modal(
 ) -> HTMLResponse:
     """Render the HTMX-loaded register modal fragment (tenant_admin-gated)."""
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    context = _register_context(csrf_token)
+    context.update(await starting_grants.pick_context(session_ctx.tenant_id))
     response = get_templates().TemplateResponse(
         request,
         "agents/principals/_register_modal.html",
-        _register_context(csrf_token),
+        context,
     )
     _set_csrf_cookie(response, csrf_token)
     return response
 
 
-def _render_register_with_error(
+async def _render_register_with_error(
     request: Request,
     *,
-    csrf_session_id: str,
+    session_ctx: UISessionContext,
     values: dict[str, object],
     field_errors: dict[str, str] | None = None,
     banner: str | None = None,
@@ -186,8 +202,9 @@ def _render_register_with_error(
     field-attributable, so they render as an alert banner above the form,
     not against a single input. The operator keeps their typed ``values``.
     """
-    csrf_token = mint_csrf_token(csrf_session_id)
+    csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context = _register_context(csrf_token)
+    context.update(await starting_grants.pick_context(session_ctx.tenant_id))
     context["errors"] = field_errors or {}
     context["banner"] = banner
     context["values"] = values
@@ -208,6 +225,8 @@ async def submit_register(
     *,
     name: str,
     owner_sub: str | None,
+    grant_set: str = "",
+    grant_targets: list[str] | None = None,
 ) -> HTMLResponse:
     """Register a new agent principal via the lifecycle service.
 
@@ -228,63 +247,40 @@ async def submit_register(
       ``scheduler_vault_write_error`` code when the scheduler token is
       live (policy scope is the fault), the three-clause re-mint detail
       when the broker's ``lookup-self`` probe found it dead (#2652).
+    * a missing or wrong starting grant pick, or a target name that does
+      not resolve -> 422 ``starting_grants`` field error. Nothing is
+      created.
+
+    After a pick that writes grants, the redirect goes to the grants page
+    of the new agent instead, so the person sees what was written.
     """
     owner_clean = (owner_sub or "").strip() or None
-    raw_values: dict[str, object] = {"name": name, "owner_sub": owner_clean or ""}
-
-    service = AgentPrincipalService()
+    targets = grant_targets or []
+    raw_values: dict[str, object] = {
+        "name": name,
+        "owner_sub": owner_clean or "",
+        **starting_grants.pick_values(grant_set, targets),
+    }
     try:
-        await service.register(
-            tenant_id=session_ctx.tenant_id,
-            created_by_sub=operator.sub,
-            payload=AgentPrincipalCreate(name=name, owner_sub=owner_clean),
-        )
+        pick = starting_grants.parse_pick(grant_set, targets)
     except ValueError as exc:
-        # The service raises ``ValueError`` for a name outside the safe
-        # alphabet (the name validity is enforced in ``register``, not on
-        # the Pydantic model).
-        return _render_register_with_error(
-            request,
-            csrf_session_id=str(session_ctx.session_id),
-            values=raw_values,
-            field_errors={"name": str(exc)},
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        result: AgentPrincipalRead | _RegisterFailure = _RegisterFailure(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, field_errors={starting_grants.FIELD: str(exc)}
         )
-    except AgentPrincipalExistsError:
-        return _render_register_with_error(
-            request,
-            csrf_session_id=str(session_ctx.session_id),
-            values=raw_values,
-            field_errors={"name": "an agent principal with this name already exists"},
-            status_code=status.HTTP_409_CONFLICT,
+    else:
+        result = await _register(
+            session_ctx,
+            operator,
+            AgentPrincipalCreate(name=name, owner_sub=owner_clean, starting_grants=pick),
         )
-    except KeycloakAdminNotConfiguredError:
-        return _render_register_with_error(
+    if isinstance(result, _RegisterFailure):
+        return await _render_register_with_error(
             request,
-            csrf_session_id=str(session_ctx.session_id),
+            session_ctx=session_ctx,
             values=raw_values,
-            banner=KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    except KeycloakAdminError:
-        return _render_register_with_error(
-            request,
-            csrf_session_id=str(session_ctx.session_id),
-            values=raw_values,
-            banner="keycloak_admin_error",
-            status_code=status.HTTP_502_BAD_GATEWAY,
-        )
-    except SchedulerVaultBrokerError as exc:
-        return _render_register_with_error(
-            request,
-            csrf_session_id=str(session_ctx.session_id),
-            values=raw_values,
-            banner=(
-                SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
-                if exc.token_invalid
-                else "scheduler_vault_write_error"
-            ),
-            status_code=status.HTTP_502_BAD_GATEWAY,
+            field_errors=result.field_errors,
+            banner=result.banner,
+            status_code=result.status_code,
         )
 
     _log.info(
@@ -292,9 +288,67 @@ async def submit_register(
         tenant_id=str(session_ctx.tenant_id),
         operator_sub=session_ctx.operator_sub,
         name=name,
+        starting_grants=pick.set.value if pick is not None else None,
     )
     del request  # HX-Redirect needs no request context.
+    if writes_rows(pick):
+        return starting_grants.grants_redirect(result.keycloak_client_id)
     return _redirect_to_list()
+
+
+@dataclass(frozen=True)
+class _RegisterFailure:
+    """Why a register failed: the modal status, field errors and banner."""
+
+    status_code: int
+    field_errors: dict[str, str] | None = None
+    banner: str | None = None
+
+
+async def _register(
+    session_ctx: UISessionContext,
+    operator: Operator,
+    payload: AgentPrincipalCreate,
+) -> AgentPrincipalRead | _RegisterFailure:
+    """Call the service; map each known failure to what the modal shows."""
+    try:
+        return await AgentPrincipalService().register(
+            tenant_id=session_ctx.tenant_id,
+            created_by_sub=operator.sub,
+            payload=payload,
+        )
+    except StartingGrantsError as exc:
+        return _RegisterFailure(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            field_errors={starting_grants.FIELD: starting_grants.error_text(exc)},
+        )
+    except ValueError as exc:
+        # The service raises ``ValueError`` for a name outside the safe
+        # alphabet (the name validity is enforced in ``register``, not on
+        # the Pydantic model).
+        return _RegisterFailure(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, field_errors={"name": str(exc)}
+        )
+    except AgentPrincipalExistsError:
+        return _RegisterFailure(
+            status.HTTP_409_CONFLICT,
+            field_errors={"name": "an agent principal with this name already exists"},
+        )
+    except KeycloakAdminNotConfiguredError:
+        return _RegisterFailure(
+            status.HTTP_503_SERVICE_UNAVAILABLE, banner=KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL
+        )
+    except KeycloakAdminError:
+        return _RegisterFailure(status.HTTP_502_BAD_GATEWAY, banner="keycloak_admin_error")
+    except SchedulerVaultBrokerError as exc:
+        return _RegisterFailure(
+            status.HTTP_502_BAD_GATEWAY,
+            banner=(
+                SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+                if exc.token_invalid
+                else "scheduler_vault_write_error"
+            ),
+        )
 
 
 async def render_revoke_modal(

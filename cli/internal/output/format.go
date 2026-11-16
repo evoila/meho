@@ -261,7 +261,7 @@ func InsufficientBudget(detail string) *StructuredError {
 // also sets SilenceErrors=true: cobra sees a non-nil error and
 // flips to a non-zero return without re-emitting any text.
 func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
-	err = withTenantNotChosenHint(err)
+	err = withLoginProfile(withTenantNotChosenHint(err))
 	if jsonOut {
 		// JSON path: serialise the envelope to stderr ourselves.
 		body := jsonError{
@@ -508,7 +508,16 @@ func formatOperatorIdentity(op api.OperatorIdentity) string {
 // formatVault renders a VaultStatus as "reachable, read ok",
 // "reachable, read failed (<detail>)", or "unreachable (<detail>)".
 // The exact phrasing matches the issue body's example output.
+//
+// When the backplane ran no check (checked=false), it prints
+// "not checked (<reason>)", for example "not checked (needs the
+// operator role)" for a caller below the operator role. An older
+// backplane sends no checked field; the line then shows the reachable
+// and read state.
 func formatVault(v api.VaultStatus) string {
+	if line, ok := VaultNotChecked(v); ok {
+		return line
+	}
 	if !v.Reachable {
 		return joinDetail("unreachable", v.Detail)
 	}
@@ -516,6 +525,19 @@ func formatVault(v api.VaultStatus) string {
 		return joinDetail("reachable, read failed", v.Detail)
 	}
 	return joinDetail("reachable, read OK", v.Detail)
+}
+
+// VaultNotChecked returns "not checked (<reason>)" and true when the
+// backplane ran no Vault check (checked=false), for example "not
+// checked (needs the operator role)". It returns false when the check
+// ran, or when an older backplane sends no checked field.
+func VaultNotChecked(v api.VaultStatus) (string, bool) {
+	if v.Checked == nil || *v.Checked {
+		return "", false
+	}
+	reason := strings.TrimPrefix(strings.TrimSpace(derefString(v.Detail)), "not checked:")
+	reason = strings.TrimSpace(reason)
+	return joinDetail("not checked", &reason), true
 }
 
 // formatDB renders a DbStatus. Migrated == nil ("unknown") happens

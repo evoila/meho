@@ -26,6 +26,7 @@ from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import as_utc, target_kinds_enabled
 from meho_backplane.operations.service_grants import (
+    always_wait_grant_reason,
     caller_address_grant_reason,
     delete_grant_reason,
 )
@@ -79,6 +80,7 @@ def _never_covered(descriptor: EndpointDescriptor) -> bool:
         is_root_shell(descriptor.op_id)
         or needs_per_call_approval(descriptor.op_id)
         or caller_address_grant_reason(descriptor) is not None
+        or always_wait_grant_reason(descriptor) is not None
     ):
         return True
     patterns = get_settings().service_grant_delete_shaped_patterns

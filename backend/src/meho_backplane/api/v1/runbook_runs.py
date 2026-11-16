@@ -386,7 +386,8 @@ async def advance_run(
     * :class:`RunAlreadyTerminalError` -> 400 (run is already
       ``completed`` / ``abandoned``).
     * :class:`PreviousStepFailedError` -> 400 (current step is in
-      ``failed`` state; the only forward path is :func:`abort_run`).
+      ``failed`` state and the request has no ``retry``; send
+      ``retry=true`` to run its check again, or use :func:`abort_run`).
     * :class:`PreviousStepNotVerifiedError` -> 400 (engine-side gate:
       previous step never transitioned to ``verified``).
     * :class:`VerifyResponseRequiredError` -> 422 (the step needs a

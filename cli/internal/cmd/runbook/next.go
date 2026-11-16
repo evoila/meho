@@ -69,6 +69,7 @@ import (
 func newNextRunCmd() *cobra.Command {
 	var (
 		verifyResponse    string
+		retry             bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -79,8 +80,9 @@ func newNextRunCmd() *cobra.Command {
 			"to advance the run one step. The substrate is the verify " +
 			"oracle: a step transitions to verified (and the run " +
 			"advances) when the verify predicate matches; otherwise " +
-			"the step transitions to failed and the only forward path " +
-			"is `meho runbook abort`.\n\n" +
+			"the step transitions to failed. Fix the cause, then run " +
+			"`next --retry` to run its check again, or use " +
+			"`meho runbook abort`. Every attempt is kept.\n\n" +
 			"--verify-response yes|no|escalate supplies the answer " +
 			"for a confirm-typed verify directly (scripted use). " +
 			"Without the flag, `next` calls the substrate first; if " +
@@ -102,6 +104,7 @@ func newNextRunCmd() *cobra.Command {
 			return runNextRun(cmd, nextRunOptions{
 				RunID:             args[0],
 				VerifyResponse:    verifyResponse,
+				Retry:             retry,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -109,6 +112,8 @@ func newNextRunCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&verifyResponse, "verify-response", "",
 		"answer for a confirm-typed verify: yes|no|escalate (omit to prompt interactively)")
+	cmd.Flags().BoolVar(&retry, "retry", false,
+		"run the check of a failed step again (after you fixed the cause)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw NextStepResponse JSON instead of the human block")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -119,6 +124,7 @@ func newNextRunCmd() *cobra.Command {
 type nextRunOptions struct {
 	RunID             string
 	VerifyResponse    string
+	Retry             bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -171,7 +177,7 @@ func runNextRun(cmd *cobra.Command, opts nextRunOptions) error {
 	// to let the substrate either dispatch the operation_call verify
 	// or surface VerifyResponseRequiredError on a confirm step we
 	// then prompt for.
-	resp, ferr := postNext(cmd.Context(), backplaneURL, runID, answer)
+	resp, ferr := postNext(cmd.Context(), backplaneURL, runID, answer, opts.Retry)
 	if ferr != nil {
 		return renderRequestError(cmd, backplaneURL, ferr, opts.JSONOut)
 	}
@@ -224,12 +230,13 @@ func postNext(
 	backplaneURL string,
 	runID uuid.UUID,
 	answer string,
+	retry bool,
 ) (*api.AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	body := buildNextRequestBody(answer)
+	body := buildNextRequestBody(answer, retry)
 	params := &api.AdvanceRunApiV1RunbooksRunsRunIdNextPostParams{}
 	return retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
@@ -248,13 +255,13 @@ func postNext(
 // neither holds. The substrate's gating is unchanged either way --
 // the field exists so the wire log captures the operator's belief
 // alongside the substrate's verdict.
-func buildNextRequestBody(answer string) api.NextStepRequest {
+func buildNextRequestBody(answer string, retry bool) api.NextStepRequest {
 	if answer == "" {
 		// Either the substrate will dispatch an operation_call
 		// verify itself, or this is the first call where no prior
 		// step exists. Either way we send last_verified=false so
 		// the wire log accurately reflects "no claim".
-		return api.NextStepRequest{LastVerified: false}
+		return api.NextStepRequest{LastVerified: false, Retry: retryField(retry)}
 	}
 	// The operator answered the confirm prompt. Wire shape:
 	//   verify_response: {"type": "confirm", "answer": "yes"|"no"|"escalate"}
@@ -264,7 +271,16 @@ func buildNextRequestBody(answer string) api.NextStepRequest {
 	return api.NextStepRequest{
 		LastVerified:   true,
 		VerifyResponse: &vr,
+		Retry:          retryField(retry),
 	}
+}
+
+// retryField sends retry only when set, so a plain call keeps the old body.
+func retryField(retry bool) *bool {
+	if !retry {
+		return nil
+	}
+	return &retry
 }
 
 // makeConfirmVerifyResponse builds the discriminated-union payload
@@ -342,7 +358,7 @@ func promptAndRetryConfirm(
 	if perr != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(perr.Error()), opts.JSONOut)
 	}
-	resp, rerr := postNext(cmd.Context(), backplaneURL, runID, answer)
+	resp, rerr := postNext(cmd.Context(), backplaneURL, runID, answer, opts.Retry)
 	if rerr != nil {
 		return renderRequestError(cmd, backplaneURL, rerr, opts.JSONOut)
 	}

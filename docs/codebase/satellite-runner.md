@@ -18,11 +18,23 @@ passive.
 
 A runner is a *dumb executor of centrally-authorized work*. It has **no**
 local Postgres, Valkey, UI, MCP, or inbound listener. Each tick it polls
-central for its assignment, executes the read-only
-(`safety_level == "safe"`) operations locally against the same connector
-surface the central instance uses, and reports results back. All
-authorization, approval, and audit stay central; the runner never
-self-authorizes.
+central for its assignment, executes the work items locally against the
+same connector surface the central instance uses, and reports results
+back. All authorization, approval, and audit stay central; the runner
+never self-authorizes.
+
+What a runner runs depends on the `safety_level` of the operation. There
+are three outcomes:
+
+- `safe` operations (reads) run. This is the default, and the only kind
+  that can be in a recurring assignment.
+- `caution` operations (low-risk writes) run only through the write gate:
+  a person's approval, a signature from the central instance, and an
+  allowlist entry at the center and on the runner. If one part is
+  missing, the operation is refused.
+- `dangerous` and `destructive` operations never run on a runner.
+
+See "Satellite-mint tier ladder" below for the details.
 
 This package (`backend/src/meho_backplane/runner/`, #2497) is the runner
 **chassis**: entrypoint, settings, tick loop, poll/report client,
@@ -129,9 +141,10 @@ authorization boundary is central minting, #2500):
    connector package set digest (see "Connector package set check"
    below). The refusal names both digests.
 2. Classify the item's `safety_level` against the shared satellite-mint
-   tier ladder (see below) and refuse anything but a `SAFE`-tier item —
-   an `EXCLUDED` (`dangerous`/`destructive`) item outright, a `remote-write`
-   (`caution`) item through the fail-closed edge re-check.
+   tier ladder (see below). A `SAFE`-tier item goes on. An `EXCLUDED`
+   (`dangerous`/`destructive`) item is refused outright. A `remote-write`
+   (`caution`) item goes on only if the signature check and the allowlist
+   re-check at the edge both pass, and is refused otherwise.
 3. Refuse any `handler_ref` not lexically under
    `meho_backplane.connectors.` — checked **before** import (import has
    module-load side effects) and re-checked on the resolved callable's

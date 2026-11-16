@@ -18,11 +18,14 @@ breaks. The shape assertion below would catch that.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
+from meho_backplane.auth import tool_clients
+from meho_backplane.auth.tool_clients import MCP_TOOL_CLIENTS, ToolClientCheck
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -41,10 +44,10 @@ def _auth_config_settings(
     re-clears the cache around every test; we set the auth-specific
     keys this route reads.
     """
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.evba.lab/realms/evba")
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.test/realms/example")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("KEYCLOAK_CLI_CLIENT_ID", "meho-cli")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.evba.lab")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.example.test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -66,7 +69,7 @@ def test_auth_config_returns_keycloak_issuer_audience_and_cli_client_id(
     assert response.status_code == 200
     payload = response.json()
     assert payload == {
-        "keycloak_issuer": "https://keycloak.evba.lab/realms/evba",
+        "keycloak_issuer": "https://keycloak.example.test/realms/example",
         "audience": "meho-backplane",
         "cli_client_id": "meho-cli",
         "cli_approve_client_id": "meho-cli-approve",
@@ -93,10 +96,10 @@ def test_auth_config_cli_client_id_defaults_empty_when_unset(
     error from the CLI (where the operator sees it) to a backplane
     CrashLoopBackOff (where they don't).
     """
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.evba.lab/realms/evba")
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.test/realms/example")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.delenv("KEYCLOAK_CLI_CLIENT_ID", raising=False)
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.evba.lab")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.example.test")
     get_settings.cache_clear()
 
     try:
@@ -109,7 +112,7 @@ def test_auth_config_cli_client_id_defaults_empty_when_unset(
     payload = response.json()
     assert payload["cli_client_id"] == ""
     # Sanity: the other fields still populate.
-    assert payload["keycloak_issuer"] == "https://keycloak.evba.lab/realms/evba"
+    assert payload["keycloak_issuer"] == "https://keycloak.example.test/realms/example"
     assert payload["audience"] == "meho-backplane"
 
 
@@ -191,9 +194,15 @@ def test_auth_config_lists_a_client_per_tool_kind_with_the_switch_on(
     monkeypatch: pytest.MonkeyPatch,
     value: str,
 ) -> None:
-    """``MCP_CLIENT_PER_TOOL_KIND`` on: each AI tool kind gets its own client."""
+    """``MCP_CLIENT_PER_TOOL_KIND`` on: each AI tool kind gets its own client.
+
+    Keycloak has both clients here; ``test_mcp_tool_clients_check.py``
+    covers a missing client and a failed check.
+    """
     monkeypatch.setenv("MCP_CLIENT_PER_TOOL_KIND", value)
     get_settings.cache_clear()
+    found = ToolClientCheck(present=dict(MCP_TOOL_CLIENTS), checked_at=time.monotonic())
+    monkeypatch.setattr(tool_clients, "_last", found)
     with TestClient(app) as client:
         response = client.get("/api/v1/auth-config")
 

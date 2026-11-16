@@ -96,6 +96,7 @@ from meho_backplane.auth.client_identity import (
     apply_client_block,
     build_client_block,
     channel_of,
+    clean_client_text,
     client_identity_enabled,
 )
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
@@ -119,6 +120,8 @@ from meho_backplane.operations._audit import (
     agent_session_id_var,
     parent_audit_id_var,
     policy_decision_var,
+    policy_rule_columns,
+    policy_rule_var,
     resolve_agent_session_id,
     work_ref_var,
 )
@@ -173,6 +176,12 @@ from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
+from meho_backplane.policy.routing import (
+    ROUTING_INVALID_RULE,
+    routing_enabled,
+    routing_refusal,
+    stamp_approver_set,
+)
 from meho_backplane.version import running_release_id
 
 __all__ = [
@@ -188,6 +197,7 @@ __all__ = [
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
     "ApprovalRoleFloorError",
+    "ApprovalRoutingError",
     "ApprovalRule",
     "ApprovalSignInReusedError",
     "ApprovalSignInTooOldError",
@@ -258,6 +268,8 @@ _DECISION_STATUS_CODE_EXPIRED: int = 410
 #: MEHO was updated while the request waited (#5030), or the target changed
 #: or no longer resolves (:func:`refuse_resume_if_target_changed`).
 _RESUME_REFUSED_STATUS_CODE: int = 409
+#: The audit status of a park refused because the stored routing is not valid.
+_ROUTING_REFUSED_STATUS_CODE: int = 409
 
 #: Who may approve another person's ``dangerous`` or ``destructive`` change,
 #: in words for the refusal texts. The rule itself is in
@@ -543,6 +555,7 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
     ``docs/decisions/approval-groups-and-self-approval.md``. Subclasses
     :class:`UnauthorizedApprovalError`, so every handler of that error still
     answers 403; the approve routes catch this one first to show its text.
+    *reason* replaces that text (:class:`ApprovalRoutingError` passes its own).
     """
 
     def __init__(
@@ -552,11 +565,12 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         operator_sub: str,
         role: str,
         safety_level: str,
+        reason: str | None = None,
     ) -> None:
         self.request_id = request_id
         self.safety_level = safety_level
         #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = (
+        self.reason_text = reason or (
             f"You cannot approve this {safety_level} change of another person. "
             f"Only {_HIGH_RISK_APPROVERS_TEXT} may approve dangerous and "
             "destructive changes."
@@ -571,11 +585,28 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         )
 
 
+class ApprovalRoutingError(ApprovalGroupForbiddenError):
+    """The person is not in a login group kind the request is routed to.
+
+    Raised by :func:`approve_request` when the ``POLICY_APPROVER_ROUTING``
+    switch is on, the request stored the group kinds that may approve it
+    (:mod:`meho_backplane.policy.routing`), and the person's kind is not one
+    of them. Subclasses :class:`ApprovalGroupForbiddenError`, so every
+    approve route answers 403 with :attr:`reason_text`: one sentence that
+    names who may approve.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, reason: str) -> None:
+        super().__init__(
+            request_id, operator_sub=operator_sub, role=role, safety_level="", reason=reason
+        )
+
+
 class NonHumanApprovalError(UnauthorizedApprovalError):
     """A machine (non-human) principal tried to decide an approval request.
 
     Approving / rejecting / deciding a parked op is a **human** decision
-    (v0.1-spec §7, meho-internal#289). Raised by :func:`_check_reviewer_role`
+    (v0.1-spec §7). Raised by :func:`_check_reviewer_role`
     when ``operator.principal_kind`` is a machine kind (agent / service /
     runner), independent of tenant role or the ``approver`` capability — an
     agent principal is minted ``tenant_admin``, so a role/approver check
@@ -1286,6 +1317,14 @@ def _bounded_expires_at(
     return min(requested, ceiling)
 
 
+def _policy_rule_fields() -> dict[str, Any]:
+    """``policy_rule`` and ``policy_version`` of a new request, from ``policy_rule_var``."""
+    stamp = policy_rule_var.get()
+    if stamp is None:
+        return {}
+    return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1343,10 +1382,21 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The group kind the policy file's bindings gave the person who acted on
+    # this row (POLICY_APPROVER_ROUTING), so a decision row says where the
+    # approver's right came from.
+    if operator.bound_kind is not None:
+        payload["bound_kind"] = operator.bound_kind.value
     # The login client of the person who acted on this row (the requester on
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.
     apply_client_block(payload, operator)
+    # Approver routing: the group kinds that may approve the request and
+    # the routing entry that set them. Only on a request routed while the
+    # POLICY_APPROVER_ROUTING switch was on.
+    if request.approver_rule is not None:
+        payload["approver_rule"] = request.approver_rule
+        payload["approver_roles"] = request.approver_roles
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1361,6 +1411,12 @@ async def _write_audit_row(
     policy_kwargs: dict[str, Any] = {}
     if hasattr(AuditLog, "policy_decision"):
         policy_kwargs["policy_decision"] = policy_decision_var.get()
+    # The matched policy rule (#6044), only on the "request" row. A
+    # "decision" row can be written on the task of another call: a retry
+    # that expires an old overdue request writes that request's decision
+    # row while the retry's own rule is bound.
+    if path == "approval.request":
+        policy_kwargs.update(policy_rule_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -1429,7 +1485,14 @@ class ResumeRequester(NamedTuple):
     #: The requester's ``client`` block from the stored effect
     #: (AUDIT_CLIENT_IDENTITY). ``None`` when the request has none.
     client: dict[str, Any] | None = None
+    #: The requester record on the card (``permission_preflight["requester"]``),
+    #: so a re-park keeps it (#6314). ``None`` when the card has none.
+    subject: dict[str, Any] | None = None
 
+
+#: Where the card keeps the requester record (#3898, #6314).
+_PERMISSION_PREFLIGHT_KEY = "permission_preflight"
+_REQUESTER_KEY = "requester"
 
 #: The requester of the approval request whose composite is being re-run
 #: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
@@ -1464,6 +1527,7 @@ async def create_pending_request(
     requester: ResumeRequester | None = None,
     reveal_secret: bool = False,
     rights_change: bool = False,
+    category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1542,6 +1606,10 @@ async def create_pending_request(
             run deleted the payload. It is not part of *params_hash*, so
             the retry check and the approval surfaces compare the call
             without it.
+        category: The category the classification gave the operation
+            (the looked-up row's ``policy_category``). Approver routing
+            matches a ``category`` entry on it
+            (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1591,6 +1659,7 @@ async def create_pending_request(
         client = build_client_block(operator) if requester is None else requester.client
         if client is not None:
             proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
+    proposed_effect = _with_requester_record(proposed_effect, operator, requester)
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
     # subject's behalf on a delegated run, read from the same
@@ -1673,9 +1742,15 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        **_policy_rule_fields(),
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
+    try:
+        await stamp_approver_set(session, request, category=category)
+    except ValueError as exc:
+        await _audit_routing_refusal(operator, request, request_audit_id, str(exc))
+        raise
     if idempotency_key is None:
         session.add(request)
         await session.flush()
@@ -1717,6 +1792,42 @@ async def create_pending_request(
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def _audit_routing_refusal(
+    operator: Operator, request: ApprovalRequest, audit_id: uuid.UUID, routing_error: str
+) -> None:
+    """Write the audit row of a park refused because the stored routing is not valid.
+
+    The caller's transaction rolls back with the refusal, so the row is
+    written in its own session. Its id *audit_id* is the request's
+    ``request_audit_id``, the id the "request" row would have had. A failed
+    write is logged; the park is refused either way.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            await _write_audit_row(
+                session,
+                audit_id=audit_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                operator=operator,
+                request=request,
+                path="approval.request",
+                status_code=_ROUTING_REFUSED_STATUS_CODE,
+                duration_ms=0.0,
+                extra_payload={
+                    "result_status": "routing_invalid",
+                    "approver_rule": ROUTING_INVALID_RULE,
+                    "routing_error": routing_error,
+                },
+            )
+            await session.commit()
+    except Exception:
+        _log().exception(
+            "approval_routing_refusal_audit_failed", approval_request_id=str(request.id)
+        )
 
 
 def _approval_lock_key(scope: str, key: str) -> int:
@@ -1833,9 +1944,9 @@ def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[
 
     ``approver_azp`` and ``approver_channel`` come from the checked login.
     ``approver_user_agent`` is the ``User-Agent`` header of a REST approve,
-    cut to 256 characters. The tool sends it about itself and MEHO cannot
-    check it, so it is marked ``"self_declared": true``. Empty when the
-    switch is off.
+    cleaned like every client text and cut to 256 characters. The tool sends
+    it about itself and MEHO cannot check it, so it is marked
+    ``"self_declared": true``. Empty when the switch is off.
     """
     if not client_identity_enabled():
         return {}
@@ -1843,11 +1954,9 @@ def _approver_client_fields(operator: Operator, user_agent: str | None) -> dict[
         "approver_azp": operator.azp,
         "approver_channel": channel_of(operator),
     }
-    if user_agent:
-        fields["approver_user_agent"] = {
-            "value": user_agent[:_USER_AGENT_MAX_LENGTH],
-            "self_declared": True,
-        }
+    cleaned = clean_client_text(user_agent, _USER_AGENT_MAX_LENGTH)
+    if cleaned:
+        fields["approver_user_agent"] = {"value": cleaned, "self_declared": True}
     return fields
 
 
@@ -1950,6 +2059,9 @@ async def approve_request(
         ApprovalGroupForbiddenError: Another person's ``dangerous`` or
             ``destructive`` change, and the approver is not in a group that
             may approve it (#3328).
+        ApprovalRoutingError: With approver routing on, the person is not
+            in a login group kind the request stored as the ones that may
+            approve it (:mod:`meho_backplane.policy.routing`).
         ApprovalRoleFloorError: The operation needs a role from the person
             who runs it, and the approver's role is below it.
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
@@ -2934,15 +3046,42 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217), with the requester's ``client`` block."""
-    client = (request.proposed_effect or {}).get(CLIENT_PAYLOAD_KEY)
+    """The requester saved on *request* (#4217), with its ``client`` block and record."""
+    effect = request.proposed_effect or {}
+    client = effect.get(CLIENT_PAYLOAD_KEY)
+    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
+    subject = preflight.get(_REQUESTER_KEY) if isinstance(preflight, dict) else None
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
         request.principal_name,
         request.principal_kind,
         client if isinstance(client, dict) else None,
+        subject if isinstance(subject, dict) else None,
     )
+
+
+def _with_requester_record(
+    proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
+) -> dict[str, Any]:
+    """Put the agent requester's record on the card (#6314), when there is one.
+
+    An approvals surface runs the approved call as the person who approved
+    it. It rebuilds the agent from this record to check the agent's grants
+    for the steps again
+    (:func:`~meho_backplane.operations.approved_step_check.approved_step_refusal`).
+    A re-park on behalf of an earlier requester keeps that requester's
+    record. A record the operation's own preflight stored stays.
+    """
+    from meho_backplane.operations.approved_step_check import requester_record
+
+    record = requester_record(operator) if requester is None else requester.subject
+    if record is None:
+        return proposed_effect
+    preflight = proposed_effect.get(_PERMISSION_PREFLIGHT_KEY)
+    preflight = dict(preflight) if isinstance(preflight, dict) else {}
+    preflight.setdefault(_REQUESTER_KEY, record)
+    return {**proposed_effect, _PERMISSION_PREFLIGHT_KEY: preflight}
 
 
 @contextmanager
@@ -3539,7 +3678,7 @@ def _check_reviewer_role(operator: Operator) -> None:
     """
     from meho_backplane.auth.operator import TenantRole, is_human_principal
 
-    # Human-only governance (v0.1-spec §7, meho-internal#289): a machine
+    # Human-only governance (v0.1-spec §7): a machine
     # principal (agent / service / runner) can never decide an approval,
     # regardless of tenant role or the ``approver`` capability. Checked
     # first so a machine token minted ``tenant_admin`` is refused here too.
@@ -3728,6 +3867,32 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`ApprovalRoutingError` when *operator* is not in the stored group kinds.
+
+    Runs after today's checks. Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off, or when the request stored no
+    group kinds (it keeps today's rule).
+    """
+    if not routing_enabled():
+        return
+    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+
+
+def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
+    """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
+    from meho_backplane.policy.shadow import shadow_approval
+
+    shadow_approval(operator, request, today=today)
+
+
 async def _load_pending_for_approval(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -3741,7 +3906,8 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → params-hash check (only when
+    (:func:`_check_approver_role_floor`) → the stored approver group kinds
+    (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
     rule that allowed the approval; the caller flips status + writes the
@@ -3761,8 +3927,14 @@ async def _load_pending_for_approval(
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
         raise ApprovalRequestExpiredError(request_id)
-    rule = _check_approver_group(operator, request)
-    _check_approver_role_floor(operator, request)
+    try:
+        rule = _check_approver_group(operator, request)
+        _check_approver_role_floor(operator, request)
+    except (UnauthorizedApprovalError, SelfApprovalForbiddenError):
+        _shadow_approval(operator, request, today=False)
+        raise
+    _shadow_approval(operator, request, today=True)
+    _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
@@ -4080,6 +4252,11 @@ async def record_approval_step_event(
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
 
+    It also starts the push messages to the browsers of the people who may
+    approve the request (:func:`~meho_backplane.web_push.send.notify_approval_step`).
+    Every caller runs this after its commit, so a message never goes out
+    for a request whose audit row did not commit.
+
     An ``approved`` event also carries ``reviewed_by`` (who approved),
     ``self_approved`` and, when :func:`approve_request` set it,
     ``approval_rule`` (#3328) -- the same fields as the
@@ -4090,7 +4267,12 @@ async def record_approval_step_event(
     (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
+    from meho_backplane.web_push.send import notify_approval_step
 
+    # Push messages to the people who may approve (web_push/send.py). It
+    # only starts a background task, so it never slows the caller, and
+    # never raises.
+    notify_approval_step(tenant_id=tenant_id, request=request, decision=decision)
     payload: dict[str, object] = {
         "approval_request_id": str(request.id),
         "decision": decision,

@@ -42,8 +42,10 @@ from meho_backplane.operations._validate import compute_audit_digest_hash
 
 __all__ = [
     "FINGERPRINT_PREFIX",
+    "REVEAL_NOT_IN_BACKGROUND",
     "REVEAL_SECRET_PARAM",
     "SECRET_VALUE_PLACEHOLDER",
+    "asks_reveal",
     "fingerprint_hidden_values",
     "fingerprint_value",
     "fingerprinted_paths",
@@ -65,6 +67,15 @@ FINGERPRINT_PREFIX: Final[str] = "[FINGERPRINT:hmac-sha256:"
 #: The dispatch control a person or a service principal sets to get the
 #: hidden values of an answer back.
 REVEAL_SECRET_PARAM: Final[str] = "reveal_secret"
+
+#: The answer to a call that sets both ``reveal_secret: true`` and
+#: ``async: true``. A reveal call cannot run in the background: it runs at
+#: once, or through an approval.
+REVEAL_NOT_IN_BACKGROUND: Final[str] = (
+    "`reveal_secret: true` cannot be used with `async: true`. A call that shows "
+    "secret values cannot run in the background: it runs at once, or through an "
+    "approval. Send the call again without `async`."
+)
 
 _MISSING: Final[object] = object()
 
@@ -158,6 +169,11 @@ def split_reveal_secret(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     reveal_secret = bool(params[REVEAL_SECRET_PARAM])
     without = {key: value for key, value in params.items() if key != REVEAL_SECRET_PARAM}
     return without, reveal_secret
+
+
+def asks_reveal(params: object) -> bool:
+    """True when *params* (the ``params`` of a call) set ``reveal_secret`` to a true value."""
+    return isinstance(params, Mapping) and bool(params.get(REVEAL_SECRET_PARAM))
 
 
 def with_reveal_secret(params: dict[str, Any]) -> dict[str, Any]:

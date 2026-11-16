@@ -136,6 +136,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -145,14 +147,17 @@ jobs:
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files=$(gh api --paginate \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files" \
             --jq '.[].filename')
           if grep -qE '^(deploy/charts/meho/|deploy/linux-server/packaging/render-values\.yaml$|deploy/linux-server/values-single-node\.yaml$|deploy/golden/|deploy/values-examples/values-openshift\.yaml$|scripts/ci/helm_golden\.py$|\.github/workflows/chart\.yml$)' <<<"$files"; then
             echo "chart=true" >> "$GITHUB_OUTPUT"
@@ -163,7 +168,8 @@ jobs:
   validate:
     name: Lint + template + kubeconform (PR build gate)
     # Fork-PR guard: fork PRs are skipped entirely (mirrors image.yml).
-    # The job runs on a GitHub-hosted runner: helm and kubeconform come from
+    # The job runs on a GitHub-hosted runner (own pool in the merge queue):
+    # helm and kubeconform come from
     # public releases. push events (main, v*) short-circuit the OR. The trailing `needs.changes.outputs.chart` clause skips this job
     # (→ reported Success) on PRs that don't touch the chart.
     needs: changes
@@ -171,7 +177,7 @@ jobs:
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.chart == 'true')
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -832,10 +838,9 @@ jobs:
     #      tripped Docker Hub's rate-limit on this repo's other CI
     #      lanes -- pre-loading sidesteps it.
     #
-    # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
-    # needs Docker-in-Docker support that the self-hosted runner
-    # pool isn't configured for; the GitHub-hosted runners ship
-    # Docker pre-installed and helm/kind-action works out of the box.
+    # Runs on ``ubuntu-latest`` for every event, the merge queue too.
+    # kind installs need more CPU than the own heavy-queue pool has today;
+    # back to an own pool when the second runner pool exists (#6026).
     #
     # #4099 -- ``helm install`` and ``helm test`` run as a namespace
     # admin (``--kube-as-user``), not as kind's cluster admin, so a chart
@@ -2651,35 +2656,45 @@ jobs:
     # there. The gate skips too, so it does not fail on the skipped `changes`.
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [changes, validate, helm-test, helm-test-byo, upgrade-from-release]
+    # Short job: it stays hosted in the merge queue too (#6350). It is on the
+    # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Evaluate gate
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_CHART: ${{ needs.changes.outputs.chart }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          HELM_TEST_RESULT: ${{ needs.helm-test.result }}
+          HELM_TEST_BYO_RESULT: ${{ needs.helm-test-byo.result }}
+          UPGRADE_RESULT: ${{ needs.upgrade-from-release.result }}
+          UPGRADE_EXPECTED: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
           # Detection must have succeeded — a flaky `changes` must never pass.
-          if [[ "${{ needs.changes.result }}" != "success" ]]; then
-            echo "::error title=Chart gate failed::the changes-detection job did not succeed (result=${{ needs.changes.result }}); failing closed."
+          if [[ "${CHANGES_RESULT}" != "success" ]]; then
+            echo "::error title=Chart gate failed::the changes-detection job did not succeed (result=${CHANGES_RESULT}); failing closed."
             exit 1
           fi
-          if [[ "${{ needs.changes.outputs.chart }}" == "true" ]]; then
+          if [[ "${CHANGES_CHART}" == "true" ]]; then
             # Chart PR (or push): validate + the kind helm-test must both pass.
-            if [[ "${{ needs.validate.result }}" != "success" ]]; then
-              echo "::error title=Chart gate failed::validate (helm lint/template/kubeconform) did not pass (result=${{ needs.validate.result }})."
+            if [[ "${VALIDATE_RESULT}" != "success" ]]; then
+              echo "::error title=Chart gate failed::validate (helm lint/template/kubeconform) did not pass (result=${VALIDATE_RESULT})."
               exit 1
             fi
-            if [[ "${{ needs.helm-test.result }}" != "success" ]]; then
-              echo "::error title=Chart gate failed::helm-test (kind install + pgvector preflight) did not pass (result=${{ needs.helm-test.result }})."
+            if [[ "${HELM_TEST_RESULT}" != "success" ]]; then
+              echo "::error title=Chart gate failed::helm-test (kind install + pgvector preflight) did not pass (result=${HELM_TEST_RESULT})."
               exit 1
             fi
-            if [[ "${{ needs.helm-test-byo.result }}" != "success" ]]; then
-              echo "::error title=Chart gate failed::helm-test-byo (kind install with bring-your-own PostgreSQL) did not pass (result=${{ needs.helm-test-byo.result }})."
+            if [[ "${HELM_TEST_BYO_RESULT}" != "success" ]]; then
+              echo "::error title=Chart gate failed::helm-test-byo (kind install with bring-your-own PostgreSQL) did not pass (result=${HELM_TEST_BYO_RESULT})."
               exit 1
             fi
             # Only a same-repo pull request runs this job. Other events skip it on purpose.
-            if [[ "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}" == "true" ]] \
-              && [[ "${{ needs.upgrade-from-release.result }}" != "success" ]]; then
-              echo "::error title=Chart gate failed::upgrade-from-release (upgrade from the last release with Helm 4) did not pass (result=${{ needs.upgrade-from-release.result }})."
+            if [[ "${UPGRADE_EXPECTED}" == "true" ]] \
+              && [[ "${UPGRADE_RESULT}" != "success" ]]; then
+              echo "::error title=Chart gate failed::upgrade-from-release (upgrade from the last release with Helm 4) did not pass (result=${UPGRADE_RESULT})."
               exit 1
             fi
             echo "Chart change verified: every chart job this event runs has passed."

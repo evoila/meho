@@ -613,6 +613,13 @@ config:
   # settings.py. Comma-separated exemptions: CIDR ranges (`10.0.0.0/8`),
   # bare IPs (`192.168.7.10`), and/or hostname literals
   # (`vcenter.lab.internal`); whitespace around commas is ignored.
+  # A host name or IP entry may end in a port (`vcenter.lab.internal:8443`,
+  # `[fd00::5]:8443`): it then admits that host on that port only, while
+  # a plain entry admits every port.
+  # Port entries apply to target registration and to target connections
+  # (HTTP, Postgres, MSSQL, MongoDB, SSH). They do not cover corpus
+  # sources, secret hand-off or Kubernetes connections: for those, use a
+  # plain entry.
   #
   # Default `""` keeps the guard fully on (default-deny) — a genuine
   # no-op render. MEHO is on-prem: registering appliances on private
@@ -705,6 +712,16 @@ config:
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
   # one-time code step off. The sign-in must still be recent.
   approvalOneTimeCodeAcrValues: ""
+  # -- Does an approve on the command line or REST need the approval level
+  # (`acr` `meho-approve`) that only the approval sign-in flow gives
+  # (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `"auto"` (the
+  # default): refuses a sign-in without the level while MEHO's check of
+  # the approval sign-in (`approvals.sign_in` in `/api/v1/health`) is
+  # `ok` or could not read the realm; only logs it while the check shows
+  # the realm does not give the level. `"off"`: no level check. `"observe"`:
+  # approves as before and logs `approval_sign_in_level_missing`.
+  # `"required"`: always refuses a sign-in without the level.
+  approvalSignInLevel: "auto"
   # -- Switches for what the agent sees. Each is off (`"false"`) by default
   # and stays off until model tests show it helps.
   # `teamKnowledgeRecall` is rendered into `TEAM_KNOWLEDGE_RECALL`. When
@@ -720,6 +737,37 @@ config:
   # `"true"`, the biggest tools on the default MCP tool list send a short
   # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- `mcpClientPerToolKind` is rendered into `MCP_CLIENT_PER_TOOL_KIND`.
+  # When `"true"`, Claude Code and Claude Desktop sign in with their own
+  # login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client
+  # only when it finds it in Keycloak, through the admin client. See
+  # `docs-site/install/keycloak-realm.md`.
+  mcpClientPerToolKind: "false"
+  # -- Policy switches. `policy.classification` is rendered into
+  # `POLICY_CLASSIFICATION`. When `"true"`, each connector, operation
+  # group and operation can carry a category, labels and an "always wait"
+  # mark, and an operation takes the values of its group and connector.
+  # When `"false"` (the default), MEHO reads none of it and behaves as
+  # before. See `docs/codebase/policy-classification.md`.
+  # `policy.engineShadow` is rendered into `POLICY_ENGINE_SHADOW`. When
+  # `"true"`, the policy evaluator works out its own answer next to
+  # today's checks and logs every difference. It also writes the rule it
+  # matched on audit rows and approval requests, and a preview shows the
+  # rule and who may approve. It decides nothing. When
+  # `"false"` (the default), it does not run. See
+  # `docs/codebase/policy-evaluator.md`.
+  # `policy.approverRouting` is rendered into `POLICY_APPROVER_ROUTING`.
+  # When `"true"`, a waiting request stores the login group kinds that may
+  # approve it, from the policy file's `routing` section, and MEHO checks
+  # them at the click. The `bindings` of the tenant's policy file give login
+  # groups, matched by full path or group attribute, a group kind and
+  # categories. When `"false"` (the default), MEHO reads no binding and
+  # today's rule decides who may approve. See `docs/codebase/approvals.md`
+  # and `docs/codebase/policy-bindings.md`.
+  policy:
+    classification: "false"
+    engineShadow: "false"
+    approverRouting: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and
@@ -1890,7 +1938,7 @@ retrieval:
 # Kubernetes Secrets *by name* (e.g. `postgres.credentialsSecret`) and
 # leaves the sync mechanism to the consumer's GitOps repo. This matches
 # Goal #11's cross-repo convention where
-# `evoila-bosnia/claude-rdc-hetzner-dc` owns the ExternalSecret manifests.
+# the consumer's own GitOps repository owns the ExternalSecret manifests.
 #
 # Flipping `enabled: true` makes the chart render ExternalSecret CRs for
 # `postgres.credentialsSecret` and (when `eso.keycloak.enabled: true`) the

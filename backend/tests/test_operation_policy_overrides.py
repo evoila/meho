@@ -173,6 +173,40 @@ async def _last_edit_audit() -> dict[str, Any]:
     return payload
 
 
+@pytest.mark.asyncio
+async def test_an_edit_back_to_the_code_level_keeps_a_category(embedding: AsyncMock) -> None:
+    """An override row that also holds a category or labels is not deleted by an edit."""
+    tenant = uuid.uuid4()
+    await _register_typed(embedding)
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=tenant,
+                **_TYPED,
+                op_id="typedpets.pet.update",
+                safety_level="dangerous",
+                category="network",
+                labels={"team": "pets"},
+                set_by_sub="fixture-admin",
+            )
+        )
+        await session.commit()
+
+    await ReviewService(_operator(tenant)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant, safety_level="caution"
+    )
+
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(OperationPolicyOverride).where(OperationPolicyOverride.tenant_id == tenant)
+            )
+        ).scalar_one()
+    assert (row.safety_level, row.requires_approval) == (None, None)
+    assert (row.category, row.labels) == ("network", {"team": "pets"})
+    assert await _effective(tenant) == ("caution", False)
+
+
 # ---------------------------------------------------------------------------
 # Tightening sticks
 # ---------------------------------------------------------------------------

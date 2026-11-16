@@ -219,3 +219,29 @@ func TestRunRemoveOverrideRejectsBadTenant(t *testing.T) {
 		t.Errorf("message must name the problem:\n%s", stderr.String())
 	}
 }
+
+// TestPrintOverridesTableWithClassification: with classification on, each
+// row names its category and the entry that decided the values.
+func TestPrintOverridesTableWithClassification(t *testing.T) {
+	on := true
+	category := "compute"
+	ref := "tenant:classifications[0]"
+	rows := []api.OperationOverrideRow{{
+		ConnectorId: "vault-1.x", OpId: "vault.kv.write", Scope: "install",
+		RequiresApproval: &on, SetBySub: "admin", Category: &category, RuleRef: &ref, AlwaysWait: &on,
+		SetAt: time.Date(2026, 10, 28, 9, 30, 0, 0, time.UTC),
+	}}
+	var buf bytes.Buffer
+	printOverridesTable(&buf, false, rows)
+	for _, want := range []string{"category", "source", "compute", ref, "always waits"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("table misses %q:\n%s", want, buf.String())
+		}
+	}
+	var plain bytes.Buffer
+	rows[0].RuleRef = nil
+	printOverridesTable(&plain, false, rows)
+	if strings.Contains(plain.String(), "source") {
+		t.Errorf("without classification the table keeps its columns:\n%s", plain.String())
+	}
+}

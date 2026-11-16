@@ -393,6 +393,13 @@ class Operator(BaseModel):
     #: The ``meho_tenants`` claim had a part MEHO could not read. Then
     #: ``self_approver`` stays off in every tenant (#3327).
     tenants_claim_malformed: bool = False
+    #: The group kind the bindings of the policy file give this login in the
+    #: current tenant (:mod:`meho_backplane.policy.bindings`). ``None`` when
+    #: the ``POLICY_APPROVER_ROUTING`` switch is off or no binding matched.
+    bound_kind: RoleGroup | None = None
+    #: The categories of the bindings that matched. ``"*"`` means every
+    #: category. Empty when :attr:`bound_kind` is ``None``.
+    bound_categories: frozenset[str] = frozenset()
     #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
     acr: str | None = None
     #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when
@@ -479,7 +486,7 @@ class Operator(BaseModel):
 #: runner. The human-only governance verbs (approval decisions, agent-grant
 #: create / elevate, standing-grant create / revoke for service principals
 #: (#4616), agent-principal register) refuse these kinds on **every**
-#: transport (meho-internal#289): approval is a human decision (v0.1-spec §7).
+#: transport: approval is a human decision (v0.1-spec §7).
 MACHINE_PRINCIPAL_KINDS: frozenset[PrincipalKind] = frozenset(
     {PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER}
 )

@@ -58,6 +58,7 @@ from meho_backplane.ui.auth.tenant import (
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.web_push.store import refresh_at_sign_in
 
 __all__ = ["TenantChoice", "build_tenant_router", "lift_session_operator", "tenant_choices"]
 
@@ -302,6 +303,8 @@ async def _switch(request: Request, session_ctx: UISessionContext) -> Response:
         can_switch=can_switch_tenant(operator),
     )
     _bind_switch_audit(operator, old_tenant=old_tenant)
+    # The push messages decide who may approve from these facts.
+    await refresh_at_sign_in(operator)
     _log.info(
         "ui_tenant_switched",
         session_ref=session_ref(session_ctx.session_id),

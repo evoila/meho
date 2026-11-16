@@ -74,11 +74,11 @@ func defaultDoctorDeps() doctorDeps {
 
 // runOfflineChecks runs every check that needs no network and returns
 // the backplane URL to use for the authenticated layer ("" if none).
-func runOfflineChecks(r *doctorReport, opts doctorOptions, deps doctorDeps) string {
+func runOfflineChecks(ctx context.Context, r *doctorReport, opts doctorOptions, deps doctorDeps) string {
 	r.add(checkBinary(deps))
 	backplaneURL, cfgCheck := checkConfig(opts.backplaneOverride)
 	r.add(cfgCheck)
-	r.add(checkCredentialStore(deps, backplaneURL))
+	r.add(checkCredentialStore(ctx, deps, backplaneURL))
 
 	plugin := loadPluginSettings(deps)
 	root, shimCheck := checkShim(opts.pluginRoot, deps)
@@ -138,20 +138,21 @@ const (
 	storeKeyringUnavailable = "keyring-unavailable"
 )
 
-// checkCredentialStore reports which store holds the login, mirroring
+// checkCredentialStore reports which store holds the login of the
+// profile on ctx, mirroring
 // auth.NewTokenStore's choice: MEHO_KEYRING_DISABLE forces the file; a
 // keyring that answers go-keyring's ErrNotFound is available (the entry
 // just is not there); any other keyring error means no keyring backend.
 // When both stores hold a login, keyringHit applies the same rule the
 // CLI's store applies on read.
-func checkCredentialStore(deps doctorDeps, backplaneURL string) doctorCheck {
+func checkCredentialStore(ctx context.Context, deps doctorDeps, backplaneURL string) doctorCheck {
 	file, err := auth.NewFileStore()
 	if err != nil {
 		return offline("credential store", doctorFail, err.Error(), "")
 	}
 	service, user := auth.DefaultService+"-probe", "meho-availability-check"
 	if backplaneURL != "" {
-		service, user = auth.KeyForBackplane(backplaneURL)
+		service, user = auth.KeyForContext(ctx, backplaneURL)
 	}
 	var fp fileProbe
 	if backplaneURL != "" {

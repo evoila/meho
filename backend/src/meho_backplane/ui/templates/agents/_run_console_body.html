@@ -6,6 +6,9 @@
   form + the transcript mount. Shared by ``run_console.html`` (full page)
   and returned standalone on an HTMX body swap.
 
+  With ``stream_url`` set (the page opened with ``?run=<id>``) the
+  transcript mount shows that run at once.
+
   The run form ``hx-post``s to ``POST /ui/agents/{name}/run`` (CSRF-gated)
   and swaps the response into ``#agent-run-transcript`` -- either the
   transcript fragment (which opens the live SSE stream) on success, or an
@@ -105,8 +108,13 @@
      The run POST swaps the transcript fragment (live SSE) or an inline
      error alert in here. Empty until the operator presses Run. -#}
   <div id="agent-run-transcript" aria-live="polite">
-    <p class="px-1 py-6 text-center text-sm opacity-60" data-state="idle">
-      Enter a prompt and press Run to start a live agent run.
-    </p>
+    {% if stream_url is defined %}
+      {# ``?run=<id>``: follow that run's saved events, then the live ones. #}
+      {% include "agents/_run_transcript.html" %}
+    {% else %}
+      <p class="px-1 py-6 text-center text-sm opacity-60" data-state="idle">
+        Enter a prompt and press Run to start a live agent run.
+      </p>
+    {% endif %}
   </div>
 </div>

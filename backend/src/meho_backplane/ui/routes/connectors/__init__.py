@@ -67,6 +67,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.connectors.classify_view import build_classify_router
 from meho_backplane.ui.routes.connectors.detail import build_detail_router
 from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.import_router import build_import_router
@@ -143,6 +144,9 @@ def build_router() -> APIRouter:
     # #4711: literal ``/ui/connectors/overrides`` must win over the
     # ``GET /ui/connectors/{name}`` detail catch-all.
     router.include_router(build_overrides_router())
+    # #6038: the classify page lives under ``/ui/policy``, so its order
+    # does not matter; it sits with the other policy page.
+    router.include_router(build_classify_router())
     router.include_router(build_registry_list_router())
     router.include_router(build_ingest_router())
     router.include_router(build_registry_actions_router())

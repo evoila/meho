@@ -3,7 +3,7 @@
 
 """Checks on a push subscription that a browser sends.
 
-MEHO will later send messages to the subscription's endpoint, so the
+MEHO sends messages to the subscription's endpoint, so the
 endpoint must be a push service of a browser maker, and nothing else: no
 host inside the network, no other port, no plain http. The keys must have
 the sizes the web push encryption needs (RFC 8291): ``p256dh`` is a P-256

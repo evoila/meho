@@ -74,6 +74,10 @@ records the launcher's contract and invariants.
    login key of `mcp-remote` is the URL plus the headers. Otherwise (switch
    off, older MEHO, an error, no answer) the client is `meho-mcp` and no
    header is sent; the launcher prints one line on an error.
+   The backplane lists a client only after it found it in Keycloak with
+   the admin client (`auth/tool_clients.py`, answer kept one minute); a
+   missing client, or a check that could not run, is not listed, and
+   `/ready` shows the result as `features.mcp.tool_clients`.
 4. **mcp-remote entry.** Resolved from the bundle's `node_modules` via the
    package's `bin` mapping.
 5. **Hand-off.** `process.argv` becomes

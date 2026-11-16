@@ -168,3 +168,11 @@
   />
   <span class="text-sm font-medium">Enabled</span>
 </label>
+
+{#- The starting grant pick, only when an agent definition is created
+    (#6192). The service needs it only when the agent that identity_ref
+    names has no grant yet. -#}
+{% if mode == "create" %}
+  {% set pick_for_definition = true %}
+  {% include "agents/_starting_grants_field.html" %}
+{% endif %}

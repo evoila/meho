@@ -153,6 +153,13 @@ between `[REDACTED:` and `]`, and the value ends there. A value that
 only starts like one (`[REDACTED:made-up`) or goes on after the `]`
 (`[REDACTED:x]made-up`) is redacted whole.
 
+The `api_key` rule also skips a value made only of mask characters:
+`*`, `•`, `●` and `·` (`patterns.py::MASK_CHARS`). A tool that reads a
+password prints one of them for each key, and that is not a secret. A
+value that goes on after the masks (`****abc123`) is redacted whole.
+The upload check of the session store uses the same characters, so such
+a value does not send an upload to quarantine.
+
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
 (`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is
@@ -529,10 +536,16 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   on the audit row of every secret read (`True` = values asked for,
   `False` = default view) and on the row of any other operation when the
   values were asked for (`True`). Every other dispatch leaves it `None`,
-  so the key is absent.
+  so the key is absent. A short row (stored when the database refuses the
+  full row, [audit_query.md](audit_query.md#text-the-table-cannot-store-and-the-short-row-6452))
+  keeps `reveal_secret` too. Find such rows with
+  `meho audit query --full-row-lost`.
 - **Fail closed.** The success-path audit row is required
-  (`require_audit=True`): when it does not commit, the caller gets
-  `audit_commit_failed` and no value, also for a reveal.
+  (`require_audit=True`): when no row commits, the caller gets
+  `audit_commit_failed` and no value, also for a reveal. A short row
+  counts as a committed row: the call then returns its answer, also the
+  hidden values of a reveal, and the short row holds the reveal choice but
+  not the answer.
 - **Stored audit copy** (`fingerprint_hidden_values`). For **every** op,
   the dispatcher walks the raw answer and the default view side by side.
   Each leaf or subtree that the view hides (Tier-1 redaction, the name

@@ -48,6 +48,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.agents.service import AgentDefinitionService
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.scheduler.check_source import describe_check_source_filter
 from meho_backplane.scheduler.schemas import ScheduledTriggerRead
 from meho_backplane.scheduler.service import SchedulerAdminService
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
@@ -104,6 +106,7 @@ def _build_context(
     trigger: ScheduledTriggerRead,
     *,
     agent_name: str | None,
+    starts_on: str | None,
     is_tenant_admin: bool,
     csrf_token: str,
 ) -> dict[str, object]:
@@ -121,6 +124,7 @@ def _build_context(
             "timezone": trigger.timezone,
             "fire_at": coerce_utc_aware(trigger.fire_at),
             "event_filter_json": _pretty_json(trigger.event_filter),
+            "starts_on": starts_on,
             "in_flight_policy": trigger.in_flight_policy.value,
             "next_fire_at": coerce_utc_aware(trigger.next_fire_at),
             "last_fired_at": coerce_utc_aware(trigger.last_fired_at),
@@ -177,10 +181,17 @@ def build_detail_router() -> APIRouter:
                 detail="trigger_not_found",
             )
         agent_name = await _resolve_agent_name(session_ctx.tenant_id, trigger.agent_definition_id)
+        starts_on: str | None = None
+        if trigger.kind.value == "event":
+            async with get_sessionmaker()() as db_session:
+                starts_on = await describe_check_source_filter(
+                    db_session, session_ctx.tenant_id, trigger.event_filter
+                )
         csrf_token = mint_csrf_token(str(session_ctx.session_id))
         context = _build_context(
             trigger,
             agent_name=agent_name,
+            starts_on=starts_on,
             is_tenant_admin=role_probe.is_tenant_admin,
             csrf_token=csrf_token,
         )

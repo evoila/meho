@@ -204,7 +204,7 @@ _IMPORT_LLM_INSTRUCTIONS: dict[str, Any] = {
     "parameter_hints": {
         "handoff_token": "Required. The handoff_token from secret.handoff.export.",
         "store": "Required. Name of the target here that points at the other Vault.",
-        "to": "Required. Sink '<kind>:<ref>', e.g. 'vault:tenants/<tenant-id>/...#password'.",
+        "to": "Required. A 'vault:' place here, e.g. 'vault:tenants/<tenant-id>/...#password'.",
         "expect_fingerprint": "Recommended. The value_fingerprint from the export.",
         "reason": "Optional. Shown to the approver.",
     },
@@ -259,7 +259,7 @@ async def register_secret_handoff_operations(
         summary="Use a handoff from another MEHO instance once and store the login here.",
         description=(
             "Uses a one-time handoff at the other instance's Vault and writes "
-            "the value into a sink on this instance. Returns only the status, "
+            "the value into this instance's Vault. Returns only the status, "
             "the SHA-256 and the length, never the value. Needs approval."
         ),
         parameter_schema=SECRET_HANDOFF_IMPORT_PARAMETER_SCHEMA,

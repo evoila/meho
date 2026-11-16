@@ -120,6 +120,13 @@ class AuditQueryFilters(BaseModel):
     # returns a trace for. ``False`` keeps the other rows. ``None`` (the
     # default) applies no filter.
     has_trace: bool | None = None
+    # Rows the audit writer marked (#6452). ``full_row_lost=True`` keeps only
+    # the short rows (the database refused the full row); ``text_changed=True``
+    # keeps only the rows where a character or a number was replaced so the
+    # table could store it. ``False`` keeps the other rows. ``None`` (the
+    # default) applies no filter.
+    full_row_lost: bool | None = None
+    text_changed: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 
@@ -190,6 +197,12 @@ class AuditEntry(BaseModel):
     # the verdict directly instead of joining ``method``+``path`` + parsing
     # ``payload``.
     policy_decision: str | None
+    # The policy rule that matched the call and the policy file version
+    # (#6044), from ``audit_log.policy_rule`` / ``policy_version``. A rule
+    # that ends with ``(shadow)`` did not decide: the policy evaluator ran
+    # in shadow mode. ``None`` when the switch was off or no gate ran.
+    policy_rule: str | None = None
+    policy_version: int | None = None
     # What kind of accountable event the row records (#3733), from the real
     # ``audit_log.event_class`` column. Rows written before the column
     # existed read as ``legacy_request``.

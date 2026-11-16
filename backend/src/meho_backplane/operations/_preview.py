@@ -105,6 +105,7 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "has_preview_builder",
     "preview_failure_reason",
     "register_permission_preflight",
     "register_preview_builder",
@@ -411,6 +412,11 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def has_preview_builder(op_id: str) -> bool:
+    """True when *op_id* has a bespoke preview builder registered."""
+    return op_id in _PREVIEW_BUILDERS
 
 
 def register_permission_preflight(op_id: str, preflight: PermissionPreflight) -> None:

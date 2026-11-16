@@ -192,8 +192,10 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, OperationRun, OperationRunOrigin
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations._lookup import enabled_for_tenant_clause, parse_connector_id
+from meho_backplane.operations._secret_values import asks_reveal
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
@@ -203,6 +205,11 @@ from meho_backplane.operations.meta_tools import (
     list_operation_groups,
     preview_operation,
     search_operations,
+)
+from meho_backplane.operations.operation_run import OperationRunNotFoundError
+from meho_backplane.operations.operation_run_service import (
+    get_operation_run_service,
+    run_result_visible_to,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
@@ -219,6 +226,12 @@ from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
 )
+from meho_backplane.ui.routes.operations.run_view import (
+    ANSWER_WAIT_SECONDS,
+    POLL_SECONDS,
+    run_view,
+)
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_operations_router"]
@@ -262,12 +275,6 @@ _MAX_TARGET_LENGTH: Final[int] = 256
 #: an oversized paste. The CSRF middleware already caps the buffered body
 #: at 256 KiB; this is the surface-specific, friendlier-error bound.
 _MAX_PARAMS_LENGTH: Final[int] = 64 * 1024
-
-#: Maximum ``work_ref`` length accepted on the run form. The work_ref is an
-#: opaque external change-ticket reference (``gh:evoila/meho#7``); a short
-#: bound rejects an oversized paste while leaving room for a real URI. The
-#: meta-tool treats it as an opaque string (no validation, #1657).
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 #: Maximum ``preview_hash`` length accepted on the run form. The hash is a
 #: SHA-256 hex string (64 characters) from a prior preview of the same call;
@@ -490,6 +497,33 @@ def build_operations_router() -> APIRouter:
         """
         return await _render_run_modal(request, session, descriptor_id)
 
+    @router.get("/ui/operations/runs/{run_id}", response_class=HTMLResponse)
+    async def operations_run_state(
+        request: Request,
+        run_id: uuid.UUID,
+        session: UISessionContext = _require_operator,
+    ) -> HTMLResponse:
+        """Where a Run from this page is now (#5111): the dialog asks this until it ends.
+
+        Reads the stored run, so it works on every MEHO server process. Only
+        the person who started a run reads it, and only a run started from
+        this page. Any other id is 404, so no id is confirmed.
+        """
+        operator = await _resolve_operator(session)
+        try:
+            row = await get_operation_run_service().poll(operator, run_id)
+        except OperationRunNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="operation_run_not_found"
+            ) from exc
+        if row.origin != OperationRunOrigin.DIRECT.value or not run_result_visible_to(
+            row, operator
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="operation_run_not_found"
+            )
+        return await _render_run_state(request, operator, row)
+
     @router.post("/ui/operations/call", response_class=HTMLResponse)
     async def operations_call(
         request: Request,
@@ -498,7 +532,7 @@ def build_operations_router() -> APIRouter:
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
         params: str = Form(default="", max_length=_MAX_PARAMS_LENGTH),
-        work_ref: str = Form(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(default=""),
         preview_hash: str = Form(default="", max_length=_MAX_PREVIEW_HASH_LENGTH),
     ) -> HTMLResponse:
         """Dispatch the chosen op in-process; render the ``OperationResult`` inline.
@@ -513,6 +547,13 @@ def build_operations_router() -> APIRouter:
         (``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one
         ``ValueError`` the meta-tool raises (a missing target name) is mapped
         to an inline ``400`` form error so the operator stays in the modal.
+
+        Background run (#5111): the call starts as a background run and the
+        route answers within about a second, however long the operation
+        takes. A quick run shows its result at once; a long one shows
+        "running", and the dialog asks ``GET /ui/operations/runs/{run_id}``
+        until it ends. A call with ``reveal_secret: true`` cannot run in
+        the background (its answer would be stored), so it runs inline.
 
         ``preview_hash`` comes from the run window's preview step. A
         ``destructive`` op needs it, or MEHO refuses to store the approval
@@ -913,6 +954,11 @@ async def _render_call_result(
     A blank target field sends no target (see :func:`_form_target`), so a
     target-less op runs; an op that needs a target answers
     ``target_required``, shown as that inline ``400``.
+
+    A ``reveal_secret: true`` in ``params`` that shows the values at once
+    makes the page say ``Cache-Control: no-store`` and ``Pragma: no-cache``
+    (:mod:`meho_backplane.no_store`), so no browser or proxy keeps them.
+    Other pages keep the usual headers.
     """
     operator = await _resolve_operator(session)
 
@@ -929,7 +975,7 @@ async def _render_call_result(
     }
     # ``work_ref`` is an opaque per-op override; bind it only when non-empty so
     # a bare run does not clobber an ambient ``Meho-Work-Ref`` (#1657).
-    work_ref_value = work_ref.strip()
+    work_ref_value = form_work_ref(work_ref)
     if work_ref_value:
         arguments["work_ref"] = work_ref_value
     # The hash of the preview the run window showed. A destructive op needs it
@@ -939,7 +985,13 @@ async def _render_call_result(
     if preview_hash_value:
         arguments["preview_hash"] = preview_hash_value
 
-    envelope = await call_operation(operator, arguments)
+    if not asks_reveal(parsed_params):
+        return await _start_background_run(request, operator, arguments)
+
+    # A call that shows secret values cannot run in the background: its
+    # answer would be stored on the run. It runs here and answers when it ends.
+    with answer_scope() as mark:
+        envelope = await call_operation(operator, arguments)
     # #136: target-resolution failures ride the envelope (``target_required`` /
     # ``no_target``) instead of raising; render them as the inline form error,
     # preserving the pre-#136 UX. Every other envelope status renders normally.
@@ -957,7 +1009,66 @@ async def _render_call_result(
         # the ticket's oldest-first view.
         "chain": await parked_request_chain(operator.tenant_id, envelope),
     }
-    return get_templates().TemplateResponse(request, "operations/_result.html", context)
+    response = get_templates().TemplateResponse(request, "operations/_result.html", context)
+    return set_no_store(response) if mark.holds_secret else response
+
+
+async def _start_background_run(
+    request: Request, operator: Operator, arguments: dict[str, Any]
+) -> HTMLResponse:
+    """Start the call as a background run and answer after a short wait (#5111).
+
+    The run has the same governed dispatch, claim and audit row as the
+    inline call. A quick run shows its result at once; a long one shows
+    "running", and the dialog asks :func:`_render_run_state` again until it
+    ends. Closing the dialog does not stop the run.
+    """
+    service = get_operation_run_service()
+    run_id = await service.submit_call(operator, arguments)
+    row = await service.poll(operator, run_id)
+    row = await service.wait_until_done(operator, row, wait_seconds=ANSWER_WAIT_SECONDS)
+    log.info(
+        "ui_operation_run_started",
+        operation_run_id=str(run_id),
+        op_id=row.op_id,
+        run_status=row.status,
+        operator_sub=operator.sub,
+    )
+    return await _render_run_state(request, operator, row)
+
+
+async def _render_run_state(
+    request: Request, operator: Operator, row: OperationRun
+) -> HTMLResponse:
+    """Draw the run in *row*: "running", or its end, in the result region.
+
+    A stored result shows in the same result view as an inline call. A
+    target that did not resolve is the inline form error (HTTP 400), as
+    before.
+    """
+    view = run_view(row)
+    context: dict[str, Any] = {
+        "run": view,
+        "poll_seconds": POLL_SECONDS,
+        "envelope": None,
+        "error_message": None,
+        "connector_id": row.connector_id,
+        "op_id": row.op_id,
+        "chain": None,
+    }
+    code = status.HTTP_200_OK
+    if view["state"] == "finished":
+        envelope = dict(row.result or {})  # run_view says ``finished`` only for a dict
+        resolution_error = _target_resolution_error_message(envelope)
+        if resolution_error is not None:
+            context["error_message"] = resolution_error
+            code = status.HTTP_400_BAD_REQUEST
+        else:
+            context["envelope"] = envelope
+            context["chain"] = await parked_request_chain(operator.tenant_id, envelope)
+    return get_templates().TemplateResponse(
+        request, "operations/_run_state.html", context, status_code=code
+    )
 
 
 def _render_call_form_error(

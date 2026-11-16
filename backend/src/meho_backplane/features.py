@@ -5,7 +5,7 @@
 
 v0.6.0 ships four major features that each require additional deploy
 configuration not flagged anywhere operator-facing
-(``claude-rdc-hetzner-dc#697`` signals 16, 17). The pattern is the same
+(consumer feedback signals 16 and 17). The pattern is the same
 across all four: the feature's code ships, env vars get added in
 :mod:`meho_backplane.settings`, but no ``/ready`` check, no
 ``docs/RELEASING.md`` callout, no release-body "what won't work out of
@@ -90,7 +90,7 @@ for its discovery payload.
 References
 ----------
 
-* Consumer feedback (canonical): ``claude-rdc-hetzner-dc#697`` signals
+* Consumer feedback (canonical): signals
   16 + 17 — the original "expose feature-gate state" flag.
 * Convention anchor: :doc:`docs/codebase/error-message-shape.md`
   (G0.14-T11) — the missing-env messages here mirror the convention's
@@ -106,7 +106,7 @@ References
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Final, Literal, NotRequired, TypedDict
 
 from cryptography.fernet import Fernet
 
@@ -114,6 +114,7 @@ from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import Settings
 
 __all__ = [
+    "CATEGORY_WITHOUT_CLASSIFICATION",
     "FEATURE_MATURITY",
     "Maturity",
     "MaturityInfo",
@@ -128,8 +129,10 @@ _TRACKER = "https://github.com/evoila/meho/issues"
 class MaturityInfo(TypedDict):
     """One :data:`FEATURE_MATURITY` entry.
 
-    ``target_ga`` and ``tracking`` are present on non-GA entries only
-    (mirroring how ``docs`` is present only where a setup doc exists).
+    ``target_ga`` is present on non-GA entries only, and ``tracking``
+    only where an open issue lists the known gaps (mirroring how ``docs``
+    is present only where a setup doc exists). A non-GA entry without
+    ``tracking`` has no open tracker.
     ``target_ga`` may be ``None`` on ``experimental`` entries: those sit
     outside the 1.0 promise (#2664 entry criteria; several are explicit
     1.0 non-goals in #2661), so advertising a committed milestone would
@@ -148,12 +151,11 @@ class MaturityInfo(TypedDict):
 #:
 #: ``tracking`` points at the open issue where the feature's road to
 #: promotion is visible today: the concrete gap issue where one exists
-#: (#2668 background-execution credential identity for sensors and the
-#: scheduler, #2667 first-class GSM chart values, #2656 the v0.25.0
-#: hosted-agent-run hardening line), the clean-room eval (#2665) for
+#: (first-class GSM chart values), the clean-room eval for
 #: beta features whose promotion gate is the eval score itself, and the
-#: 1.0 Goal (#2661, which schedules the v0.28 re-triage) for
-#: experimental features with no committed path.
+#: 1.0 Goal (which schedules the v0.28 re-triage) for
+#: experimental features with no committed path. A feature with no open
+#: tracker has no ``tracking`` key.
 FEATURE_MATURITY: dict[str, MaturityInfo] = {
     # GA-track (provisional): the read/governance/knowledge plane the
     # 2026-07-21 grounding review found provably working in the field.
@@ -168,7 +170,6 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
     "sensors": {
         "maturity": "beta",
         "target_ga": "v1.0.0",
-        "tracking": f"{_TRACKER}/2668",
     },
     "topology": {
         "maturity": "beta",
@@ -183,7 +184,6 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
     "scheduler": {
         "maturity": "beta",
         "target_ga": "v1.0.0",
-        "tracking": f"{_TRACKER}/2668",
     },
     "ui_console": {
         "maturity": "beta",
@@ -214,7 +214,6 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
     "agent_runtime": {
         "maturity": "experimental",
         "target_ga": None,
-        "tracking": f"{_TRACKER}/2656",
     },
     "doc_collections": {
         "maturity": "experimental",
@@ -367,7 +366,9 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     ``short_tool_texts`` is the ``MCP_SHORT_TOOL_TEXTS`` switch (#4172), so
     a benchmark knows its state. ``client_per_tool_kind`` is the
     ``MCP_CLIENT_PER_TOOL_KIND`` switch: when on, Claude Code and Claude
-    Desktop sign in with their own login client. ``protocol_version`` is the spec revision
+    Desktop sign in with their own login client, and ``/ready`` adds
+    ``tool_clients`` (:func:`~meho_backplane.auth.tool_clients.tool_clients_report`:
+    are these clients in Keycloak). ``protocol_version`` is the spec revision
     the server pins (:data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`),
     so a deploy operator can answer "which MCP revision will this server
     negotiate with my clients?" from a single GET without a login.
@@ -394,18 +395,10 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     by :func:`~meho_backplane.mcp.server._initialize`) gives them the
     converse — which clients are pinned to a different revision.
     """
-    # Function-local import to break the
+    # Function-local import: it breaks the cycle
     # ``features -> mcp.schemas -> mcp/__init__ -> mcp.handlers ->
-    # broadcast -> health -> features`` cycle. ``health.py`` imports
-    # ``build_features_block`` at module top-level (the ``/ready``
-    # route hands the result to ``JSONResponse``), and ``mcp/__init__.py``
-    # eagerly imports ``handlers`` to register the T3 JSON-RPC methods
-    # — both can't sit above this module without re-entering it
-    # during initial import. ``mcp.schemas`` itself is a leaf module
-    # (no imports from elsewhere in the package), so reaching for it
-    # function-locally is cheap and safe; the per-request cost of one
-    # already-cached ``import`` is negligible against the rest of
-    # ``/ready``'s probe-fanout work.
+    # broadcast -> health -> features``. ``mcp/__init__.py`` imports its
+    # handlers eagerly, and ``health.py`` imports this module at the top.
     from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 
     return {
@@ -534,6 +527,57 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+#: The ``/ready`` policy note, and the import warning, when approver routing
+#: is on and the classification is off
+#: (:func:`meho_backplane.policy.routing.category_routing_warnings`).
+CATEGORY_WITHOUT_CLASSIFICATION: Final[str] = (
+    "POLICY_APPROVER_ROUTING is on and POLICY_CLASSIFICATION is off, so no change has "
+    "a category and a routing entry that matches on `category` fits nothing. Turn on "
+    "POLICY_CLASSIFICATION, or match on connector or risk."
+)
+
+
+def _policy_block(settings: Settings) -> dict[str, Any]:
+    """The policy switches, so ``/ready`` shows which are on.
+
+    ``classification`` is the ``POLICY_CLASSIFICATION`` switch: category,
+    labels and "always wait" on connectors, operation groups and
+    operations (:mod:`meho_backplane.policy.classification`). It is off by
+    default. Nothing is missing when it is off, so ``configured`` is always
+    ``True`` and ``missing_env`` is always empty.
+
+    ``engine_shadow`` is the ``POLICY_ENGINE_SHADOW`` switch: the policy
+    evaluator runs next to today's checks and logs every difference
+    (:mod:`meho_backplane.policy.shadow`). It also writes the rule it
+    matched on audit rows and approval requests
+    (:mod:`meho_backplane.policy.stamp`), and a preview shows the rule
+    and who may approve. It decides nothing. Off by default.
+
+    ``approver_routing`` is the ``POLICY_APPROVER_ROUTING`` switch: a
+    waiting request stores who may approve it, from the policy file's
+    ``routing`` section (:mod:`meho_backplane.policy.routing`), and the
+    ``bindings`` of the policy file give login groups a group kind and
+    categories (:mod:`meho_backplane.policy.bindings`). Off by default.
+
+    ``notes`` holds one sentence when ``approver_routing`` is on and
+    ``classification`` is off: then no change has a category, so a routing
+    entry that matches on ``category`` fits nothing. Empty otherwise.
+    """
+    notes = (
+        [CATEGORY_WITHOUT_CLASSIFICATION]
+        if settings.policy_approver_routing and not settings.policy_classification
+        else []
+    )
+    return {
+        "configured": True,
+        "classification": settings.policy_classification,
+        "engine_shadow": settings.policy_engine_shadow,
+        "approver_routing": settings.policy_approver_routing,
+        "notes": notes,
+        "missing_env": [],
+    }
+
+
 def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     """Return the ``features`` block exposed under ``/ready``.
 
@@ -567,8 +611,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
 
         {
           "agent_runtime":  {"configured": <bool>, "missing_env": [...], "docs": "...",
-                             "maturity": "experimental", "target_ga": null,
-                             "tracking": "https://github.com/evoila/meho/issues/2656"},
+                             "maturity": "experimental", "target_ga": null},
           "ui_surface":     {"configured": <bool>, "missing_env": [...], "docs": "...",
                              "maturity": "beta", "target_ga": "v1.0.0",
                              "tracking": "https://github.com/evoila/meho/issues/2665"},
@@ -586,7 +629,10 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                                  "docs": "docs/codebase/connectors-vault-tenant-scope.md",
                                  "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...",
-                             "short_tool_texts": <bool>, "missing_env": []}
+                             "short_tool_texts": <bool>, "missing_env": []},
+          "policy":         {"configured": true, "classification": <bool>,
+                             "engine_shadow": <bool>, "approver_routing": <bool>,
+                             "notes": [<text>], "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {
@@ -597,6 +643,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "approval_custody": _approval_custody_block(settings),
         "vault_tenant_scope": _vault_tenant_scope_block(settings),
         "mcp": _mcp_block(settings),
+        "policy": _policy_block(settings),
     }
     for entry_name, feature_key in _READY_ENTRY_FEATURE.items():
         block[entry_name].update(FEATURE_MATURITY[feature_key])

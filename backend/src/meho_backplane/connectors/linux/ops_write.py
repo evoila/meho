@@ -74,6 +74,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     check_param_secret_ref,
     strip_credential_value,
 )
+from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.linux.ops import (
     SSH_TRANSPORT_NOTE,
@@ -128,6 +129,14 @@ class LinuxWriteError(ValueError):
 
     A :class:`ValueError` subclass so the dispatcher's handler-exception catch
     maps it to a ``connector_error`` result rather than an unhandled crash.
+    """
+
+
+class LinuxWriteOwnMessageError(ConnectorOwnMessage, LinuxWriteError):
+    """A :class:`LinuxWriteError` whose message is a fixed sentence of MEHO.
+
+    The message holds no host output and no secret, so an operation that sends
+    a secret still shows it (:class:`ConnectorOwnMessage`).
     """
 
 
@@ -355,7 +364,7 @@ async def _resolve_sudo_password(
     secret = await connector._resolve_secret(target, operator)
     password = secret.get("sudo_password") or secret.get("password")
     if not password:
-        raise LinuxWriteError(
+        raise LinuxWriteOwnMessageError(
             "the target's Vault secret carries no sudo_password / password; a "
             "governed root write needs a sudo credential"
         )
@@ -1082,9 +1091,11 @@ async def _linux_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     """Preview builder for ``linux.file.write`` -- path + byte size, never content.
 
     ``linux.file.write`` classifies ``credential_write`` (its ``content`` may
-    carry secrets), so ``preview_operation`` returns ``preview_unavailable`` for
-    it; this bespoke builder is the deliberate exception that runs *at park
-    time* (a bespoke builder owns its own field discipline). It echoes the
+    carry secrets). ``preview_operation`` returns ``preview_unavailable`` for
+    it, unless the ``PREVIEW_TYPED_WRITES`` switch is on: then its preview
+    shows only this builder's plan and never copies the params. The builder
+    also runs *at park time* (a bespoke builder owns its own field
+    discipline). It echoes the
     target, the path, the content byte size, the deterministic backup path, and
     the validate command (not a secret) -- never the ``content``. Declines
     (``None``) on malformed params.
@@ -1107,8 +1118,10 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     """Preview builder for ``linux.script.run`` -- the script, never the values.
 
     ``linux.script.run`` classifies ``credential_write`` (its ``arguments`` /
-    ``env`` may carry secrets), so ``preview_operation`` returns
-    ``preview_unavailable`` for it; this bespoke builder runs *at park time*.
+    ``env`` may carry secrets). ``preview_operation`` returns
+    ``preview_unavailable`` for it, unless the ``PREVIEW_TYPED_WRITES``
+    switch is on: then its preview shows only this builder's plan and never
+    copies the params. The builder also runs *at park time*.
     The script body is the change the approver decides on, so the preview
     shows it with its SHA-256 and the optional check against a reviewed copy
     (:func:`~meho_backplane.connectors.linux.script_preview.script_preview_fields`).

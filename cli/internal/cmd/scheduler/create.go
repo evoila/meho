@@ -21,7 +21,9 @@ import (
 // newCreateCmd returns the `meho scheduler create` command.
 //
 //	meho scheduler create --kind K --agent-definition ID
-//	  [--cron-expr E | --fire-at TS | --event-filter @file|<json>]
+//	  [--cron-expr E | --fire-at TS | --event-filter @file|<json>
+//	   | --on-sensor N | --on-dashboard N | --on-any-sensor | --on-any-dashboard
+//	     [--only-worse]]
 //	  [--timezone TZ] [--inputs @file|<json>] [--identity-sub SUB]
 //	  [--in-flight-policy P] [--tenant T] [--json] [--backplane <url>]
 //
@@ -33,6 +35,11 @@ func newCreateCmd() *cobra.Command {
 		cronExpr          string
 		fireAt            string
 		eventFilter       string
+		onSensor          string
+		onDashboard       string
+		onAnySensor       bool
+		onAnyDashboard    bool
+		onlyWorse         bool
 		timezone          string
 		inputsArg         string
 		identitySub       string
@@ -54,6 +61,10 @@ func newCreateCmd() *cobra.Command {
 			"  --cron-expr <expr>     (kind=cron, 5-field cron)\n" +
 			"  --fire-at <ISO8601>    (kind=one_off)\n" +
 			"  --event-filter <json>  (kind=event; inline JSON, @<path>, or @-)\n" +
+			"  one of --on-sensor <name|id>, --on-dashboard <name|id>, " +
+			"--on-any-sensor, --on-any-dashboard (kind=event; start on a " +
+			"Sensor or Dashboard change, with no JSON; add --only-worse to " +
+			"start only when it gets worse; not with --event-filter)\n" +
 			"--timezone is the IANA timezone for cron evaluation " +
 			"(default 'UTC'). --inputs is an optional JSON object " +
 			"forwarded as the agent run's input. --identity-sub overrides " +
@@ -76,6 +87,11 @@ func newCreateCmd() *cobra.Command {
 				CronExpr:          cronExpr,
 				FireAt:            fireAt,
 				EventFilterArg:    eventFilter,
+				OnSensor:          onSensor,
+				OnDashboard:       onDashboard,
+				OnAnySensor:       onAnySensor,
+				OnAnyDashboard:    onAnyDashboard,
+				OnlyWorse:         onlyWorse,
 				Timezone:          timezone,
 				InputsArg:         inputsArg,
 				IdentitySub:       identitySub,
@@ -97,6 +113,16 @@ func newCreateCmd() *cobra.Command {
 		"ISO 8601 fire time (required when --kind=one_off)")
 	cmd.Flags().StringVar(&eventFilter, "event-filter", "",
 		"event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-)")
+	cmd.Flags().StringVar(&onSensor, "on-sensor", "",
+		"start on this Sensor (name or id); needs --kind=event, not with --event-filter")
+	cmd.Flags().StringVar(&onDashboard, "on-dashboard", "",
+		"start on this Dashboard (name or id); needs --kind=event, not with --event-filter")
+	cmd.Flags().BoolVar(&onAnySensor, "on-any-sensor", false,
+		"start on any Sensor; needs --kind=event, not with --event-filter")
+	cmd.Flags().BoolVar(&onAnyDashboard, "on-any-dashboard", false,
+		"start on any Dashboard; needs --kind=event, not with --event-filter")
+	cmd.Flags().BoolVar(&onlyWorse, "only-worse", false,
+		"with an --on-* flag: start only when the state gets worse")
 	cmd.Flags().StringVar(&timezone, "timezone", "",
 		"IANA timezone name for cron evaluation (default 'UTC')")
 	cmd.Flags().StringVar(&inputsArg, "inputs", "",
@@ -124,6 +150,11 @@ type createOptions struct {
 	CronExpr          string
 	FireAt            string
 	EventFilterArg    string
+	OnSensor          string
+	OnDashboard       string
+	OnAnySensor       bool
+	OnAnyDashboard    bool
+	OnlyWorse         bool
 	Timezone          string
 	InputsArg         string
 	IdentitySub       string
@@ -169,15 +200,40 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 				opts.JSONOut)
 		}
 	case "event":
-		if strings.TrimSpace(opts.EventFilterArg) == "" {
+		if opts.hasCheckSource() && strings.TrimSpace(opts.EventFilterArg) != "" {
 			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected("--kind=event requires --event-filter"), opts.JSONOut)
+				output.Unexpected("--on-sensor, --on-dashboard, --on-any-sensor and --on-any-dashboard cannot be used with --event-filter"),
+				opts.JSONOut)
+		}
+		if n := opts.checkSourceFlagCount(); n > 1 {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("use only one of --on-sensor, --on-dashboard, --on-any-sensor, --on-any-dashboard"),
+				opts.JSONOut)
+		}
+		if opts.OnlyWorse && !opts.hasCheckSource() {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("--only-worse needs one of --on-sensor, --on-dashboard, --on-any-sensor, --on-any-dashboard"),
+				opts.JSONOut)
+		}
+		if !opts.hasCheckSource() && strings.TrimSpace(opts.EventFilterArg) == "" {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("--kind=event requires --event-filter or one of the --on-* flags"),
+				opts.JSONOut)
 		}
 		if opts.CronExpr != "" || opts.FireAt != "" {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected("--kind=event forbids --cron-expr and --fire-at"),
 				opts.JSONOut)
 		}
+	}
+	if opts.Kind != "event" && opts.hasCheckSource() {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("--on-sensor, --on-dashboard, --on-any-sensor and --on-any-dashboard need --kind=event"),
+			opts.JSONOut)
+	}
+	if opts.Kind != "event" && opts.OnlyWorse {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("--only-worse needs --kind=event"), opts.JSONOut)
 	}
 	eventFilter, err := loadJSONObjectFlag(cmd, opts.EventFilterArg, "--event-filter")
 	if err != nil {
@@ -265,6 +321,9 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "created %s trigger %s\n", string(entry.Kind), entry.Id.String())
 	printTriggerSummary(cmd.OutOrStdout(), entry)
+	if entry.Notice != nil && *entry.Notice != "" {
+		fmt.Fprintln(cmd.OutOrStdout(), *entry.Notice)
+	}
 	return nil
 }
 
@@ -324,6 +383,9 @@ func buildCreateBody(
 		policy := api.ScheduledTriggerInFlightPolicy(opts.InFlightPolicy)
 		body.InFlightPolicy = &policy
 	}
+	if cs := opts.checkSource(); cs != nil {
+		body.CheckSource = cs
+	}
 	if tenantID != nil {
 		body.TenantId = tenantID
 	}
@@ -353,4 +415,57 @@ func postCreate(
 		},
 		func(r *api.CreateTriggerApiV1SchedulerTriggersPostResponse) int { return r.StatusCode() },
 	)
+}
+
+func (o createOptions) checkSourceFlagCount() int {
+	n := 0
+	if o.OnSensor != "" {
+		n++
+	}
+	if o.OnDashboard != "" {
+		n++
+	}
+	if o.OnAnySensor {
+		n++
+	}
+	if o.OnAnyDashboard {
+		n++
+	}
+	return n
+}
+
+func (o createOptions) hasCheckSource() bool { return o.checkSourceFlagCount() > 0 }
+
+// checkSource turns the --on-* flags into the typed `check_source`
+// pick. A value that parses as a UUID is sent as the id, anything else
+// as the name. No name and no id means "any" Sensor or Dashboard.
+func (o createOptions) checkSource() *api.CheckSource {
+	var kind, ref string
+	switch {
+	case o.OnSensor != "":
+		kind, ref = "sensor", o.OnSensor
+	case o.OnDashboard != "":
+		kind, ref = "dashboard", o.OnDashboard
+	case o.OnAnySensor:
+		kind = "sensor"
+	case o.OnAnyDashboard:
+		kind = "dashboard"
+	default:
+		return nil
+	}
+	cs := api.CheckSource{Kind: api.CheckSourceKind(kind)}
+	if o.OnlyWorse {
+		worse := true
+		cs.OnlyWorsening = &worse
+	}
+	if ref != "" {
+		var id openapi_types.UUID
+		if err := id.UnmarshalText([]byte(ref)); err == nil {
+			cs.Id = &id
+		} else {
+			name := ref
+			cs.Name = &name
+		}
+	}
+	return &cs
 }

@@ -27,6 +27,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
+from meho_backplane.session_store.hosted_runs import add_run_session
 from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
 from meho_backplane.session_store.object_store import ObjectStoreError, set_object_store_for_testing
 from meho_backplane.session_store.retention import CLEANUP_PATH, cleanup_once
@@ -585,3 +586,23 @@ async def test_cleanup_keeps_the_rows_when_the_storage_fails(
     store.fail = False
     assert await cleanup_once() == 1
     assert store.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_an_upload_never_adds_to_a_hosted_run_session(client: TestClient) -> None:
+    """A hosted agent run's session gets its events from MEHO, never from an upload."""
+    async with get_sessionmaker()() as session:
+        add_run_session(
+            session,
+            run_id=UUID(_SID),
+            tenant_id=_TENANT_A,
+            started_by="op-alice",
+            agent_name="reader",
+        )
+        await session.commit()
+    resp = _upload(client, _transcript(_LINE_1))
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "session_is_a_hosted_run"
+    [record] = await _records()
+    assert record.upload_count == 0
+    assert [row.status_code for row in await _audit("sessions.upload")] == [409]

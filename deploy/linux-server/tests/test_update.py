@@ -187,7 +187,8 @@ class UpdateFlowTests(UpdateTestCase):
         self.assert_succeeds(result)
         headers = [line for line in result.stdout.splitlines() if line.startswith("== ")]
         last_step = (
-            "== Update step 5: install the meho command and meho-host, and write the install record"
+            "== Update step 5: install the meho command and meho-host, write the install record"
+            " and read the first-start list"
         )
         self.assertEqual(
             [
@@ -273,7 +274,10 @@ class UpdateFlowTests(UpdateTestCase):
         self.assert_succeeds(result)
         self.assertEqual(before, {path: sha256(self.machine.host_path(path)) for path in kept})
         calls = self.machine.calls()
-        for command in ("nft", "get secret", "meho-firewall", "firewalld", "ufw"):
+        # The update reads only the CA of the console's TLS Secret, never the
+        # Secrets of the one-time files.
+        one_time_secrets = ("get secret meho-core-first-login", "get secret meho-core-vault-unseal")
+        for command in ("nft", *one_time_secrets, "meho-firewall", "firewalld", "ufw"):
             with self.subTest(command=command):
                 self.assertNotIn(command, calls)
 

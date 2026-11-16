@@ -725,6 +725,37 @@ async def test_preview_credential_class_writes_are_unavailable_no_secret(
 @pytest.mark.parametrize(
     "op_id,params",
     [
+        ("linux.file.write", {"path": "/etc/app/conf.yaml", "content": _CONTENT_CANARY}),
+        ("linux.script.run", {"script": _SCRIPT_CANARY, "arguments": _ARG_CANARY}),
+    ],
+)
+async def test_preview_credential_class_writes_show_own_plan_with_switch_on(
+    linux_write_registered: None,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+) -> None:
+    """With ``PREVIEW_TYPED_WRITES`` on, they preview from their own builder (#5074)."""
+    monkeypatch.setenv("PREVIEW_TYPED_WRITES", "true")
+    get_settings.cache_clear()
+    envelope = await preview_operation(
+        _OPERATOR,
+        {"connector_id": _CONNECTOR_ID, "op_id": op_id, "target": _TARGET_NAME, "params": params},
+    )
+    assert envelope["status"] == "ok", envelope
+    assert envelope["redacted_body"] is None
+    # No secret rides in the envelope. The script body is the one text that
+    # shows: it is the change the approver decides on, and it is not a secret
+    # value (the builder's own rule).
+    for secret in (_CONTENT_CANARY, _ARG_CANARY):
+        assert secret not in str(envelope)
+    assert (_SCRIPT_CANARY in str(envelope)) == (op_id == "linux.script.run")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "op_id,params",
+    [
         ("linux.sysctl.write", {"key": "net.ipv4.ip_forward", "value": "1"}),
         ("linux.firewall.load", {"ruleset": "table inet filter {}"}),
     ],

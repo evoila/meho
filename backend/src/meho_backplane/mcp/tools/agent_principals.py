@@ -52,7 +52,9 @@ from __future__ import annotations
 from typing import Any, Final
 
 import structlog
+from pydantic import ValidationError
 
+from meho_backplane.agents.grant_sets import StartingGrants, audit_fields
 from meho_backplane.auth.agent_principals import (
     AgentPrincipalCreate,
     AgentPrincipalExistsError,
@@ -68,6 +70,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpExecutionFailedError, McpInvalidParamsError
+from meho_backplane.mcp.tools._starting_grants import with_starting_grants
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
     SCHEDULER_VAULT_WRITE_DENIED_DETAIL,
@@ -92,6 +95,15 @@ def _require_name(arguments: dict[str, Any]) -> str:
     if not isinstance(name, str) or not name:
         raise McpInvalidParamsError("name is required and must be a non-empty string")
     return name
+
+
+def _parse_starting_grants(raw: object) -> StartingGrants | None:
+    if raw is None:
+        return None
+    try:
+        return StartingGrants.model_validate(raw)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(f"invalid starting_grants: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -160,17 +172,19 @@ async def _register_handler(
     owner_sub: str | None = arguments.get("owner_sub") or None
     if owner_sub is not None and not isinstance(owner_sub, str):
         raise McpInvalidParamsError("owner_sub must be a string when provided")
+    starting = _parse_starting_grants(arguments.get("starting_grants"))
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["register"],
         audit_op_class="write",
         audit_agent_principal_name=name,
+        **audit_fields(starting),
     )
     service = AgentPrincipalService()
     try:
         entry = await service.register(
             tenant_id=operator.tenant_id,
             created_by_sub=operator.sub,
-            payload=AgentPrincipalCreate(name=name, owner_sub=owner_sub),
+            payload=AgentPrincipalCreate(name=name, owner_sub=owner_sub, starting_grants=starting),
         )
     except AgentPrincipalExistsError as exc:
         raise McpInvalidParamsError(
@@ -250,6 +264,9 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the agent's first grants; it is required."
+        ),
     ),
     handler=_register_handler,
 )

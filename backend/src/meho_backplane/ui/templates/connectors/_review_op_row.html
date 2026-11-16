@@ -52,7 +52,8 @@
     * ``op``             -- dict: {op_id, summary, description,
                             custom_description, safety_level,
                             requires_approval, classified_safety_level,
-                            is_enabled, tenant_enabled, tags}.
+                            is_enabled, tenant_enabled, tags, category,
+                            labels}.
                             ``safety_level`` / ``requires_approval`` are
                             the effective values (operator overrides
                             applied, #4711).
@@ -74,6 +75,19 @@
     <span class="font-mono text-xs shrink-0">{{ op.op_id }}</span>
     {% if op.summary %}
       <span class="text-xs opacity-70 truncate">{{ op.summary }}</span>
+    {% endif %}
+    {#- #6038: the category that applies to the viewer's tenant; ``none``
+        while the classification switch is off. A change waits for a second
+        tenant admin, so it goes through the classify page (dry run first). -#}
+    {% if op.category is not none %}
+      <span class="badge badge-ghost badge-sm shrink-0" data-op-category>{{ op.category }}</span>
+      {% if is_tenant_admin %}
+        <a
+          class="link link-hover text-xs shrink-0"
+          href="/ui/policy/classify?connector={{ connector_id | urlencode }}&op={{ op.op_id | urlencode }}"
+          data-op-classify-link
+        >classify</a>
+      {% endif %}
     {% endif %}
   </div>
 

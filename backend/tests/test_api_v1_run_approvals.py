@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane import op_classes
+from meho_backplane.auth.approval_sign_in import LEVEL_MISSING_REMEDIATION
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -54,6 +55,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.delenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", raising=False)
     monkeypatch.delenv("KEYCLOAK_CLI_APPROVE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("APPROVAL_SIGN_IN_LEVEL", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield
@@ -126,6 +128,7 @@ def _person(
     tenant: uuid.UUID = _TENANT_A,
     fresh: bool = True,
     role: TenantRole = TenantRole.OPERATOR,
+    acr: str | None = None,
 ) -> dict[str, str]:
     token = mint_token(
         key,
@@ -133,6 +136,7 @@ def _person(
         tenant_role=role.value,
         tenant_id=str(tenant),
         fresh_sign_in=fresh,
+        extra_claims={"acr": acr} if acr else None,
     )
     return {"Authorization": f"Bearer {token}"}
 
@@ -231,6 +235,29 @@ def test_stored_token_of_a_person_alone_cannot_approve(client: TestClient, key: 
     assert response.status_code == 401
     assert "insufficient_user_authentication" in response.headers["WWW-Authenticate"]
     assert _status(client, key, run_approval_id) == "pending"
+
+
+def test_required_level_refuses_a_sign_in_without_it_and_takes_one_with_it(
+    client: TestClient, key: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``APPROVAL_SIGN_IN_LEVEL=required`` holds on the run approval route too (#6281)."""
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
+    get_settings.cache_clear()
+    run_approval_id = _request(client, key)
+
+    refused = client.post(f"{_BASE}/{run_approval_id}/approve", headers=_person(key, acr="1"))
+
+    assert refused.status_code == 401
+    assert "insufficient_user_authentication" in refused.headers["WWW-Authenticate"]
+    assert refused.json()["detail"].endswith(LEVEL_MISSING_REMEDIATION)
+    assert _status(client, key, run_approval_id) == "pending"
+
+    accepted = client.post(
+        f"{_BASE}/{run_approval_id}/approve", headers=_person(key, acr="meho-approve")
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "approved"
 
 
 def test_no_mcp_tool_reaches_run_approvals() -> None:

@@ -17,11 +17,14 @@
   form (``banner``), not a generic "something went wrong". The
   field-attributable failures (empty / bad-character name -> 422,
   duplicate name -> 409) render against the ``name`` input.
+  A missing or wrong starting grant pick (422) renders against the
+  pick (#6192).
 
   Submit contract: the form ``hx-post``s to
   ``/ui/agents/principals/register``, swapping
   ``#principals-modal-container``.
-    * Success -> 204 + ``HX-Redirect: /ui/agents/principals``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents/principals``, or to the
+      new agent's grants page after a pick that writes grants.
     * Failure -> this same modal re-rendered with ``errors`` / ``banner``
       populated and the operator's typed values echoed back.
 
@@ -101,6 +104,8 @@
           </span>
         {% endif %}
       </label>
+
+      {% include "agents/_starting_grants_field.html" %}
 
       <div class="modal-action">
         <button

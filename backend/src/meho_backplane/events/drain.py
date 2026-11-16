@@ -271,8 +271,15 @@ async def _dispatch_event(
     # `agent.invocation` off the module-load path (see the top-of-module
     # TYPE_CHECKING note). Cached after the first tick.
     from meho_backplane.events.matcher import fire_matching_triggers
+    from meho_backplane.operations.agent_run import AGENT_RUN_COMPLETED_EVENT_KIND
 
     await fire_matching_triggers(row, invoker)
+    if get_settings().checks_agent_events and row.event_kind == AGENT_RUN_COMPLETED_EVENT_KIND:
+        # A run started by a Dashboard event trigger has no step after it ends.
+        # This one stores and mails its finding (#6183). It never raises.
+        from meho_backplane.checks.findings import record_finding_for_event
+
+        await record_finding_for_event(row.payload)
     return await _mark_processed(session, row, now=now)
 
 

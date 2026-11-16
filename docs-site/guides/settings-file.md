@@ -12,6 +12,9 @@ policies, the conventions and the targets. The settings file
 The file never holds a secret. Passwords and keys stay in your secret
 store.
 
+The categories and classifications of operations are in a separate file:
+see [The policy file](policy-file.md).
+
 !!! note "REST only"
 
     The command line and the web console do not have it yet. Today you
@@ -96,7 +99,9 @@ spec:
 
 - Passwords, tokens and keys of any kind.
 - The settings MEHO reads from environment variables when it starts.
-- Who is in which Keycloak group, and the Keycloak realm setup.
+- Who is in which Keycloak group, and the Keycloak realm setup. To
+  move them to another install, see
+  [Move the login setup](../install/move-login-setup.md).
 - The settings of the machine or cluster: host names, IP addresses,
   certificates, storage and network setup.
 - Fields that MEHO manages itself, such as ids and timestamps.

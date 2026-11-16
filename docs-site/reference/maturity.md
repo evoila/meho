@@ -35,8 +35,8 @@ Works end-to-end somewhere real; gaps are known and tracked on the feature's tra
 | [broadcast](#broadcast) | v1.0.0 | [#2665](https://github.com/evoila/meho/issues/2665) |
 | [gsm_backend](#gsm_backend) | v1.0.0 | [#2667](https://github.com/evoila/meho/issues/2667) |
 | [satellite_gateway](#satellite_gateway) | v1.0.0 | [#2665](https://github.com/evoila/meho/issues/2665) |
-| [scheduler](#scheduler) | v1.0.0 | [#2668](https://github.com/evoila/meho/issues/2668) |
-| [sensors](#sensors) | v1.0.0 | [#2668](https://github.com/evoila/meho/issues/2668) |
+| [scheduler](#scheduler) | v1.0.0 | no open tracker |
+| [sensors](#sensors) | v1.0.0 | no open tracker |
 | [topology](#topology) | v1.0.0 | [#2665](https://github.com/evoila/meho/issues/2665) |
 | [ui_console](#ui_console) | v1.0.0 | [#2665](https://github.com/evoila/meho/issues/2665) |
 | [write_surfaces](#write_surfaces) | v1.0.0 | [#2665](https://github.com/evoila/meho/issues/2665) |
@@ -63,13 +63,13 @@ Works end-to-end somewhere real; gaps are known and tracked on the feature's tra
 
 - **Tier:** beta
 - **Target GA milestone:** v1.0.0
-- **Gaps & promotion gate:** known gaps and the road to promotion are tracked in [#2668](https://github.com/evoila/meho/issues/2668).
+- **Gaps & promotion gate:** no open tracker.
 
 ### sensors
 
 - **Tier:** beta
 - **Target GA milestone:** v1.0.0
-- **Gaps & promotion gate:** known gaps and the road to promotion are tracked in [#2668](https://github.com/evoila/meho/issues/2668).
+- **Gaps & promotion gate:** no open tracker.
 
 ### topology
 
@@ -96,7 +96,7 @@ May change or vanish without notice; sits outside the 1.0 stability promise. No 
 | Feature | Target GA | Gaps & promotion gate |
 | --- | --- | --- |
 | [addon_pairing](#addon_pairing) | _none committed_ | [#2900](https://github.com/evoila/meho/issues/2900) |
-| [agent_runtime](#agent_runtime) | _none committed_ | [#2656](https://github.com/evoila/meho/issues/2656) |
+| [agent_runtime](#agent_runtime) | _none committed_ | no open tracker |
 | [connector_ingest](#connector_ingest) | _none committed_ | [#2661](https://github.com/evoila/meho/issues/2661) |
 | [doc_collections](#doc_collections) | _none committed_ | [#2661](https://github.com/evoila/meho/issues/2661) |
 | [two_world_ops](#two_world_ops) | _none committed_ | [#2661](https://github.com/evoila/meho/issues/2661) |
@@ -111,7 +111,7 @@ May change or vanish without notice; sits outside the 1.0 stability promise. No 
 
 - **Tier:** experimental
 - **Target GA milestone:** none committed — outside the 1.0 promise
-- **Gaps & promotion gate:** known gaps and the road to promotion are tracked in [#2656](https://github.com/evoila/meho/issues/2656).
+- **Gaps & promotion gate:** no open tracker.
 
 ### connector_ingest
 

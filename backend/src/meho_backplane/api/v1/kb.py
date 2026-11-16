@@ -56,11 +56,11 @@ self-describing about authorship without an audit-log join; see
   Body: :class:`~meho_backplane.kb.page_import.KbImportRequest`. Returns
   :class:`~meho_backplane.kb.page_import.KbImportResult`. Caller: a
   ``tenant_admin``, or a login with the ``kb_import_only`` claim (the
-  team wiki's CI job), which may reach this route and nothing else.
+  tenant wiki's CI job), which may reach this route and nothing else.
 * ``POST /api/v1/kb/export`` -- the confirmed, generic entries as
   Markdown pages, plus the pages to remove (#5730). No body. Returns
   :class:`~meho_backplane.kb.page_export.KbExportResult`. Caller: an
-  ``operator``, or a login with the ``kb_export_only`` claim (the team
+  ``operator``, or a login with the ``kb_export_only`` claim (the tenant
   wiki's CI job), which may reach this route and nothing else. It is a
   ``POST`` because ``GET /api/v1/kb/export`` would hide an entry with
   the slug ``export``; it writes nothing.
@@ -770,7 +770,7 @@ async def import_kb_pages(
 ) -> KbImportResult:
     """Import knowledge pages sent in the request into the caller's tenant (#5728).
 
-    The team wiki's CI job calls this after each merge, with the
+    The tenant wiki's CI job calls this after each merge, with the
     ``kb_import_only`` login. A ``tenant_admin`` may call it too. Every
     page gets one row in the answer: ``create``, ``update``,
     ``unchanged`` or ``skip`` with the reason. ``dry_run`` writes
@@ -817,7 +817,7 @@ def _require_exporter(operator: Operator = Depends(verify_jwt_and_bind)) -> Oper
 async def export_kb_pages(operator: Operator = Depends(_require_exporter)) -> KbExportResult:
     """Return the caller's confirmed and candidate generic entries as Markdown pages (#5730).
 
-    The team wiki's CI job calls this with the ``kb_export_only`` login,
+    The tenant wiki's CI job calls this with the ``kb_export_only`` login,
     writes the pages into the wiki and opens a merge request there. An
     operator may call it too (``meho kb export``). MEHO writes nothing.
     The rules are in :mod:`meho_backplane.kb.page_export`.

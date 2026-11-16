@@ -49,6 +49,9 @@ they also bind the run:
 * The change does not run when it now needs a stricter approval than the
   one it got: the realm became a login realm, the group became the platform
   admin group, or MEHO cannot read which case it is.
+* A change that acts on a list of objects shown on the card (for example
+  the credentials a credential delete removes, registered with
+  ``bound_ids``) does not run when the live card lists other ids.
 
 The decision audit row names the login the change is for and says whether
 it is the approver (:func:`grant_audit_fields`).
@@ -57,7 +60,9 @@ The rights-change mark
 ----------------------
 
 Every change of rights carries one mark (``ApprovalRequest.rights_change``):
-the changes above in MEHO's own login realm, and any other request
+the changes above in MEHO's own login realm, every request of an
+operation registered with :func:`register_rights_change_op` (for example
+a change of an operation's category or labels), and any other request
 that was parked with the mark. :func:`check_rights_change_approval` applies
 it: the requester never approves their own change of rights, whatever
 their group, at every risk level and with the break-glass switch on, and
@@ -93,6 +98,7 @@ __all__ = [
     "is_rights_change",
     "is_rights_change_op",
     "register_grant_op",
+    "register_rights_change_op",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -134,6 +140,9 @@ class _GrantOp:
     user_id_params: tuple[str, ...]
     #: The params that can hold the id of the group the change is for.
     group_id_params: tuple[str, ...]
+    #: A card key that lists the ``{"id": ...}`` entries the run acts on, and
+    #: the refusal when the live card lists other ids. ``None``: no such list.
+    bound_ids: tuple[str, str] | None = None
 
 
 #: op_id -> where its params carry the login and the group.
@@ -145,13 +154,28 @@ def register_grant_op(
     *,
     user_id_params: tuple[str, ...] = (),
     group_id_params: tuple[str, ...] = (),
+    bound_ids: tuple[str, str] | None = None,
 ) -> None:
     """Record that *op_id* changes the rights of a login or a group.
 
     *user_id_params* is empty for a change of a whole group;
     *group_id_params* is empty for a change that names no group.
+    *bound_ids* is ``(card key, refusal)`` for a change that acts on a list
+    of objects shown on the card: the run is refused with the refusal when
+    the live card lists other ids than the approved card.
     """
-    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params)
+    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params, bound_ids)
+
+
+#: Operations that are always a change of rights, but not of one login or
+#: group: their requests carry the mark, and nothing else of this module
+#: applies to them.
+_RIGHTS_CHANGE_OPS: set[str] = set()
+
+
+def register_rights_change_op(op_id: str) -> None:
+    """Record that every request of *op_id* is a change of rights."""
+    _RIGHTS_CHANGE_OPS.add(op_id)
 
 
 @dataclass(frozen=True)
@@ -214,7 +238,7 @@ def is_rights_change_op(op_id: str) -> bool:
     approval list). The login realm is not known there, so every
     registered operation counts.
     """
-    return op_id in _GRANT_OPS
+    return op_id in _GRANT_OPS or op_id in _RIGHTS_CHANGE_OPS
 
 
 def is_rights_change(request: ApprovalRequest) -> bool:
@@ -223,7 +247,7 @@ def is_rights_change(request: ApprovalRequest) -> bool:
     A request parked before the ``rights_change`` column has no stored
     mark, so a registered change in the login realm counts too.
     """
-    if request.rights_change:
+    if request.rights_change or request.op_id in _RIGHTS_CHANGE_OPS:
         return True
     facts = grant_facts(request)
     return facts is not None and facts.login_realm
@@ -404,6 +428,7 @@ async def grant_changed_since_request(
         _id_moved(facts, live)
         or _stricter_now(facts, live)
         or _approver_joined_group(request, facts, live)
+        or _bound_ids_moved(request, preview)
     )
     if reason is not None:
         kind = "unreadable" if reason == GRANT_REASON_UNREADABLE else "changed"
@@ -431,6 +456,28 @@ def _stricter_now(facts: GrantFacts, live: dict[str, Any]) -> str | None:
     realm_is_stricter = not facts.login_realm and live.get("login_realm") is not False
     group_is_stricter = not facts.platform_admin and live.get("platform_admin") is not False
     return GRANT_REASON_STRICTER if realm_is_stricter or group_is_stricter else None
+
+
+def _card_ids(preview: Any, key: str) -> frozenset[str] | None:
+    """The ids of the entries the card lists under *key*; ``None`` when they cannot be read."""
+    rows = preview.get(key) if isinstance(preview, dict) else None
+    if not isinstance(rows, list):
+        return None
+    ids = {row["id"] for row in rows if isinstance(row, dict) and _text(row.get("id"))}
+    return frozenset(ids) if len(ids) == len(rows) else None
+
+
+def _bound_ids_moved(request: ApprovalRequest, live_preview: Any) -> str | None:
+    """Why the live card lists other objects than the approved card, for a ``bound_ids`` op."""
+    op = _GRANT_OPS.get(request.op_id)
+    if op is None or op.bound_ids is None:
+        return None
+    key, reason = op.bound_ids
+    now = _card_ids(live_preview, key)
+    if now is None:
+        return GRANT_REASON_UNREADABLE
+    approved = _card_ids((request.proposed_effect or {}).get("preview"), key)
+    return None if approved == now else reason
 
 
 def _approver_joined_group(

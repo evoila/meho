@@ -62,6 +62,7 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -870,7 +871,10 @@ def test_operations_ui_drawer_renders_preview_form_for_ingested_op() -> None:
 def _patch_call_operation(
     monkeypatch: pytest.MonkeyPatch, envelope: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Patch the route module's ``call_operation`` to return *envelope*.
+    """Patch the dispatcher's ``call_operation`` to return *envelope*.
+
+    The Run button starts a background run (#5111), which calls it from
+    :mod:`meho_backplane.operations.meta_tools`.
 
     Records the ``arguments`` dict each call receives so a test can assert the
     BFF threaded the form fields (connector_id / op_id / target / params /
@@ -886,7 +890,7 @@ def _patch_call_operation(
         return envelope
 
     monkeypatch.setattr(
-        "meho_backplane.ui.routes.operations.routes.call_operation",
+        "meho_backplane.operations.meta_tools.call_operation",
         _fake_call_operation,
     )
     return received
@@ -939,6 +943,93 @@ def test_operations_ui_run_call_ok_renders_result_inline(
     assert args["target"] == "gh-prod"
     assert args["params"] == {"owner": "evoila", "repo": "meho", "body": {"title": "go"}}
     assert args["work_ref"] == "gh:evoila/meho#7"
+
+
+def test_operations_ui_run_counts_work_ref_length_after_nfc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ticket id longer than 512 code points in NFD form but within the rule is taken."""
+    import unicodedata
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(
+        monkeypatch,
+        {
+            "status": "ok",
+            "op_id": "POST:/repos/{owner}/{repo}/issues",
+            "result": {"number": 7},
+            "error": None,
+            "duration_ms": 1.0,
+            "handle": None,
+            "extras": {},
+        },
+    )
+    ticket = "\u1ec7" * 200  # three code points each in NFD form
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {"title": "go"}}',
+                "work_ref": unicodedata.normalize("NFD", ticket),
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert received[0]["work_ref"] == ticket
+
+
+@pytest.mark.parametrize("reveal", [True, False], ids=["reveal", "no-reveal"])
+def test_operations_ui_run_call_says_no_store_only_when_it_reveals(
+    monkeypatch: pytest.MonkeyPatch, reveal: bool
+) -> None:
+    """A page with revealed values says no-store; the same call without them does not.
+
+    The stand-in marks the answer the way the dispatcher does when it puts
+    revealed values into it (:func:`mark_answer_holds_secret`).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+
+    async def _fake_call_operation(operator: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        if arguments["params"].get("reveal_secret"):
+            mark_answer_holds_secret()
+        return {"status": "ok", "op_id": "GET:/user", "result": {}, "extras": {}}
+
+    # A reveal call runs inline in the route; any other call runs in the
+    # background run, which calls the dispatcher itself (#5111).
+    monkeypatch.setattr(
+        "meho_backplane.ui.routes.operations.routes.call_operation", _fake_call_operation
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.call_operation", _fake_call_operation)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    params = '{"reveal_secret": true}' if reveal else "{}"
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "GET:/user",
+                "target": "gh-prod",
+                "params": params,
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert (response.headers.get("cache-control") == "no-store") is reveal
+    assert (response.headers.get("pragma") == "no-cache") is reveal
 
 
 def test_operations_ui_run_call_tenant_admin_can_run(

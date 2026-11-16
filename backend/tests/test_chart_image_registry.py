@@ -136,6 +136,7 @@ _EXPECTED_PODS = {
     "Deployment/test-meho",
     "Job/test-core-secrets",
     "Job/test-core-bootstrap",
+    "Job/test-check-manage-realm",
     "Job/test-vault-init-<hash>",
     "StatefulSet/test-postgres",
     "StatefulSet/test-keycloak",

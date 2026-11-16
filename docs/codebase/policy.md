@@ -1,0 +1,262 @@
+# The policy file (`policy: v1`)
+
+The policy file holds the categories (the taxonomy), the
+classifications of connectors, operation groups and operations
+([policy-classification.md](policy-classification.md)), and the routing
+of approvals: who may approve which waiting change
+([approvals.md](approvals.md), "Approver routing"). It is a file of
+its own, with its own command (`meho policy`) and its own REST routes. It
+is **not** a section of the settings file
+([settings.md](settings.md)): the settings import adds and updates but
+never deletes, and a policy import must be able to remove a right.
+
+Everything here is behind the switch `POLICY_CLASSIFICATION` (off by
+default). With the switch off, the import is refused with one sentence.
+Validate, diff, export and history still work: they only read.
+
+## The file
+
+```yaml
+policy: v1
+description: "<free text>"
+taxonomy:
+  default: "<category>"          # the install's file only
+  categories: ["<category-a>", "<category-b>"]
+classifications:
+  - match: {connector: "<connector-id-pattern>"}
+    category: "<category-a>"
+  - match: {connector: "<connector-id>", group: "<group-key>"}
+    labels: {team: "<team-name>"}
+    always_wait: true
+  - match: {op: "<op-id-pattern>"}
+    risk: dangerous
+routing:
+  - match: {category: "<category-a>"}
+    approvers: [SA-Operators, Admins]
+  - match: {connector: "<connector-id-pattern>", risk: destructive}
+    approvers: [Admins]
+```
+
+- `policy` is required and is always `v1`.
+- `taxonomy.categories` in a tenant's file adds categories for that
+  tenant. In the install's file it is the category list of every tenant.
+  `taxonomy.default` is allowed only in the install's file. Each of the
+  two replaces the built-in value when set, and the default must be one
+  of the categories (the built-in default is `other`).
+- Each `classifications` entry has a `match` (at least one of `connector`,
+  `group`, `op`; patterns as in
+  [policy-classification.md](policy-classification.md)) and sets at least
+  one of `category`, `labels`, `risk`, `always_wait`. Two entries with the
+  same `match` are a mistake.
+- `labels` pass the same check as the single edit (`_check_labels` in
+  `policy/store.py`): at most 32 labels, a key of 1 to 63 characters and a
+  value of 1 to 255 characters, and the character rule of
+  [policy-classification.md](policy-classification.md) (a key uses only
+  letters, digits and `. _ / -`; a value has no line breaks and no control
+  characters). A mistake names the entry.
+- Each `routing` entry has a `match` (at least one of `category`,
+  `connector`, `risk`; `connector` is a pattern, the other two are exact)
+  and `approvers`: one to five of the login group kinds `Readers`,
+  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts: the
+  first entry that fits a waiting change wins, and a tenant's entries come
+  before the install's. Two entries with the same `match` are a mistake.
+  Routing only narrows who may approve; see
+  [approvals.md](approvals.md), "Approver routing".
+- `bindings` (a tenant's file only) says which login group is which team:
+  a group, matched by its full path or its group attribute, gets one of the
+  five group kinds and a set of categories. They count only while the
+  switch `POLICY_APPROVER_ROUTING` is on. See
+  [policy-bindings.md](policy-bindings.md).
+- The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
+  sign-in and the routing at the click.
+
+## Checks
+
+The parser (`policy/document.py`) uses the strict YAML loader of the
+settings file (`instance_settings/schema.py`): a repeated key, a YAML
+anchor or alias, an unknown key, and an entry that is not a map are each a
+mistake. The file may be at most 1 MiB.
+
+The checks against what MEHO knows (`policy/validate.py`) run on every
+operation the file can match: for a tenant's file the built-in operations
+and the tenant's own; for the install's file every operation. Each problem
+is one sentence that names the entry:
+
+- An unknown category, an unknown risk level.
+- **Floor: a secret.** An entry that sets `risk: safe` or
+  `always_wait: false` on an operation that shows a secret
+  (`operations/credential_read.py`) is refused: such an operation stays at
+  least `caution` and always waits.
+- **Floor: an address the caller gives.** The same for an operation with a
+  parameter that holds an address MEHO connects to
+  (`operations/caller_address.py`).
+- **Floor: the code's level.** A `risk` below the operation's level in the
+  code is refused. A file can raise a risk level, not lower it.
+- **An install-wide "always wait" or risk level.** In a tenant's file, an
+  entry with `always_wait: false` that matches an operation the install's
+  policy makes always wait is refused. So is an entry that decides a lower
+  `risk` than the install's level for a matching operation; a more
+  specific tenant entry with the install's level or higher makes it fine.
+  The sentence names the install entry, for example
+  `install:classifications[0]`, and the operation where the part does not
+  count. For a wide entry it suggests a more specific entry or a narrower
+  match, not to remove the level, because the level still counts for the
+  other operations.
+- Two entries that give one operation a different category (or a different
+  value for one label key) at the same level.
+- **Routing** (`policy/routing.py`, `routing_mistakes`): an unknown
+  category or risk level in `match`; a group kind that may approve none of
+  the changes the entry routes ("`routing[N]` asks `ROLE`, but `ROLE` has
+  no `approve` rule for these changes."); and a risk level that no group
+  kind of the entry may approve ("A LEVEL change in category CAT can wait,
+  but no role may approve it. It would wait until it expires."). An entry
+  without `risk` is checked on all four risk levels. Readers never
+  approve; Operators and Approvers approve only `safe` and `caution`
+  changes of other people.
+- **Routing and the role floor** (`policy/validate.py`,
+  `_routing_floor_mistakes`): only Admins approve an operation that needs
+  the `tenant_admin` role (for example `targets.register`). For each known
+  operation with that floor, the check works like the run: for each risk
+  level the operation can wait at (its level and every level above), the
+  first entry that fits wins (by its category, its connector, and a
+  `risk` that is that level, or no `risk`). Only that entry is checked.
+  When it does not ask Admins, that is a mistake ("`routing[N]` fits
+  `OP` of connector `C`, but only MEHO-Admins may approve it and the entry
+  does not ask them. It would wait until it expires."). So an earlier
+  entry with `risk: caution` that asks Admins covers the `caution` level,
+  and a later entry is not checked at that level.
+
+At most 50 mistakes are listed, then one line says how many more there
+are.
+
+**The stricter of install and tenant counts** (decision of 12 November
+2026). For the risk level and for "always wait", the install and the
+tenant each find their own value; then the higher risk level counts, and
+the operation always waits when either says so. So what the install's
+file sets is a floor for every tenant, and a tenant can only make things
+stricter. A more specific install entry with `always_wait: false` does
+not end a wait that a tenant entry adds. The rule is in `classify`
+(`policy/classification.py`), so dispatch, preview, search, the policy
+evaluator and its compare-only run (`POLICY_ENGINE_SHADOW`) all follow
+it. The details and the case of a connector that a tenant registers
+under its own id are in [policy-classification.md](policy-classification.md).
+
+**A stored tenant entry against the install.** A stored tenant entry
+that sets an install-wide wait back, or that sets a lower risk level
+than the install, has no effect for that part on that operation (its
+other fields, and its level on other operations, still count).
+`export_policy` writes one `# Has no effect: ...` comment for each such
+part above the entry, with the same text as the import refusal, and a
+new import of the same entry is refused until the tenant admin fixes
+it.
+
+## Plan, import, approval
+
+`policy/service.py`:
+
+- `build_plan` parses and checks the file and works out the diff. It
+  writes nothing. The diff has the sections `description`, `taxonomy`,
+  `classifications`, `routing` and `bindings`, each with `added`, `changed`
+  (`before` and `after`) and `removed`. A routing entry is found by its
+  `match`; it is `changed` when its approvers or its place in the list
+  changed (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
+  operations it matches) and `changes` (how many of those get other
+  values). Entries are told apart by their whole `match` (each part on its
+  own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
+  `based_on` is the SHA-256 of the meaning of the stored policy (key order,
+  comments and empty keys do not count). It covers only the stored policy
+  of the import's own scope. A tenant import does not notice a change to
+  the install's policy, or to the category and labels of a single
+  operation (`operation_policy_override`), made after the plan. The run
+  plans again, so the floors and conflict checks still use the policy of
+  that moment; only the diff the approver saw can be out of date.
+- The same file twice, or a file with the same meaning, is "No change.":
+  nothing waits, and no version is written.
+- An import is a change of rights. `POST /api/v1/policy/import` calls the
+  typed operation `policy.apply` (`connectors/policy/apply.py`, connector
+  `policy-registry-1.x`) through the dispatcher. It is `dangerous`, waits
+  for a person to approve each call, needs the `tenant_admin` role, and
+  carries the rights-change mark: the importer can never approve it;
+  another admin must ([approvals.md](approvals.md)). The params are the
+  scope, the file, its SHA-256 and `based_on`. The approval card shows the
+  plan (a preview builder) and who asked (a permission preflight).
+- Only a person asks for an import, and only a platform admin asks for
+  `scope: install`. The import route checks this at the door. For every
+  other path to `policy.apply` (`call_operation`, the REST dispatch route,
+  `meho call`), the operation registers a requester check
+  (`register_requester_check` in `operations/role_floors.py`). The policy
+  gate runs it first, for every kind of login, so an agent, a service
+  login, a hosted agent run, or a tenant admin asking for `scope: install`
+  is refused before the request waits and before any plan is built. The
+  preview builder refuses the same callers too.
+- When it runs, `policy_apply` checks the requester again from the
+  request: the approval card's record must say a person asked, with no
+  agent acting for them, and for `scope: install` a platform admin. A
+  request without that record does not run.
+- When it runs after the approval, `apply_policy` checks the SHA-256 of
+  the file and plans again. If the stored policy changed after the plan:
+  "The policy changed after this import was planned. Run the preview
+  again." Nothing is written then.
+- Only the admin who approved runs the import. A run by the login that
+  asked for it (for example its re-run of a failed request,
+  `POST /api/v1/approvals/{id}/rerun`) writes nothing and says: "A policy
+  import runs only from a second admin's approval. Run the import again."
+- The import **replaces the whole policy** of its scope in `tenant_policy`:
+  an entry that is not in the file is removed. This also removes entries
+  that `policy.classify` wrote. The category and labels on single
+  operations (`operation_policy_override`) are not part of the file and
+  stay.
+- The install's policy (`scope: install`) can only be imported by a
+  platform admin, and runs only when a platform admin approves it.
+
+## Versions: `policy_revision`
+
+Migration `0163`. One row per imported file: the tenant (`NULL` for the
+install), when, who imported it (`imported_by_sub`, the person who asked),
+who approved it (`approved_by_sub`), the file's SHA-256, the file as sent,
+the stored document after the import, and the diff. The service only adds
+rows; after each import it deletes the rows beyond the last 20 of that
+scope.
+
+## A bad stored document
+
+If a stored document holds an entry MEHO cannot read (for example a risk
+level that does not exist), every policy read of that tenant fails while
+the switch is on. The error names the document and the entry, for example
+"The stored policy of tenant `<tenant-id>` is not valid, so MEHO cannot
+classify operations: tenant:classifications[3]: ...". An import of a good
+file replaces it; the preview says so in a warning. This holds also when
+an entry or its `match` is not a map, or `classifications` is not a list:
+the diff then lists such an entry as removed. With approver routing
+on, a bad `routing` entry makes every request of that tenant fail to start
+waiting: the call is refused ("approval queue unavailable") instead of
+waiting with an unknown approver set.
+
+## Endpoints and CLI
+
+Every file route takes `scope` (`tenant`, the default, or `install`). Callers:
+`tenant_admin` or platform admin; `install` needs a platform admin. The
+import is human-only.
+
+| Route | CLI | What it does |
+|---|---|---|
+| `POST /api/v1/policy/validate` | `meho policy validate FILE` | mistakes and warnings |
+| `POST /api/v1/policy/import?preview=true` | `meho policy diff FILE` | mistakes and the diff; writes nothing |
+| `POST /api/v1/policy/import` | `meho policy import FILE` | 202 with the approval request; 200 "No change."; 422 with mistakes; 409 with the switch off |
+| `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
+| `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
+| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
+
+Code: `backend/src/meho_backplane/api/v1/policy.py`,
+`cli/internal/cmd/policy/`.
+
+## Tests
+
+`backend/tests/test_policy_document.py` (parser, floors, plan, apply,
+versions), `backend/tests/test_policy_bindings.py` (bindings), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
+approval by a second admin),
+`backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
+`backend/tests/test_policy_routing.py` (the `routing` section, its checks,
+diff and export, the "separated duties" file, the stored approver kinds
+and the click),
+`cli/internal/cmd/policy/file_test.go`.

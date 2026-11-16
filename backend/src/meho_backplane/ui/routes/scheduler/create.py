@@ -48,23 +48,32 @@ from pydantic import ValidationError
 
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     ScheduledTriggerInFlightPolicy,
     ScheduledTriggerKind,
 )
+from meho_backplane.scheduler.check_source import list_check_source_choices
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
     InvalidTimezoneError,
     is_valid_cron_expr,
     next_fire_after,
 )
-from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
+from meho_backplane.scheduler.schemas import (
+    CHECK_EVENTS_OFF_NOTICE,
+    CheckSource,
+    ScheduledTriggerCreate,
+)
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    CheckSourceNotFoundError,
     SchedulerAdminService,
 )
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -93,6 +102,33 @@ def _set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:
     )
 
 
+async def _modal_context(
+    session_ctx: UISessionContext,
+    *,
+    error_message: str | None,
+) -> tuple[str, dict[str, object]]:
+    """Mint a CSRF token and build the create-modal template context."""
+    agents = AgentDefinitionService()
+    definitions = await agents.list_(session_ctx.tenant_id, limit=500)
+    async with get_sessionmaker()() as db_session:
+        check_choices = await list_check_source_choices(db_session, session_ctx.tenant_id)
+    csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    context: dict[str, object] = {
+        "csrf_token": csrf_token,
+        "agent_definitions": [
+            {"id": str(d.id), "name": d.name, "enabled": d.enabled} for d in definitions
+        ],
+        "kind_values": [k.value for k in ScheduledTriggerKind],
+        "in_flight_policy_values": [p.value for p in ScheduledTriggerInFlightPolicy],
+        "in_flight_policy_default": ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
+        "check_choices": check_choices,
+        "check_events_on": get_settings().checks_agent_events,
+        "check_events_off_notice": CHECK_EVENTS_OFF_NOTICE,
+        "error_message": error_message,
+    }
+    return csrf_token, context
+
+
 async def render_create_modal(
     request: Request,
     session_ctx: UISessionContext,
@@ -105,19 +141,7 @@ async def render_create_modal(
     with no options. The in_flight_policy radio defaults to
     ``fail_into_audit`` per the consumer doc.
     """
-    agents = AgentDefinitionService()
-    definitions = await agents.list_(session_ctx.tenant_id, limit=500)
-    csrf_token = mint_csrf_token(str(session_ctx.session_id))
-    context: dict[str, object] = {
-        "csrf_token": csrf_token,
-        "agent_definitions": [
-            {"id": str(d.id), "name": d.name, "enabled": d.enabled} for d in definitions
-        ],
-        "kind_values": [k.value for k in ScheduledTriggerKind],
-        "in_flight_policy_values": [p.value for p in ScheduledTriggerInFlightPolicy],
-        "in_flight_policy_default": ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
-        "error_message": None,
-    }
+    csrf_token, context = await _modal_context(session_ctx, error_message=None)
     response = get_templates().TemplateResponse(request, "scheduler/_create_modal.html", context)
     _set_csrf_cookie(response, csrf_token)
     return response
@@ -193,6 +217,28 @@ def _parse_json_field(raw: str | None, *, field_name: str) -> dict[str, object] 
     return parsed
 
 
+def _parse_check_source(
+    start_on: str,
+    ref: str | None,
+    *,
+    only_worsening: bool,
+) -> CheckSource:
+    """Build the ``check_source`` from the "Start on" choice (blank or "any" = any)."""
+    value = (ref or "").strip()
+    source_id: uuid.UUID | None = None
+    if value and value != "any":
+        try:
+            source_id = uuid.UUID(value)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"the {start_on} must be picked from the list",
+            ) from exc
+    return CheckSource.model_validate(
+        {"kind": start_on, "id": source_id, "only_worsening": only_worsening}
+    )
+
+
 def _parse_fire_at(raw: str | None) -> datetime | None:
     """Parse the ``one_off`` ``fire_at`` datetime-local field.
 
@@ -228,6 +274,9 @@ def _build_create_payload(
     inputs_raw: str | None,
     in_flight_policy: str,
     work_ref: str | None,
+    start_on: str = "custom",
+    check_source_ref: str | None = None,
+    only_worsening: bool = False,
 ) -> ScheduledTriggerCreate:
     """Build + validate a :class:`ScheduledTriggerCreate` from the form fields.
 
@@ -263,7 +312,7 @@ def _build_create_payload(
         ) from exc
 
     inputs = _parse_json_field(inputs_raw, field_name="inputs")
-    work_ref_clean = work_ref.strip() if work_ref and work_ref.strip() else None
+    work_ref_clean = form_work_ref(work_ref)
 
     # Populate only the discriminator field for the chosen kind so the
     # schema's exactly-one-discriminator invariant holds regardless of any
@@ -271,11 +320,16 @@ def _build_create_payload(
     cron_value: str | None = None
     fire_at_value: datetime | None = None
     event_filter_value: dict[str, object] | None = None
+    check_source_value: CheckSource | None = None
     if kind == ScheduledTriggerKind.CRON:
         cron_value = cron_expr.strip() if cron_expr and cron_expr.strip() else None
     elif kind == ScheduledTriggerKind.ONE_OFF:
         fire_at_value = _parse_fire_at(fire_at_raw)
-    else:  # ScheduledTriggerKind.EVENT
+    elif start_on in ("sensor", "dashboard"):
+        check_source_value = _parse_check_source(
+            start_on, check_source_ref, only_worsening=only_worsening
+        )
+    else:  # ScheduledTriggerKind.EVENT with a custom filter
         event_filter_value = _parse_json_field(event_filter_raw, field_name="event_filter")
 
     try:
@@ -285,6 +339,7 @@ def _build_create_payload(
             cron_expr=cron_value,
             fire_at=fire_at_value,
             event_filter=event_filter_value,
+            check_source=check_source_value,
             timezone=timezone.strip() or "UTC",
             inputs=inputs,
             in_flight_policy=policy,
@@ -324,19 +379,7 @@ async def _rerender_modal_with_error(
     Re-mints + re-sets the CSRF token (the failed submit consumed the
     prior one) so the operator's next submit attempt lines up.
     """
-    agents = AgentDefinitionService()
-    definitions = await agents.list_(session_ctx.tenant_id, limit=500)
-    csrf_token = mint_csrf_token(str(session_ctx.session_id))
-    context: dict[str, object] = {
-        "csrf_token": csrf_token,
-        "agent_definitions": [
-            {"id": str(d.id), "name": d.name, "enabled": d.enabled} for d in definitions
-        ],
-        "kind_values": [k.value for k in ScheduledTriggerKind],
-        "in_flight_policy_values": [p.value for p in ScheduledTriggerInFlightPolicy],
-        "in_flight_policy_default": ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
-        "error_message": error_message,
-    }
+    csrf_token, context = await _modal_context(session_ctx, error_message=error_message)
     response = get_templates().TemplateResponse(request, "scheduler/_create_modal.html", context)
     _set_csrf_cookie(response, csrf_token)
     return response
@@ -373,6 +416,9 @@ async def create_trigger(
     inputs: str | None,
     in_flight_policy: str,
     work_ref: str | None,
+    start_on: str = "custom",
+    check_source_ref: str | None = None,
+    only_worsening: bool = False,
 ) -> HTMLResponse:
     """Persist a new scheduled trigger and HX-Redirect to the list.
 
@@ -392,6 +438,9 @@ async def create_trigger(
             inputs_raw=inputs,
             in_flight_policy=in_flight_policy,
             work_ref=work_ref,
+            start_on=start_on,
+            check_source_ref=check_source_ref,
+            only_worsening=only_worsening,
         )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
@@ -411,6 +460,12 @@ async def create_trigger(
             request,
             session_ctx,
             error_message="No agent definition with that id exists in this tenant.",
+        )
+    except CheckSourceNotFoundError:
+        return await _rerender_modal_with_error(
+            request,
+            session_ctx,
+            error_message="That Sensor or Dashboard does not exist in this tenant.",
         )
 
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))

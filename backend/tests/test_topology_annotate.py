@@ -84,10 +84,10 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_tenant(slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(slug: str = "example-tenant") -> uuid.UUID:
     """Return the tenant row's id, inserting it on the first call.
 
-    Look-up-then-insert -- migration ``0018`` seeds the ``rdc-internal``
+    Look-up-then-insert -- migration ``0018`` seeds a
     tenant into the per-worker schema template
     (:func:`tests.conftest._schema_template_db`); a plain INSERT would
     trip ``UNIQUE constraint failed: tenant.slug``.

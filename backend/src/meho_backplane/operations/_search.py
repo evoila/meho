@@ -333,7 +333,7 @@ async def resolve_group_id(
     row for the connector, the built-in groups otherwise (#3870). Returns
     ``None`` when the visible bucket has no match.
 
-    Visibility predicate (claude-rdc-hetzner-dc#1136): a group resolves
+    Visibility predicate: a group resolves
     when it is fully enabled (``review_status='enabled'``) **or** still
     ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
     enabled descriptor. This mirrors the ``list_operation_groups``
@@ -645,7 +645,8 @@ async def _hydrate_hits(
     """Bulk-fetch full descriptor rows + group_key for the fused top-N entries.
 
     Each hit shows the risk level and approval that apply to *tenant_id*,
-    with the operator overrides (#4711) — the same values a call uses.
+    with the operator overrides (#4711) — the same values a call uses —
+    and the category and labels of the classification.
     """
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
@@ -660,7 +661,10 @@ async def _hydrate_hits(
         descriptor.id: (descriptor, group_key) for descriptor, group_key in rows
     }
     policies = await effective_policy_map(
-        session, tenant_id=tenant_id, rows=[descriptor for descriptor, _ in by_id.values()]
+        session,
+        tenant_id=tenant_id,
+        rows=[descriptor for descriptor, _ in by_id.values()],
+        group_keys={descriptor_id: group_key for descriptor_id, (_, group_key) in by_id.items()},
     )
     hits: list[OperationSearchHit] = []
     for entry in fused:
@@ -679,6 +683,8 @@ async def _hydrate_hits(
                 group_key=group_key,
                 safety_level=policy.safety_level,
                 requires_approval=policy.requires_approval,
+                category=policy.category,
+                labels=dict(policy.labels),
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,

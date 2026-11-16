@@ -32,16 +32,41 @@ A connector module registers the floor at import time, next to the
 handler (the same shape as ``register_params_check`` and the preview
 builders). The floor is in memory; it is not a column of the operation
 row.
+
+An operation can also register a requester check
+(:func:`register_requester_check`): who may ask for a call with these
+params at all, for example only a person. The policy gate runs it first,
+for every kind of login, so a refused call is denied before an approval
+request or its preview is built.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
 from meho_backplane.auth.operator import TenantRole
 
-__all__ = ["register_role_floor", "role_floor_denial", "role_floor_for"]
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+
+__all__ = [
+    "RequesterCheck",
+    "register_requester_check",
+    "register_role_floor",
+    "requester_check_denial",
+    "role_floor_denial",
+    "role_floor_for",
+]
+
+#: Why the caller may not ask for a call with these params, or ``None``.
+RequesterCheck = Callable[["Operator", dict[str, Any]], str | None]
 
 #: op_id -> the lowest role a person needs. Absent means no floor.
 _FLOORS: dict[str, TenantRole] = {}
+
+#: op_id -> who may ask for a call of it. Absent means no check.
+_REQUESTER_CHECKS: dict[str, RequesterCheck] = {}
 
 #: The role ladder, lowest first. The same order as ``auth/rbac.py``
 #: (REST) and ``mcp/registry.py`` (MCP); those modules are not imported
@@ -73,3 +98,14 @@ def role_floor_denial(op_id: str, role: TenantRole) -> str | None:
     if floor is None or _ROLE_ORDER.index(role) >= _ROLE_ORDER.index(floor):
         return None
     return f"{op_id} needs the {floor.value} role; your role is {role.value}"
+
+
+def register_requester_check(op_id: str, check: RequesterCheck) -> None:
+    """Record *check*: who may ask for a call of *op_id* with given params."""
+    _REQUESTER_CHECKS[op_id] = check
+
+
+def requester_check_denial(op_id: str, operator: Operator, params: dict[str, Any]) -> str | None:
+    """Why *operator* may not ask for this call of *op_id*, or ``None`` when it may."""
+    check = _REQUESTER_CHECKS.get(op_id)
+    return None if check is None else check(operator, params)

@@ -8,6 +8,9 @@ step says what you should see when it worked.
 - **Tested with:** MEHO v0.45.0 (chart 0.45.0), Kubernetes v1.35.5 on
   VCF 9.1, on 10 November 2026. The install itself took 2 minutes and
   17 seconds.
+- **Also tested with:** the same MEHO version on Kubernetes v1.32.10 on
+  vSphere 8.0 Update 3 (VCF 5.2), on 11 November 2026, with the same
+  values file. The install itself took 2 minutes and 46 seconds.
 - **Short version:** the [VKS notes](form-3-your-kubernetes.md#vks-vsphere-kubernetes-service)
   of the form 3 chapter. This page is the long version, with every
   command.

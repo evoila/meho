@@ -1,0 +1,103 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Classify operations (#6038). A tenant admin sets the category, labels or
+  "always wait" mark of one operation, one group, one connector, or many
+  operations by pattern. Step 1 is the dry run (``Show what changes``):
+  every matched operation with its values before and after; nothing is
+  written. Step 2 (in the dry-run result) asks for the change; it waits
+  until another tenant admin approves it.
+
+  Context contract:
+    * ``enabled``    -- bool: the POLICY_CLASSIFICATION switch.
+    * ``categories`` -- list[str]: the taxonomy of the admin's tenant.
+    * ``match``      -- dict: {connector, group, op}, filled in from the
+                        query string (the review drawer links here).
+    * ``csrf_token`` -- str: the double-submit token the form echoes.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Classify operations &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-classify-page>
+  <header class="space-y-1">
+    <h1 class="text-2xl font-semibold">Classify operations</h1>
+    <p class="text-sm opacity-70">
+      Give one operation, one group, one connector, or many operations by
+      pattern a category, labels or the "always wait" mark. A category
+      decides who may approve, so every change waits until another tenant
+      admin approves it. In a pattern, <code>*</code> is any text and
+      <code>?</code> is one character.
+    </p>
+  </header>
+
+  {% if not enabled %}
+    <p class="alert alert-info text-sm" data-classify-off>
+      Classification is off on this MEHO. An admin turns it on with the
+      POLICY_CLASSIFICATION setting.
+    </p>
+  {% else %}
+    <form
+      class="grid gap-3 max-w-2xl"
+      hx-post="/ui/policy/classify/preview"
+      hx-target="#classify-result"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      data-classify-form
+    >
+      <fieldset class="grid gap-2 sm:grid-cols-3">
+        <legend class="text-sm font-semibold mb-1">What it matches (give at least one)</legend>
+        <label class="form-control">
+          <span class="label-text text-xs">Connector id</span>
+          <input name="connector" class="input input-bordered input-sm" maxlength="200"
+                 value="{{ match.connector }}" placeholder="<connector-id>" autocomplete="off" />
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">Group key</span>
+          <input name="group" class="input input-bordered input-sm" maxlength="200"
+                 value="{{ match.group }}" placeholder="<group-key>" autocomplete="off" />
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">Operation id</span>
+          <input name="op" class="input input-bordered input-sm" maxlength="200"
+                 value="{{ match.op }}" placeholder="<op-id-pattern>" autocomplete="off" />
+        </label>
+      </fieldset>
+
+      <fieldset class="grid gap-2 sm:grid-cols-3">
+        <legend class="text-sm font-semibold mb-1">What it sets (empty means no change)</legend>
+        <label class="form-control">
+          <span class="label-text text-xs">Category</span>
+          <select name="category" class="select select-bordered select-sm" data-classify-category>
+            <option value="">(no change)</option>
+            {% for category in categories %}
+              <option value="{{ category }}">{{ category }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">Always wait</span>
+          <select name="always_wait" class="select select-bordered select-sm">
+            <option value="">(no change)</option>
+            <option value="true">yes: every call waits</option>
+            <option value="false">no: back to the operation's own value</option>
+          </select>
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs">Labels, one key=value per line</span>
+          <textarea name="labels" class="textarea textarea-bordered textarea-sm" rows="2"
+                    placeholder="team=<team-name>"></textarea>
+        </label>
+      </fieldset>
+
+      <div>
+        <button type="submit" class="btn btn-sm btn-primary" data-classify-preview>Show what changes</button>
+      </div>
+    </form>
+
+    <div id="classify-result" aria-live="polite"></div>
+  {% endif %}
+</section>
+{% endblock %}

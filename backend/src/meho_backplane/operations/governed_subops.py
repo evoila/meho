@@ -57,6 +57,7 @@ __all__ = [
     "register_governed_subops",
     "registered_governed_subop_surfaces",
     "reset_governed_subop_registry",
+    "steps_declared",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -172,6 +173,15 @@ def composites_without_declared_steps(composite_op_ids: Iterable[str]) -> list[s
         for op_id in set(composite_op_ids)
         if op_id not in _REGISTRY and op_id not in _NO_STEPS
     )
+
+
+def steps_declared(composite_op_id: str) -> bool:
+    """Say whether *composite_op_id* declared its steps, or declared it has none.
+
+    The up-front step check of an agent call refuses a multi-step
+    operation that changes something and declared neither (#6298).
+    """
+    return composite_op_id in _REGISTRY or composite_op_id in _NO_STEPS
 
 
 def classify_subop_grantability(op_id: str) -> SubopGrantability:

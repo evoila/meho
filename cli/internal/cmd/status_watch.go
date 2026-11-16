@@ -101,7 +101,7 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 		backoff = defaultBackoff
 	}
 
-	service, user := auth.KeyForBackplane(opts.BackplaneURL)
+	service, user := auth.KeyForContext(ctx, opts.BackplaneURL)
 	tok, err := store.Load(service, user)
 	if err != nil {
 		if errors.Is(err, auth.ErrTokenNotFound) {
@@ -117,6 +117,10 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 		return output.RenderError(opts.Stderr,
 			output.AuthExpired(fmt.Sprintf("stored token has no access_token; run `meho login %s`", opts.BackplaneURL)),
 			opts.JSONOut)
+	}
+
+	if !opts.JSONOut {
+		printProfileFor(ctx, opts.Stdout)
 	}
 
 	feedURL, err := buildFeedURL(opts.BackplaneURL, opts.OpClass, opts.Principal, opts.Target)

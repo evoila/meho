@@ -12,7 +12,7 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
 2. Element-equality alias match — ``query = ANY(aliases)`` on PostgreSQL,
    Python-side set-membership on other dialects (SQLite dev/test path).
    The consumer's #110 incident showed that substring matching caused
-   ``--target k8s`` to resolve to either ``rke2-meho`` or ``rke2-infra``
+   ``--target k8s`` to resolve to either ``rke2-meho`` or ``rke2-ops``
    ambiguously; element-equality is the correct semantic.
 3. If steps 1 and 2 both return nothing, run a prefix-ILIKE near-miss
    query (up to 5 candidates) and raise :exc:`TargetNotFoundError` with

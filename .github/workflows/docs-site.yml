@@ -72,12 +72,10 @@ on:
       - 'scripts/ci/check_tested_live_claims.py'
       - 'backend/scripts/validate_live_tests.py'
       - '.github/workflows/docs-site.yml'
-  # Fires when a PR enters the merge queue, so the check can be made
-  # required in branch protection and still report against the
-  # synthesised merge commit. Bare `merge_group:` because the event
-  # does not support `paths:` filtering — same rationale as
-  # readme-version-check.yml (#769). The build is a strict mkdocs run
-  # (~seconds), so the redundant queue runs are negligible.
+  # Bare `merge_group:`: the event does not support `paths:` filtering.
+  # The strict build stays in the queue: two pull requests can each pass
+  # alone and break the build together (one moves a page, the other links
+  # to it). The build runs on a hosted runner (#6350).
   merge_group:
   push:
     # A tag publishes a new docs version, like the image / chart / CLI

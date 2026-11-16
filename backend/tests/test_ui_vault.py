@@ -643,11 +643,18 @@ def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
         assert 'data-vault-secret="ok"' in shown.text
         assert _SECRET_VALUE in shown.text
         assert path in shown.text
+        # The answer with the value is never kept by a cache (#6273).
+        assert shown.headers["cache-control"] == "no-store"
+        assert shown.headers["pragma"] == "no-cache"
 
         again = _show_value(client, request_id)
         assert again.status_code == 200, again.text
         assert "reveal_already_used" in again.text
         assert _SECRET_VALUE not in again.text
+        assert "pragma" not in again.headers
+        assert "pragma" not in early.headers
+        assert again.headers.get("cache-control") != "no-store"
+        assert early.headers.get("cache-control") != "no-store"
 
     other, other_mock = _client_with_role(
         tenant_id=_TENANT_A, operator_sub="op-someone-else", role=TenantRole.OPERATOR
@@ -656,6 +663,37 @@ def test_vault_ui_read_shows_the_value_to_the_requester_after_approval(
         refused = _show_value(other, request_id)
     assert refused.status_code == 404
     assert _SECRET_VALUE not in refused.text
+
+
+def test_vault_ui_show_value_of_a_failed_read_keeps_usual_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """The approved read runs but fails: the page shows no value and says no no-store."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_stub_embedding_service)
+    install_fake_client(monkeypatch, read_exc=RuntimeError("secret missing"))
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        waiting = client.get(
+            "/ui/vault/read",
+            params={"mount": "secret", "path": _tenant_path(_TENANT_A, "app/db")},
+            headers={"HX-Request": "true"},
+        )
+        assert waiting.status_code == 200, waiting.text
+        assert "pragma" not in waiting.headers
+        match = re.search(r"data-approval-request-id>([0-9a-f-]{36})<", waiting.text)
+        assert match is not None, waiting.text
+        _approve(match.group(1))
+
+        failed = _show_value(client, match.group(1))
+    assert failed.status_code == 200, failed.text
+    assert 'data-vault-secret="ok"' not in failed.text
+    assert "pragma" not in failed.headers
+    assert failed.headers.get("cache-control") != "no-store"
 
 
 def test_vault_ui_show_value_needs_the_csrf_token() -> None:

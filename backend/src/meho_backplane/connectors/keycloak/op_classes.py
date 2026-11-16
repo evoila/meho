@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_op_classes, declare_per_call_approval
 
 declare_op_classes(
     # Takes the realm's SMTP password as a reference
@@ -21,6 +21,8 @@ declare_op_classes(
     # write suffix, so it needs this pin.
     # ``.ensure_passkey_code_skip`` copies and binds the realm's browser flow;
     # its params are empty, so it is a plain write too.
+    # ``.ensure_approval_touch`` makes the console's touch flow and binds it;
+    # its params hold only a client id.
     # ``.disable`` and ``.enable`` turn a user off and on. Their params hold
     # only a user id or username, so they are plain writes.
     write=(
@@ -28,5 +30,17 @@ declare_op_classes(
         "keycloak.user.enable",
         "keycloak.authflow.ensure_approval_flow",
         "keycloak.authflow.ensure_passkey_code_skip",
+        "keycloak.authflow.ensure_approval_touch",
     ),
+)
+
+# These four change who can sign in to a realm and with what rights. No
+# standing grant and no run approval covers them: a person approves each call.
+declare_per_call_approval(
+    (
+        "keycloak.role_mapping.client.assign",
+        "keycloak.role_mapping.client.remove",
+        "keycloak.user.update",
+        "keycloak.user.credential.delete",
+    )
 )

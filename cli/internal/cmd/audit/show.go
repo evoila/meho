@@ -179,7 +179,11 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 	field("tenant_name:", strOrDash(strDeref(e.TenantName)))
 	field("principal_sub:", e.PrincipalSub)
 	field("principal_name:", strOrDash(strDeref(e.PrincipalName)))
-	field("via:", strOrDash(viaLabel(e.Payload)))
+	// MEHO writes the client block only with AUDIT_CLIENT_IDENTITY on, so
+	// the line is left out when there is nothing to show.
+	if via := viaLabel(e.Payload); via != "" {
+		field("via:", via)
+	}
 	field("actor_sub:", strOrDash(strDeref(e.ActorSub)))
 	field("actor_name:", strOrDash(strDeref(e.ActorName)))
 	field("target_id:", strOrDash(uuidDeref(e.TargetId)))
@@ -192,6 +196,13 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 	field("op_id:", e.OpId)
 	field("op_class:", e.OpClass)
 	field("result_status:", e.ResultStatus)
+	field("policy_decision:", strOrDash(strDeref(e.PolicyDecision)))
+	// The rule that matched the call (#6044). "(shadow)" at the end means
+	// the policy evaluator only watched: today's checks decided.
+	field("policy_rule:", strOrDash(strDeref(e.PolicyRule)))
+	if e.PolicyVersion != nil {
+		field("policy_version:", fmt.Sprintf("%d", *e.PolicyVersion))
+	}
 	field("parent_audit_id:", strOrDash(uuidDeref(e.ParentAuditId)))
 	field("agent_session_id:", strOrDash(uuidDeref(e.AgentSessionId)))
 	field("broadcast_event_id:", strOrDash(uuidDeref(e.BroadcastEventId)))
@@ -205,7 +216,7 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 // viaLabel renders the login client and channel of a row as
 // "<client> (<channel>)", from the payload's "client" block. MEHO writes
 // the block only when AUDIT_CLIENT_IDENTITY is on, so older rows have
-// none and get "".
+// none and get "", and the summary prints no "via:" line for them.
 func viaLabel(payload map[string]any) string {
 	block, ok := payload["client"].(map[string]any)
 	if !ok {

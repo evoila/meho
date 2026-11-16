@@ -363,7 +363,9 @@ async def lookup_descriptor(
 
     The returned row carries the *effective* ``safety_level`` and
     ``requires_approval`` for *tenant_id*: the operator overrides are
-    applied (#4711, :func:`~meho_backplane.operations.op_policy.apply_effective_policy`).
+    applied (#4711, :func:`~meho_backplane.operations.op_policy.apply_effective_policy`),
+    and with the ``POLICY_CLASSIFICATION`` switch on the classification
+    too, matched on the operation's group key (joined here).
     The row is detached from its session, so those values are never
     written back.
 
@@ -375,10 +377,15 @@ async def lookup_descriptor(
     "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
     tenant's own on/off setting wins over the install default (#5029).
     """
+    # The group is joined under an alias: the "enabled" clause has its own
+    # correlated subqueries on OperationGroup, which must not bind to it.
+    group = aliased(OperationGroup)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
-            select(EndpointDescriptor).where(
+            select(EndpointDescriptor, group.group_key)
+            .outerjoin(group, EndpointDescriptor.group_id == group.id)
+            .where(
                 visible_scope_clause(
                     EndpointDescriptor,
                     tenant_id=tenant_id,
@@ -394,15 +401,18 @@ async def lookup_descriptor(
                 installed_owner_clause(),
             )
         )
-        row = result.scalar_one_or_none()
-        if row is None:
+        found = result.one_or_none()
+        if found is None:
             return None
+        row, group_key = found
         # Imported here: the module imports this one.
         from meho_backplane.operations._code_presence import row_code_missing
 
         if await row_code_missing(session, tenant_id=tenant_id, row=row):
             return None
-        return await apply_effective_policy(session, tenant_id=tenant_id, row=row)
+        return await apply_effective_policy(
+            session, tenant_id=tenant_id, row=row, group_keys={row.id: group_key}
+        )
 
 
 async def descriptor_exists_any_state(

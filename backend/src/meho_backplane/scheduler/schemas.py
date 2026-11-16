@@ -28,13 +28,23 @@ from meho_backplane.db.models import (
     ScheduledTriggerStatus,
 )
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
+from meho_backplane.work_ref import WorkRef
 
 __all__ = [
+    "CHECK_EVENTS_OFF_NOTICE",
+    "CheckSource",
     "ScheduledTriggerCreate",
     "ScheduledTriggerListResponse",
     "ScheduledTriggerRead",
 ]
 
+
+#: One plain sentence for a trigger that picks a Sensor or a Dashboard while the
+#: switch is off. The console form, the create answer and the CLI show it (#6182).
+CHECK_EVENTS_OFF_NOTICE = (
+    "Sensor and Dashboard events are off on this MEHO, so this trigger will not "
+    "fire until an admin turns them on."
+)
 
 #: Max length of an operator-supplied cron expression. A 5-field cron
 #: expression with reasonable bounded ranges stays well under 128 chars;
@@ -51,13 +61,6 @@ _TIMEZONE_MAX_LENGTH = 64
 #: a UUID-shaped value in production; 256 chars covers any tenant-side
 #: customisation (longer values are almost certainly a misconfiguration).
 _IDENTITY_SUB_MAX_LENGTH = 256
-
-#: Max length of a ``work_ref`` change-ticket reference. An opaque
-#: cross-system string (``"gh:evoila/meho#13"`` / a Jira key / a CR id);
-#: bounded so an adversarial caller cannot smuggle a large blob past the
-#: validator. Mirrors the 256-char cap the audit ``work_ref`` sink
-#: applies (:class:`~meho_backplane.api.v1.audit_models`).
-_WORK_REF_MAX_LENGTH = 256
 
 #: Shared wire-description fragment naming the scheduler's tick-quantization
 #: latency contract, surfaced on the timestamp fields so REST / MCP / CLI
@@ -110,6 +113,8 @@ def _require_cron_fields(model: ScheduledTriggerCreate) -> None:
         raise ValueError("cron triggers require cron_expr")
     if model.fire_at is not None or model.event_filter is not None:
         raise ValueError("cron triggers must leave fire_at and event_filter null")
+    if model.check_source is not None:
+        raise ValueError("check_source is only allowed for event triggers")
     if not is_valid_cron_expr(model.cron_expr):
         raise ValueError(f"invalid cron expression: {model.cron_expr!r}")
     # ``resolve_timezone`` raises :class:`InvalidTimezoneError` (a ``ValueError``
@@ -123,12 +128,38 @@ def _require_one_off_fields(model: ScheduledTriggerCreate) -> None:
         raise ValueError("one-off triggers require fire_at")
     if model.cron_expr is not None or model.event_filter is not None:
         raise ValueError("one-off triggers must leave cron_expr and event_filter null")
+    if model.check_source is not None:
+        raise ValueError("check_source is only allowed for event triggers")
+
+
+class CheckSource(BaseModel):
+    """Pick a Sensor or a Dashboard as the source of an event trigger (#6182).
+
+    MEHO turns it into the normal event filter at create. No *id* and no
+    *name* means "any Sensor" or "any Dashboard". *id* and *name* are not
+    allowed together: say which one you mean.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["sensor", "dashboard"]
+    id: uuid.UUID | None = None
+    name: Annotated[str | None, Field(min_length=1, max_length=256)] = None
+    only_worsening: bool = False
+
+    @model_validator(mode="after")
+    def _id_or_name(self) -> CheckSource:
+        if self.id is not None and self.name is not None:
+            raise ValueError("check_source takes an id or a name, not both")
+        return self
 
 
 def _require_event_fields(model: ScheduledTriggerCreate) -> None:
     """Validate the ``event`` discriminator fields (helper for the validator)."""
-    if model.event_filter is None:
-        raise ValueError("event triggers require event_filter")
+    if model.check_source is not None and model.event_filter is not None:
+        raise ValueError("check_source and event_filter cannot be used together")
+    if model.event_filter is None and model.check_source is None:
+        raise ValueError("event triggers require event_filter or check_source")
     if model.cron_expr is not None or model.fire_at is not None:
         raise ValueError("event triggers must leave cron_expr and fire_at null")
 
@@ -205,6 +236,18 @@ class ScheduledTriggerCreate(BaseModel):
         ),
     ] = None
     event_filter: dict[str, object] | None = None
+    check_source: Annotated[
+        CheckSource | None,
+        Field(
+            description=(
+                "Only for kind=event, and not together with event_filter. Starts the "
+                "agent on a Sensor or a Dashboard change: {kind: sensor|dashboard, "
+                "id or name (none = any), only_worsening}. MEHO turns it into the "
+                "event filter and stores the id. Such a trigger fires only when "
+                "CHECKS_AGENT_EVENTS is on."
+            ),
+        ),
+    ] = None
     timezone: Annotated[str, Field(max_length=_TIMEZONE_MAX_LENGTH)] = "UTC"
     inputs: dict[str, object] | None = None
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__scheduler__"
@@ -212,7 +255,7 @@ class ScheduledTriggerCreate(BaseModel):
         ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT
     )
     tenant_id: uuid.UUID | None = None
-    work_ref: Annotated[str | None, Field(max_length=_WORK_REF_MAX_LENGTH)] = None
+    work_ref: WorkRef | None = None
 
     @model_validator(mode="after")
     def _validate_discriminated_union(self) -> ScheduledTriggerCreate:
@@ -350,6 +393,15 @@ class ScheduledTriggerRead(BaseModel):
     work_ref: str | None
     created_at: datetime
     updated_at: datetime
+    notice: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Set only on the create answer, when the trigger will not fire yet "
+                "(a check_source trigger while CHECKS_AGENT_EVENTS is off)."
+            ),
+        ),
+    ] = None
 
 
 class ScheduledTriggerListResponse(BaseModel):

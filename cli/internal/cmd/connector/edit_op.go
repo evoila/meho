@@ -60,6 +60,8 @@ func newEditOpCmd() *cobra.Command {
 		enableOp          bool
 		disableOp         bool
 		reason            string
+		category          string
+		labels            []string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -100,11 +102,26 @@ func newEditOpCmd() *cobra.Command {
 			"fresh sign-in: run `meho login` and retry within five minutes. It is\n" +
 			"never allowed for a destructive operation. List these operations\n" +
 			"with `meho connector overrides --reduced-approval`.\n\n" +
+			"--category and --label set the operation's category and labels.\n" +
+			"Use them without the other flags.\n" +
+			classifyNote + "\n" +
 			"Role: tenant_admin.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			classify, err := classificationFlagsSet(cmd, "custom-description", "safety",
+				"requires-approval", "no-requires-approval", "enable", "disable", "reason")
+			if err != nil {
+				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
+			}
+			if classify {
+				backplaneURL, err := resolveBackplane(backplaneOverride)
+				if err != nil {
+					return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+				}
+				return patchOpClassification(cmd, backplaneURL, args[0], args[1], category, labels, jsonOut)
+			}
 			return runEditOp(cmd, editOpOptions{
 				ConnectorID:          args[0],
 				OpID:                 args[1],
@@ -134,6 +151,7 @@ func newEditOpCmd() *cobra.Command {
 		"set is_enabled=false on this op")
 	cmd.Flags().StringVar(&reason, "reason", "",
 		"why you make this change; written to the audit row and required to turn approval off")
+	addClassificationFlags(cmd, &category, &labels)
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",

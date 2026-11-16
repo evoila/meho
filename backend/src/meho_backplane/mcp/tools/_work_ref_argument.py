@@ -41,12 +41,17 @@ def work_ref_argument(value: Any, *, name: str = "work_ref") -> str | None:
 
 
 def validation_error_text(exc: ValidationError) -> str:
-    """Return the text of a pydantic error without the refused input.
+    """Return the text of a pydantic error, without the input when a ticket id was refused.
 
     ``str(exc)`` holds each refused value (``input_value=...``), so a refused
-    ticket id would be sent back in the error. This text names only the field
-    and the rule.
+    ticket id would be sent back in the error. When one error is a refused
+    ticket id, this text names only each field and its rule. Any other error
+    is ``str(exc)``, the same text as before.
     """
+    if not any(
+        isinstance((error.get("ctx") or {}).get("error"), WorkRefError) for error in exc.errors()
+    ):
+        return str(exc)
     parts = [
         f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
         for error in exc.errors(include_url=False, include_context=False, include_input=False)

@@ -266,15 +266,19 @@ broadcast scrub and the approval echo use. The full word list:
   `product_key`, `secret_id`, `secret_value`, `secret_data`, `pass_phrase`
   anywhere in the name;
 - the pairs `secret_key`, `shared_key`, `preshared_key`,
-  `connection_string`, `connection_strings`, `authentication_key` and
+  `connection_string`, `connection_strings` only at the end of the name
+  (`secret_key_ref` is the name of a Kubernetes Secret and stays plain).
+  `pre_shared_key` ends in `shared_key`, and `license_key` counts
+  anywhere;
+- the device and protocol key pairs `authentication_key` and
   `privacy_key` (the SNMP keys), `auth_key`, `priv_key`,
   `community_string`, `community_strings`, `tacacs_key`, `radius_key`,
   `hmac_key`, `signing_key`, `store_key`, `application_key`,
-  `snmp_community` only at the end of the name (`secret_key_ref` is the
-  name of a Kubernetes Secret and stays plain, and so are `auth_key_id`
-  and `authentication_key_id`). `pre_shared_key` ends in `shared_key`,
-  and `license_key` counts anywhere. `shared_secret` ends in `secret`, so
-  it is hidden by the rule above;
+  `snmp_community` at the end of the name, or right before a last word
+  `ref` (`auth_key_ref` is hidden; `auth_key_id` and
+  `authentication_key_id` stay plain). The list is
+  `_SECRET_KEY_FINAL_TOKEN_PAIRS`;
+- the pair `shared_secret` anywhere in the name (`shared_secret_ref`);
 - a name in capitals has no word boundary (`AUTHKEY`, `LICENSEKEY`), so a
   pair written as one word counts too: a final pair as the last word, any
   other pair as any word;
@@ -293,14 +297,19 @@ broadcast scrub and the approval echo use. The full word list:
   community;
 - never hidden, whatever the rules say: `primary_key`, `partition_key`,
   `sort_key`, `key_id`, `public_key` (plain identifiers that end in a key
-  word; the list is `_PLAIN_KEY_NAMES`), and every name whose last word
-  is `ref` (`secret_ref`, `password_ref`, `apiKeyRef`): it names where a
-  secret is kept, not the secret.
+  word; the list is `_PLAIN_KEY_NAMES`).
+
+A name whose last word is `ref` has no rule of its own. It follows the
+rules above, so it is hidden when the rest of the name is a secret name
+(`password_ref`, `apiKeyRef`, `private_key_ref`) and stays when it is not
+(`secret_ref`). This change only hides more: every name that the rule
+hid before is still hidden.
 
 The rule is one table test, `test_secret_name_new_fields.py`: each secret
-name in four spellings and with an SNMP prefix, each plain name in four
-spellings, checked in every place below and in the Keycloak scrub. A new
-name is one new row.
+name in four spellings and with an SNMP prefix, each name that ends in
+`ref` and is hidden (`_SECRET_REF_NAMES`) in four spellings, each plain
+name in four spellings, checked in every place below and in the Keycloak
+scrub. A new name is one new row.
 
 The same rule serves the places that had a list of their own:
 
@@ -313,6 +322,14 @@ The same rule serves the places that had a list of their own:
   and keeps their values, so `reveal_secret: true` still returns them.
 - The secret query names of a link (`redaction/url_secret.py::is_secret_query_name`)
   are its own last words plus every name the shared rule marks.
+- The pfSense config read (`connectors/pfsense/redaction_names.py`)
+  checks the shared rule first, then its own lists for pfSense element
+  names. It keeps its own lists because pfSense writes many secrets
+  under names that no other place uses (`ipsecpsk`, `ldap_bindpw`).
+- The secret check of an uploaded session file
+  (`session_store/secret_check.py`) sends a file to quarantine when a
+  JSON field, a name/value pair or a quoted pair in text has a name the
+  shared rule marks, and also for its own words in `name=value` text.
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number

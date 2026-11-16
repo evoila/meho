@@ -194,18 +194,14 @@ def registered_ops() -> list[_Op]:
 
 
 def test_the_guard_sees_the_registered_operations(registered_ops: list[_Op]) -> None:
-    """Not empty: the registrars ran, and the known secret operations are flagged.
-
-    ``msad.user.set-password`` is not in the list: its only secret-like
-    field is ``password_ref``, a reference, and a name that ends in
-    ``_ref`` is plain.
-    """
+    """Not empty: the registrars ran, and the known secret operations are flagged."""
     assert len(registered_ops) >= 100
     flagged = {op.op_id for op in registered_ops if _flagged_fields(op.parameter_schema or {})}
     assert {
         "k8s.secret.update",
         "keycloak.user.create",
         "keycloak.user.reset_password",
+        "msad.user.set-password",
         "secret.handoff.import",
         "vault.auth.userpass.update_password",
         "vault.auth.userpass.write",
@@ -253,11 +249,23 @@ def test_the_guard_reports_an_unmarked_operation() -> None:
         },
         ("write",),
     )
-    ops = [password_field, spec_field, example_key]
+    ref_fields = _Op(
+        "acme.host.join",
+        {
+            "type": "object",
+            "properties": {
+                "password_secret_ref": {"type": "string"},
+                "private_key_ref": {"type": "string"},
+            },
+        },
+        ("write",),
+    )
+    ops = [password_field, spec_field, example_key, ref_fields]
 
     assert _unmarked(ops) == {
         "acme.user.create": ["password"],
         "acme.cluster.deploy": ["clusterSpec"],
         "acme.depot.set": ["password"],
+        "acme.host.join": ["password_secret_ref", "private_key_ref"],
     }
     assert _unmarked([op._replace(tags=(*op.tags, "credential")) for op in ops]) == {}

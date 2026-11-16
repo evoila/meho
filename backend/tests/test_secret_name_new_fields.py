@@ -6,7 +6,8 @@
 One name rule (``broadcast.events.is_secret_param_name``) serves the normal
 answer and the audit row, the approval preview (also the Keycloak one), the
 broadcast params, the trace, the error text and the query names of a link.
-Plain identifiers and references stay visible.
+Plain identifiers stay visible. A name that ends in ``ref`` is hidden when
+the rest of it is a secret name (``password_ref``), as on main.
 
 The tests are one table: a new secret name is one new row in
 :data:`_SECRET_NAMES`, a new plain name one new row in :data:`_PLAIN_NAMES`.
@@ -15,6 +16,7 @@ Each row is checked in four spellings, with an SNMP prefix too.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,6 +24,7 @@ import pytest
 
 from meho_backplane.broadcast.events import (
     is_secret_param_name,
+    is_secret_param_name_lowercased,
     scrub_broadcast_params,
     scrub_secret_named_values,
 )
@@ -33,6 +36,7 @@ from meho_backplane.connectors.keycloak.redaction import (
     redact_secret_fields,
     redact_trace_fields,
 )
+from meho_backplane.connectors.pfsense.redaction_names import is_secret_name as is_pfsense_secret
 from meho_backplane.operations._preview import _PARAM_REDACTED, _scrub_secret_param_keys
 from meho_backplane.operations._secret_values import hide_secret_values, reveal_hidden_values
 from meho_backplane.redaction.secret_fields import (
@@ -40,6 +44,7 @@ from meho_backplane.redaction.secret_fields import (
     scrub_secret_fields_in_text,
 )
 from meho_backplane.redaction.url_secret import is_secret_query_name
+from meho_backplane.session_store.secret_check import check_part
 
 _MARK = "[REDACTED:param_name]"
 _VALUE = "made-up-value-123"
@@ -64,6 +69,23 @@ _SECRET_NAMES = [
     "snmp_community",
 ]
 
+#: Names that end in ``ref`` and are hidden, in snake case. Main hides the
+#: first ones already, and so must every later change; the last ones end in
+#: a name this table adds. Each is hidden in four spellings
+#: (``password_ref``, ``passwordRef``, ``password-ref``, ``PASSWORD_REF``).
+_SECRET_REF_NAMES = [
+    "password_ref",
+    "password_secret_ref",
+    "passphrase_ref",
+    "private_key_ref",
+    "api_key_ref",
+    "license_key_ref",
+    "kubeconfig_ref",
+    "auth_key_ref",
+    "snmp_auth_key_ref",
+    "shared_secret_ref",
+]
+
 #: Plain names, in snake case. Each stays visible in every spelling.
 _PLAIN_NAMES = [
     "auth_key_id",
@@ -71,9 +93,8 @@ _PLAIN_NAMES = [
     "community_id",
     "public_key",
     "secret_ref",
-    "password_ref",
-    "api_key_ref",
-    "snmp_auth_key_ref",
+    "secret_key_ref",
+    "connection_string_ref",
     "primary_key",
     "partition_key",
     "sort_key",
@@ -95,7 +116,15 @@ def _spellings(snake: str) -> list[str]:
     ]
 
 
+def _four_spellings(snake: str) -> list[str]:
+    """``password_ref``, ``passwordRef``, ``password-ref``, ``PASSWORD_REF``."""
+    words = snake.split("_")
+    camel = words[0] + "".join(word.title() for word in words[1:])
+    return [snake, camel, snake.replace("_", "-"), snake.upper()]
+
+
 _ALL_SECRET = [spelling for name in _SECRET_NAMES for spelling in _spellings(name)]
+_ALL_SECRET += [spelling for name in _SECRET_REF_NAMES for spelling in _four_spellings(name)]
 _ALL_PLAIN = [spelling for name in _PLAIN_NAMES for spelling in _spellings(name)[:4]]
 # Older names, hidden before this table: the capital spelling is one word.
 _ALL_SECRET += ["sharedSecret", "shared_secret", "shared-secret", "PassPhrase", "PASSPHRASE"]
@@ -128,6 +157,14 @@ def test_secret_name_is_hidden_in_every_place(name: str) -> None:
     assert scrub_secret_fields(node, hide_numbers=True) == hidden(_MARK)  # trace
     assert _VALUE not in scrub_secret_fields_in_text(f'{{"{name}": "{_VALUE}"}}')  # error text
     assert is_secret_query_name(name) is True  # a link's query
+    assert is_pfsense_secret(name) is True  # pfSense config read
+    assert check_part(json.dumps(node).encode()).unclear is True  # uploaded session file
+    assert check_part(json.dumps({"line": f'"{name}": "{_VALUE}"'}).encode()).unclear is True
+
+
+@pytest.mark.parametrize("name", _ALL_SECRET)
+def test_secret_name_is_hidden_once_its_case_is_lost(name: str) -> None:
+    assert is_secret_param_name_lowercased(name.lower()) is True
 
 
 @pytest.mark.parametrize("name", _ALL_PLAIN)
@@ -173,6 +210,7 @@ def test_community_in_an_snmp_place_is_hidden_in_every_place(
     assert _at(scrub_broadcast_params(node)[0], path) == _MARK
     assert _at(_scrub_secret_param_keys(node), path) == _PARAM_REDACTED
     assert _at(scrub_secret_fields(node), path) == _MARK
+    assert check_part(json.dumps(node).encode()).unclear is True  # uploaded session file
 
 
 def test_name_value_pair_community_is_hidden_in_text() -> None:
@@ -191,6 +229,7 @@ def test_name_value_pair_community_is_hidden_in_text() -> None:
     ],
 )
 def test_community_outside_an_snmp_place_stays(node: Any) -> None:
+    assert check_part(json.dumps(node).encode()).unclear is False
     assert scrub_secret_named_values(node) == (node, False)
     assert scrub_broadcast_params({"params": node}) == ({"params": node}, False)
     assert _scrub_secret_param_keys(node) == node

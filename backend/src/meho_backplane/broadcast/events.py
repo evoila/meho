@@ -1020,6 +1020,7 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("secret", "data"),
         ("pass", "phrase"),
         ("pass", "phrases"),
+        ("shared", "secret"),
     }
 )
 
@@ -1039,6 +1040,17 @@ _SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("preshared", "key"),
         ("connection", "string"),
         ("connection", "strings"),
+    }
+)
+
+#: Adjacent token pairs that name a device or protocol key: an SNMP
+#: authentication or privacy key, an SNMP community, a TACACS+ or RADIUS
+#: shared key, an HMAC or signing key. Like the pairs above they mark a
+#: secret when they end the name (``auth_key``, ``snmpAuthKey``), not when
+#: more words follow (``auth_key_id``). A last word ``ref`` does not count
+#: as more words here: ``auth_key_ref`` is hidden too.
+_SECRET_KEY_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
         ("authentication", "key"),
         ("privacy", "key"),
         ("store", "key"),
@@ -1063,11 +1075,6 @@ _PLAIN_KEY_NAMES: Final[frozenset[str]] = frozenset(
     {"primary_key", "partition_key", "sort_key", "key_id", "public_key"}
 )
 
-#: The last word of a reference: ``password_ref``, ``secret_ref``,
-#: ``apiKeyRef``. The field names where a secret is kept, not the secret,
-#: so it stays visible, like a name in :data:`_PLAIN_KEY_NAMES`.
-_REFERENCE_WORD: Final[str] = "ref"
-
 #: Each pair written as one word, for a name in capitals (``AUTHKEY``,
 #: ``LICENSEKEY``): the camelCase split has no boundary to find there.
 #: A final-position pair counts as the last word only.
@@ -1077,6 +1084,13 @@ _SECRET_NAME_PAIRS_AS_WORD: Final[frozenset[str]] = frozenset(
 _SECRET_NAME_FINAL_PAIRS_AS_WORD: Final[frozenset[str]] = frozenset(
     first + second for first, second in _SECRET_NAME_FINAL_TOKEN_PAIRS
 )
+_SECRET_KEY_FINAL_PAIRS_AS_WORD: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_KEY_FINAL_TOKEN_PAIRS
+)
+
+#: The last word of a reference (``auth_key_ref``): see
+#: :data:`_SECRET_KEY_FINAL_TOKEN_PAIRS`.
+_REFERENCE_WORD: Final[str] = "ref"
 
 #: Replacement value for a secret-named param. Mirrors the Tier-1
 #: engine's ``[REDACTED:<pattern>]`` shape so feed consumers see one
@@ -1098,7 +1112,7 @@ def _is_secret_param_name(name: str) -> bool:
     """
     flat = name.replace("-", "_").replace(".", "_")
     split = _CAMEL_BOUNDARY.sub("_", flat).lower()
-    if split in _PLAIN_KEY_NAMES or split.rsplit("_", 1)[-1] == _REFERENCE_WORD:
+    if split in _PLAIN_KEY_NAMES:
         return False
     return _tokens_are_secret(split) or _tokens_are_secret(flat.lower())
 
@@ -1115,6 +1129,11 @@ def _tokens_are_secret(normalised: str) -> bool:
     if tuple(tokens[-2:]) in _SECRET_NAME_FINAL_TOKEN_PAIRS:
         return True
     if tokens[-1] in _SECRET_NAME_FINAL_PAIRS_AS_WORD:
+        return True
+    key_tokens = tokens[:-1] if len(tokens) > 1 and tokens[-1] == _REFERENCE_WORD else tokens
+    if tuple(key_tokens[-2:]) in _SECRET_KEY_FINAL_TOKEN_PAIRS:
+        return True
+    if key_tokens[-1] in _SECRET_KEY_FINAL_PAIRS_AS_WORD:
         return True
     if any(token in _SECRET_NAME_PAIRS_AS_WORD for token in tokens):
         return True
@@ -1136,7 +1155,7 @@ def is_secret_param_name(name: str) -> bool:
 #: names than the exact rule, never fewer, so a final-only pair counts
 #: anywhere there.
 _SECRET_NAME_TOKEN_PAIRS_LOOSE: Final[frozenset[tuple[str, str]]] = (
-    _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS
+    _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS | _SECRET_KEY_FINAL_TOKEN_PAIRS
 )
 
 
@@ -1225,7 +1244,7 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     """
     flat = name.replace("-", "_").replace(".", "_").lower()
     tokens = [token for token in flat.split("_") if token]
-    if not tokens or tokens[-1] == _REFERENCE_WORD:
+    if not tokens:
         return False
     if any(word in token for token in tokens for word in _SECRET_NAME_TOKENS_ANYWHERE):
         return True

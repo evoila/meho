@@ -70,6 +70,37 @@ routing:
 - The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
   sign-in and the routing at the click.
 
+## The shipped "small team" file
+
+`deploy/policy-profiles/small-team.yaml` is MEHO's default policy. The
+same file is packaged at
+`backend/src/meho_backplane/policy/profiles/small-team.yaml` (listed in the
+wheel `artifacts` in `backend/pyproject.toml`), so MEHO has it without a
+network. It holds the built-in taxonomy (`DEFAULT_TAXONOMY` in
+`policy/classification.py`) and no classification entries.
+
+Until a policy for the whole install is stored, the install's policy is
+this file (`builtin_install_document` in `policy/service.py`):
+
+- `build_plan` compares an install file against it, so importing the file
+  on a fresh install is "No change.", and `based_on` is its SHA-256;
+- `export_policy` for `scope: install` writes it;
+- a tenant import checks against its taxonomy.
+
+The runtime (`policy/store.py`) does not read the file: with no stored
+install policy it uses `DEFAULT_TAXONOMY` and no entries, which is the
+same. `backend/tests/test_policy_small_team_parity.py` keeps the two
+copies equal, keeps the file's taxonomy equal to `DEFAULT_TAXONOMY`, and
+checks that storing the file changes no operation. For every registered
+operation it compares, with and without the file: the risk level, the
+wait, "always wait", the category, who may approve (`approvers_for`), and
+the answer of `policy_gate` (run, wait or refuse, and the reason) for
+seven kinds of caller, with a standing grant, an agent grant and a run
+approval. It runs with `POLICY_CLASSIFICATION` and
+`POLICY_APPROVER_ROUTING` on. The file has no `routing` section, so who
+may approve stays today's rule. It cannot have `bindings`: they are for a
+tenant's file only.
+
 ## Checks
 
 The parser (`policy/document.py`) uses the strict YAML loader of the
@@ -255,6 +286,8 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
 versions), `backend/tests/test_policy_bindings.py` (bindings), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
+`backend/tests/test_policy_small_team_parity.py` (the "small team" file:
+round trip and no change over every operation),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `backend/tests/test_policy_routing.py` (the `routing` section, its checks,
 diff and export, the "separated duties" file, the stored approver kinds

@@ -124,7 +124,10 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     marks = {
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
-        "credential_read": credential_read_grant_reason(op_id) is not None,
+        "credential_read": credential_read_grant_reason(
+            op_id, getattr(descriptor, "op_class", None)
+        )
+        is not None,
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
     }

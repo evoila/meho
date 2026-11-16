@@ -195,7 +195,7 @@ async def create_agent(
         audit_op_id=_AGENT_OP_IDS["create"],
         audit_op_class="write",
         audit_agent_name=body.name,
-        **audit_fields(body.starting_grants),
+        **audit_fields(body.starting_grants, agent=body.identity_ref),
     )
     if writes_rows(body.starting_grants):
         ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)

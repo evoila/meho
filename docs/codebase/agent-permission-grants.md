@@ -206,13 +206,18 @@ Rules:
 - The audit row of the creation carries `starting_grants` (the set, or
   `not-chosen` when no set was picked) and, for `read-targets`,
   `starting_grant_targets` (the names as sent). So does the audit row of
-  an edit that sends `identity_ref`; it also carries
-  `starting_grant_agent`, the agent that gets the grants. The console
+  an edit that sends `identity_ref`. The audit row of an agent definition
+  create, and of such an edit, also carries `starting_grant_agent`, the
+  agent that gets the grants. The console
   forms write the same audit values as the API (`ui/routes/agents/forms.py`,
   `principals_forms.py`). They bind the operation name before they read
   the pick and before the person check, so the audit row of a form that
-  is refused early also names it. `test_ui_agent_starting_grants_audit.py`
-  and `test_agent_starting_grants_edit_audit.py` check the rows.
+  is refused early also names it. A refused console create or edit
+  answers 422, so its audit row does not read like a done change; a
+  saved one answers 204. `test_ui_agent_starting_grants_audit.py`,
+  `test_agent_starting_grants_edit_audit.py`,
+  `test_agent_starting_grants_create_audit.py` and
+  `test_ui_agent_form_refusals.py` check the rows.
 - A target name that does not resolve gives
   `starting_grants_target_unknown` (or `_ambiguous` when it matches more
   than one target). The text ends with "Nothing was created." for a

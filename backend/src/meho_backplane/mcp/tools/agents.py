@@ -219,7 +219,8 @@ async def _create_handler(
     except ValidationError as exc:
         raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
     structlog.contextvars.bind_contextvars(
-        audit_agent_name=payload.name, **audit_fields(payload.starting_grants)
+        audit_agent_name=payload.name,
+        **audit_fields(payload.starting_grants, agent=payload.identity_ref),
     )
     if writes_rows(payload.starting_grants):
         ensure_human_mcp_caller(

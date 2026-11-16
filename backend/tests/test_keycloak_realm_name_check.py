@@ -279,7 +279,11 @@ def _sample(schema: dict[str, Any]) -> Any:
 def _params(op: Any) -> dict[str, Any]:
     schema = op.parameter_schema
     props = schema.get("properties", {})
-    return {name: _sample(props.get(name, {})) for name in schema.get("required", [])}
+    example = (schema.get("examples") or [{}])[0]
+    return {
+        name: copy.deepcopy(example[name]) if name in example else _sample(props.get(name, {}))
+        for name in schema.get("required", [])
+    }
 
 
 @pytest.mark.asyncio
@@ -507,3 +511,47 @@ async def test_the_check_route_lists_refused_targets_and_a_platform_admin_sees_a
         (DEFAULT_TENANT_ID, "kc-path"),
         (str(other_tenant), "kc-other"),
     }
+
+
+@pytest.mark.asyncio
+async def test_the_check_route_shows_only_the_own_tenant_to_other_callers() -> None:
+    """A machine login with platform admin, a read-only role and another tenant."""
+    from meho_backplane.api.v1.targets_keycloak_realm import router as check_router
+
+    from ._oidc_jwt_helpers import mint_token
+
+    other_tenant = UUID("00000000-0000-0000-0000-00000000b0b0")
+    await _insert_target(name="kc-none", product="keycloak", extras={"admin_realm": "master"})
+    await _insert_target(name="kc-other", product="keycloak", tenant_id=other_tenant, extras={})
+
+    app = _build_app()
+    app.include_router(check_router)
+    key = make_rsa_keypair("kid-A")
+    url = "/api/v1/targets/checks/keycloak-realm"
+
+    def _get(client: TestClient, **claims: Any) -> Any:
+        token = mint_token(key, **claims)
+        return client.get(url, headers={"Authorization": f"Bearer {token}"})
+
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as test_client:
+            machine = _get(
+                test_client,
+                tenant_role=TenantRole.OPERATOR.value,
+                platform_admin=True,
+                principal_kind=PrincipalKind.SERVICE.value,
+            )
+            read_only = _get(test_client, tenant_role=TenantRole.READ_ONLY.value)
+            other = _get(
+                test_client, tenant_role=TenantRole.OPERATOR.value, tenant_id=str(other_tenant)
+            )
+    assert machine.status_code == 200, machine.text
+    assert machine.json()["all_tenants"] is False
+    assert [i["name"] for i in machine.json()["items"]] == ["kc-none"]
+    assert read_only.status_code == 403, read_only.text
+    assert other.status_code == 200, other.text
+    assert other.json()["all_tenants"] is False
+    assert [(i["tenant_id"], i["name"]) for i in other.json()["items"]] == [
+        (str(other_tenant), "kc-other")
+    ]

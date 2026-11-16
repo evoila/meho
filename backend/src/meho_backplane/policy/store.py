@@ -41,6 +41,8 @@ from meho_backplane.db.models import (
     TenantPolicy,
 )
 from meho_backplane.policy.classification import (
+    LABEL_KEY_MAX,
+    LABEL_VALUE_MAX,
     Classification,
     ClassificationEntry,
     OpCoordinates,
@@ -71,8 +73,6 @@ __all__ = [
 ]
 
 _MAX_LABELS = 32
-_MAX_LABEL_KEY = 63
-_MAX_LABEL_VALUE = 255
 
 
 class InvalidStoredPolicyError(ValueError):
@@ -130,7 +130,7 @@ def _override_entries(
                 connector=connector_id,
                 op=override.op_id,
                 category=override.category,
-                labels={str(k): str(v) for k, v in labels.items() if label_text_ok(str(k), str(v))},
+                labels={str(k): str(v) for k, v in labels.items()},
             )
         )
     return entries
@@ -297,11 +297,11 @@ def _check_labels(labels: Mapping[str, str]) -> None:
     if len(labels) > _MAX_LABELS:
         raise ValueError(f"At most {_MAX_LABELS} labels are allowed.")
     for key, value in labels.items():
-        if not key or len(key) > _MAX_LABEL_KEY:
-            raise ValueError(f"Label key {key!r} must have 1 to {_MAX_LABEL_KEY} characters.")
-        if not value or len(value) > _MAX_LABEL_VALUE:
+        if not key or len(key) > LABEL_KEY_MAX:
+            raise ValueError(f"Label key {key!r} must have 1 to {LABEL_KEY_MAX} characters.")
+        if not value or len(value) > LABEL_VALUE_MAX:
             raise ValueError(
-                f"The value of label {key!r} must have 1 to {_MAX_LABEL_VALUE} characters."
+                f"The value of label {key!r} must have 1 to {LABEL_VALUE_MAX} characters."
             )
         if not label_text_ok(key, value):
             raise ValueError(

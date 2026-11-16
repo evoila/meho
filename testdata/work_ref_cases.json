@@ -1,5 +1,5 @@
 {
- "_comment": "Shared cases for the ticket id rule. Read by backend/tests/test_work_ref_rule.py and cli/internal/api/workref_test.go. A case with repeat holds raw repeated that many times. The Go test skips length_depends_on_nfc (the CLI does not make the text composed) and invalid_python_only (Go text cannot hold a lone surrogate). A valid case with cli_refuses is cleaned by the backend, but the CLI refuses it on purpose: a control character at the end of a flag or variable value is most likely a mistake.",
+ "_comment": "Shared cases for the ticket id rule. Read by backend/tests/test_work_ref_rule.py and cli/internal/api/workref_test.go. A case with repeat holds raw repeated that many times. The Go test skips invalid_python_only (Go text cannot hold a lone surrogate). A valid case with cli_refuses is cleaned by the backend, but the CLI refuses it on purpose: a control character at the end of a flag or variable value is most likely a mistake.",
  "valid": [
   {
    "name": "plain ticket",
@@ -70,8 +70,7 @@
    "raw": "A\u0308",
    "repeat": 130,
    "clean": "\u00c4",
-   "clean_repeat": 130,
-   "length_depends_on_nfc": true
+   "clean_repeat": 130
   }
  ],
  "invalid": [

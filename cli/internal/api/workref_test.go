@@ -23,7 +23,6 @@ type workRefCase struct {
 	Clean              string `json:"clean"`
 	CleanRepeat        int    `json:"clean_repeat"`
 	Rule               string `json:"rule"`
-	LengthDependsOnNFC bool   `json:"length_depends_on_nfc"`
 	CLIRefuses         bool   `json:"cli_refuses"`
 }
 
@@ -62,19 +61,13 @@ func loadWorkRefCases(t *testing.T) (valid, invalid []workRefCase) {
 }
 
 // TestValidWorkRef_SharedCases runs the list the backend test runs too.
-// The CLI does not make the text NFC, so a case whose length depends on
-// that step is left to the backend.
 func TestValidWorkRef_SharedCases(t *testing.T) {
 	valid, invalid := loadWorkRefCases(t)
 	for _, c := range valid {
-		if c.LengthDependsOnNFC {
-			continue
-		}
 		if got := ValidWorkRef(c.raw()); got == c.CLIRefuses {
 			t.Errorf("%s: ValidWorkRef(%q) = %v; want %v", c.Name, c.raw(), got, !c.CLIRefuses)
 		}
-		// Only the case that needs the NFC step differs from CleanWorkRef.
-		if c.Name != "decomposed text is made composed" && CleanWorkRef(c.raw()) != c.clean() {
+		if CleanWorkRef(c.raw()) != c.clean() {
 			t.Errorf("%s: CleanWorkRef(%q) = %q; want %q", c.Name, c.raw(), CleanWorkRef(c.raw()), c.clean())
 		}
 	}
@@ -82,6 +75,19 @@ func TestValidWorkRef_SharedCases(t *testing.T) {
 		if ValidWorkRef(c.raw()) {
 			t.Errorf("%s: ValidWorkRef(%q) = true; want false", c.Name, c.raw())
 		}
+	}
+}
+
+// TestValidWorkRef_CountsLengthAfterNFC: 130 decomposed letters are 260
+// characters as typed and 130 after the NFC step, so the CLI takes them,
+// as the backplane does.
+func TestValidWorkRef_CountsLengthAfterNFC(t *testing.T) {
+	ref := strings.Repeat("A\u0308", 130)
+	if !ValidWorkRef(ref) {
+		t.Errorf("ValidWorkRef(130 decomposed letters) = false; want true")
+	}
+	if got, want := CleanWorkRef(ref), strings.Repeat("\u00c4", 130); got != want {
+		t.Errorf("CleanWorkRef(130 decomposed letters) = %q; want %q", got, want)
 	}
 }
 

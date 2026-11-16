@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // WorkRefHeader is the request header the backplane audit middleware
@@ -26,14 +28,15 @@ const WorkRefRule = "must be a ticket id on one line, for example gh:evoila/meho
 // WorkRefMaxChars is the longest ticket id the backplane takes.
 const WorkRefMaxChars = 256
 
-// CleanWorkRef removes white space at both ends of ref, like the
-// backplane does. White space is what Python's str.strip removes: the
-// Unicode white space, and also the four information separators
-// U+001C to U+001F. Send this value, not the raw text.
+// CleanWorkRef cleans ref like the backplane does: it removes white
+// space at both ends and makes the text Unicode form NFC. White space is
+// what Python's str.strip removes: the Unicode white space, and also the
+// four information separators U+001C to U+001F. Send this value, not the
+// raw text.
 func CleanWorkRef(ref string) string {
-	return strings.TrimFunc(ref, func(r rune) bool {
+	return norm.NFC.String(strings.TrimFunc(ref, func(r rune) bool {
 		return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
-	})
+	}))
 }
 
 // ValidWorkRef reports whether ref can be sent as a change-ticket
@@ -44,13 +47,13 @@ func CleanWorkRef(ref string) string {
 // direction marks) or a line or paragraph separator. Text that is not
 // valid UTF-8 is refused too, because the header carries UTF-8.
 //
-// Two things differ from the backplane, on purpose. The CLI looks for
-// control characters before it removes white space (CleanWorkRef), so a
+// The length is counted after cleaning, so a decomposed id that is longer
+// than 256 characters only before the NFC step passes, as on the
+// backplane. One thing differs from the backplane, on purpose. The CLI
+// looks for control characters before it removes white space, so a
 // trailing line break in a flag or variable value is refused here,
 // although the backplane would remove it: it is most likely a mistake.
-// And the CLI does not make the text Unicode form NFC, so a decomposed id
-// that is only longer than 256 characters before that step is refused
-// here, although the backplane would take it. The shared case list
+// The shared case list
 // testdata/work_ref_cases.json is read by this package's test and by the
 // backend test, so the two rules cannot drift.
 func ValidWorkRef(ref string) bool {

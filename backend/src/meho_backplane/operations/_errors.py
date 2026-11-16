@@ -2520,6 +2520,7 @@ def _auth_failed_summary(
     remediation: str,
     relogin: Literal["not_available", "attempted_failed", "reestablished"],
     over_http: bool,
+    session_ended: bool = False,
 ) -> str:
     """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
 
@@ -2538,13 +2539,21 @@ def _auth_failed_summary(
       "already re-logged-in and retried once" sentence lives here alone.
     * ``call`` -- a connector rejected a normal call on a live session with
       an auth/permission fault that a fresh login cannot fix (#3566), so no
-      re-login was tried.
+      re-login was tried. With *session_ended* (the cause
+      ``session_ended_<status>_not_resent``) the summary says first that the
+      login session ended and that MEHO did not send the operation again.
 
     *status_label* is ``HTTP <status>`` when the connector got a real HTTP
     status, else ``cause <cause>``. With ``over_http=False`` (a database
     login, for example) the establish text says that the system refused
     the login, not that an HTTP login was rejected (#6154).
     """
+    if stage == "call" and session_ended:
+        return (
+            f"connector_auth_failed: the login session ended ({status_label}) "
+            f"for {host}, and MEHO did not send the operation again. "
+            f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
+        )
     if stage == "call":
         return (
             f"connector_auth_failed: the upstream rejected this call with an "
@@ -2739,6 +2748,7 @@ def result_connector_auth_failed(
         remediation=remediation,
         relogin=relogin,
         over_http=over_http,
+        session_ended=cause.startswith("session_ended_"),
     )
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"

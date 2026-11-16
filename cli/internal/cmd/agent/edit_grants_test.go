@@ -62,6 +62,32 @@ func TestRunEditSendsThePickAndShowsTheGrants(t *testing.T) {
 	}
 }
 
+func TestRunEditSaysChangedWhenTheGrantReadFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/incident-triage", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sampleDefinition())
+	})
+	mux.HandleFunc("/api/v1/agents/grants", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	opts := editOpts(srv.URL, startinggrants.Flags{Set: "read-everything"})
+	opts.JSONOut = false
+	if err := runEdit(cmd, opts); err != nil {
+		t.Fatalf("runEdit: %v; stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "the agent was changed, but its grants could not be read") ||
+		strings.Contains(out, "was created") {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
 func TestRunEditWithoutGrantsFlagSendsNoPick(t *testing.T) {
 	var raw map[string]any
 	mux := http.NewServeMux()

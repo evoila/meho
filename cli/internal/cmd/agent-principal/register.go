@@ -113,7 +113,7 @@ func runRegister(cmd *cobra.Command, opts registerOptions) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "registered agent principal %q\n", entry.Name)
 	printEntrySummary(cmd.OutOrStdout(), entry)
-	startinggrants.PrintGrants(cmd.OutOrStdout(), entry.KeycloakClientId, grants, readErr)
+	startinggrants.PrintGrants(cmd.OutOrStdout(), "created", entry.KeycloakClientId, grants, readErr)
 	return nil
 }
 

@@ -199,6 +199,7 @@ def test_edit_unknown_target_keeps_the_pick_and_writes_nothing(
     error = _pick_error(response.text)
     assert error is not None
     assert "no target named" in error
+    assert "Nothing was changed." in error
     assert 'value="read-targets"' in response.text
     assert _grant_rows("agent-new") == []
     assert _identity_ref_of("triage") == "agent-old"

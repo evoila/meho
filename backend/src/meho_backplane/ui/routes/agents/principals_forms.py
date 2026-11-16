@@ -254,6 +254,12 @@ async def submit_register(
     After a pick that writes grants, the redirect goes to the grants page
     of the new agent instead, so the person sees what was written.
     """
+    # Bound first, so the audit row of an early refusal names the operation.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent_principal.register",
+        audit_op_class="write",
+        audit_agent_principal_name=name,
+    )
     owner_clean = (owner_sub or "").strip() or None
     targets = grant_targets or []
     raw_values: dict[str, object] = {
@@ -312,15 +318,10 @@ async def _register(
 ) -> AgentPrincipalRead | _RegisterFailure:
     """Call the service; map each known failure to what the modal shows.
 
-    Binds the same ``audit_*`` values as ``POST /api/v1/agent-principals``,
-    so the audit row names the picked set (and its targets).
+    Binds the picked set (and its targets) for the audit row, the same
+    ``audit_*`` values as ``POST /api/v1/agent-principals``.
     """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id="agent_principal.register",
-        audit_op_class="write",
-        audit_agent_principal_name=payload.name,
-        **audit_fields(payload.starting_grants),
-    )
+    structlog.contextvars.bind_contextvars(**audit_fields(payload.starting_grants))
     try:
         return await AgentPrincipalService().register(
             tenant_id=session_ctx.tenant_id,

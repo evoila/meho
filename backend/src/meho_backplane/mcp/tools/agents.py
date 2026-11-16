@@ -211,15 +211,15 @@ async def _create_handler(
     # pattern, turn-budget bounds, extra="forbid") run for MCP as for
     # REST. The inputSchema does first-pass shape checks; Pydantic runs
     # the typed-field validators.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_AGENT_OP_IDS["create"], audit_op_class="write"
+    )
     try:
         payload = AgentDefinitionCreate.model_validate(arguments)
     except ValidationError as exc:
         raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
     structlog.contextvars.bind_contextvars(
-        audit_op_id=_AGENT_OP_IDS["create"],
-        audit_op_class="write",
-        audit_agent_name=payload.name,
-        **audit_fields(payload.starting_grants),
+        audit_agent_name=payload.name, **audit_fields(payload.starting_grants)
     )
     if writes_rows(payload.starting_grants):
         ensure_human_mcp_caller(
@@ -338,17 +338,19 @@ async def _edit_handler(
     # validating the update body so a stray ``name`` doesn't trip
     # extra="forbid".
     update_args = {k: v for k, v in arguments.items() if k != "name"}
-    try:
-        payload = AgentDefinitionUpdate.model_validate(update_args)
-    except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["edit"],
         audit_op_class="write",
         audit_agent_name=name,
     )
+    try:
+        payload = AgentDefinitionUpdate.model_validate(update_args)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
     if payload.identity_ref is not None:
-        structlog.contextvars.bind_contextvars(**audit_fields(payload.starting_grants))
+        structlog.contextvars.bind_contextvars(
+            **audit_fields(payload.starting_grants, agent=payload.identity_ref)
+        )
     if writes_rows(payload.starting_grants):
         ensure_human_mcp_caller(
             operator, "meho_agents_edit with starting_grants", PERSON_ONLY_REMEDIATION

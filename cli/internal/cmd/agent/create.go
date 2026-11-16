@@ -212,7 +212,11 @@ func printSaved(
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s agent definition %q\n", verb, entry.Name)
 	printDefinitionSummary(cmd.OutOrStdout(), entry)
-	startinggrants.PrintGrants(cmd.OutOrStdout(), entry.IdentityRef, grants, readErr)
+	outcome := "created"
+	if verb != "created" {
+		outcome = "changed"
+	}
+	startinggrants.PrintGrants(cmd.OutOrStdout(), outcome, entry.IdentityRef, grants, readErr)
 	return nil
 }
 

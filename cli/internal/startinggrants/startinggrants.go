@@ -206,10 +206,11 @@ func WithGrants(entry any, grants []api.AgentGrantRead, readErr error) (map[stri
 }
 
 // PrintGrants writes the agent's grants for the human summary. A failed
-// read is said in plain words, never shown as "no grants".
-func PrintGrants(w io.Writer, principalSub string, grants []api.AgentGrantRead, readErr error) {
+// read is said in plain words, never shown as "no grants". outcome is
+// what the command did: "created" or "changed".
+func PrintGrants(w io.Writer, outcome, principalSub string, grants []api.AgentGrantRead, readErr error) {
 	if readErr != nil {
-		fmt.Fprintf(w, "the agent was created, but its grants could not be read: %v\n", readErr)
+		fmt.Fprintf(w, "the agent was %s, but its grants could not be read: %v\n", outcome, readErr)
 		fmt.Fprintf(w, "check them with `meho agent grant list --principal %s`\n", principalSub)
 		return
 	}

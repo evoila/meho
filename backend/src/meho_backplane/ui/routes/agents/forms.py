@@ -101,6 +101,7 @@ from pydantic import ValidationError
 
 from meho_backplane.agents.grant_sets import (
     PERSON_ONLY_REMEDIATION,
+    audit_fields,
     writes_rows,
 )
 from meho_backplane.agents.schemas import (
@@ -301,6 +302,10 @@ async def submit_create(
     create returns 204 + ``HX-Redirect: /ui/agents``, or to the agent's
     grants page after a pick that writes grants.
     """
+    # Bound first, so the audit row of an early refusal names the operation.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.create", audit_op_class="write", audit_agent_name=name
+    )
     targets = grant_targets or []
     raw_values = {
         "name": name,
@@ -330,6 +335,7 @@ async def submit_create(
         )
     except (ValidationError, ValueError) as exc:
         return await _render_errors(request, session_ctx, "create", raw_values, exc=exc)
+    structlog.contextvars.bind_contextvars(**audit_fields(pick))
     if writes_rows(pick):
         ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
 
@@ -397,6 +403,10 @@ async def submit_edit(
     inline. A changed ``identity_ref`` that names an agent with no grant
     needs the starting grant pick, the same as a create (#6389).
     """
+    # Bound first, so the audit row of an early refusal names the operation.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.edit", audit_op_class="write", audit_agent_name=name
+    )
     targets = grant_targets or []
     raw_values = {
         "name": name,
@@ -425,6 +435,7 @@ async def submit_edit(
         )
     except (ValidationError, ValueError) as exc:
         return await _render_errors(request, session_ctx, "edit", raw_values, exc=exc)
+    structlog.contextvars.bind_contextvars(**audit_fields(pick, agent=identity_ref))
     if writes_rows(pick):
         ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
 

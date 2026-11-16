@@ -246,6 +246,8 @@ class AgentDefinitionService:
         tenant_id: uuid.UUID,
         identity_ref: str,
         starting: StartingGrants | None,
+        *,
+        outcome: str = "Nothing was created.",
     ) -> list[str]:
         """Check the starting grant pick and return the scopes of its rows (#6191).
 
@@ -253,7 +255,7 @@ class AgentDefinitionService:
         """
         if starting is None and not await has_live_grant(session, tenant_id, identity_ref):
             require_pick(None)
-        return await resolve_scopes(session, tenant_id, starting)
+        return await resolve_scopes(session, tenant_id, starting, outcome=outcome)
 
     async def list_(
         self,
@@ -378,7 +380,11 @@ class AgentDefinitionService:
                 await _validate_identity_ref(session, tenant_id, new_identity_ref)
                 if new_identity_ref != row.identity_ref or payload.starting_grants is not None:
                     grant_scopes = await self._starting_grant_scopes(
-                        session, tenant_id, new_identity_ref, payload.starting_grants
+                        session,
+                        tenant_id,
+                        new_identity_ref,
+                        payload.starting_grants,
+                        outcome="Nothing was changed.",
                     )
             apply_changes(row, changes)
             await session.flush()

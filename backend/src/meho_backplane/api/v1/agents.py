@@ -249,7 +249,9 @@ async def edit_agent(
         audit_agent_name=name,
     )
     if body.identity_ref is not None:
-        structlog.contextvars.bind_contextvars(**audit_fields(body.starting_grants))
+        structlog.contextvars.bind_contextvars(
+            **audit_fields(body.starting_grants, agent=body.identity_ref)
+        )
     if writes_rows(body.starting_grants):
         ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
     service = AgentDefinitionService()

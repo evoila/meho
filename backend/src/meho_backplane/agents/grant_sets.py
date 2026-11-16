@@ -210,12 +210,15 @@ async def resolve_scopes(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     starting: StartingGrants | None,
+    *,
+    outcome: str = "Nothing was created.",
 ) -> list[str]:
     """Return the ``target_scope`` of each row the set writes, in the caller's tenant.
 
     ``none`` (or no pick) gives no row, ``read-everything`` gives ``["*"]``,
     ``read-targets`` gives the target ids, once each. An unknown or
-    ambiguous name raises :class:`StartingGrantsError`.
+    ambiguous name raises :class:`StartingGrantsError`; its text ends with
+    *outcome* (an edit passes "Nothing was changed.").
     """
     if starting is None or starting.set is StartingGrantSet.NONE:
         return []
@@ -231,13 +234,13 @@ async def resolve_scopes(
             except TargetNotFoundError as exc:
                 raise StartingGrantsError(
                     "starting_grants_target_unknown",
-                    f"no target named {name!r} in this tenant. Nothing was created.",
+                    f"no target named {name!r} in this tenant. {outcome}",
                 ) from exc
             except AmbiguousTargetError as exc:
                 raise StartingGrantsError(
                     "starting_grants_target_ambiguous",
                     f"the name {name!r} matches more than one target. "
-                    "Use the target's exact name. Nothing was created.",
+                    f"Use the target's exact name. {outcome}",
                 ) from exc
             scope = str(target.id)
             if scope not in scopes:
@@ -334,11 +337,19 @@ def _has_expired(expires_at: datetime | None, now: datetime) -> bool:
     return expires_at <= now
 
 
-def audit_fields(starting: StartingGrants | None) -> dict[str, object]:
-    """The ``audit_*`` values that name the picked set on the creation's audit row."""
+def audit_fields(starting: StartingGrants | None, *, agent: str | None = None) -> dict[str, object]:
+    """The ``audit_*`` values that name the picked set on the creation's audit row.
+
+    An edit passes *agent*, the ``identity_ref`` it points the definition
+    at, so its audit row also names the agent that got the grants.
+    """
+    fields: dict[str, object] = {}
+    if agent is not None:
+        fields["audit_starting_grant_agent"] = agent
     if starting is None:
-        return {"audit_starting_grants": NOT_CHOSEN}
-    fields: dict[str, object] = {"audit_starting_grants": starting.set.value}
+        fields["audit_starting_grants"] = NOT_CHOSEN
+        return fields
+    fields["audit_starting_grants"] = starting.set.value
     if starting.set is StartingGrantSet.READ_TARGETS:
         fields["audit_starting_grant_targets"] = list(starting.targets)
     return fields

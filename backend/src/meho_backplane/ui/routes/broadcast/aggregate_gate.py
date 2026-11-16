@@ -43,6 +43,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AuditLog
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "fetch_audit_row",
     "is_aggregate_only",
     "resolve_op_id",
+    "resolve_row_op_class",
 ]
 
 #: Op classes whose detail is withheld from any console drawer per
@@ -120,6 +122,22 @@ def resolve_op_id(row: AuditLog) -> str:
     if isinstance(op_id, str) and op_id:
         return op_id
     return f"http.{row.method.lower()}:{row.path}"
+
+
+def resolve_row_op_class(row: AuditLog, op_id: str) -> str:
+    """Return the op class a drawer shows for *row*.
+
+    The class the audit row stored (``payload["op_class"]``) wins when it is
+    a secret class: a connector's safety floor can store ``credential_read``
+    on an ingested operation, and nothing in the op id says so. For every
+    other class the op id gives the class, as before: a route can bind a
+    class (``read`` or ``write``) to an op id that the classifier shows
+    with its own name (the ``approval.*`` ids).
+    """
+    stored = row.payload.get("op_class")
+    if isinstance(stored, str) and stored in AGGREGATE_ONLY_OP_CLASSES | {"credential_write"}:
+        return stored
+    return classify_op(op_id)
 
 
 def is_aggregate_only(row: AuditLog, op_class: str) -> bool:

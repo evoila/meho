@@ -40,7 +40,6 @@ from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast.events import resolve_operation_op_class
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
@@ -56,6 +55,7 @@ from meho_backplane.operations.audit_row_safe import (
     storable_and_changed,
 )
 from meho_backplane.operations.caller_gone import caller_gone_at
+from meho_backplane.operations.op_class_of import descriptor_op_class
 from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
@@ -436,24 +436,6 @@ def _resolve_audit_extras_from_contextvars() -> dict[str, Any]:
         if stripped:
             out[stripped] = value
     return out
-
-
-def descriptor_op_class(descriptor: EndpointDescriptor) -> str:
-    """Return the op class of one run of *descriptor*.
-
-    The audit row stores this class, and the dispatcher hands the same
-    value to the announce gate, the announce reminder and the target
-    activity warning. See
-    :func:`~meho_backplane.broadcast.events.resolve_operation_op_class`.
-    A descriptor stand-in without a ``safety_level`` gets the class from
-    its op id alone.
-    """
-    return resolve_operation_op_class(
-        descriptor.op_id,
-        source_kind=descriptor.source_kind,
-        safety_level=getattr(descriptor, "safety_level", None),
-        stored_op_class=getattr(descriptor, "op_class", None),
-    )
 
 
 def _build_audit_payload(

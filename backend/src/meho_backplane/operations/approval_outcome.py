@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_ADVICE,
@@ -126,12 +126,19 @@ def _extras(data: Mapping[str, Any]) -> Mapping[str, Any]:
     return extras if isinstance(extras, Mapping) else {}
 
 
-def _sends_or_reads_secret(op_id: object) -> bool:
-    """Whether *op_id* is in a secret class. An op id that is not a string counts as yes."""
-    return not isinstance(op_id, str) or classify_op(op_id) in SECRET_OP_CLASSES
+def _sends_or_reads_secret(op_id: object, op_class: str | None = None) -> bool:
+    """Whether *op_id* is in a secret class. An op id that is not a string counts as yes.
+
+    *op_class* is the class of the operation when the caller knows it (the
+    class of the approval request, which may be a class stored on an
+    ingested operation). Without it, the op id gives the class.
+    """
+    return not isinstance(op_id, str) or resolve_op_class(op_id, op_class) in SECRET_OP_CLASSES
 
 
-def _run_guidance(data: Mapping[str, Any], parked_op_id: str) -> str | None:
+def _run_guidance(
+    data: Mapping[str, Any], parked_op_id: str, parked_op_class: str | None
+) -> str | None:
     """The ``guidance`` of a failed multi-step operation's own error answer, else ``None``."""
     body = data.get("result")
     error_code = _str_or_none(_extras(data).get("error_code"))
@@ -139,7 +146,12 @@ def _run_guidance(data: Mapping[str, Any], parked_op_id: str) -> str | None:
         return None
     if body.get("status") != error_code:
         return None
-    if _sends_or_reads_secret(data.get("op_id")) or _sends_or_reads_secret(parked_op_id):
+    # The class of the parked request is known. The envelope's own op id can be
+    # another one: an approved step makes the whole multi-step operation run
+    # again, and such an operation is hand-written, so it has no stored class.
+    if _sends_or_reads_secret(data.get("op_id")) or _sends_or_reads_secret(
+        parked_op_id, parked_op_class
+    ):
         return None
     text = _str_or_none(body.get("guidance"))
     if text is not None and len(text) > _GUIDANCE_CAP:
@@ -147,7 +159,9 @@ def _run_guidance(data: Mapping[str, Any], parked_op_id: str) -> str | None:
     return text
 
 
-def with_approval_guidance(envelope: Mapping[str, Any], *, parked_op_id: str) -> dict[str, Any]:
+def with_approval_guidance(
+    envelope: Mapping[str, Any], *, parked_op_id: str, parked_op_class: str | None = None
+) -> dict[str, Any]:
     """Return a copy of *envelope* with the summary's guidance stamped into ``extras``.
 
     *envelope* is the result the running code just produced
@@ -159,10 +173,12 @@ def with_approval_guidance(envelope: Mapping[str, Any], *, parked_op_id: str) ->
     *parked_op_id* is the op id of the approval request. It can differ from
     the envelope's ``op_id``: an approved step of a multi-step operation runs
     the whole operation again. When either one is in a secret class, there is
-    no stamp.
+    no stamp. *parked_op_class* is the class of the approval request
+    (:func:`~meho_backplane.operations.op_class_of.request_op_class`); without
+    it the op id gives the class.
     """
     extras = {k: v for k, v in _extras(envelope).items() if k != _GUIDANCE_KEY}
-    text = _run_guidance(envelope, parked_op_id)
+    text = _run_guidance(envelope, parked_op_id, parked_op_class)
     if text is not None:
         extras[_GUIDANCE_KEY] = text
     return {**envelope, "extras": extras}

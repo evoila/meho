@@ -71,7 +71,6 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._branches import resolve_ingested_request
@@ -113,6 +112,7 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_class_of import descriptor_op_class
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.settings import get_settings
@@ -249,7 +249,7 @@ def is_credential_builder_op(descriptor: EndpointDescriptor) -> bool:
     """
     return (
         get_settings().preview_typed_writes
-        and classify_op(descriptor.op_id) in _SENSITIVE_CLASSES
+        and descriptor_op_class(descriptor) in _SENSITIVE_CLASSES
         and has_preview_builder(descriptor.op_id)
     )
 
@@ -264,7 +264,7 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
 
     * ``safety_level='destructive'`` (#3198) -- unconditional: the
       governed-delete gate refuses to park without a bound preview hash.
-    * a credential-class op (``classify_op`` in the aggregate-only
+    * a credential-class op (the op class in the aggregate-only
       :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) with
       its own preview builder (#5074). The builder owns the secret
       discipline, and the preview never copies the params.
@@ -288,9 +288,10 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
         return True
     if not get_settings().preview_typed_writes:
         return (
-            descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            descriptor.requires_approval
+            and descriptor_op_class(descriptor) not in _SENSITIVE_CLASSES
         )
-    if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
+    if descriptor_op_class(descriptor) in _SENSITIVE_CLASSES:
         return has_preview_builder(descriptor.op_id)
     return descriptor.requires_approval or _is_mutating(descriptor)
 

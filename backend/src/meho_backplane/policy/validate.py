@@ -95,6 +95,7 @@ async def load_known_ops(
         EndpointDescriptor.op_id,
         EndpointDescriptor.safety_level,
         EndpointDescriptor.parameter_schema,
+        EndpointDescriptor.op_class,
     ).outerjoin(group, EndpointDescriptor.group_id == group.id)
     if scope == "tenant":
         visible: ColumnElement[bool] = EndpointDescriptor.tenant_id.is_(None)
@@ -105,10 +106,10 @@ async def load_known_ops(
         KnownOp(
             coords=OpCoordinates(f"{impl_id}-{version}", group_key, op_id),
             safety_level=str(safety_level),
-            shows_secret=has_credential_read_floor(op_id),
+            shows_secret=has_credential_read_floor(op_id, stored_op_class=stored_op_class),
             caller_address=has_caller_address(parameter_schema),
         )
-        for impl_id, version, group_key, op_id, safety_level, parameter_schema in (
+        for impl_id, version, group_key, op_id, safety_level, parameter_schema, stored_op_class in (
             await session.execute(stmt)
         ).tuples()
     ]

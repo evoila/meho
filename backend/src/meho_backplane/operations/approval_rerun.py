@@ -76,6 +76,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
 from meho_backplane.operations.approved_reveal import is_secret_reveal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
+from meho_backplane.operations.op_class_of import request_op_class
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -444,6 +445,7 @@ async def rerun_failed_request(
                 duration_ms=0.0,
             ),
             parked_op_id=request.op_id,
+            parked_op_class=request_op_class(request.op_id, request.proposed_effect),
         )
         raise
     return RerunOutcome(attempt=attempt, result=cast(OperationResult, result))

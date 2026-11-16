@@ -552,46 +552,96 @@ floor reads `proto.response_schema["components"]["schemas"]["Client"]`,
 finds the field, and returns a copy of the operation with
 `op_class="credential_read"`.
 
-- **Allowed values: `credential_read` and `write` only**
-  (`FLOOR_OP_CLASSES` in `ingest/safety_floors.py`). MEHO has a rule for
-  each of these two on every call. Any other value, also `credential_mint`
-  and `credential_write`, stops the ingest with `InvalidOpClassError`. The
-  message names the operation and the two allowed values, and nothing is
-  stored. `credential_mint` and `credential_write` come in a later Task,
-  when every place below that still reads the op id reads the stored class
-  too.
+- **Allowed values: `credential_read`, `credential_write`,
+  `credential_mint` and `write`** (`FLOOR_OP_CLASSES` in
+  `ingest/safety_floors.py`). MEHO has a rule for each of them on every
+  call, because every place that reads the class of an operation reads the
+  stored class first (below). Any other value stops the ingest with
+  `InvalidOpClassError`. The message names the operation and the allowed
+  values, and nothing is stored.
 - **Stored on the row.** `EndpointDescriptor.op_class` (nullable). A
   re-ingest stores the class when the floor gives one. When the floor gives
   none, the class of an earlier ingest stays: a floor never weakens a row.
-  A stored `credential_read` is never replaced by another class: a floor
-  that later gives `write` leaves it in place. A floor may still raise a
-  row from no class, or from `write`, to `credential_read`. A row with a
+  A stored secret class (`credential_read`, `credential_write` or
+  `credential_mint`) is never replaced by another class: a floor that later
+  gives `write` leaves it in place. A floor may still raise a row from no
+  class, or from `write`, to a secret class. A row with a
   class also keeps its stored risk level and approval flag when they are
   stricter: a re-ingest only raises them.
-- **Places that use the stored class.** A stored class never replaces a
-  credential or audit class that the op id already gives
-  (`resolve_op_class`). So it also holds in a process that has no floor
-  and no op class list.
+- **One helper gives the class.** `operations/op_class_of.py` gives the
+  class of an operation from the row first and the op id second.
+  `descriptor_op_class(row)` is the class of a run. The audit row, the
+  approval request and the preview all store this same value, also for a
+  typed operation (a typed `caution` operation is `write` on both). An
+  approval request has no row: it carries that class in
+  `proposed_effect["op_class"]`, and `request_op_class(op_id,
+  proposed_effect)` reads it. A stored class never replaces a credential or
+  audit class that the op id already gives (`resolve_op_class`). So it also
+  holds in a process that has no floor and no op class list.
+- **No place reads the op id alone.** Each place below reads the stored
+  class, and `tests/test_op_class_stored_readers.py` has a test for each
+  one with an operation whose class is only stored.
   - The credential read floor, at ingest and at lookup (`op_policy.py`):
     a stored `credential_read` is at least `caution` and waits for a
-    person.
-  - The dispatcher's secret read flag (`dispatcher.py`). It is read from
-    the row that runs, after any switch to a sibling catalog, so the
-    audit row, the policy and the flag use the same row.
-  - The audit row of a call (`descriptor_op_class` in `_audit.py`) and the
-    audit row written when a call waits for approval (`approval_queue.py`).
+    person. A stored `credential_mint` gets the same floor
+    (`operations/credential_read.py`).
+  - The dispatcher's secret read flag and new-secret flag
+    (`dispatcher.py`). They are read from the row that runs, after any
+    switch to a sibling catalog, so the audit row, the policy and the flags
+    use the same row.
+  - The audit row of a call (`_audit.py`) and the audit row written when a
+    call waits for approval (`approval_queue.py`).
   - The approval request: the class in `proposed_effect`, and the preview,
-    which hides the parameters for a secret class (`_preview.py`).
+    which hides the parameters for a secret class (`_preview.py`,
+    `_request_preview.py`).
+  - The subject and the preview subject of the approval card
+    (`approval_context.py`): no subject for a secret class. The check of an
+    approved reveal (`approved_reveal.py`) and the guidance stamp of a run
+    (`approval_outcome.py`) read the class of the request too.
+  - The stored parameters of an approval request (`approval_queue.py`):
+    for a `credential_write` the parameters are not stored in plain. They
+    go to the encrypted payload. When the effect of a call cannot be built,
+    the dispatcher still passes the class of the row.
+  - The vendor error text (`_vendor_text.py`): kept for no
+    `credential_write`.
+  - The policy file check (`policy/validate.py`): an operation that shows a
+    secret is known as one.
+  - The result reducer (`jsonflux_reducer.py`): it gets the class of the row
+    in its context. For a `credential_mint` the dispatcher also tells it to
+    store nothing, so the result store never holds the new credential.
+  - The outer MCP row of `call_operation` (`mcp/handlers.py`): it looks up
+    the operation inside, and a stored secret class makes the broadcast
+    detail the aggregate only.
+  - The console drawers (`ui/routes/broadcast/aggregate_gate.py`): the
+    secret class that the audit row stored wins. The count of write calls in
+    `reflex/adoption.py` also counts the stored class.
   - Standing grants (`service_grants.py`): grant create refuses an op with
     a stored `credential_read`, and an existing grant row does not run it.
-    The shadow policy marks use the same check (`policy/shadow.py`).
+    Grant create and use also refuse a `credential_write` that has no
+    preview builder, whatever its source, because the approver then sees
+    nothing of the call. The shadow policy marks use the same checks
+    (`policy/shadow.py`).
   - The call trace (`flight_recorder/capture.py` and `typed.py`, through
     `classify_body_exclusion`): no request body and no answer body is
     recorded.
-- **Places that still read the op id only.** The subject and outcome of
-  the approval card, the policy file check, the console drawers, the outer
-  MCP row, and the result reducer. A later Task makes them read the stored
-  class before a connector floor sets a class.
+- **A guard keeps it that way.** `tests/test_op_class_readers.py` reads the
+  source and fails when code calls `classify_op(op_id)` or
+  `resolve_op_class(op_id)` on an op id alone. Its list of allowed files
+  holds only places that read the stored class first, and says why.
+- **Write notes of a stored `credential_read`.** The run row of a stored
+  `credential_read` on an operation that also changes something (a `POST`,
+  `PUT` or `DELETE`) says `credential_read`, because that class decides what
+  is hidden. The call still waits for a person on every call. Such an
+  operation also keeps the write notes (the target activity note, the
+  announce reminder and the announce gate): they read
+  `write_note_op_class(row)`, which gives `write` for it. An audit filter on
+  `op_class=write` does not find the row. Filter on `credential_read` too.
+- **Correct a wrong stored class.** A re-ingest never removes a stored
+  secret class: a floor may only raise a row. To remove a wrong
+  `credential_read`, `credential_write` or `credential_mint`, delete the
+  connector and ingest it again (`meho connector delete <id>`). The
+  connector's operations go, so do this on purpose. Fix the floor first:
+  the new rows get the class of the floor.
 - **Not a global list.** The class is not added to `op_classes.py`.
   Ingested op ids such as `GET:/clients` are not unique across connectors.
 - **A two-argument floor** (version, operation) works as before.
@@ -2388,10 +2438,11 @@ licences stays off too: its answer carries licence keys (see "Ingested
 licence reads stay off" above). The point is broad governed *read*
 coverage on big ingested surfaces (thousands of ops, mostly GETs)
 without a per-op death-march.
-`EndpointDescriptor` carries no `op_class` column — the read/write
-taxonomy the MCP tool registry uses lives on `ToolDefinition`, not
-the descriptor row — so HTTP method *is* the per-row read-class
-signal for ingested ops. The route returns `200` with
+`EndpointDescriptor` has a nullable `op_class` column, but only a
+connector floor sets it (see "A floor sees the answer and sets the op
+class"). The read/write taxonomy the MCP tool registry uses lives on
+`ToolDefinition`, not the descriptor row. So for an ingested op with no
+stored class, the HTTP method *is* the per-row read-class signal. The route returns `200` with
 `{connector_id, ops_enabled}` (not the `204` the enable / disable
 transitions return) so the count of flipped ops rides the wire;
 unlike `enable`, it does **not** move any group's `review_status`

@@ -105,7 +105,6 @@ from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import (
-    classify_op,
     holds_hidden_param_values,
     scrub_secret_named_values,
 )
@@ -172,6 +171,7 @@ from meho_backplane.operations.grant_approval import (
     grant_changed_since_request,
     is_rights_change,
 )
+from meho_backplane.operations.op_class_of import request_op_class
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
@@ -1533,6 +1533,7 @@ async def create_pending_request(
     reveal_secret: bool = False,
     rights_change: bool = False,
     category: str | None = None,
+    op_class: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1615,6 +1616,11 @@ async def create_pending_request(
             (the looked-up row's ``policy_category``). Approver routing
             matches a ``category`` entry on it
             (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
+        op_class: The class of the run row of the operation
+            (:func:`~meho_backplane.operations.op_class_of.descriptor_op_class`).
+            Used when *proposed_effect* is ``None`` (the effect could not be
+            built), so a class stored on an ingested row still counts: the
+            request stores no plain parameters of a ``credential_write``.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1654,6 +1660,8 @@ async def create_pending_request(
             "op_id": op_id,
             "connector_id": connector_id,
         }
+        if op_class is not None:
+            proposed_effect["op_class"] = op_class
         if target_id is not None:
             proposed_effect["target_id"] = str(target_id)
     # The requester's login client and channel (AUDIT_CLIENT_IDENTITY), so
@@ -1709,7 +1717,10 @@ async def create_pending_request(
     handoff_payload: dict[str, Any] | None = None
     stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
-    if classify_op(op_id) == "credential_write":
+    # The class the request stores, which includes a class stored on the
+    # row of an ingested operation: the parameters of such a call are not
+    # stored in plain.
+    if request_op_class(op_id, proposed_effect) == "credential_write":
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
@@ -2852,7 +2863,12 @@ async def _refuse_resume(
     )
     if audit_id is not None:
         refusal = refusal.model_copy(update={"audit_id": audit_id})
-    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
+    await persist_resume_result(
+        request.id,
+        refusal,
+        parked_op_id=request.op_id,
+        parked_op_class=request_op_class(request.op_id, request.proposed_effect),
+    )
     return refusal
 
 
@@ -2904,7 +2920,12 @@ async def refuse_resume_if_preview_changed(
         refusal = result_object_changed_since_approval(
             request.op_id, approval_request_id=request.id, reason=reason
         )
-    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
+    await persist_resume_result(
+        request.id,
+        refusal,
+        parked_op_id=request.op_id,
+        parked_op_class=request_op_class(request.op_id, request.proposed_effect),
+    )
     return refusal
 
 
@@ -2972,7 +2993,9 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op_id: str) -> None:
+async def persist_resume_result(
+    request_id: uuid.UUID, result: Any, *, parked_op_id: str, parked_op_class: str | None = None
+) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
@@ -2990,7 +3013,8 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op
     :func:`~meho_backplane.operations.approval_outcome.with_approval_guidance`).
     The run summary on the list and show views reads only that stamp, so a
     row this code did not write shows no guidance. *parked_op_id* is the op
-    id of the request; a secret-class op gets no stamp.
+    id of the request and *parked_op_class* its class; a secret-class op
+    gets no stamp.
 
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
@@ -3003,7 +3027,9 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op
     dumped = _dump_result_envelope(result)
     if dumped is None:
         return
-    dumped = with_approval_guidance(dumped, parked_op_id=parked_op_id)
+    dumped = with_approval_guidance(
+        dumped, parked_op_id=parked_op_id, parked_op_class=parked_op_class
+    )
     from meho_backplane.db.engine import get_sessionmaker
 
     try:
@@ -3332,7 +3358,12 @@ async def _dispatch_resume_with_bound_context(
     # approve path.
     # A reveal keeps its values only in the answer to the person who asked.
     stored = without_secret_values(result) if reveal_secret else result
-    await persist_resume_result(request.id, stored, parked_op_id=request.op_id)
+    await persist_resume_result(
+        request.id,
+        stored,
+        parked_op_id=request.op_id,
+        parked_op_class=request_op_class(request.op_id, request.proposed_effect),
+    )
     return result
 
 

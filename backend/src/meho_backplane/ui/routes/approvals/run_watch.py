@@ -51,6 +51,7 @@ from meho_backplane.operations.approval_queue import (
     get_request,
 )
 from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER, is_secret_reveal
+from meho_backplane.operations.op_class_of import request_op_class
 from meho_backplane.operations.operation_run import TERMINAL_STATUSES
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -170,7 +171,11 @@ def _from_own_run(row: ApprovalRequest, run: OperationRun) -> dict[str, Any] | N
     if isinstance(envelope, dict) and envelope.get("status") == "already_resumed":
         return None
     if run.status == OperationRunStatus.SUCCEEDED.value and isinstance(envelope, dict):
-        projected = project_run_envelope(envelope, parked_op_id=row.op_id)
+        projected = project_run_envelope(
+            envelope,
+            parked_op_id=row.op_id,
+            parked_op_class=request_op_class(row.op_id, row.proposed_effect),
+        )
         live = _state(projected["result_state"], run, polling=False)
         live["outcome"] = projected["outcome"]
         return live

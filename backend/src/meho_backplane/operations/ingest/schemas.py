@@ -108,8 +108,9 @@ class EndpointDescriptorProto(BaseModel):
     op_class: str | None = None
     """The class a connector's safety floor gave to this operation, for
     example ``credential_read``. ``None`` from the parser. Only a floor
-    sets it, to ``credential_read`` or ``write``; ingest refuses any other
-    value. Registration stores it on the row."""
+    sets it, to ``credential_read``, ``credential_write``, ``credential_mint``
+    or ``write``; ingest refuses any other value. Registration stores it on
+    the row."""
 
     llm_instructions: dict[str, object] | None = None
     """Agent guidance for this operation. ``None`` from the parser. A

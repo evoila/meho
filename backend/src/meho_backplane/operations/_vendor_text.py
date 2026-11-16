@@ -42,7 +42,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Final
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations._errors import (
     MESSAGE_SOURCE_KEY,
@@ -79,16 +79,19 @@ _VENDOR_TEXT_KEYS: Final = ("upstream_message", "exception_message", "raw_messag
 _SUMMARY_MARKERS: Final = (UPSTREAM_SAID, VAULT_SAID)
 
 
-def sends_secret(op_id: str, tags: Iterable[str] | None) -> bool:
+def sends_secret(op_id: str, tags: Iterable[str] | None, op_class: str | None = None) -> bool:
     """Whether the operation sends a secret, so its vendor error text must not be kept.
 
-    Yes when :func:`~meho_backplane.broadcast.events.classify_op` pins the op
-    as ``credential_write``, or when one of its tags has a secret token
+    Yes when the op class is ``credential_write`` (the class of the row, or
+    else the one :func:`~meho_backplane.broadcast.events.classify_op` pins
+    from the op id; *op_class* is the class of the row), or when one of its tags has a secret token
     (:data:`~meho_backplane.redaction.flight_recorder.families.SECRET_FAMILY_TAGS`,
     for example the ``key`` of ``license-key``). The flight recorder uses the
     same tag list, so both agree.
     """
-    return classify_op(op_id) == "credential_write" or bool(secret_tag_tokens(tags or ()))
+    return resolve_op_class(op_id, op_class) == "credential_write" or bool(
+        secret_tag_tokens(tags or ())
+    )
 
 
 def _summary_without_vendor_text(error: str | None) -> str | None:
@@ -124,13 +127,13 @@ def _extras_without_vendor_text(extras: dict[str, Any]) -> dict[str, Any]:
 
 
 def withhold_vendor_text(
-    result: OperationResult, *, op_id: str, tags: Iterable[str] | None
+    result: OperationResult, *, op_id: str, tags: Iterable[str] | None, op_class: str | None = None
 ) -> OperationResult:
     """Return *result* with its vendor text replaced, when the operation sends a secret.
 
     *result* is returned as it is for any other operation.
     """
-    if not sends_secret(op_id, tags):
+    if not sends_secret(op_id, tags, op_class):
         return result
     return result.model_copy(
         update={

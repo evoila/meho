@@ -248,7 +248,8 @@ class InvalidOpClassError(InvalidSchemaError):
 
     Only the classes in
     :data:`~meho_backplane.operations.ingest.safety_floors.FLOOR_OP_CLASSES`
-    (``credential_read`` and ``write``) may be set. The message names the
+    (``credential_read``, ``credential_write``, ``credential_mint`` and
+    ``write``) may be set. The message names the
     operation and the allowed classes.
     """
 

@@ -67,7 +67,7 @@ import msgspec
 import structlog
 from pydantic import ValidationError
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     get_result_handle_store,
@@ -362,7 +362,7 @@ _RESERVED_SUMMARY_KEYS = frozenset(
 #: into the inline summary would defeat the reduction it rides on.
 _SCALAR_VALUE_TYPES = (str, int, float)
 
-#: Sensitivity classes (:func:`~meho_backplane.broadcast.events.classify_op`)
+#: Sensitivity classes (the ``op_class`` of the context, else the op id's class)
 #: whose scalars are NOT kept by default (#3633 / #3549). Their ops keep the
 #: explicit ``result_scalars`` opt-in, so an automatic copy never surfaces a
 #: secret-shaped value. Same set as ``operations.approval_context``.
@@ -1527,7 +1527,12 @@ def _is_credential_class(context: dict[str, Any] | None) -> bool:
     op_id = context.get("op_id") if context else None
     if not isinstance(op_id, str) or not op_id:
         return True
-    return classify_op(op_id) in _CREDENTIAL_CLASSES
+    # ``op_class`` is the class of the row that runs. A context without it (a
+    # test, a caller that has no row) leaves the class to the op id.
+    stored = context.get("op_class") if context else None
+    return resolve_op_class(op_id, stored if isinstance(stored, str) else None) in (
+        _CREDENTIAL_CLASSES
+    )
 
 
 def _default_scalar_siblings(

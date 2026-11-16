@@ -128,6 +128,7 @@ from meho_backplane.mcp.tenant_gate import STATUS_TOOL
 from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.delivery_budget import tool_result_text
+from meho_backplane.operations.op_class_of import lookup_secret_op_class
 from meho_backplane.request_usage.collector import (
     current_request_id,
     note_request_route,
@@ -775,6 +776,14 @@ async def _write_tool_call_row(
     # back. ``call_operation`` keeps its ``tool_call`` label on both;
     # only the redaction detail comes from the inner op above.
     _wraps_inner_op = _broadcast_op_id != audit_name
+    # The inner operation's own row can say it holds a secret (a class that a
+    # connector's safety floor stored): then the broadcast shows only the
+    # aggregate, as for an op id in a secret class.
+    _inner_secret_class: str | None = None
+    if _wraps_inner_op and isinstance(arguments.get("connector_id"), str):
+        _inner_secret_class = await lookup_secret_op_class(
+            operator.tenant_id, arguments["connector_id"], _broadcast_op_id
+        )
     (
         broadcast_op_class,
         broadcast_detail,
@@ -784,7 +793,7 @@ async def _write_tool_call_row(
         tenant_id=operator.tenant_id,
         raw_params=resolver_params,
         request_override=request_override,
-        op_class_override=None if _wraps_inner_op else audit_payload["op_class"],
+        op_class_override=(_inner_secret_class if _wraps_inner_op else audit_payload["op_class"]),
     )
     if not _wraps_inner_op:
         audit_payload["op_class"] = broadcast_op_class

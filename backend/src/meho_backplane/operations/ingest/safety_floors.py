@@ -7,12 +7,13 @@ Four sources raise the parsed safety of an ingested operation:
 
 * a connector-owned floor, registered in code by the connector module. It
   sees the full answer schema of the operation, with the shared schemas it
-  uses, and it may set the op class of the operation (``op_class``), to
-  ``credential_read`` or ``write`` only. MEHO stores the class on the row,
-  so every process applies it;
+  uses, and it may set the op class of the operation (``op_class``): one of
+  ``credential_read``, ``credential_write``, ``credential_mint`` or ``write``.
+  MEHO stores the class on the row, so every process applies it;
 * the per-spec ``safety_overlay`` declared on the catalog row; and
 * the op class of the operation: a read whose answer holds credentials
-  (``credential_read``, see :mod:`meho_backplane.operations.credential_read`)
+  (``credential_read``) or an operation that makes a new credential (a stored
+  ``credential_mint``), see :mod:`meho_backplane.operations.credential_read`,
   is at least ``caution`` and waits for a person's approval; and
 * the caller-address marker: an operation with a parameter that holds an
   address MEHO connects to (``x-meho-caller-address: true``, see
@@ -53,11 +54,13 @@ __all__ = [
 IngestSafetyFloor = Callable[[str, EndpointDescriptorProto], EndpointDescriptorProto]
 _FLOORS: dict[tuple[str, str], IngestSafetyFloor] = {}
 
-#: The classes a connector floor may set. MEHO has a rule for each of them
-#: on every call that reads the stored class. ``credential_mint`` and
-#: ``credential_write`` are not allowed yet: some places still read the
-#: class from the op id only (``docs/codebase/spec-ingestion.md``).
-FLOOR_OP_CLASSES: Final[frozenset[str]] = frozenset({"credential_read", "write"})
+#: The classes a connector floor may set. Every place that reads the class of
+#: an operation reads the class stored on the row first
+#: (:mod:`meho_backplane.operations.op_class_of`), so MEHO has a rule for each
+#: of them on every call.
+FLOOR_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_write", "credential_mint", "write"}
+)
 
 _SAFETY_RANK: dict[SafetyLevel, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 

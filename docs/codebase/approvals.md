@@ -2617,8 +2617,9 @@ Three invariants make the hook safe to wire on the park path:
    previewable from these params) still collapses to the identifier-only
    default with no marker, as do connector-resolution faults outside
    the hook.
-3. **Redaction-safe.** `build_proposed_effect` classifies the op via
-   `classify_op` (the same single-sourced sensitivity classification used
+3. **Redaction-safe.** `build_proposed_effect` classifies the op with
+   `descriptor_op_class` (`operations/op_class_of.py`: the row first, then
+   `classify_op`, the same single-sourced sensitivity classification used
    for broadcast/audit redaction, #1401) and **suppresses the generic
    params-echo default** for any credential class (`credential_read` /
    `credential_mint` / `credential_write`) — the generic echo can only do

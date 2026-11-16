@@ -146,14 +146,16 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
     }
 
 
-def project_run_envelope(envelope: dict[str, Any], *, parked_op_id: str) -> dict[str, Any]:
+def project_run_envelope(
+    envelope: dict[str, Any], *, parked_op_id: str, parked_op_class: str | None = None
+) -> dict[str, Any]:
     """Project the result of an approved run into ``result_state`` + ``outcome`` (#3543).
 
     *envelope* is the run's result in its JSON form: the stored result of
     the background run the console started (#5110).
     """
     outcome = resume_outcome_from_envelope(
-        with_approval_guidance(envelope, parked_op_id=parked_op_id)
+        with_approval_guidance(envelope, parked_op_id=parked_op_id, parked_op_class=parked_op_class)
     )
     return {
         "result_state": result_state_of_envelope(envelope).value,

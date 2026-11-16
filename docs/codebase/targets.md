@@ -159,7 +159,9 @@ Limits:
   that finds another product behind the address drops them once, even when
   the same connector serves the target: the old system is gone. A probe that
   finds the same product, with a new version or only a new probe time,
-  drops nothing. A new
+  drops nothing. The first probe of a target that was never probed before
+  also drops the kept logins once, because the product goes from none to a
+  name. This is harmless: the next call signs in again. A new
   value drops the kept logins once, then the next login uses the new
   values. Rows from before migration `0170` got `connection_changed_at`
   from `updated_at`; a descriptor from an older gateway has none, and

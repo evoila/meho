@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_op_classes, declare_per_call_approval
 
 declare_op_classes(
     # Takes the realm's SMTP password as a reference
@@ -32,4 +32,15 @@ declare_op_classes(
         "keycloak.authflow.ensure_passkey_code_skip",
         "keycloak.authflow.ensure_approval_touch",
     ),
+)
+
+# These four change who can sign in to a realm and with what rights. No
+# standing grant and no run approval covers them: a person approves each call.
+declare_per_call_approval(
+    (
+        "keycloak.role_mapping.client.assign",
+        "keycloak.role_mapping.client.remove",
+        "keycloak.user.update",
+        "keycloak.user.credential.delete",
+    )
 )

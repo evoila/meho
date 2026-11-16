@@ -48,6 +48,8 @@ works in another tenant is listed (with its tenant) and can be revoked.
 
 The page also lists the person's tenants with the role in each (#5240);
 switching happens on the tenant picker (:mod:`meho_backplane.ui.routes.tenant`).
+With ``MCP_CLIENT_PER_TOOL_KIND`` on, it has a "Your tools" section with a
+sign-out per tool kind (:mod:`meho_backplane.ui.routes.account_tools`).
 
 Out of scope (Keycloak-owned / future): role editing, password / MFA /
 token rotation.
@@ -82,6 +84,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.account_push import build_account_push_router
+from meho_backplane.ui.routes.account_tools import build_account_tools_router, tools_section
 from meho_backplane.ui.routes.connectors.operator import _lift_operator
 from meho_backplane.ui.routes.tenant import TenantChoice, tenant_choices
 from meho_backplane.ui.templating import get_templates
@@ -220,6 +223,9 @@ async def _render_page(
         "csrf_token": csrf_token,
         # None while the admin setting is off: no notification switch.
         "push_public_key": push_public_key(),
+        # None while MCP_CLIENT_PER_TOOL_KIND is off: no "Your tools" section.
+        "tools": await tools_section(db_session, session_ctx),
+        "tools_result": None,
     }
     response = get_templates().TemplateResponse(request, "account/index.html", context)
     _set_csrf_cookie(response, csrf_token)
@@ -404,4 +410,6 @@ def build_account_router() -> APIRouter:
     )
     # "Notify me about approvals" (account_push.py); 404 while the setting is off.
     router.include_router(build_account_push_router())
+    # "Your tools" (account_tools.py); 404 while MCP_CLIENT_PER_TOOL_KIND is off.
+    router.include_router(build_account_tools_router())
     return router

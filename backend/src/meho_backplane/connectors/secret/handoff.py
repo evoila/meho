@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "EXPORT_REFUSED_SOURCE_KINDS",
     "SecretHandoffDestinationBlockedError",
     "SecretHandoffDigestMismatchError",
     "SecretHandoffError",
@@ -119,6 +120,13 @@ UNWRAP_PATH: Final[str] = "sys/wrapping/unwrap"
 #: The key of the wrapped payload that carries the value. The payload also
 #: carries the handoff's check key (:mod:`.handoff_check`).
 _WRAP_FIELD: Final[str] = "value"
+
+#: Source kinds ``secret.handoff.export`` refuses. A ``vault-target:`` source
+#: reads under a registered Vault target's role; the handoff is made under
+#: the operator's own identity, so the export keeps to sources of that one
+#: identity. Move such a secret to a ``vault:`` place with ``secret.move``
+#: first.
+EXPORT_REFUSED_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"vault-target"})
 
 #: Handoff life when the caller does not set ``ttl_seconds``.
 DEFAULT_HANDOFF_TTL_SECONDS: Final[int] = 3600
@@ -298,6 +306,11 @@ async def secret_handoff_export(
     """
     del target
     source_ref = parse_secret_ref(str(params["from"]))
+    if source_ref.kind in EXPORT_REFUSED_SOURCE_KINDS:
+        raise SecretHandoffRefusedError(
+            f"secret.handoff.export does not read from a {source_ref.kind!r} source, so "
+            f"{_LOCAL_STORE} was not asked; use a 'vault:' source, {_RETRY_EXPORT}"
+        )
     source = resolve_secret_endpoint(source_ref)
     material = await _read_source(operator, source, f"{source_ref.kind}:{source_ref.ref}")
     ttl_seconds = int(params.get("ttl_seconds", DEFAULT_HANDOFF_TTL_SECONDS))

@@ -65,6 +65,10 @@ func newExplainCmd() *cobra.Command {
 			"Only a tenant admin or a platform admin sees the entries of the " +
 			"policy and their places in it. Everyone else gets the answer, the " +
 			"reason, the risk level and who may approve.",
+		Annotations: map[string]string{
+			"docs-reference-note": "Who may approve is a list of MEHO group kinds " +
+				"(MEHO-<kind>), not the names of the login groups of your install.",
+		},
 		Example: "  meho policy explain <connector-id> <op-id> --me\n" +
 			"  meho policy explain <connector-id> <op-id> --groups Operators --target <target-name>\n" +
 			"  meho policy explain <connector-id> <op-id> --groups Operators --principal agent\n" +

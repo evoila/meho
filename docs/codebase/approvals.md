@@ -2548,7 +2548,8 @@ The per-op preview is opt-in via a builder registry in
   `async (PreviewContext) -> dict | None` callable for an op-id.
   `PreviewContext` carries the resolved connector instance + descriptor +
   operator + target + params.
-  With `enabled=<callable>`, the builder counts only while the callable
+  `register_preview_builder_switch(op_id, enabled)` (core only, not in
+  the connector kit) makes the builder count only while `enabled()`
   returns true; off, the op previews as if it had no builder. A new card
   for an op that agents already see goes behind a switch this way.
 - At the park point, `dispatcher._handle_needs_approval` resolves the

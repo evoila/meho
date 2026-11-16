@@ -59,6 +59,7 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
     register_preview_builder,
+    register_preview_builder_switch,
 )
 from meho_backplane.settings import get_settings
 
@@ -236,8 +237,8 @@ async def _protocol_mapper_create_card(ctx: PreviewContext) -> dict[str, Any] | 
     return card
 
 
-register_preview_builder(CLIENT_UPDATE_OP_ID, _client_update_card, enabled=_cards_on)
+register_preview_builder(CLIENT_UPDATE_OP_ID, _client_update_card)
 register_preview_builder(REALM_UPDATE_OP_ID, _realm_update_card)
-register_preview_builder(
-    PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card, enabled=_cards_on
-)
+register_preview_builder(PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card)
+register_preview_builder_switch(CLIENT_UPDATE_OP_ID, _cards_on)
+register_preview_builder_switch(PROTOCOL_MAPPER_CREATE_OP_ID, _cards_on)

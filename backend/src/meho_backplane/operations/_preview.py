@@ -109,6 +109,7 @@ __all__ = [
     "preview_failure_reason",
     "register_permission_preflight",
     "register_preview_builder",
+    "register_preview_builder_switch",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -409,23 +410,22 @@ _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
 
 
-def register_preview_builder(
-    op_id: str, builder: PreviewBuilder, *, enabled: Callable[[], bool] | None = None
-) -> None:
+def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     """Register *builder* as the preview computation for *op_id*.
-
-    With *enabled*, the builder is used only while ``enabled()`` is true;
-    off, the op previews as if it had no builder (the generic params echo).
-    A new card for an op the agent already sees goes behind a switch this way.
 
     Idempotent re-registration overwrites -- registration happens at
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
-    if enabled is None:
-        _PREVIEW_BUILDER_SWITCHES.pop(op_id, None)
-    else:
-        _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
+
+
+def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> None:
+    """Use the builder of *op_id* only while ``enabled()`` is true.
+
+    Off, the op previews as if it had no builder (the generic params echo).
+    A new card for an op the agent already sees goes behind a switch this way.
+    """
+    _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
 
 
 def _preview_builder(op_id: str) -> PreviewBuilder | None:

@@ -536,9 +536,9 @@ same card is also the answer of `preview_operation` that an agent reads.
 Off, `client.update` and `protocol_mapper.create` show the generic params
 echo, and `realm.update` shows the realm card of `ops_write_realm_smtp.py`
 without `current_values`. The card builders of `client.update` and
-`protocol_mapper.create` are registered with
-`register_preview_builder(..., enabled=...)`, so with the switch off the
-op previews as if it had no builder.
+`protocol_mapper.create` also get a switch with
+`register_preview_builder_switch`, so with the switch off the op previews
+as if it had no builder.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /

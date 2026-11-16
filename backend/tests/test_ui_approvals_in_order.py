@@ -31,6 +31,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
+import pytest
 import respx
 from sqlalchemy import select, update
 
@@ -278,6 +279,55 @@ def test_history_offers_in_order_button_only_for_a_ticket_with_pending_steps() -
     assert "/ui/approvals/in-order?work_ref=gh%3Aexample/repo%237" in filtered.text
     assert "data-approval-in-order-open" not in unfiltered.text
     assert "data-approval-in-order-open" not in other_tab.text
+
+
+def _set_work_ref(request_id: uuid.UUID, work_ref: str) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            await session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .values(work_ref=work_ref)
+            )
+
+    asyncio.run(_do())
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [("  " + "x" * 256 + "  ", "x" * 256), ("A\u0308" * 130, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_plan_counts_the_ticket_id_length_after_cleaning(typed: str, stored: str) -> None:
+    """The page checks the ticket id like the approvals search box: clean, then count."""
+    session_id = _session()
+    _set_work_ref(_seed(1, "caution"), stored)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/approvals/in-order", params={"work_ref": typed})
+
+    assert response.status_code == 200, response.text
+    assert 'data-approval-in-order-step="1"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [
+        ("CHG\u200b1", "control or invisible characters"),
+        ("x" * 257, "at most 256 characters"),
+        ("   ", "must name a change ticket"),
+    ],
+    ids=["invisible", "too-long", "blank"],
+)
+def test_plan_refuses_a_bad_ticket_id(typed: str, message: str) -> None:
+    """A value the rule refuses is a 422 that names the rule, not an empty plan."""
+    session_id = _session()
+    response = _get(session_id, f"/ui/approvals/in-order?work_ref={quote(typed, safe='')}")
+
+    assert response.status_code == 422, response.text
+    assert message in response.json()["detail"]
 
 
 def test_plan_lists_steps_oldest_first_with_a_start_form() -> None:

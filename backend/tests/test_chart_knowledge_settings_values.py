@@ -90,14 +90,14 @@ def test_values_set_render_all_three_keys() -> None:
         "--set-string",
         f"config.kbSharedTenantIds={_TENANT_A}\\,{_TENANT_B}",
         "--set-string",
-        "config.knowledgeUpkeepEnabled=false",
+        "config.knowledgeUpkeepEnabled=true",
         "--set",
         "config.knowledgeUpkeepIntervalSeconds=3600",
     )
     assert result.returncode == 0, result.stderr
     data = _config_map_data(result.stdout)
     assert data["KB_SHARED_TENANT_IDS"] == f"{_TENANT_A},{_TENANT_B}"
-    assert data["KNOWLEDGE_UPKEEP_ENABLED"] == "false"
+    assert data["KNOWLEDGE_UPKEEP_ENABLED"] == "true"
     assert data["KNOWLEDGE_UPKEEP_INTERVAL_SECONDS"] == "3600"
 
 
@@ -106,7 +106,7 @@ def test_no_values_give_the_backplane_defaults() -> None:
     assert result.returncode == 0, result.stderr
     data = _config_map_data(result.stdout)
     assert data["KB_SHARED_TENANT_IDS"] == ""
-    assert data["KNOWLEDGE_UPKEEP_ENABLED"] == "true"
+    assert data["KNOWLEDGE_UPKEEP_ENABLED"] == "false"
     assert data["KNOWLEDGE_UPKEEP_INTERVAL_SECONDS"] == "604800"
 
     fields = Settings.model_fields

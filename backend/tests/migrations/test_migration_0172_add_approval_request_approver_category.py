@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0171_add_approval_request_approver_category``.
+"""Behavioural tests for ``0172_add_approval_request_approver_category``.
 
 The migration adds one nullable column to ``approval_request``. Rows that
 exist already and have stored approver groups get the empty text: MEHO
 does not know their category. The other rows keep ``NULL``.
 ``downgrade()`` removes the column again. Every step targets this migration's own
-revision (``0171``) and its ``down_revision`` (``0170``), never ``head``.
+revision (``0172``) and its ``down_revision`` (``0171``), never ``head``.
 """
 
 from __future__ import annotations
@@ -25,17 +25,17 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0171"
-_DOWN_REVISION = "0170"
+_REVISION = "0172"
+_DOWN_REVISION = "0171"
 _NEW = {"approver_category"}
-_ROUTED_ID = "00000000-0000-0000-0000-000000000171"
-_UNROUTED_ID = "00000000-0000-0000-0000-000000000172"
+_ROUTED_ID = "00000000-0000-0000-0000-000000000172"
+_UNROUTED_ID = "00000000-0000-0000-0000-000000000173"
 _TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0171.db"
+    db_path = tmp_path / "migration_0172.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

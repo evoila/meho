@@ -1316,9 +1316,9 @@ works out who may approve it and stores it on the request:
   `install:routing[0], tenant:routing[1]`), or `default`.
 - `approver_category` (text): the category the routing used. The click
   routes the request again with it (below). The empty text on a request
-  that had stored kinds before migration `0171`: MEHO does not know its
+  that had stored kinds before migration `0172`: MEHO does not know its
   category.
-- Migration `0167` adds the first two columns, migration `0171` the third.
+- Migration `0167` adds the first two columns, migration `0172` the third.
   All are nullable.
 
 How the kinds are found:
@@ -1359,7 +1359,7 @@ example "The install's routing (`install:routing[0]`) lets only
 MEHO-SA-Operators or MEHO-Admins approve this change. You are in
 MEHO-Operators. A tenant's routing can only narrow it." An install routing
 that is not valid refuses the click. A request whose category is the
-empty text (stored before migration `0171`) is refused when an install
+empty text (stored before migration `0172`) is refused when an install
 entry that matches on a `category` could fit it: MEHO cannot check who
 may approve it, so it must be rejected and started again. When no such
 entry could fit, the category does not change the answer. A change of
@@ -1412,7 +1412,7 @@ the switch was off, or before migration `0167`) keeps today's rule, but
 the click still checks the install's current routing for it. Such a
 request has no stored category (`NULL`), so only install entries without
 `category` can fit it. A request with stored kinds from before migration
-`0171` has the empty text as category (see the click above). With
+`0172` has the empty text as category (see the click above). With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail
@@ -1440,7 +1440,7 @@ Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`
 `tests/test_web_push_send.py`,
 `tests/test_policy_routing_floor.py`,
 `tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`,
-`tests/migrations/test_migration_0171_add_approval_request_approver_category.py`.
+`tests/migrations/test_migration_0172_add_approval_request_approver_category.py`.
 
 **Not yet:** a team is a group kind. Bindings that give a login group
 categories come later. The "separated duties" file

@@ -3,8 +3,8 @@
 
 """Save the category that approver routing used for each approval request.
 
-Revision ID: 0171
-Revises: 0170
+Revision ID: 0172
+Revises: 0171
 Create Date: 2026-11-16
 
 With approver routing on, a request that starts to wait now also stores
@@ -27,8 +27,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0171"
-down_revision: str | None = "0170"
+revision: str = "0172"
+down_revision: str | None = "0171"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

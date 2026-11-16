@@ -213,7 +213,7 @@ def _route_install(entries: Sequence[RouteEntry], request: ApprovalRequest) -> A
     """Route *request* with the install's *entries* and the category it stored.
 
     A request that started to wait before MEHO stored categories has the
-    empty text (migration ``0171``). Its category is not known. When an
+    empty text (migration ``0172``). Its category is not known. When an
     install entry that matches on a category could fit it, no group may
     approve it (rule :data:`CATEGORY_NOT_STORED`). Else the category does
     not change the answer.

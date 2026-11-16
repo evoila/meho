@@ -518,8 +518,10 @@ the caller sent.
 
 - Run the work as a MEHO-hosted agent run (`meho agent run …`). The
   run's announcements are stamped automatically.
-- Register an agent principal: `meho agent-principal register <name>`
-  (a tenant admin does this). Then the agent calls MEHO with that
+- Register an agent principal:
+  `meho agent-principal register <name> --grants none` (a tenant admin
+  does this). Announcing needs no grant: grants check only
+  `call_operation`. Add grants only for the operations the agent runs. Then the agent calls MEHO with that
   principal's client-credentials token.
 
 **What the server stamps.** The caller cannot set these fields:

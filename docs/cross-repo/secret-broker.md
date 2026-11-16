@@ -245,15 +245,18 @@ and no value ever rests in a durable artifact.
    `dangerous` carries **two distinct properties** that are worth
    stating precisely, because they are stronger than "parked":
 
-   - **Default with no live grant ⇒ `needs-approval`.** An agent with no
-     matching `AgentPermission` grant — or one whose grant has expired —
-     waits for a person's approval. It never auto-executes.
+   - **No live grant ⇒ depends on `AGENT_GRANT_REQUIRED`.** An agent
+     with no matching `AgentPermission` grant — or one whose grant has
+     expired — waits for a person's approval while the switch is `off`
+     (the default) or `observe`. With `on`, the call is refused
+     (`agent_no_grant`). It never auto-executes.
    - **Ceiling ⇒ `needs-approval`.** A grant can make the verdict
      stricter (`deny`), but a grant that carries `auto-execute` is
      **capped to `needs-approval`** for a `dangerous` op. No grant can
      make a credential move auto-execute.
 
-   In short: no grant ⇒ waits for approval; a `deny` grant ⇒ denied; an
+   In short: no grant ⇒ waits for approval with the switch `off` or
+   `observe`, refused with `on`; a `deny` grant ⇒ denied; an
    `auto-execute` grant ⇒ still waits for approval. A credential move
    never runs without a human in the loop.
 

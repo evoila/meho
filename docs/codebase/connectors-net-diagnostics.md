@@ -147,8 +147,8 @@ Every `net.*` op is **targetless** (the destination is a param,
 `target=None`) and `safety_level="safe"` + `requires_approval=False`, so
 for an **agent** principal it auto-executes with no grant while
 `AGENT_GRANT_REQUIRED` is `off` (the default) or `observe`. With `on`, an
-agent needs a grant whose `target_scope` is `*` (a grant for named targets
-never matches a call with no target); with no such grant the call is
+agent needs a grant whose `target_scope` is `*` or empty (a grant for
+named targets never matches a call with no target); with no such grant the call is
 refused (`agent_no_grant`). When it runs, it **bypasses
 the per-target tenant boundary entirely** — it is the one op family that
 can reach an address no target in the caller's tenant resolves to. The

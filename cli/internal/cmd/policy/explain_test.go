@@ -27,7 +27,8 @@ const explainWait = `{
     "same_as_today": true
   },
   "classification": {"risk_level": "caution", "requires_approval": true, "category": "network",
-    "labels": {}, "entries": [{"path": "file:classifications[1]", "labels": {}}]}
+    "labels": {}, "entries": [{"path": "file:classifications[1]", "labels": {}}]},
+  "not_checked": ["idempotency_key", "connector_resolution"]
 }`
 
 func decodeSent(t *testing.T, got seen) map[string]any {
@@ -70,6 +71,7 @@ func TestExplainSendsTheQuestionAndPrintsTheRules(t *testing.T) {
 		"  2. default always_wait: wait (the operation always waits) at file:classifications[1]",
 		"category: network",
 		"matched file:classifications[1]",
+		"Not checked: idempotency_key, connector_resolution",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)

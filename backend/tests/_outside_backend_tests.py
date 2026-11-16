@@ -91,6 +91,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_check_plugin_version.py",
     "tests/test_ci_check_release_body_paths.py",
     "tests/test_ci_coverage_shards.py",
+    "tests/test_ci_dockerhub_login_soft_fail.py",
     "tests/test_ci_docs_deploy.py",
     "tests/test_ci_fork_runner_isolation.py",
     "tests/test_ci_helm_golden.py",
@@ -138,6 +139,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_targets_file_schema.py",
     "tests/test_vault_tenant_admin_policy_doc.py",
     "tests/test_vcf_api_contract_manifest.py",
+    "tests/test_work_ref_rule.py",
 )
 
 # `Path(__file__)`, an optional `.resolve()`, then `.parents[N]` or `.parent`s.

@@ -39,7 +39,7 @@ func newExplainCmd() *cobra.Command {
 	var opts explainOptions
 	cmd := &cobra.Command{
 		Use:   "explain [CONNECTOR_ID OP_ID]",
-		Short: "Say why a call runs, waits or is denied, and who may approve it",
+		Short: "Say if a call runs, waits or is denied, and why.",
 		Long: "explain calls POST /api/v1/policy/explain. It says what MEHO does " +
 			"with one call (run, wait or deny), why, and who may approve it. " +
 			"Nothing runs and nothing is written.\n\n" +
@@ -51,14 +51,24 @@ func newExplainCmd() *cobra.Command {
 			"and the groups that may approve it.\n\n" +
 			"explain asks about a call with no parameters. For an operation " +
 			"whose answer depends on its parameters, the answer is the one of " +
-			"a call without parameters.\n\n" +
+			"a call without parameters. It asks the checks after the policy " +
+			"rules that the call asks: the announce rule of the tenant, and " +
+			"whether the target's connector takes ingested operations. The " +
+			"last line names each check after the policy rules that explain " +
+			"does not ask and that can still refuse the call.\n\n" +
 			"explain works with POLICY_ENGINE_SHADOW off: it then shows today's " +
 			"answer only. Today's checks decide while the policy evaluator is off " +
 			"or in shadow mode. With POLICY_ENGINE_SHADOW on, the answer also lists " +
 			"every rule the evaluator matched, in order, and the floor that decided.\n\n" +
+			"Who may approve is a list of MEHO group kinds (MEHO-<kind>), not " +
+			"the names of the login groups of your install.\n\n" +
 			"Only a tenant admin or a platform admin sees the entries of the " +
 			"policy and their places in it. Everyone else gets the answer, the " +
 			"reason, the risk level and who may approve.",
+		Annotations: map[string]string{
+			"docs-reference-note": "Who may approve is a list of MEHO group kinds " +
+				"(MEHO-<kind>), not the names of the login groups of your install.",
+		},
 		Example: "  meho policy explain <connector-id> <op-id> --me\n" +
 			"  meho policy explain <connector-id> <op-id> --groups Operators --target <target-name>\n" +
 			"  meho policy explain <connector-id> <op-id> --groups Operators --principal agent\n" +
@@ -226,6 +236,13 @@ func printExplain(w io.Writer, a api.PolicyExplainResponse) {
 	}
 	if a.Classification != nil {
 		printClassification(w, *a.Classification)
+	}
+	if a.NotChecked != nil && len(*a.NotChecked) > 0 {
+		names := make([]string, len(*a.NotChecked))
+		for i, n := range *a.NotChecked {
+			names[i] = sanitize(n)
+		}
+		fmt.Fprintln(w, "Not checked: "+strings.Join(names, ", "))
 	}
 }
 

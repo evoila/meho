@@ -711,6 +711,7 @@ jobs:
       # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
       # never breaks an unrelated PR.
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
       # #2949 — vendor vCenter spec-shelf wiring (see the checkout step
       # below + docs/decisions/vendor-spec-ci-provisioning.md).
       # SPEC_SHELF_TOKEN_PRESENT surfaces *presence* of the
@@ -873,6 +874,11 @@ jobs:
         # *skipping* on Dependabot PRs again, the org Dependabot secret
         # is gone or expired — check there before touching the workflow.
         if: env.DOCKERHUB_USERNAME != ''
+        # A short network problem on the way to Docker Hub must not fail
+        # the job (and so not throw a pull request out of the merge
+        # queue). The test images come through the Harbor proxy, so a
+        # failed login only gives up the Docker Hub rate-limit headroom.
+        continue-on-error: true
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -1875,6 +1881,7 @@ jobs:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
     defaults:
       run:
         working-directory: backend
@@ -1904,6 +1911,11 @@ jobs:
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
         if: env.DOCKERHUB_USERNAME != ''
+        # A short network problem on the way to Docker Hub must not fail
+        # the job (and so not throw a pull request out of the merge
+        # queue). The test images come through the Harbor proxy, so a
+        # failed login only gives up the Docker Hub rate-limit headroom.
+        continue-on-error: true
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -2449,6 +2461,7 @@ jobs:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
       # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
       # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
       # and the existing tests/integration/test_connectors_k8s_k3d.py).
@@ -2556,6 +2569,11 @@ jobs:
         # is an argument for mirroring the Dependabot secrets, not for
         # letting the step hard-fail.
         if: env.DOCKERHUB_USERNAME != ''
+        # A short network problem on the way to Docker Hub must not fail
+        # the job (and so not throw a pull request out of the merge
+        # queue). The test images come through the Harbor proxy, so a
+        # failed login only gives up the Docker Hub rate-limit headroom.
+        continue-on-error: true
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -2689,6 +2707,11 @@ jobs:
 
       - name: Docker Hub login (for testcontainers pulls)
         if: env.DOCKERHUB_USERNAME != ''
+        # A short network problem on the way to Docker Hub must not fail
+        # the job (and so not throw a pull request out of the merge
+        # queue). The test images come through the Harbor proxy, so a
+        # failed login only gives up the Docker Hub rate-limit headroom.
+        continue-on-error: true
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -2846,6 +2869,11 @@ jobs:
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
         if: env.DOCKERHUB_USERNAME != ''
+        # A short network problem on the way to Docker Hub must not fail
+        # the job (and so not throw a pull request out of the merge
+        # queue). The test images come through the Harbor proxy, so a
+        # failed login only gives up the Docker Hub rate-limit headroom.
+        continue-on-error: true
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

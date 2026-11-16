@@ -2324,7 +2324,9 @@ type AuditClassCountsRequest struct {
 	Target         *string             `json:"target"`
 	TextChanged    *bool               `json:"text_changed"`
 	Until          *string             `json:"until"`
-	WorkRef        *string             `json:"work_ref"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef *string `json:"work_ref"`
 }
 
 // AuditEntry One row of the audit query result.
@@ -2482,7 +2484,9 @@ type AuditQueryRequest struct {
 	Target        *string             `json:"target"`
 	TextChanged   *bool               `json:"text_changed"`
 	Until         *string             `json:"until"`
-	WorkRef       *string             `json:"work_ref"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef *string `json:"work_ref"`
 }
 
 // AuditQueryResult Page of audit rows plus the forward-only continuation cursor.
@@ -4041,7 +4045,9 @@ type BroadcastAnnounceRequest struct {
 	Target         *string                                 `json:"target"`
 	Targets        *[]string                               `json:"targets,omitempty"`
 	TtlMinutes     *int                                    `json:"ttl_minutes"`
-	WorkRef        *string                                 `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // BroadcastAnnounceRequestPhase defines model for BroadcastAnnounceRequest.Phase.
@@ -4293,7 +4299,9 @@ type CallOperationBody struct {
 	// PreviewHash Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op — the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197.
 	PreviewHash *string                   `json:"preview_hash"`
 	Target      *CallOperationBody_Target `json:"target"`
-	WorkRef     *string                   `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // CallOperationBodyTarget0 defines model for .
@@ -8949,8 +8957,11 @@ type PolicyExplainResponse struct {
 	Extras    *map[string]interface{} `json:"extras"`
 
 	// File True when a policy file that is not imported was asked.
-	File *bool   `json:"file,omitempty"`
-	OpId *string `json:"op_id"`
+	File *bool `json:"file,omitempty"`
+
+	// NotChecked Each check after the policy gate that explain does not ask and that can still refuse the call, by a fixed name. Empty for deny. Null for a stored approval request and for an error.
+	NotChecked *[]string `json:"not_checked"`
+	OpId       *string   `json:"op_id"`
 
 	// Request The rule stored on an approval request.
 	Request *ExplainStoredRequest       `json:"request,omitempty"`
@@ -9833,7 +9844,7 @@ type RunApprovalCreate struct {
 	// Reason What the run does, for the approver.
 	Reason string `json:"reason"`
 
-	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header.
+	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
 	WorkRef string `json:"work_ref"`
 }
 
@@ -10420,7 +10431,9 @@ type ScheduledTriggerCreate struct {
 	Kind     ScheduledTriggerKind `json:"kind"`
 	TenantId *openapi_types.UUID  `json:"tenant_id"`
 	Timezone *string              `json:"timezone,omitempty"`
-	WorkRef  *string              `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // ScheduledTriggerInFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
@@ -11448,7 +11461,9 @@ type StartRunRequest struct {
 	Params       *map[string]interface{} `json:"params,omitempty"`
 	Target       string                  `json:"target"`
 	TemplateSlug string                  `json:"template_slug"`
-	WorkRef      *string                 `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // StartingGrantSet The three starting grant sets a person can pick.
@@ -13001,7 +13016,7 @@ type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
 
 // ListRunsApiV1AgentsRunsGetParams defines parameters for ListRunsApiV1AgentsRunsGet.
 type ListRunsApiV1AgentsRunsGetParams struct {
-	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
@@ -13060,7 +13075,7 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Status Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
-	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Limit Return at most this many requests (1..500). Omit for no limit.
@@ -13223,11 +13238,13 @@ type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
 
 // RecentBroadcastEventsApiV1BroadcastRecentGetParams defines parameters for RecentBroadcastEventsApiV1BroadcastRecentGet.
 type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
-	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-	OpClass       *string `form:"op_class,omitempty" json:"op_class,omitempty"`
-	Principal     *string `form:"principal,omitempty" json:"principal,omitempty"`
-	Target        *string `form:"target,omitempty" json:"target,omitempty"`
-	ActorSub      *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
+	Cursor    *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
+	Target    *string `form:"target,omitempty" json:"target,omitempty"`
+	ActorSub  *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	ActiveOnly    *bool   `form:"active_only,omitempty" json:"active_only,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -13818,12 +13835,14 @@ type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
 // ListRunsApiV1RunbooksRunsGetParams defines parameters for ListRunsApiV1RunbooksRunsGet.
 type ListRunsApiV1RunbooksRunsGetParams struct {
-	Assignee      *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
-	Status        *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TemplateSlug  *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
-	WorkRef       *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	Limit         *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
-	Authorization *string                                   `json:"authorization,omitempty"`
+	Assignee     *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
+	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // ListRunsApiV1RunbooksRunsGetParamsStatus defines parameters for ListRunsApiV1RunbooksRunsGet.
@@ -13926,13 +13945,15 @@ type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams
 
 // ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
 type ListTriggersApiV1SchedulerTriggersGetParams struct {
-	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset        *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
-	Kind          *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
-	Status        *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	WorkRef       *string                                            `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	TenantFilter  *openapi_types.UUID                                `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
-	Authorization *string                                            `json:"authorization,omitempty"`
+	Limit  *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
+	Kind   *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
+	Status *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef       *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
 }
 
 // ListTriggersApiV1SchedulerTriggersGetParamsKind defines parameters for ListTriggersApiV1SchedulerTriggersGet.

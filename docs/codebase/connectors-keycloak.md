@@ -47,9 +47,9 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset. Two more, `keycloak.user.lock_status` and
 `keycloak.realm.lock_settings`, show whether a user is locked after failed
-sign-ins. In total the connector registers 48
-operations: 19 `safe` reads and 29 writes that wait for
-approval (8 `caution`, 17 `dangerous`, 4 `destructive`).
+sign-ins. In total the connector registers 49
+operations: 19 `safe` reads and 30 writes that wait for
+approval (8 `caution`, 18 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
 (see "One-time code set-up").
@@ -73,7 +73,8 @@ fresh target with no asserted version still resolves.
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
+  `user_logout`, `user_disable`, `user_enable`,
+  `client_scope_protocol_mapper_update`, `realm_delete`, `user_check_login`,
   `role_mapping_client_assign`, `role_mapping_client_remove`, `user_update`,
   `user_credential_delete`,
   `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`,
@@ -106,7 +107,9 @@ fresh target with no asserted version still resolves.
   the nine original approval-gated write ops plus `user.logout` (#3851),
   with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
   (`ops_write_user_enabled_schemas.py`; handlers in
-  `ops_write_user_enabled.py`) spliced in,
+  `ops_write_user_enabled.py`) and `SCOPE_MAPPER_OPS`
+  (`ops_write_scope_mapper_schemas.py`; handler in
+  `ops_write_scope_mapper.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -425,6 +428,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 | `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
 | `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
+| `keycloak.client_scope.protocol_mapper.update` | dangerous | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
 | `keycloak.role_mapping.client.assign` | dangerous | `POST .../users/{user-id}/role-mappings/clients/{client-id}` |
 | `keycloak.role_mapping.client.remove` | dangerous | `DELETE .../users/{user-id}/role-mappings/clients/{client-id}` |
 | `keycloak.user.update` | caution | `PUT .../users/{user-id}` |
@@ -442,7 +446,7 @@ and optionally placed in a file on a host, use the three-step recipe in
 machine login for an agent seat". Step 1 is `keycloak.client.create`, which never returns
 the secret.
 
-Six more writes are `dangerous` because they can change who gets which
+Seven more writes are `dangerous` because they can change who gets which
 tenant rights, or how strong a sign-in is. MEHO reads the rights from the
 login token, and these writes change what goes into it, who can sign in as
 whom, or what a sign-in asks for:
@@ -452,6 +456,9 @@ whom, or what a sign-in asks for:
   scopes that fill the token.
 - `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
   and `tenant_role`.
+- `client_scope.protocol_mapper.update`: the same, for a mapper on a client
+  scope. It is also a change of rights, so its approval rules are stricter
+  (see "Change a protocol mapper of a client scope").
 - `user.reset_password`: it sets the password of any user of the realm.
 - `user.required_actions.update`: taking a required action away (for
   example the one-time code set-up) makes a user's sign-in weaker.
@@ -783,6 +790,65 @@ their risk level apply, and only the person the change is for is refused.
   A test with recorded `secretData` and `credentialData` checks the result,
   the approval rows and the audit rows
   (`tests/test_connectors_keycloak_account_writes.py`).
+
+### Change a protocol mapper of a client scope (#5930)
+
+`keycloak.client_scope.protocol_mapper.update` changes one protocol mapper
+that already exists on a client scope. Example: add one value to a
+hardcoded-claim mapper, such as the `capabilities` claim that lists which
+document collections a person may open. A second hardcoded-claim mapper with
+the same claim name would not add values, it would overwrite the first, so
+the existing mapper is changed.
+
+- Pass the scope as `scope_id` (UUID) or `scope_name` (exact name), and the
+  mapper as `mapper_id` (UUID) or `mapper_name` (exact name on that scope).
+  Pass only the fields to change in `representation`.
+- The op reads the mapper, puts `representation` on top and writes the whole
+  mapper back (`read_merge_write`). Fields not sent stay. `config` merges key
+  by key, so `{"config": {"claim.value": "..."}}` changes only that key.
+- `representation` may hold only `name` and `config`. A change of the
+  mapper's type (`protocolMapper`) or `protocol` makes another kind of
+  mapper, whose config keys mean other things, so the approver could not
+  compare the old and the new values. MEHO refuses such a request
+  (`invalid_params`).
+- A name that matches nothing raises `KeycloakUserNotFoundError` (the shared
+  "not found" error) and nothing is written. A name that matches more than
+  one object raises `ValueError`. A scope list that cannot be read is an
+  error, never "not found".
+- An id and a name sent together must name one object: the name stored in
+  Keycloak for that id must be the name sent. Otherwise MEHO refuses the
+  request before it waits for approval (`refused_before_approval`), and
+  again when it runs. Nothing is written.
+- Safe to run twice. The result shows the ids and the names stored in
+  Keycloak, and lists the changed field names (`changed_fields`,
+  `unrequested_changes`), never values. Check the new value with
+  `keycloak.client_scope.list`.
+- Risk level `dangerous`, approval required, group `protocol_mapper_write`.
+- It is a change of rights: a mapper decides what goes into the login
+  token, so a change can give rights. The call waits for approval, and
+  another admin must approve:
+  - The op is registered with `register_rights_change_op`. The requester
+    never approves their own request, also as a tenant admin and with the
+    self-approval switch on. The approver is another person who is a
+    tenant admin or a platform admin. A MEHO-SA-Operator who is not an
+    admin cannot approve it.
+  - A person approves each call (`declare_per_call_approval`). No standing
+    grant and no run approval covers it. An agent grant does not either:
+    the op needs approval, so an agent's call always waits.
+- The approval card shows the scope and the mapper with their ids and the
+  names stored in Keycloak (also when the caller sent only one of them). It
+  shows the mapper as it is now (`current`): its type (`protocolMapper`),
+  `protocol`, the claim name, and the old value of each field sent. The new
+  values are in `representation`. Secrets are hidden in both.
+- After approval the run acts on the ids on the card and does not look a
+  name up again. It reads the mapper again before the write. The run is
+  refused and nothing is written when a stored name is no longer the one
+  on the card, when the mapper's type, protocol or config changed after the
+  card was made (then a new request is needed), or when the card lacks the
+  ids or that content (the objects could not be read when the request was
+  made).
+- Not offered: adding a mapper to a client scope, and changing or deleting a
+  mapper on a client.
 
 ### One-time code set-up
 

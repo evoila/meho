@@ -70,6 +70,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
     check_param_secret_ref,
     strip_credential_value,
@@ -248,6 +249,10 @@ async def _read_password(
     except TargetSecretNotFoundError as exc:
         raise ValueError(
             f"could not read password_ref {path}#{field}: Vault has no secret at that path"
+        ) from exc
+    except TargetSecretForbiddenError as exc:
+        raise ValueError(
+            f"could not read password_ref {path}#{field}: Vault refused to read that path"
         ) from exc
     except (VaultClientError, CredentialsReadError) as exc:
         raise ValueError(f"could not read password_ref {path}#{field}: {exc}") from exc

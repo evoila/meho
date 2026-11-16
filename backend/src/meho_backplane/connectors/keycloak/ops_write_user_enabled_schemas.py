@@ -77,8 +77,9 @@ _WHEN_TO_USE_DISABLE = (
 
 _WHEN_TO_USE_ENABLE = (
     "Use to turn a disabled account on again (``keycloak.user.enable``), so "
-    "the person can sign in again. Dangerous: a MEHO-SA-Operator or a tenant "
-    "admin must approve. Key on the user UUID (``id``) or ``username``. "
+    "the person can sign in again. Dangerous, and a change of rights: another "
+    "admin than the one who asked must approve each call. Key on the user UUID "
+    "(``id``) or ``username``. "
     "Safe to run twice."
 )
 

@@ -29,17 +29,15 @@ a tenant-rights change, like ``keycloak.group.member.add`` and
 * ``keycloak.client_scope.protocol_mapper.update`` -- the same, for a
   mapper on a client scope. It is also registered as a change of rights:
   the requester never approves it and the approver is another admin.
-* ``keycloak.user.reset_password`` -- sets the password of any user of the
-  realm, so it lets someone sign in as that user.
-
-At ``dangerous``, only a MEHO-SA-Operator or a tenant admin may approve
-another person's request, and the single-operator self-approval switch
-(``APPROVAL_ALLOW_SELF_APPROVAL``) does not cover them
-(``operations/approval_queue.py``).
+* ``keycloak.user.reset_password`` -- sets a new password for a user of
+  the realm.
 
 All of them are also changes of rights (:mod:`.rights_changes`): another
-admin must approve, the requester never approves their own request, and no
-standing grant or run approval covers a call.
+admin than the one who asked must approve (a tenant admin, or a platform
+admin for the platform admin group), the requester never approves their
+own request, and no standing grant or run approval covers a call. The
+single-operator self-approval switch (``APPROVAL_ALLOW_SELF_APPROVAL``)
+does not cover them (``operations/approval_queue.py``).
 """
 
 from __future__ import annotations

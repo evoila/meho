@@ -1274,8 +1274,8 @@ chart's realm finishing job cannot change realm settings either: its
 account `meho-admin` may only manage clients and users. So a realm that
 already runs gets these settings once, in one of two ways:
 
-- **Through MEHO**, with `keycloak.realm.update` (it waits for
-  approval). Put the values in a file, for example `realm-login.json`:
+- **Through MEHO**, with `keycloak.realm.update` (it waits until
+  another admin approves). Put the values in a file, for example `realm-login.json`:
 
     ```json
     {
@@ -1301,8 +1301,8 @@ realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.
 
-MEHO adds the step with one operation. It waits for approval
-([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
+MEHO adds the step with one operation. It waits until another admin
+approves ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
 because it changes how every person of the realm logs in:
 
 ```bash

@@ -9864,7 +9864,7 @@ type RunApprovalRead struct {
 	EndedAt       *time.Time         `json:"ended_at"`
 	Entries       []RunApprovalEntry `json:"entries"`
 
-	// EntriesThatWait Entries the run approval never covers: each of their calls waits for a person. Filled by request, show and approve; null in the list.
+	// EntriesThatWait Entries the run approval never covers: each of their calls waits for a person. Filled by request, show and approve; null in list, revoke and end.
 	EntriesThatWait *[]RunApprovalWaitNote `json:"entries_that_wait"`
 	ExpiresAt       time.Time              `json:"expires_at"`
 	Id              openapi_types.UUID     `json:"id"`

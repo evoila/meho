@@ -142,7 +142,7 @@ class RunApprovalRead(BaseModel):
         default=None,
         description=(
             "Entries the run approval never covers: each of their calls waits for a "
-            "person. Filled by request, show and approve; null in the list."
+            "person. Filled by request, show and approve; null in list, revoke and end."
         ),
     )
 

@@ -318,3 +318,41 @@ async def test_a_request_without_a_credential_read_has_no_entry_that_waits() -> 
         ),
     )
     assert read.entries_that_wait == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["k8s.secret.compare_to_ref", "vault.kv.list"])
+async def test_a_credential_read_that_returns_no_secret_value_has_no_entry_that_waits(
+    op_id: str,
+) -> None:
+    rows = await _register_all()
+    row = next(row for row in rows if row.op_id == op_id)
+    read = await RunApprovalService().request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=_RUN,
+            entries=[RunApprovalEntry(connector_id=connector_id_of(row), op_id=op_id)],
+            reason="compare or list without a secret value",
+        ),
+    )
+    assert read.entries_that_wait == []
+
+
+@pytest.mark.asyncio
+async def test_a_vault_kv_read_entry_says_only_calls_with_reveal_secret_wait() -> None:
+    rows = await _register_all()
+    row = next(row for row in rows if row.op_id == "vault.kv.read")
+    read = await RunApprovalService().request(
+        _operator(),
+        RunApprovalCreate(
+            work_ref=_RUN,
+            entries=[RunApprovalEntry(connector_id=connector_id_of(row), op_id="vault.kv.read")],
+            reason="read one secret",
+        ),
+    )
+    notes = read.entries_that_wait or []
+    assert [(n.entry, n.op_id) for n in notes] == [(0, "vault.kv.read")]
+    assert notes[0].reason == (
+        "op 'vault.kv.read' reads a credential. A run approval never covers it: "
+        "each call with reveal_secret waits for a person"
+    )

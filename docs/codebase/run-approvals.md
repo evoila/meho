@@ -187,10 +187,14 @@ as for a standing grant (`service_grants.credential_read_grant_reason`):
   the row.
 - `RunApprovalService.request` does **not** refuse such an entry. The
   answer of request, show and approve has `entries_that_wait`: one note
-  per such entry, with its position (`entry`), `connector_id`, `op_id` and
-  the reason "reads a credential. A run approval never covers it: each
-  call waits for a person" (`operations/run_approval_notes.py`). The list
-  route leaves the field `null`, because it looks up no operation.
+  per such entry whose calls wait (`has_credential_read_floor` with
+  `reveal_secret`), with its position (`entry`), `connector_id`, `op_id`
+  and the reason "reads a credential. A run approval never covers it: each
+  call waits for a person" (`operations/run_approval_notes.py`). For
+  `vault.kv.read` the reason ends "each call with reveal_secret waits for
+  a person". A read that returns no secret value gets no note. The list,
+  revoke and end routes leave the field `null`, because they look up no
+  operation.
   `meho approvals runs show` and `approve` print the reason under the
   entry.
 - A read that a connector marks as one that returns no secret value

@@ -62,6 +62,9 @@ from meho_backplane.connectors.harbor.ops import (
     register_harbor_project_quota_operations,
     register_harbor_robot_operations,
 )
+from meho_backplane.connectors.harbor.ops_artifact_copy import (
+    register_harbor_artifact_copy_operation,
+)
 from meho_backplane.connectors.harbor.ops_project_create import (
     register_harbor_project_create_operation,
 )
@@ -137,6 +140,10 @@ register_typed_op_registrar(register_harbor_project_quota_operations)
 # waits for approval and is safe to run twice.
 register_typed_op_registrar(register_harbor_project_create_operation)
 
+# Queue the artifact copy write (harbor.artifact.copy): a typed write that
+# waits for approval and is safe to run twice.
+register_typed_op_registrar(register_harbor_artifact_copy_operation)
+
 __all__ = [
     "HARBOR_CONNECTOR_ID",
     "HARBOR_IMPL_ID",
@@ -150,6 +157,7 @@ __all__ = [
     "HarborTypedOp",
     "SessionCredentials",
     "load_credentials_from_vault",
+    "register_harbor_artifact_copy_operation",
     "register_harbor_artifact_operations",
     "register_harbor_project_create_operation",
     "register_harbor_project_quota_operations",

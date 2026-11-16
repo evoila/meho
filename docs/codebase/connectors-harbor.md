@@ -406,6 +406,7 @@ not one of the 9.
 | `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}/summary` |
 | `harbor.quota.list` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/quotas?reference=project` |
 | `harbor.project.create` *(typed write, `caution` + approval)* | `harbor-projects` | `POST /api/v2.0/projects` |
+| `harbor.artifact.copy` *(typed write, `caution` + approval)* | `harbor-artifacts` | `POST …/artifacts?from=` |
 
 `harbor.project.create` (`ops_project_create.py`) creates a project from
 `project_name`, `public` (default `false`, so private) and an optional
@@ -413,6 +414,19 @@ not one of the 9.
 taken name, and the handler returns `created: false` without a change. Any
 other HTTP error is raised. The result names `harbor.project.info` as the
 read back. Its tests are in `tests/test_connectors_harbor_project_create.py`.
+
+`harbor.artifact.copy` (`ops_artifact_copy.py`) copies an image inside Harbor
+from `from` (`<project>/<repository>@<digest>` or `:<tag>`) into `project` and
+`repository`. Nothing is uploaded. It is safe to run twice: it reads the source
+digest (for a tag), then reads the target by that digest. When the target holds
+that digest, under any tag or none, it returns `copied: false` and sends no
+copy. The copy itself names the source by digest (`from=<project>/<repository>@<digest>`),
+so a tag that moves after the read cannot change what is copied. Harbor copies
+the tags of the source image along with it. Only a
+`404` counts as "not there"; any other failed read, a missing source, and any
+copy error are raised. The result carries the `digest` and names
+`harbor.artifact.list` as the read back. Its tests are in
+`tests/test_connectors_harbor_artifact_copy.py`.
 
 **Quota lives on the summary endpoint, not on `Project`**: `harbor.project.info`
 (`GET /projects/{name}`) returns the vendor `Project` object, which has no
@@ -446,7 +460,7 @@ names (`{project_name_or_id}` on the project detail / `/summary` routes,
 `{project_name}` / `{repository_name}` / `{reference}` on the repository
 sub-tree, `{robot_id}` on the robot read and delete). All 14 were served on the
 first armed run — no repoints, no exclusions. The robot read before the delete
-(`GET /api/v2.0/robots/{robot_id}`) is the 15th, and the project create (`POST /api/v2.0/projects`) is the 16th. Standard:
+(`GET /api/v2.0/robots/{robot_id}`) is the 15th, the project create (`POST /api/v2.0/projects`) is the 16th, and the artifact copy (`POST …/artifacts`) is the 17th. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## CLI verbs

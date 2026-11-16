@@ -10,29 +10,46 @@
   the diff and the import of the file on a fresh install answer
   "No change.".
 * No change over every registered operation: with the file stored for the
-  whole install, every operation keeps its risk level, its wait and the
-  answer (run, wait or deny) for each kind of caller.
+  whole install, every operation keeps its risk level, its "always wait",
+  who may approve it, and the answer of the real policy check
+  (``policy_gate``: run, wait or refuse, and the reason) for seven kinds of
+  caller, with grants and a run approval. A file with one more entry or
+  routing line fails this check. A binding in the file fails the
+  ``validate`` check: an install's file may not hold bindings.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, PolicyRevision, TenantPolicy
-from meho_backplane.operations.op_policy import OpKey, effective_policy_map
+from meho_backplane.db.models import (
+    AgentPermission,
+    EndpointDescriptor,
+    PermissionVerdict,
+    PolicyRevision,
+    RunApproval,
+    ServicePrincipalGrant,
+    TenantPolicy,
+)
+from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations._validate import policy_gate
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.policy import service
 from meho_backplane.policy.classification import DEFAULT_TAXONOMY, taxonomy_from_documents
 from meho_backplane.policy.document import document_of, parse_policy_file
-from meho_backplane.policy.evaluate import Asker, Lookups, evaluate
+from meho_backplane.policy.evaluate import Asker, AskerKind, Lookups, Via, evaluate
 from meho_backplane.policy.service import (
     NO_CHANGE,
     apply_policy,
@@ -42,6 +59,7 @@ from meho_backplane.policy.service import (
 )
 from meho_backplane.policy.shadow import asked_of
 from meho_backplane.policy.store import connector_id_of
+from meho_backplane.policy.who_approves import approvers_for
 from meho_backplane.settings import get_settings
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -50,20 +68,78 @@ _PACKAGED_COPY = (
     _REPO / "backend" / "src" / "meho_backplane" / "policy" / "profiles" / "small-team.yaml"
 )
 _TENANT = uuid.UUID("00000000-0000-0000-0000-000000006040")
+_WORK_REF = "run-small-team"
+
+
+@dataclass(frozen=True)
+class _Caller:
+    """A caller of every operation, and what it holds."""
+
+    name: str
+    operator: Operator
+    asker: Asker
+    run_approval: bool = False
+
+
+def _operator(sub: str, kind: PrincipalKind, role: TenantRole, **extra: Any) -> Operator:
+    return Operator(
+        sub=sub,
+        raw_jwt="header.payload.signature",
+        tenant_id=_TENANT,
+        tenant_role=role,
+        principal_kind=kind,
+        **extra,
+    )
+
+
+def _asker(kind: AskerKind, sub: str, *roles: str, via: Via = "token") -> Asker:
+    return Asker(kind=kind, sub=sub, tenant_id=_TENANT, roles=frozenset(roles), via=via)
+
+
+_USER, _AGENT, _SERVICE = PrincipalKind.USER, PrincipalKind.AGENT, PrincipalKind.SERVICE
+_OPERATOR, _ADMIN = TenantRole.OPERATOR, TenantRole.TENANT_ADMIN
 
 #: One caller of each kind, so a changed answer shows up for any of them.
-_ASKERS: tuple[Asker, ...] = (
-    Asker(kind="person", sub="p-web", tenant_id=_TENANT, roles=frozenset({"operator"}), via="web"),
-    Asker(kind="person", sub="p-token", tenant_id=_TENANT, roles=frozenset({"operator"})),
-    Asker(
-        kind="person",
-        sub="p-admin",
-        tenant_id=_TENANT,
-        roles=frozenset({"tenant_admin", "approver", "sa_operator"}),
+#: ``svc-grant`` holds a standing grant for every operation, ``agent-grant``
+#: an agent grant for every operation, and ``svc-run`` a run approval for
+#: every operation (:func:`_seed_grants`).
+_CALLERS: tuple[_Caller, ...] = (
+    _Caller(
+        "person in the console",
+        _operator("p-web", _USER, _OPERATOR, web_session=True),
+        _asker("person", "p-web", "operator", via="web"),
     ),
-    Asker(kind="agent", sub="agent", tenant_id=_TENANT, roles=frozenset({"operator"})),
-    Asker(kind="service", sub="service", tenant_id=_TENANT, roles=frozenset({"operator"})),
-    Asker(kind="runner", sub="runner", tenant_id=_TENANT, roles=frozenset({"operator"})),
+    _Caller(
+        "person with a token",
+        _operator("p-token", _USER, _OPERATOR),
+        _asker("person", "p-token", "operator"),
+    ),
+    _Caller(
+        "admin",
+        _operator("p-admin", _USER, _ADMIN, approver=True),
+        _asker("person", "p-admin", "tenant_admin", "approver", "sa_operator"),
+    ),
+    _Caller(
+        "service with a standing grant",
+        _operator("svc-grant", _SERVICE, _OPERATOR),
+        _asker("service", "svc-grant", "operator"),
+    ),
+    _Caller(
+        "agent with a grant",
+        _operator("agent-grant", _AGENT, _OPERATOR),
+        _asker("agent", "agent-grant", "operator"),
+    ),
+    _Caller(
+        "agent without a grant",
+        _operator("agent-none", _AGENT, _OPERATOR),
+        _asker("agent", "agent-none", "operator"),
+    ),
+    _Caller(
+        "service with a run approval",
+        _operator("svc-run", _SERVICE, _OPERATOR),
+        _asker("service", "svc-run", "operator"),
+        run_approval=True,
+    ),
 )
 
 
@@ -77,8 +153,12 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def _switch(monkeypatch: pytest.MonkeyPatch, on: bool) -> None:
+def _switch(monkeypatch: pytest.MonkeyPatch, on: bool, *, routing: bool | None = None) -> None:
+    """The switches that make MEHO read the policy file: classification and approver routing."""
     monkeypatch.setenv("POLICY_CLASSIFICATION", "true" if on else "false")
+    monkeypatch.setenv(
+        "POLICY_APPROVER_ROUTING", "true" if (on if routing is None else routing) else "false"
+    )
     get_settings.cache_clear()
 
 
@@ -94,44 +174,118 @@ async def _register_all() -> None:
     await run_typed_op_registrars(embedding_service=embedding)
 
 
-async def _store_small_team() -> None:
-    parsed = parse_policy_file(_small_team())
+async def _store_install_policy(content: bytes) -> None:
+    """Store *content* as the install's policy, in place of the one stored before."""
+    parsed = parse_policy_file(content)
     assert parsed.model is not None, parsed.mistakes
     async with get_sessionmaker()() as session, session.begin():
+        await session.execute(delete(TenantPolicy).where(TenantPolicy.tenant_id.is_(None)))
         session.add(
             TenantPolicy(tenant_id=None, document=document_of(parsed.model), set_by_sub="test")
         )
 
 
-async def _answers() -> dict[tuple[str, str], tuple[Any, ...]]:
-    """Per operation: risk level, wait, "always wait", category, labels and each caller's answer."""
+async def _all_rows() -> list[EndpointDescriptor]:
     async with get_sessionmaker()() as session:
         rows = list((await session.execute(select(EndpointDescriptor))).scalars())
-        policies = await effective_policy_map(session, tenant_id=_TENANT, rows=rows)
         session.expunge_all()
-    answers: dict[tuple[str, str], tuple[Any, ...]] = {}
-    for row in rows:
-        policy = policies[OpKey.of(row)]
-        row.safety_level = policy.safety_level
-        row.requires_approval = policy.requires_approval
-        row.policy_always_wait = policy.always_wait
-        connector_id = connector_id_of(row)
-        asked = asked_of(row, connector_id=connector_id, target=None)
-        verdicts = tuple(evaluate(asker, asked, Lookups()).verdict for asker in _ASKERS)
-        answers[(connector_id, row.op_id)] = (
-            policy.safety_level,
-            policy.requires_approval,
-            policy.always_wait,
-            policy.category,
-            dict(policy.labels),
-            verdicts,
+    return rows
+
+
+async def _seed_grants(rows: list[EndpointDescriptor]) -> None:
+    """A standing grant, an agent grant and a run approval for every operation."""
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session, session.begin():
+        for row in rows:
+            session.add(
+                ServicePrincipalGrant(
+                    tenant_id=_TENANT,
+                    principal_sub="svc-grant",
+                    op_id=row.op_id,
+                    connector_id=connector_id_of(row),
+                    target_id=None,
+                    reason="test: every operation",
+                    created_by_sub="test-admin",
+                )
+            )
+        session.add(
+            AgentPermission(
+                tenant_id=_TENANT,
+                principal_sub="agent-grant",
+                op_pattern="*",
+                verdict=PermissionVerdict.AUTO_EXECUTE,
+                created_by_sub="test-admin",
+            )
         )
+        session.add(
+            RunApproval(
+                tenant_id=_TENANT,
+                principal_sub="svc-run",
+                work_ref=_WORK_REF,
+                entries=[
+                    {"connector_id": connector_id_of(row), "op_id": row.op_id} for row in rows
+                ],
+                reason="test: every operation",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+                approved_at=now,
+                approved_by_sub="test-approver",
+            )
+        )
+
+
+async def _gate(caller: _Caller, descriptor: EndpointDescriptor) -> tuple[str, str | None]:
+    """The answer of the real policy check (run, wait or refuse) and its reason."""
+    token = work_ref_var.set(_WORK_REF if caller.run_approval else None)
+    try:
+        verdict, reason = await policy_gate(
+            operator=caller.operator,
+            descriptor=descriptor,
+            target=None,
+            connector_id=connector_id_of(descriptor),
+            decide_only=True,
+        )
+    finally:
+        work_ref_var.reset(token)
+    return verdict.value, reason
+
+
+async def _answers(rows: list[EndpointDescriptor]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Per operation, everything the policy decides, as a real call loads it."""
+    answers: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        descriptor = await lookup_descriptor(
+            tenant_id=_TENANT,
+            product=row.product,
+            version=row.version,
+            impl_id=row.impl_id,
+            op_id=row.op_id,
+        )
+        assert descriptor is not None, row.op_id
+        connector_id = connector_id_of(descriptor)
+        approvers = await approvers_for(
+            tenant_id=_TENANT, connector_id=connector_id, descriptor=descriptor
+        )
+        asked = asked_of(descriptor, connector_id=connector_id, target=None)
+        answers[(connector_id, row.op_id)] = {
+            "risk": descriptor.safety_level,
+            "requires_approval": descriptor.requires_approval,
+            "always_wait": descriptor.policy_always_wait,
+            "category": descriptor.policy_category,
+            "labels": dict(descriptor.policy_labels or {}),
+            "approvers": approvers,
+            "gate": {c.name: await _gate(c, descriptor) for c in _CALLERS},
+            "evaluator": {c.name: evaluate(c.asker, asked, Lookups()).verdict for c in _CALLERS},
+        }
     return answers
 
 
-def _without_classification(answers: dict[Any, tuple[Any, ...]]) -> dict[Any, tuple[Any, ...]]:
-    """Risk level, wait, "always wait" and the answers; no category or labels."""
-    return {key: (*value[:3], value[5]) for key, value in answers.items()}
+def _without_classification(answers: dict[Any, dict[str, Any]]) -> dict[Any, dict[str, Any]]:
+    """Everything but the category and the labels, which only exist with the switch on."""
+    return {
+        key: {k: v for k, v in value.items() if k not in ("category", "labels")}
+        for key, value in answers.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +399,8 @@ async def test_an_install_file_without_taxonomy_waits_and_keeps_the_categories(
 
 @pytest.mark.asyncio
 async def test_a_fresh_tenant_still_exports_an_empty_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    _switch(monkeypatch, True)
+    """A tenant does not get the install's file (with routing on it gets the shipped bindings)."""
+    _switch(monkeypatch, True, routing=False)
     async with get_sessionmaker()() as session:
         text = await export_policy(session, scope="tenant", tenant_id=_TENANT)
     assert text == "policy: v1\nclassifications: []\n"
@@ -258,16 +413,43 @@ async def test_a_fresh_tenant_still_exports_an_empty_file(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_importing_the_file_changes_no_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real policy check gives every caller the same answer, with and without the file.
+
+    The last part shows that the comparison sees a change: one routing line
+    and one "always wait" entry added to the file change the answers.
+    """
     await _register_all()
+    rows = await _all_rows()
+    assert len(rows) > 100, "the registrars registered too few operations"
+    await _seed_grants(rows)
 
     _switch(monkeypatch, False)
-    today = await _answers()
+    today = await _answers(rows)
     _switch(monkeypatch, True)
-    without_file = await _answers()
+    without_file = await _answers(rows)
 
-    await _store_small_team()
-    with_file = await _answers()
+    await _store_install_policy(_small_team())
+    with_file = await _answers(rows)
 
-    assert len(with_file) > 100, "the registrars registered too few operations"
     assert with_file == without_file
     assert _without_classification(with_file) == _without_classification(today)
+
+    gates = [answer["gate"] for answer in with_file.values()]
+    assert any("standing grant" in (g["service with a standing grant"][1] or "") for g in gates)
+    assert any("run approval" in (g["service with a run approval"][1] or "") for g in gates)
+    assert any(g["agent with a grant"] != g["agent without a grant"] for g in gates)
+
+    changed_file = _small_team().replace(
+        b"classifications: []\n",
+        b"classifications:\n"
+        b"  - match: {op: '*.list'}\n"
+        b"    always_wait: true\n"
+        b"routing:\n"
+        b"  - match: {category: other}\n"
+        b"    approvers: [Admins]\n",
+    )
+    await _store_install_policy(changed_file)
+    changed = await _answers(rows)
+    assert any(changed[k]["approvers"] != with_file[k]["approvers"] for k in with_file)
+    assert any(changed[k]["always_wait"] != with_file[k]["always_wait"] for k in with_file)
+    assert any(changed[k]["gate"] != with_file[k]["gate"] for k in with_file)

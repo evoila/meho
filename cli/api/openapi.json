@@ -27504,6 +27504,12 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
           "reviewer_context": {
             "$ref": "#/components/schemas/ReviewerContextView",
             "nullable": true

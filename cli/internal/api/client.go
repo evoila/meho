@@ -152,6 +152,9 @@ func NewAuthedClient(ctx context.Context, backplaneURL string, opts AuthedClient
 			return errors.New("meho: stored token has no access_token")
 		}
 		req.Header.Set("Authorization", authorizationHeader(bearer))
+		if id := box.sessionID(); id != "" {
+			req.Header.Set(SessionIDHeader, id)
+		}
 		SetWorkRefHeader(req)
 		SetTenantHeader(req)
 		return nil

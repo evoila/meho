@@ -439,6 +439,10 @@ class ApprovalRequestView(BaseModel):
     created_at: str
     expires_at: str | None
     work_ref: str | None
+    #: The session that parked the request: an agent run, an MCP session, or
+    #: the ``meho login`` session of a CLI call. ``None`` when the call had
+    #: none. Additive; a client that ignores it is unaffected.
+    agent_session_id: uuid.UUID | None = None
     #: Redacted reviewer context (#3353): resolved target name + product/
     #: version, the concrete subject of a path-variable op, the parent
     #: composite op for a child park, a blast-radius summary, and a
@@ -702,6 +706,7 @@ def _view(
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         work_ref=row.work_ref,
+        agent_session_id=row.agent_session_id,
         reviewer_context=reviewer_context,
         delegation=(
             DelegationView(

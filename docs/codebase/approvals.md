@@ -608,6 +608,29 @@ bound) and an autonomous agent run both resolve to `principal_act=NULL`.
 (Before #1481 the field read a nonexistent `Operator.identity_act`
 attribute and was always `NULL`.)
 
+### The session of a CLI call, and the origin columns
+
+Every request and audit row can say which session made it, also when
+several sessions share one login. `meho login` makes a random session id
+(a version-4 UUID) and saves it with the token. The CLI sends it in the
+`Meho-Session-Id` header on every call. A token refresh keeps the id. The
+next `meho login` makes a new one.
+
+The audit middleware (`backend/src/meho_backplane/audit.py`) reads the
+header and binds it to `client_session_id_var`
+(`backend/src/meho_backplane/operations/_audit.py`). A header that is not
+a UUID is ignored. `resolve_agent_session_id()` returns it last, after an
+agent run and an MCP session. So the operation rows of a CLI call, the
+HTTP row of the call and a parked approval request all carry it in
+`agent_session_id`. A CLI that has no saved session id (a login from an
+older CLI) sends no header; running `meho login` again fixes that.
+
+`ApprovalRequestView` has `agent_session_id` next to `work_ref`.
+`meho approvals list` shows two more columns: `WORK-REF` and `SESSION`
+(the first 8 characters of the session id; `--json` has the whole id).
+Both show `-` when empty. With them, a person can see which session
+parked a request and for which change ticket.
+
 ### Display-name resolution alongside the sub (#3300)
 
 Every operator-facing approvals surface — CLI `approve` / `show` /

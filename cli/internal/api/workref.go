@@ -14,6 +14,11 @@ import (
 // reads to stamp audit_log.work_ref on the row for that request.
 const WorkRefHeader = "Meho-Work-Ref"
 
+// SessionIDHeader is the request header that carries the id of the
+// login session. The backplane stores it as the session of the audit
+// rows of the request.
+const SessionIDHeader = "Meho-Session-Id"
+
 // WorkRefEnv is the environment variable the root --work-ref flag
 // falls back to when the flag is not set.
 const WorkRefEnv = "MEHO_WORK_REF"

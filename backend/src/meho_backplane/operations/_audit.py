@@ -66,6 +66,7 @@ __all__ = [
     "agent_session_id_var",
     "audit_rejection_safe",
     "audit_safe",
+    "client_session_id_var",
     "decode_work_ref_header",
     "descriptor_op_class",
     "parent_audit_id_var",
@@ -124,6 +125,17 @@ parent_audit_id_var: ContextVar[uuid.UUID | None] = ContextVar(
 #: agent's full session graph.
 agent_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "agent_session_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the session id the ``meho`` CLI sends in the
+#: ``Meho-Session-Id`` header. The audit middleware binds it for the whole
+#: request. :func:`resolve_agent_session_id` uses it last, after an agent run
+#: and an MCP session, so a CLI dispatch carries the id of its ``meho login``
+#: session.
+client_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
+    "client_session_id",
     default=None,
 )
 
@@ -288,6 +300,10 @@ def resolve_agent_session_id() -> uuid.UUID | None:
       direct MCP ``call_operation`` (ok, error or denied) and every
       operation an MCP tool runs inside carry the MCP session id.
 
+    * :data:`client_session_id_var` — bound by the audit middleware from the
+      ``Meho-Session-Id`` header the ``meho`` CLI sends. Its value is the id
+      the CLI minted at ``meho login`` and keeps until the next login.
+
     A client-credential service principal that dispatches over the REST
     chassis with a ``work_ref`` reaches the first source too:
     ``call_operation`` binds :data:`agent_session_id_var` to the session id
@@ -306,7 +322,7 @@ def resolve_agent_session_id() -> uuid.UUID | None:
         return session_id
     raw = structlog.contextvars.get_contextvars().get("mcp_session_id")
     if raw is None:
-        return None
+        return client_session_id_var.get()
     if not isinstance(raw, str):
         _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
         return None

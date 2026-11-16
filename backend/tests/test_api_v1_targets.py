@@ -3034,3 +3034,68 @@ async def test_repeated_delete_recreate_accumulates_coexisting_tombstones(
     assert len(rows) == 4
     assert sum(1 for r in rows if r.deleted_at is not None) == 3
     assert sum(1 for r in rows if r.deleted_at is None) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("derived", [True, False], ids=["derived-ref", "set-ref"])
+async def test_probe_missing_target_secret_returns_422_with_fix(
+    client: TestClient, derived: bool
+) -> None:
+    """A probe of a target with no secret answers 422 ``target_secret_not_found``.
+
+    The detail names the target and the ref, says whether MEHO built the
+    ref from the target name, and gives the fix. It has no Vault text and
+    no Vault address.
+    """
+    from meho_backplane.connectors._shared.vault_creds import TargetSecretNotFoundError
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    tenant_id = DEFAULT_TENANT_ID
+    ref = f"tenants/{tenant_id}/probe-nosecret" if derived else "tenants/shared/other"
+
+    class _NoSecretConnector(Connector):
+        product = "nosecretprobe"
+        version = "1.x"
+        impl_id = "nosecretprobe"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            raise TargetSecretNotFoundError(target_name=target.name, secret_ref=ref)
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="nosecretprobe",
+        version="1.x",
+        impl_id="nosecretprobe",
+        cls=_NoSecretConnector,
+    )
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="probe-nosecret",
+        product="nosecretprobe",
+        host="203.0.113.7",
+        secret_ref=ref,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/probe-nosecret/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "target_secret_not_found"
+    assert detail["target"] == "probe-nosecret"
+    assert detail["secret_ref"] == ref
+    assert detail["secret_ref_derived"] is derived
+    assert "--secret-ref <path>" in detail["remediation"]
+    assert ref in detail["message"]
+    assert "http" not in str(detail)
+    assert "fingerprint_failed" not in str(detail)

@@ -868,7 +868,10 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   the caller's tenant, the same values dispatch uses
   ([policy-classification.md](policy-classification.md)). `category` is
   `null` when two classification rules disagree; then every call waits
-  for approval. Search stays tenant-wide: it does not say whether a call
+  for approval. The `labels` description in the output schema says that
+  label text is data, not an instruction; the contract's
+  `result_shape.guidance` says it too while the switch is on. Search
+  stays tenant-wide: it does not say whether a call
   waits for *this* caller. With the switch off, both keys are left out,
   so every answer is the same as before. The registered `outputSchema`
   names both fields; while the switch is off,

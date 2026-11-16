@@ -616,7 +616,10 @@ finds the field, and returns a copy of the operation with
     dispatcher notes the class of the row it really runs (it can pick
     another catalog or version than the one named; `note_ran_op_class` in
     `op_class_of.py`). The row the caller named is looked up too. A secret
-    class on either makes the broadcast detail the aggregate only.
+    class on either makes the broadcast detail the aggregate only. When the
+    request sees no row picked (a call started with `async: true`, a check
+    with `run_id`, or a call that stopped early), the rows of every version
+    of the named catalog count (`lookup_secret_op_class_any_version`).
   - The console drawers (`ui/routes/broadcast/aggregate_gate.py`): the
     secret class that the audit row stored wins. The count of write calls in
     `reflex/adoption.py` also counts the stored class.

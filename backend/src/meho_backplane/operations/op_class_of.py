@@ -42,6 +42,7 @@ __all__ = [
     "RanOpClass",
     "descriptor_op_class",
     "lookup_secret_op_class",
+    "lookup_secret_op_class_any_version",
     "note_ran_op_class",
     "ran_op_class_var",
     "request_op_class",
@@ -175,3 +176,46 @@ async def lookup_secret_op_class(tenant_id: UUID, connector_id: str, op_id: str)
         return None
     op_class = descriptor_op_class(descriptor)
     return op_class if op_class in SECRET_CLASSES else None
+
+
+async def lookup_secret_op_class_any_version(
+    tenant_id: UUID, connector_id: str, op_id: str
+) -> str | None:
+    """Return a secret class stored on any version of an operation, else ``None``.
+
+    For a caller that cannot see which row the dispatcher picks: a call that
+    starts in the background, or a check of such a call. The dispatcher can
+    run the same op id in another version of the named catalog (same product
+    and implementation, :mod:`~meho_backplane.operations._catalog_guard`).
+    So this reads the rows of every version that *tenant_id* can see. When
+    one of them stores a secret class, that class is returned.
+    """
+    from sqlalchemy import select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import EndpointDescriptor
+    from meho_backplane.operations._lookup import parse_connector_id, visible_scope_clause
+
+    product, _version, impl_id = parse_connector_id(connector_id)
+    async with get_sessionmaker()() as session:
+        stored = (
+            await session.execute(
+                select(EndpointDescriptor.op_class)
+                .where(
+                    visible_scope_clause(
+                        EndpointDescriptor,
+                        tenant_id=tenant_id,
+                        product=product,
+                        version=EndpointDescriptor.version,
+                        impl_id=impl_id,
+                    ),
+                    EndpointDescriptor.product == product,
+                    EndpointDescriptor.impl_id == impl_id,
+                    EndpointDescriptor.op_id == op_id,
+                    EndpointDescriptor.op_class.in_(sorted(SECRET_CLASSES)),
+                )
+                .order_by(EndpointDescriptor.op_class)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    return stored

@@ -132,6 +132,7 @@ from meho_backplane.operations.op_class_of import (
     SECRET_CLASSES,
     RanOpClass,
     lookup_secret_op_class,
+    lookup_secret_op_class_any_version,
     ran_op_class_var,
 )
 from meho_backplane.request_usage.collector import (
@@ -793,11 +794,19 @@ async def _write_tool_call_row(
     # The inner operation's own row can say it holds a secret (a class that a
     # connector's safety floor stored): then the broadcast shows only the
     # aggregate, as for an op id in a secret class. The row the dispatcher
-    # ran counts first; the row the caller named counts too, also when the
-    # call stopped before a row was picked.
+    # ran counts first; the row the caller named counts too. When this
+    # request saw no row picked (a call started in the background, a check
+    # of such a call, or a call that stopped early), every version the
+    # dispatcher could pick counts.
     _inner_secret_class: str | None = None
     if _wraps_inner_op and ran_op_class in SECRET_CLASSES:
         _inner_secret_class = ran_op_class
+    elif (
+        _wraps_inner_op and ran_op_class is None and isinstance(arguments.get("connector_id"), str)
+    ):
+        _inner_secret_class = await lookup_secret_op_class_any_version(
+            operator.tenant_id, arguments["connector_id"], _broadcast_op_id
+        )
     elif _wraps_inner_op and isinstance(arguments.get("connector_id"), str):
         _inner_secret_class = await lookup_secret_op_class(
             operator.tenant_id, arguments["connector_id"], _broadcast_op_id

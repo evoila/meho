@@ -253,6 +253,14 @@ def build_probe_router() -> APIRouter:
                 ),
                 "content": {"text/html": {}},
             },
+            422: {
+                "description": (
+                    "MEHO cannot read the target's secret: it is missing or "
+                    "the read is refused. The alert fragment names the target "
+                    "and the secret path."
+                ),
+                "content": {"text/html": {}},
+            },
             501: {
                 "description": (
                     "Resolver found no matching connector for the target's "

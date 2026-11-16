@@ -41,6 +41,10 @@ Suite shape:
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+import shutil
+import subprocess
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -1569,6 +1573,65 @@ def test_detail_shows_reprobe_button_for_tenant_admin_role() -> None:
     assert "Re-probe admin-view" in body
     # The button uses ``hx-post`` to the probe endpoint.
     assert 'hx-post="/ui/connectors/admin-view/probe"' in body
+
+
+# A synthetic ``htmx:beforeSwap`` event per status, run through the slot's
+# inline handler the way htmx 2.0.9 calls ``hx-on`` (``this`` is the element,
+# ``event`` is the event). Prints what the handler left in ``event.detail``.
+_SWAP_DRIVER = """
+const handler = new Function("event", process.argv[1]);
+const out = {};
+for (const status of [200, 409, 422, 501, 500]) {
+  const detail = { xhr: { status }, shouldSwap: status < 400, isError: status >= 400 };
+  handler.call({}, { detail });
+  out[status] = { shouldSwap: detail.shouldSwap, isError: detail.isError };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_detail_fingerprint_slot_shows_reprobe_alerts() -> None:
+    """The browser swaps the re-probe alert cards in, not only a success card.
+
+    htmx 2.0.9 does not swap a 4xx / 5xx body by default, so the 409 / 422 /
+    501 alert card would stay hidden and the old card would stay on screen.
+    The slot around the card turns the swap on for exactly those statuses.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="slot-view", product="ssh")
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/slot-view")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    slot = re.search(r'<div\s+id="fingerprint-card-slot"[^>]*>\s*<article\s+id="fingerprint-card"', body)
+    assert slot is not None, body
+    override = re.search(r'hx-on::before-swap="([^"]*)"', slot.group(0))
+    assert override is not None, slot.group(0)
+    handler = override.group(1)
+
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    completed = subprocess.run(
+        ["node", "-e", _SWAP_DRIVER, handler],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    for status in ("409", "422", "501"):
+        assert result[status] == {"shouldSwap": True, "isError": False}, status
+    # A success keeps htmx's default swap; another error stays an error.
+    assert result["200"] == {"shouldSwap": True, "isError": False}
+    assert result["500"] == {"shouldSwap": False, "isError": True}
 
 
 # ---------------------------------------------------------------------------

@@ -277,7 +277,7 @@ async def test_with_the_switch_off_the_click_does_not_check_the_floor(
 
 
 async def _from_before_the_category(request_id: uuid.UUID) -> None:
-    """Make the row look like one that started to wait before migration ``0172``."""
+    """Make the row look like one that started to wait before migration ``0173``."""
     async with get_sessionmaker()() as session:
         row = await session.get(ApprovalRequest, request_id)
         assert row is not None

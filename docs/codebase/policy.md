@@ -219,11 +219,11 @@ stored group kinds are the kinds of both (`approver_rule` names both, the
 install's first, for example `install:routing[0], tenant:routing[1]`). At
 the approve click MEHO first routes the request again with the install's
 current file and the stored category (`approval_request.approver_category`,
-migration `0172`), then checks the stored kinds. So a tenant entry stored
+migration `0173`), then checks the stored kinds. So a tenant entry stored
 before this rule, or an install file that changed later, never widens
 anything: where a tenant entry is wider, its extra groups do not count.
 Nothing fails open: an install routing that is not valid refuses the
-click. A request that waited with stored groups before migration `0172`
+click. A request that waited with stored groups before migration `0173`
 has the empty text as category: MEHO does not know it. Such a request is
 refused when an install entry that matches on a `category` could fit it;
 reject it and start the call again.

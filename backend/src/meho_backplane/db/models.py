@@ -7296,7 +7296,7 @@ class ApprovalRequest(Base):
       NULL. The empty text on a row that had ``approver_roles`` before this
       column: MEHO does not know its category, and the click refuses it
       when an install entry that matches on a category could fit it.
-      Added by migration ``0172``.
+      Added by migration ``0173``.
 
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
@@ -7556,7 +7556,7 @@ class ApprovalRequest(Base):
     # entry that set them. See the class docstring. Added by migration ``0167``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    # The category the routing used. Added by migration ``0172``.
+    # The category the routing used. Added by migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict

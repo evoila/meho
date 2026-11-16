@@ -406,6 +406,7 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         row.op_id,
         safety_level=policy.safety_level,
         requires_approval=policy.requires_approval,
+        stored_op_class=getattr(row, "op_class", None),
     )
     safety_level, requires_approval = raise_for_caller_address(
         row.parameter_schema,

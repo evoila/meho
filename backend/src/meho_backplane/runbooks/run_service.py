@@ -68,7 +68,14 @@ For ``verify.type='operation_call'``: the service binds
 :data:`~meho_backplane.operations._audit.step_id_var` around
 :func:`~meho_backplane.operations.meta_tools.call_operation`, so every
 audit row written by the dispatched call carries the run / step
-correlation columns populated. The :class:`OperationCallVerifyResponse`
+correlation columns populated. The call runs with the identity of the
+caller who advances the run (the ``caller`` passed to :meth:`next_step`):
+its principal kind, client id, role and token. The call always follows
+the token rule, also when the run is advanced from the web console: for a
+person only a ``safe`` check runs at once. So an agent's check step
+is checked against the agent's grants, a service login's against its
+read scope and standing grants, and the audit row and any approval
+request name that caller. The :class:`OperationCallVerifyResponse`
 the engine receives carries the call's raw result as ``actual``; the
 engine constructs the persisted response with ``matched`` set to its
 own structural-equality verdict (not the caller's claim).
@@ -110,7 +117,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 from sqlalchemy import func, or_, select
@@ -133,7 +140,13 @@ from meho_backplane.operations._audit import (
 )
 from meho_backplane.operations._lookup import enabled_for_tenant_clause
 from meho_backplane.operations.meta_tools import call_operation
+from meho_backplane.runbooks.check_approval import (
+    APPROVAL_REQUEST_KEY,
+    linked_approval_id,
+    read_linked_approval,
+)
 from meho_backplane.runbooks.engine import (
+    AdvanceOutcome,
     advance,
     current_step_body,
 )
@@ -169,6 +182,9 @@ from meho_backplane.runbooks.substitution import (
     resolve_substitutions,
 )
 
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+
 __all__ = [
     "DeprecatedTemplateError",
     "MissingParamsError",
@@ -177,6 +193,7 @@ __all__ = [
     "RunAlreadyTerminalError",
     "RunNotFoundError",
     "RunbookRunService",
+    "StepCallerRequiredError",
 ]
 
 
@@ -244,6 +261,29 @@ class PreviousStepFailedError(ValueError):
     """
 
 
+class StepCallerRequiredError(ValueError):
+    """An ``operation_call`` check needs the identity of the caller who advances the run.
+
+    Raised by :meth:`RunbookRunService.next_step` when the current step's
+    check is an ``operation_call`` and the caller passed no ``caller``.
+    The step state does not change; the caller can try again.
+    """
+
+
+class _CheckCallNotRunError(Exception):
+    """The check call of an ``operation_call`` step did not return ``ok``.
+
+    Internal to :meth:`RunbookRunService.next_step`: the call was refused
+    (for example by the caller's grants or read scope), failed, or waits
+    for approval. The step then fails with :attr:`reason` as its text.
+    """
+
+    def __init__(self, reason: str, response: OperationCallVerifyResponse) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.response = response
+
+
 class MissingParamsError(ValueError):
     """``start_run`` was called without a params key referenced by the template.
 
@@ -274,6 +314,8 @@ class _NextStepInputs:
     run_target: str
     run_params: dict[str, Any]
     retry: bool = False
+    #: The approval request the failed step's check waits for; read on a retry.
+    approval_request_id: uuid.UUID | None = None
 
 
 class RunbookRunService:
@@ -383,6 +425,8 @@ class RunbookRunService:
         operator_sub: str,
         run_id: uuid.UUID,
         request: NextStepRequest,
+        *,
+        caller: Operator | None = None,
     ) -> NextStepResponse:
         """Advance the run one step, gated by the verify predicate.
 
@@ -403,6 +447,15 @@ class RunbookRunService:
         substituted op_id + params, captures the result into an
         :class:`OperationCallVerifyResponse` whose ``actual`` is the
         call's raw ``result`` dict (the engine recomputes ``matched``).
+        The call runs as *caller*: the identity of the caller who
+        advances the run (kind, client id, role and token), so the
+        caller's grants, read scope and role apply as on a direct call.
+        *caller* must be the assignee (``caller.sub == operator_sub``,
+        same tenant), else :class:`NotRunAssigneeError`. Without
+        *caller* the step is refused with :class:`StepCallerRequiredError`
+        and its state does not change. When the call does not return
+        ``ok`` (refused, failed, or waiting for approval) the step fails
+        and the :class:`PreviousStepFailedError` text says why.
         For ``verify.type='confirm'``: passes ``request.verify_response``
         through unchanged.
 
@@ -433,6 +486,10 @@ class RunbookRunService:
         single-assignee / no-mutate-terminal invariants must hold at the
         moment of the write, not just at the start of the call.
         """
+        if caller is not None and (caller.sub != operator_sub or caller.tenant_id != tenant_id):
+            raise NotRunAssigneeError(
+                "the caller identity does not match the caller who advances the run"
+            )
         inputs = await self._load_next_step_inputs(
             tenant_id, operator_sub, run_id, retry=request.retry
         )
@@ -442,14 +499,22 @@ class RunbookRunService:
         # immutable for the run, so they survive the gap; the run/step
         # contextvar binding inside ``_resolve_verify_response`` is
         # task-local and independent of session lifetime.
-        verify_response = await self._resolve_verify_response(
-            run=inputs.run,
-            current_step=inputs.current_step,
-            request_verify=request.verify_response,
-        )
+        check_failure: str | None = None
+        verify_response: VerifyResponse | None
+        try:
+            verify_response = await self._resolve_verify_response(
+                run=inputs.run,
+                current_step=inputs.current_step,
+                request_verify=request.verify_response,
+                caller=caller,
+                approval_request_id=inputs.approval_request_id,
+            )
+        except _CheckCallNotRunError as exc:
+            check_failure = exc.reason
+            verify_response = exc.response
 
         return await self._write_next_step_outcome(
-            tenant_id, operator_sub, run_id, inputs, verify_response
+            tenant_id, operator_sub, run_id, inputs, verify_response, check_failure=check_failure
         )
 
     async def _load_next_step_inputs(
@@ -491,6 +556,13 @@ class RunbookRunService:
                 run_target=run.target,
                 run_params=dict(run.params),
                 retry=retrying,
+                approval_request_id=(
+                    linked_approval_id(
+                        cast("dict[str, Any] | None", step_states[current_step_id].verify_response)
+                    )
+                    if retrying
+                    else None
+                ),
             )
 
     async def _write_next_step_outcome(
@@ -500,6 +572,8 @@ class RunbookRunService:
         run_id: uuid.UUID,
         inputs: _NextStepInputs,
         verify_response: VerifyResponse | None,
+        *,
+        check_failure: str | None = None,
     ) -> NextStepResponse:
         """Phase C: advance + persist the outcome under a fresh session B.
 
@@ -508,6 +582,9 @@ class RunbookRunService:
         flip) or :meth:`reassign_run` (assignee change). The
         single-assignee / no-mutate-terminal invariants must still hold
         at write time, not just at the start of the call.
+
+        *check_failure* is set when the check call did not return ``ok``:
+        the step fails whatever its ``expect`` says, with that text.
         """
         now = datetime.now(UTC)
         sessionmaker = get_sessionmaker()
@@ -536,6 +613,8 @@ class RunbookRunService:
                 verify_response=verify_response,
                 completed_at=now,
             )
+            if check_failure is not None:
+                outcome = AdvanceOutcome(kind="failed", verify_response_persisted=verify_response)
             return await self._apply_outcome(
                 session=session_b,
                 run=run,
@@ -545,6 +624,7 @@ class RunbookRunService:
                 outcome=outcome,
                 now=now,
                 operator_sub=operator_sub,
+                check_failure=check_failure,
             )
 
     async def _apply_outcome(
@@ -558,6 +638,7 @@ class RunbookRunService:
         outcome: Any,
         now: datetime,
         operator_sub: str,
+        check_failure: str | None = None,
     ) -> NextStepResponse:
         """Apply the engine's outcome to storage + return the response shape.
 
@@ -579,6 +660,7 @@ class RunbookRunService:
             verify_response=persisted_response_dict,
             now=now,
             operator_sub=operator_sub,
+            reason=check_failure,
         )
 
         if outcome.kind == "failed":
@@ -592,10 +674,7 @@ class RunbookRunService:
                 step_id=current_step_id,
                 operator_sub=operator_sub,
             )
-            raise PreviousStepFailedError(
-                f"step {current_step_id!r} verify did not pass; fix the cause and retry "
-                f"the step, or abort the run",
-            )
+            raise PreviousStepFailedError(_step_failed_message(current_step_id, check_failure))
 
         current_step_state.state = _STEP_VERIFIED
         current_step_state.verified_at = now
@@ -654,12 +733,21 @@ class RunbookRunService:
         verify_response: dict[str, Any] | None,
         now: datetime,
         operator_sub: str,
+        reason: str | None = None,
     ) -> None:
-        """Add one check attempt to the step's history, and audit a confirm."""
-        step_state.attempts = _attempts_with(
-            step_state,
-            {"at": now.isoformat(), "passed": passed, "verify_response": verify_response},
-        )
+        """Add one check attempt to the step's history, and audit a confirm.
+
+        *reason* is the text of why the check call did not run; it is kept
+        on the attempt, so :meth:`get_failed_step_message` can show it later.
+        """
+        attempt: dict[str, Any] = {
+            "at": now.isoformat(),
+            "passed": passed,
+            "verify_response": verify_response,
+        }
+        if reason is not None:
+            attempt["reason"] = reason
+        step_state.attempts = _attempts_with(step_state, attempt)
         if step.verify.type == "confirm":
             # An operation_call attempt is audited by the dispatcher; a
             # confirm attempt has no dispatch, so write its row here, in
@@ -982,6 +1070,36 @@ class RunbookRunService:
             current_step=step_body,
         )
 
+    async def get_failed_step_message(
+        self,
+        tenant_id: uuid.UUID,
+        run_id: uuid.UUID,
+    ) -> str | None:
+        """Return why the run's current step failed, or ``None`` when it did not fail.
+
+        The text is the same one :meth:`next_step` raised with
+        :class:`PreviousStepFailedError` when the step failed. It names the
+        reason that was stored with the last attempt when the check call
+        did not run (refused, failed, or waiting for approval). So the web
+        console shows the same text after a page reload. It exposes no step
+        content.
+
+        Raises :class:`RunNotFoundError` when *run_id* does not resolve in
+        this tenant.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            run = await self._load_run_or_raise(session, tenant_id, run_id)
+            if run.state != "in_progress":
+                return None
+            step_states = await _load_step_states(session, run_id)
+        step_id = self._current_step_id_or_none(run, step_states)
+        if step_id is None or step_states[step_id].state != _STEP_FAILED:
+            return None
+        attempts = cast("list[dict[str, Any]]", step_states[step_id].attempts or [])
+        reason = attempts[-1].get("reason") if attempts else None
+        return _step_failed_message(step_id, reason if isinstance(reason, str) else None)
+
     async def get_run_assignee(
         self,
         tenant_id: uuid.UUID,
@@ -1174,6 +1292,8 @@ class RunbookRunService:
         run: RunbookRun,
         current_step: Step,
         request_verify: VerifyResponse | None,
+        caller: Operator | None = None,
+        approval_request_id: uuid.UUID | None = None,
     ) -> VerifyResponse | None:
         """Produce the verify response the engine should evaluate.
 
@@ -1188,10 +1308,28 @@ class RunbookRunService:
         the call's result dict. ``matched`` is set to ``False``
         provisionally — the engine recomputes it against the substituted
         ``expect``.
+
+        The call runs as *caller*, the caller who advances the run; there
+        is no stand-in identity. The call always follows the token rule
+        (``web_session`` is off for it), so also from the web console only
+        a ``safe`` check runs at once for a person. Without *caller* the check is refused
+        with :class:`StepCallerRequiredError` before anything runs. A
+        call result whose ``status`` is not ``ok`` raises
+        :class:`_CheckCallNotRunError`, so the step fails with the call's
+        error text.
+
+        *approval_request_id* is the approval request the failed step's
+        check waits for (a retry). The check then reads that request
+        (:func:`_linked_call_result`) and does not run the call again.
         """
         verify = current_step.verify
         if not isinstance(verify, OperationCallVerify):
             return request_verify
+        if caller is None:
+            raise StepCallerRequiredError(
+                f"step {current_step.id!r} runs an operation; MEHO needs the identity of the "
+                f"caller who advances the run to run it"
+            )
 
         params = dict(run.params)
         substituted_op_id = _substitute_string(verify.op_id, target=run.target, params=params)
@@ -1204,10 +1342,6 @@ class RunbookRunService:
             tenant_id=run.tenant_id, op_id=substituted_op_id
         )
 
-        operator = _build_operator_for_dispatch(
-            sub=run.assigned_to,
-            tenant_id=run.tenant_id,
-        )
         call_arguments: dict[str, Any] = {
             "connector_id": connector_id,
             "op_id": substituted_op_id,
@@ -1215,23 +1349,15 @@ class RunbookRunService:
             "params": dict(substituted_params_obj),
         }
 
-        # Bind run / step / work_ref onto the shared ContextVars around the
-        # dispatch so the dispatcher's audit writer stamps them on the
-        # operation_call step's audit row. ``work_ref`` is the run's
-        # durable change-ticket reference (work_ref I3-T1 #1661): binding
-        # it here -- once per step, from the run row -- is the "bind once,
-        # inherit" boundary that gives every dispatching step's audit row
-        # the same ``work_ref`` without each step having to carry it.
-        run_token = run_id_var.set(run.run_id)
-        step_token = step_id_var.set(current_step.id)
-        work_ref_token = work_ref_var.set(run.work_ref)
-        try:
-            call_result = await call_operation(operator, call_arguments)
-        finally:
-            work_ref_var.reset(work_ref_token)
-            step_id_var.reset(step_token)
-            run_id_var.reset(run_token)
+        call_result = await self._linked_call_result(
+            caller, approval_request_id, call_arguments=call_arguments
+        )
+        if call_result is None:
+            call_result = await self._dispatch_check_call(
+                run=run, step_id=current_step.id, caller=caller, call_arguments=call_arguments
+            )
 
+        _raise_unless_call_ok(call_result)
         actual = call_result.get("result", {})
         if not isinstance(actual, dict):
             # The verify's _matches() compares dict-shaped expect against
@@ -1245,6 +1371,81 @@ class RunbookRunService:
             matched=False,
             actual=actual,
         )
+
+    @staticmethod
+    async def _linked_call_result(
+        caller: Operator,
+        approval_request_id: uuid.UUID | None,
+        *,
+        call_arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return the result of the approved call the check waited for.
+
+        Returns ``None`` when the check must run its call (no linked
+        request, or :func:`read_linked_approval` says so). Raises
+        :class:`_CheckCallNotRunError` while the request waits or the
+        approved call has not finished; the step keeps the link, and no
+        new approval request is made.
+        """
+        if approval_request_id is None:
+            return None
+        linked = await read_linked_approval(
+            caller,
+            approval_request_id,
+            op_id=call_arguments["op_id"],
+            connector_id=call_arguments["connector_id"],
+        )
+        if linked is None:
+            return None
+        if linked.result is None:
+            error = (
+                f"awaiting_approval: approval request {linked.request_id} for "
+                f"{call_arguments['op_id']!r} has no result yet; retry the step after it "
+                f"is approved and has run"
+            )
+            raise _CheckCallNotRunError(
+                error,
+                OperationCallVerifyResponse(
+                    type="operation_call",
+                    matched=False,
+                    actual={
+                        "status": "awaiting_approval",
+                        "error": error,
+                        APPROVAL_REQUEST_KEY: str(linked.request_id),
+                    },
+                ),
+            )
+        return linked.result
+
+    @staticmethod
+    async def _dispatch_check_call(
+        *,
+        run: RunbookRun,
+        step_id: str,
+        caller: Operator,
+        call_arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run the check call as *caller*, with the run's ids bound for the audit row."""
+        # Bind run / step / work_ref onto the shared ContextVars around the
+        # dispatch so the dispatcher's audit writer stamps them on the
+        # operation_call step's audit row. ``work_ref`` is the run's
+        # durable change-ticket reference (work_ref I3-T1 #1661): binding
+        # it here -- once per step, from the run row -- is the "bind once,
+        # inherit" boundary that gives every dispatching step's audit row
+        # the same ``work_ref`` without each step having to carry it.
+        run_token = run_id_var.set(run.run_id)
+        step_token = step_id_var.set(step_id)
+        work_ref_token = work_ref_var.set(run.work_ref)
+        # A check step follows the token rule on every path: also when the
+        # run is advanced from the web console, only a ``safe`` check runs
+        # at once for a person; a ``caution`` or higher check waits.
+        token_caller = caller.model_copy(update={"web_session": False})
+        try:
+            return await call_operation(token_caller, call_arguments)
+        finally:
+            work_ref_var.reset(work_ref_token)
+            step_id_var.reset(step_token)
+            run_id_var.reset(run_token)
 
     async def _resolve_connector_id_for_op(
         self,
@@ -1522,6 +1723,38 @@ def _template_body_from_row(row: RunbookTemplate) -> RunbookTemplateBody:
     )
 
 
+def _raise_unless_call_ok(call_result: dict[str, Any]) -> None:
+    """Raise :class:`_CheckCallNotRunError` when a check call did not return ``ok``."""
+    status = call_result.get("status")
+    if status == "ok":
+        return
+    error = call_result.get("error") or f"the call ended with status {status!r}"
+    actual: dict[str, Any] = {"status": status, "error": error}
+    # A check that waits for approval keeps the id of its request, so a
+    # retry reads that request instead of making a new one.
+    extras = call_result.get("extras")
+    if status == "awaiting_approval" and isinstance(extras, dict):
+        request_id = extras.get(APPROVAL_REQUEST_KEY)
+        if request_id is not None:
+            actual[APPROVAL_REQUEST_KEY] = str(request_id)
+    raise _CheckCallNotRunError(
+        str(error),
+        OperationCallVerifyResponse(type="operation_call", matched=False, actual=actual),
+    )
+
+
+def _step_failed_message(step_id: str, check_failure: str | None) -> str:
+    """The text of a step that just failed; names the reason when the check call did not run."""
+    if check_failure is not None:
+        return (
+            f"step {step_id!r} check call did not run: {check_failure}; "
+            f"fix the cause and retry the step, or abort the run"
+        )
+    return (
+        f"step {step_id!r} verify did not pass; fix the cause and retry the step, or abort the run"
+    )
+
+
 def _failed_message(step_id: str) -> str:
     return (
         f"previous step {step_id!r} is in 'failed' state; "
@@ -1631,53 +1864,6 @@ def _format_connector_id(*, impl_id: str, version: str) -> str:
     if not version:
         return impl_id
     return f"{impl_id}-{version}"
-
-
-def _build_operator_for_dispatch(
-    *,
-    sub: str,
-    tenant_id: uuid.UUID,
-) -> Any:
-    """Construct an :class:`~meho_backplane.auth.operator.Operator` for the call.
-
-    The dispatch path requires a populated ``Operator`` (the audit row
-    uses ``operator.sub`` + ``operator.tenant_id``). The runbook
-    service's public API takes ``operator_sub: str`` — by convention
-    the route / MCP layer has the JWT-validated operator and we
-    reconstruct the minimum-shape object here.
-
-    ``raw_jwt`` is the **empty string** — the fail-closed synthetic-
-    operator convention (the topology scheduler's refresh operator uses
-    the same shape). This operator is reconstructed from
-    ``operator_sub``, not validated from a bearer token, so it must
-    never be usable as operator context for a downstream credential
-    read: the Vault credential backend short-circuits on an empty
-    ``raw_jwt`` (``VaultCredentialBackend.load_secret_data`` in
-    :mod:`meho_backplane.connectors._shared.vault_creds` raises
-    ``VaultCredentialsReadError`` before Vault is contacted). A verify
-    ``op_id`` that resolves to a Vault-backed connector therefore fails
-    closed locally with a structured refusal instead of forwarding a
-    placeholder string to Vault's JWT/OIDC login. (A ``gsm:`` ref on a
-    deploy with an ambient GCP identity is served under MEHO's own
-    deployment identity instead — that backend owns its own precondition,
-    #2642.) Typed in-process
-    verify handlers that need no per-target credential read never
-    consume ``raw_jwt`` and dispatch unchanged.
-
-    Imports lazily to avoid a hard import-cycle at module load (the
-    auth subpackage depends on a lot of substrate; runbooks initialises
-    earlier in the dependency graph).
-    """
-    from meho_backplane.auth.operator import Operator, TenantRole
-
-    return Operator(
-        sub=sub,
-        name=sub,
-        email=None,
-        raw_jwt="",
-        tenant_id=tenant_id,
-        tenant_role=TenantRole.OPERATOR,
-    )
 
 
 def _substitute_string(value: str, *, target: str, params: dict[str, object]) -> str:

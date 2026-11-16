@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.op_classes import returns_no_secret_value
 
 if TYPE_CHECKING:
@@ -69,15 +69,22 @@ _VAULT_NO_SECRET_VALUE_OPS: Final[frozenset[str]] = frozenset(
 _VAULT_HIDDEN_UNLESS_REVEALED_OPS: Final[frozenset[str]] = frozenset({"vault.kv.read"})
 
 
-def has_credential_read_floor(op_id: str, *, reveal_secret: bool = False) -> bool:
+def has_credential_read_floor(
+    op_id: str, *, reveal_secret: bool = False, stored_op_class: str | None = None
+) -> bool:
     """Return whether the floor applies to a call of *op_id*.
 
     True for a ``credential_read`` operation, unless it is marked in code
     as one that returns no secret value. ``vault.kv.read`` hides every
     value by default, so its mark holds only for a call without
     *reveal_secret*.
+
+    *stored_op_class* is the class stored on the row of an ingested
+    operation (a connector's safety floor sets it at ingest). It counts
+    like a declared class: it never replaces a credential or audit class
+    that the op id already gives (:func:`resolve_op_class`).
     """
-    if classify_op(op_id) != "credential_read":
+    if resolve_op_class(op_id, stored_op_class) != "credential_read":
         return False
     if op_id in _VAULT_NO_SECRET_VALUE_OPS or returns_no_secret_value(op_id):
         return False
@@ -85,7 +92,12 @@ def has_credential_read_floor(op_id: str, *, reveal_secret: bool = False) -> boo
 
 
 def raise_for_credential_read(
-    op_id: str, *, safety_level: str, requires_approval: bool, reveal_secret: bool = False
+    op_id: str,
+    *,
+    safety_level: str,
+    requires_approval: bool,
+    reveal_secret: bool = False,
+    stored_op_class: str | None = None,
 ) -> tuple[str, bool]:
     """Return the risk level and approval flag after the floor.
 
@@ -93,7 +105,9 @@ def raise_for_credential_read(
     is at least ``caution`` and approval is on. Otherwise both values come
     back unchanged.
     """
-    if not has_credential_read_floor(op_id, reveal_secret=reveal_secret):
+    if not has_credential_read_floor(
+        op_id, reveal_secret=reveal_secret, stored_op_class=stored_op_class
+    ):
         return safety_level, requires_approval
     if _SAFETY_RANK.get(safety_level, 0) < _SAFETY_RANK[FLOOR_SAFETY_LEVEL]:
         safety_level = FLOOR_SAFETY_LEVEL
@@ -117,4 +131,5 @@ def raise_descriptor_for_reveal(descriptor: EndpointDescriptor, *, reveal_secret
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
         reveal_secret=True,
+        stored_op_class=getattr(descriptor, "op_class", None),
     )

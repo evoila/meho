@@ -3752,6 +3752,11 @@ groups and clients.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td>A secret path that a caller gives in a parameter (the Kubernetes secret writes, <code>secret_env</code> of the Linux script operation, <code>password_ref</code> of the AD password operation) and that Vault refuses to read now answers with the operation's own parameter error, not <code>connector_vault_forbidden</code>. For Kubernetes the answer is <code>vault_credentials_read_error</code>. A Vault answer for a second path now says "write" when Vault refused a write, and "read" otherwise. For a target whose <code>secret_ref</code> is the default path MEHO builds, the text no longer says the target has no <code>secret_ref</code>: it says the path is the default one.</td>
+<td><strong>Nothing to do</strong>, unless a script or an agent prompt waits for <code>connector_vault_forbidden</code> after a refused secret path in one of these parameters: read the operation's own error instead (for Kubernetes, <code>vault_credentials_read_error</code>).</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td>MEHO ships the "small team" policy file (<code>deploy/policy-profiles/small-team.yaml</code>). While no policy is imported for the whole install, MEHO uses this file as the install's policy. It changes no answer: every operation keeps its risk level, its approval rule and who may approve it. An install policy import (<code>--scope install</code>) that waits for a second admin during the upgrade, on an install without an imported install policy, stops at the approval with "The policy changed after this import was planned." No database migration.</td>
 <td>Run that import again after the upgrade: <code>meho policy diff --scope install &lt;file&gt;</code>, then <code>meho policy import --scope install &lt;file&gt;</code>. A second admin approves it. Tenant imports are not affected. See <a href="../../guides/policy-file/#start-from-the-small-team-file">Start from the "small team" file</a>.</td>
 </tr>

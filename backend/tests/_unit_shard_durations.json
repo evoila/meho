@@ -1223,6 +1223,7 @@
   "tests/test_web_push_service_worker.py": 0.0,
   "tests/test_well_known.py": 0.19,
   "tests/test_work_item_signing.py": 0.53,
+  "tests/test_work_ref_doors.py": 5.96,
   "tests/test_work_ref_rule.py": 1.34
  }
 }

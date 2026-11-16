@@ -2623,7 +2623,11 @@ Three invariants make the hook safe to wire on the park path:
    `credential_mint` / `credential_write`) — the generic echo can only do
    generic key-name / value-shape redaction and is not trusted to scrub a
    connector-specific secret shape, so a credential-class op with no
-   bespoke builder collapses to the identifier-only default. A **bespoke
+   bespoke builder collapses to the identifier-only default. For an
+   ingested op, the class stored on its row by a connector floor counts
+   too (`resolve_op_class`): a stored `credential_read` hides the
+   parameters, and the request and its audit row carry that class
+   ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)). A **bespoke
    builder is the deliberate exception (#1857)**: like the
    permission-preflight hook, it is trusted to own its own field
    discipline and runs even for a credential-class op (e.g. the keycloak

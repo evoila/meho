@@ -22,7 +22,7 @@
 #   level            "read" or "change" (see "levels" below)
 #   date             the day of the test, as YYYY-MM-DD, not in the future
 #   meho_release     the MEHO release that was tested; it must be a release
-#                    heading in CHANGELOG.md
+#                    heading in CHANGELOG.md or a git tag "v" plus the release
 #
 # No lab details: no IP address, no host name, no URL, anywhere in this file.
 # The check is backend/scripts/validate_live_tests.py.
@@ -32,4 +32,107 @@ levels:
   change: "A change operation ran through MEHO against a real system of this version, with approval."
 # A test older than this many minor releases is shown with its age.
 stale_after_minor_releases: 5
-connectors: {}
+connectors:
+  vmware-rest-9.0:
+    product: VMware vCenter and vSphere
+    tests:
+      - product_version: "9.1.0.0"
+        level: change
+        date: 2026-10-26
+        meho_release: "0.37.0"
+  vmware-rest-8.0:
+    product: VMware vCenter and vSphere
+    tests:
+      - product_version: "8.0.3"
+        level: change
+        date: 2026-10-27
+        meho_release: "0.37.0"
+  nsx-rest-9.0:
+    product: VMware NSX
+    tests:
+      - product_version: "9.1.0.0"
+        level: read
+        date: 2026-11-10
+        meho_release: "0.45.2"
+  nsx-rest-4.2:
+    product: VMware NSX
+    tests: []
+  sddc-rest-9.0:
+    product: VCF SDDC Manager
+    tests:
+      - product_version: "9.1.0.0"
+        level: read
+        date: 2026-11-10
+        meho_release: "0.45.2"
+  sddc-vcf5-5.0:
+    product: VCF SDDC Manager
+    tests: []
+  installer-rest-9.1:
+    product: VCF Installer and Cloud Builder
+    tests:
+      - product_version: "9.1.1.0"
+        level: change
+        date: 2026-10-27
+        meho_release: "0.37.0"
+  installer-cb-5.0:
+    product: VCF Installer and Cloud Builder
+    tests: []
+  fleet-lcm-9.0:
+    product: VCF fleet management and Aria Suite Lifecycle
+    tests: []
+  fleet-rest-9.0:
+    product: VCF fleet management and Aria Suite Lifecycle
+    tests: []
+  vcfa-rest-9.0:
+    product: VCF Automation and Aria Automation
+    tests:
+      - product_version: "9.1.0"
+        level: change
+        date: 2026-10-26
+        meho_release: "0.37.0"
+      - product_version: "9.1.1"
+        level: read
+        date: 2026-11-10
+        meho_release: "0.45.2"
+  vcfa-vra8-8.0:
+    product: VCF Automation and Aria Automation
+    tests: []
+  vrops-rest-9.0:
+    product: VCF Operations and Aria Operations
+    tests: []
+  vrops-vrops8-8.0:
+    product: VCF Operations and Aria Operations
+    tests: []
+  vrli-rest-9.0:
+    product: VCF Operations for logs and Aria Operations for Logs
+    tests: []
+  vrli-vrli8-8.0:
+    product: VCF Operations for logs and Aria Operations for Logs
+    tests: []
+  vro-rest-9.0:
+    product: VCF Operations orchestrator
+    tests: []
+  idb-rest-9.0:
+    product: VCF Identity Broker and Workspace ONE Access
+    tests: []
+  idb-wsa-3.3:
+    product: VCF Identity Broker and Workspace ONE Access
+    tests: []
+  vcd-rest-10.6:
+    product: VMware Cloud Director
+    tests: []
+  hcx-rest-9.0:
+    product: VMware HCX
+    tests: []
+  srm-rest-9.1:
+    product: VMware Site Recovery Manager
+    tests: []
+  vr-rest-9.1:
+    product: VMware vSphere Replication
+    tests: []
+  salt-raas-8.18:
+    product: VMware Aria Automation Config (Salt)
+    tests: []
+  holodeck-ssh-9.0:
+    product: VMware Holodeck
+    tests: []

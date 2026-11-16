@@ -51,6 +51,13 @@ The rules (:func:`bind`):
   login with a list the list entry of the tenant decides, as with the
   switch off. A shipped operator group next to the shipped self-approval
   group gives ``SA-Operators``, as today.
+* A shipped binding counts only when its kind gives the same ``approver``
+  and ``self_approver`` flags as the token gives today. Else it is left
+  out and logged. So a person in the shipped approver group whose token
+  has no ``approver`` claim gets no approve right, and a person with
+  ``approver: true`` in the shipped readers group keeps it, as with the
+  switch off. A stored binding is the tenant's own choice: there the
+  group alone gives the flags of its kind.
 * A ``groups`` claim that is not a list of texts matches no binding.
 
 The import refuses a binding of an agent or a service to a kind that may
@@ -317,16 +324,29 @@ def bind(
         raise BoundKindConflictError(kinds)
     usable: list[BindingEntry] = []
     for entry in matched:
-        if group_grant(entry.kind).role == operator.tenant_role:
-            usable.append(entry)
+        if group_grant(entry.kind).role != operator.tenant_role:
+            log.warning(
+                "policy_binding_other_base_level",
+                operator_sub=operator.sub,
+                binding=entry.ref,
+                kind=entry.kind.value,
+                tenant_role=operator.tenant_role.value,
+            )
             continue
-        log.warning(
-            "policy_binding_other_base_level",
-            operator_sub=operator.sub,
-            binding=entry.ref,
-            kind=entry.kind.value,
-            tenant_role=operator.tenant_role.value,
-        )
+        if entry.ref.startswith(_SHIPPED) and _flags(operator, entry.kind) != (
+            operator.approver,
+            operator.self_approver,
+        ):
+            # A shipped binding gives a flag only when the token gives it too,
+            # so the switch on without stored bindings changes no approve right.
+            log.warning(
+                "policy_shipped_binding_other_flags",
+                operator_sub=operator.sub,
+                binding=entry.ref,
+                kind=entry.kind.value,
+            )
+            continue
+        usable.append(entry)
     if not usable:
         return operator
     categories = frozenset().union(*(entry.categories for entry in usable))
@@ -335,15 +355,22 @@ def bind(
     return _with_kind(operator, usable[0].kind, categories)
 
 
-def _with_kind(operator: Operator, kind: RoleGroup, categories: frozenset[str]) -> Operator:
+def _flags(operator: Operator, kind: RoleGroup) -> tuple[bool, bool]:
+    """The ``approver`` and ``self_approver`` flags that *kind* gives *operator*."""
     grant = group_grant(kind)
     person = is_human_principal(operator)
+    return (
+        grant.approver and person,
+        grant.self_approval and person and not operator.tenants_claim_malformed,
+    )
+
+
+def _with_kind(operator: Operator, kind: RoleGroup, categories: frozenset[str]) -> Operator:
+    approver, self_approver = _flags(operator, kind)
     return operator.model_copy(
         update={
-            "approver": grant.approver and person,
-            "self_approver": grant.self_approval
-            and person
-            and not operator.tenants_claim_malformed,
+            "approver": approver,
+            "self_approver": self_approver,
             "bound_kind": kind,
             "bound_categories": categories,
         }

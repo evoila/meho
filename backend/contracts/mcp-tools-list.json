@@ -1607,7 +1607,6 @@
                 "type": "string"
               },
               "work_ref": {
-                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               }
@@ -1679,7 +1678,6 @@
                 "type": "string"
               },
               "work_ref": {
-                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               }
@@ -2741,7 +2739,6 @@
             "type": "string"
           },
           "work_ref": {
-            "maxLength": 256,
             "type": "string"
           }
         },

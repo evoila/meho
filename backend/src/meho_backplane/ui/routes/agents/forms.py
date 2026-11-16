@@ -19,17 +19,12 @@ write surface on top:
   error -- a Pydantic :class:`~pydantic.ValidationError`, a duplicate-name
   :class:`~meho_backplane.agents.service.AgentDefinitionExistsError`, or
   an :class:`~meho_backplane.agents.service.AgentIdentityRefInvalidError`
-  -- re-renders the modal as a **200** fragment carrying a top-of-form
-  error banner plus the per-field messages, and HTMX swaps it back into
-  the modal container in place. The 200 is load-bearing: HTMX's default
-  response handling silently drops a non-2xx fragment (``swap: false``),
-  so the earlier 409 / 422 re-renders were computed by the server but
-  never shown to the operator -- the button appeared to "do nothing"
-  (#2346). This mirrors the shipped error mold of the runbooks start-run
-  modal (:func:`~meho_backplane.ui.routes.runbooks.runs._render_start_error`)
-  and the conventions author modal
-  (:func:`~meho_backplane.ui.routes.conventions.write._render_create_error`),
-  both of which re-render inline errors as 200.
+  -- re-renders the modal as a **422** fragment carrying a top-of-form
+  error banner plus the per-field messages. HTMX does not swap a 4xx
+  answer by default, so the modal container has an ``hx-on::before-swap``
+  handler that swaps a 422 in place (the same shape as the register
+  modal). The 422 keeps the audit row of a refused form from reading
+  like a done change (#2346 was the earlier fix that showed the errors).
 * **``GET /ui/agents/{name}/edit``** -- HTMX-loaded edit modal, fields
   pre-populated server-side. ``name`` is read-only (not updatable per
   :class:`~meho_backplane.agents.schemas.AgentDefinitionUpdate`).
@@ -292,8 +287,8 @@ async def submit_create(
 ) -> HTMLResponse:
     """Build an :class:`AgentDefinitionCreate` and persist it via the service.
 
-    Any recoverable input error re-renders the modal as a **200**
-    fragment (so HTMX swaps it back in place) carrying a top-of-form
+    Any recoverable input error re-renders the modal as a **422**
+    fragment (the container's ``hx-on::before-swap`` swaps it in place) carrying a top-of-form
     error banner + per-field messages: a Pydantic :class:`ValidationError`
     surfaces the offending fields, a duplicate ``(tenant, name)`` a
     ``name`` error, and an unknown / revoked ``identity_ref`` an
@@ -335,7 +330,7 @@ async def submit_create(
         )
     except (ValidationError, ValueError) as exc:
         return await _render_errors(request, session_ctx, "create", raw_values, exc=exc)
-    structlog.contextvars.bind_contextvars(**audit_fields(pick))
+    structlog.contextvars.bind_contextvars(**audit_fields(pick, agent=body.identity_ref))
     if writes_rows(pick):
         ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
 
@@ -542,14 +537,12 @@ def _render_form_with_errors(
     service-raised duplicate-name and identity_ref cases. ``pick_ctx``
     carries the starting grant pick values for the create and edit modals.
 
-    The fragment is returned as **200**, not the semantically-matching
-    409 / 422: HTMX's default response handling does not swap a non-2xx
-    response (``swap: false``), so a 4xx re-render is computed but never
-    shown -- the invisible-error defect #2346 fixes. Returning 200 is the
-    same inline-error mold the runbooks start-run and conventions author
-    modals already ship. These ``/ui`` routes are HTMX-only (the REST
-    agents API carries the machine-readable status contract), so the
-    fragment status is a rendering concern, not an external contract.
+    The fragment is returned as **422**, so the audit row of a refused
+    form does not read like a done change. HTMX does not swap a 4xx
+    answer by default; the ``hx-on::before-swap`` handler on
+    ``#agents-modal-container`` (``agents/index.html`` and
+    ``agents/detail.html``) swaps a 422 in place, so the errors still
+    show (#2346).
     """
     if field_errors is not None:
         errors = field_errors
@@ -568,7 +561,7 @@ def _render_form_with_errors(
         request,
         template,
         context,
-        status_code=status.HTTP_200_OK,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
     )
     _set_csrf_cookie(response, csrf_token)
     return response

@@ -506,8 +506,8 @@ def test_create_missing_pick_with_the_switch_on_shows_the_text_next_to_the_field
         response = client.post(_CREATE, data=_create_form(), headers=_csrf_headers(csrf))
     finally:
         mock.stop()
-    # 200 so HTMX swaps the form back in (the create form's error mold).
-    assert response.status_code == 200, response.text
+    # 422; the modal container's before-swap hook swaps the form back in.
+    assert response.status_code == 422, response.text
     assert "data-form-error-summary" in response.text
     error = re.search(r'data-error-for="starting_grants">\s*([^<]+)<', response.text)
     assert error is not None
@@ -527,7 +527,7 @@ def test_create_unknown_target_writes_nothing() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     assert 'data-error-for="starting_grants"' in response.text
     assert "no target named" in response.text
     assert _definition_names() == []
@@ -564,7 +564,7 @@ def test_create_wrong_pick_keeps_the_typed_values() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     assert 'data-error-for="starting_grants"' in response.text
     assert 'value="triage"' in response.text
     assert re.search(r'value="read-targets"[^>]*checked', response.text)

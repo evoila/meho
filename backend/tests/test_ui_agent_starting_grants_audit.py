@@ -154,7 +154,7 @@ def test_edit_refused_before_the_service_names_the_operation(
     _switch(monkeypatch, "on")
     _seed_definition_and_new_agent()
     response = _patch("agent-new", starting_grant_targets=["alpha-vault"])
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     audit = _audit_row("agent.edit")
     assert audit["op_class"] == "write"
     assert audit["agent_name"] == "triage"
@@ -171,7 +171,7 @@ def test_create_refused_before_the_service_names_the_operation() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     audit = _audit_row("agent.create")
     assert audit["agent_name"] == "triage"
 

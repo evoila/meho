@@ -155,8 +155,8 @@ def test_edit_to_an_agent_without_a_grant_shows_the_pick_error(
     _switch(monkeypatch, "on")
     _seed_definition_and_new_agent()
     response = _patch("agent-new")
-    # 200 so HTMX swaps the form back in.
-    assert response.status_code == 200, response.text
+    # 422; the modal container's before-swap hook swaps the form back in.
+    assert response.status_code == 422, response.text
     error = _pick_error(response.text)
     assert error is not None
     assert "Choose &#39;none&#39;" in error
@@ -195,7 +195,7 @@ def test_edit_unknown_target_keeps_the_pick_and_writes_nothing(
     response = _patch(
         "agent-new", starting_grants="read-targets", starting_grant_targets=["no-such-target"]
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     error = _pick_error(response.text)
     assert error is not None
     assert "no target named" in error

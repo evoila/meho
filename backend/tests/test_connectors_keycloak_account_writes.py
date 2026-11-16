@@ -901,6 +901,7 @@ async def _park_sign_in_change(op_id: str, requester: Operator) -> uuid.UUID:
         _mount_user_lookup(mock)
         mock.get(_USER_PATH).respond(200, json=_USER_BEFORE)
         mock.get(_CREDENTIALS_PATH).respond(200, json=_CREDENTIALS)
+        mock.get(f"/admin/realms/{_REALM}").respond(200, json={"realm": _REALM})
         call = await call_operation(
             requester,
             {

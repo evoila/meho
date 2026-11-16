@@ -22,6 +22,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -736,8 +737,13 @@ def _connector_with(
     users: dict[str, str] | None = None,
     members: dict[str, list[dict[str, Any]]] | None = None,
     user_lookup_fails: bool = False,
+    realm_answer: str | None = None,
 ) -> tuple[KeycloakConnector, list[dict[str, Any]]]:
-    """A connector whose lookups answer from the given maps; records member reads."""
+    """A connector whose lookups answer from the given maps; records member reads.
+
+    A realm read answers with *realm_answer*, or else with the realm name in
+    the path.
+    """
     connector = KeycloakConnector()
     reads: list[dict[str, Any]] = []
 
@@ -768,6 +774,12 @@ def _connector_with(
         first = int(params["first"])
         return rows[first : first + int(params["max"])]
 
+    async def _get_admin_json(
+        _t: Any, path: str, *, operator: Any, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return {"realm": realm_answer or unquote(path.rsplit("/", 1)[-1])}
+
+    connector._get_admin_json = _get_admin_json  # type: ignore[method-assign]
     connector._find_group = _find_group  # type: ignore[method-assign]
     connector._find_user_uuid = _find_user  # type: ignore[method-assign]
     connector._get_admin_list = _get_admin_list  # type: ignore[method-assign]
@@ -900,12 +912,54 @@ async def test_the_connector_says_when_the_realm_is_not_the_login_realm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with()
 
     block = await _grant_block(
-        _ctx(_ADD, {"group_name": "g", "user_id": _USER}, realm="customer-realm")
+        _ctx(
+            _ADD, {"group_name": "g", "user_id": _USER}, realm="customer-realm", connector=connector
+        )
     )
 
     assert block["login_realm"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "answer"),
+    [("customer-realm", "MEHO"), ("Meho", None), ("meho ", None), (" MEHO ", "meho")],
+    ids=["keycloak-answers-own-realm", "other-case", "space-at-end", "both"],
+)
+async def test_the_own_realm_is_found_by_the_name_keycloak_answers_with(
+    monkeypatch: pytest.MonkeyPatch, stored: str, answer: str | None
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with(realm_answer=answer)
+
+    block = await _grant_block(
+        _ctx(_ADD, {"group_name": "g", "user_id": _USER}, realm=stored, connector=connector)
+    )
+
+    assert block["login_realm"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_realm_that_cannot_be_read_counts_as_the_own_realm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with()
+
+    async def _fails(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("read failed")
+
+    connector._get_admin_json = _fails  # type: ignore[method-assign]
+    params = {"group_name": "g", "user_id": _USER}
+
+    unreadable = await _grant_block(_ctx(_ADD, params, realm="customer-realm", connector=connector))
+    offline = await _grant_block(_ctx(_ADD, params, realm="customer-realm"))
+
+    assert unreadable["login_realm"] is True
+    assert offline["login_realm"] is True
 
 
 @pytest.mark.asyncio

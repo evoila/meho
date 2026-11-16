@@ -44,6 +44,7 @@ from meho_backplane.operations.credential_read import (
     has_credential_read_floor,
     raise_descriptor_for_reveal,
 )
+from meho_backplane.operations.role_floors import requester_check_denial
 from meho_backplane.operations.run_approval_gate import _never_covered
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
 from meho_backplane.operations.run_approvals import RunApprovalService
@@ -51,7 +52,10 @@ from meho_backplane.operations.service_grants import (
     credential_read_grant_reason,
     never_covered_reason,
 )
-from meho_backplane.operations.typed_register import run_typed_op_registrars
+from meho_backplane.operations.typed_register import (
+    clear_typed_op_snapshot,
+    run_typed_op_registrars,
+)
 from meho_backplane.policy.evaluate import Verdict
 from meho_backplane.policy.shadow import evaluate_call
 from meho_backplane.policy.store import connector_id_of
@@ -61,6 +65,8 @@ _TENANT = uuid.uuid4()
 _PRINCIPAL = "svc-run-credential-reads"
 _RUN = "run-credential-reads"
 _K8S_READ = "k8s.secret.read_to_ref"
+_ONLY_GRANT = "svc-only-a-standing-grant"
+_ONLY_RUN_APPROVAL = "svc-only-a-run-approval"
 
 _FROM_TODAY = {
     PermissionVerdict.AUTO_EXECUTE: Verdict.RUN,
@@ -110,7 +116,9 @@ def _reads_a_credential(row: EndpointDescriptor) -> bool:
     return credential_read_grant_reason(row.op_id, row.op_class) is not None
 
 
-async def _approved_before_upgrade(rows: list[EndpointDescriptor]) -> uuid.UUID:
+async def _approved_before_upgrade(
+    rows: list[EndpointDescriptor], principal_sub: str = _PRINCIPAL
+) -> uuid.UUID:
     """A live run approval that lists *rows*, written straight to the table."""
     approval_id = uuid.uuid4()
     now = datetime.now(UTC)
@@ -119,7 +127,7 @@ async def _approved_before_upgrade(rows: list[EndpointDescriptor]) -> uuid.UUID:
             RunApproval(
                 id=approval_id,
                 tenant_id=_TENANT,
-                principal_sub=_PRINCIPAL,
+                principal_sub=principal_sub,
                 work_ref=_RUN,
                 entries=[{"connector_id": connector_id_of(r), "op_id": r.op_id} for r in rows],
                 reason="test: credential reads and one write",
@@ -387,14 +395,14 @@ def _ingested_row(op_id: str, **fields: object) -> EndpointDescriptor:
     )
 
 
-async def _seed_grant_and_run_approval(rows: list[EndpointDescriptor]) -> None:
-    """A live standing grant per row, and one live run approval that lists every row."""
+async def _seed_grants(rows: list[EndpointDescriptor], principal_sub: str = _PRINCIPAL) -> None:
+    """A live standing grant per row."""
     async with get_sessionmaker()() as session, session.begin():
         for row in rows:
             session.add(
                 ServicePrincipalGrant(
                     tenant_id=_TENANT,
-                    principal_sub=_PRINCIPAL,
+                    principal_sub=principal_sub,
                     op_id=row.op_id,
                     connector_id=connector_id_of(row),
                     target_id=None,
@@ -402,17 +410,16 @@ async def _seed_grant_and_run_approval(rows: list[EndpointDescriptor]) -> None:
                     created_by_sub="test-admin",
                 )
             )
+
+
+async def _seed_grant_and_run_approval(rows: list[EndpointDescriptor]) -> None:
+    """A live standing grant per row, and one live run approval that lists every row."""
+    await _seed_grants(rows)
     await _approved_before_upgrade(rows)
 
 
-@pytest.mark.asyncio
-async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_covered() -> None:
-    """Over every operation: the gate equals the shadow evaluator, and clears no never-covered op.
-
-    Two ingested rows join the registry: one that stores the
-    ``credential_read`` class and one with a caller-address field. A run
-    approval also never covers an operation that runs a command as root.
-    """
+async def _seed_ingested_rows() -> None:
+    """One row that stores the ``credential_read`` class, one with a caller-address field."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(
             _ingested_row(
@@ -428,9 +435,69 @@ async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_co
                 },
             )
         )
+
+
+@pytest.fixture(params=[False, True], ids=["classification-off", "classification-on"])
+def classification(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[bool]:
+    """The ``POLICY_CLASSIFICATION`` switch, set by the test and not by the environment.
+
+    The policy operations register only with the switch on, and the suite
+    keeps the registered rows of its first run. So the kept rows are
+    dropped before and after the test.
+    """
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true" if request.param else "false")
+    get_settings.cache_clear()
+    clear_typed_op_snapshot()
+    yield bool(request.param)
+    clear_typed_op_snapshot()
+
+
+async def _decide(row: EndpointDescriptor, principal_sub: str) -> tuple[PermissionVerdict, str]:
+    """The answer of the policy gate for one call of *row* under the run :data:`_RUN`."""
+    descriptor = await lookup_descriptor(
+        tenant_id=_TENANT,
+        product=row.product,
+        version=row.version,
+        impl_id=row.impl_id,
+        op_id=row.op_id,
+    )
+    assert descriptor is not None, row.op_id
+    token = work_ref_var.set(_RUN)
+    try:
+        verdict, reason = await policy_gate(
+            operator=_operator(principal_sub),
+            descriptor=descriptor,
+            target=None,
+            connector_id=connector_id_of(descriptor),
+            decide_only=True,
+        )
+    finally:
+        work_ref_var.reset(token)
+    return verdict, reason or ""
+
+
+@pytest.mark.asyncio
+async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_covered(
+    classification: bool,
+) -> None:
+    """Over every operation: the gate equals the shadow evaluator, and clears no never-covered op.
+
+    Two ingested rows join the registry: one that stores the
+    ``credential_read`` class and one with a caller-address field. A run
+    approval also never covers an operation that runs a command as root.
+
+    The one known difference: the gate refuses a call that the operation's
+    own requester check refuses (``policy.apply`` and ``policy.classify``
+    for a service login, registered only with the classification switch
+    on). The shadow evaluator has no requester check.
+    """
+    await _seed_ingested_rows()
     rows = await _register_all()
     await _seed_grant_and_run_approval(rows)
     kinds_seen: set[str] = set()
+    requester_denied: set[str] = set()
 
     token = work_ref_var.set(_RUN)
     try:
@@ -458,7 +525,12 @@ async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_co
                 connector_id=connector_id,
                 decide_only=True,
             )
-            assert shadow.verdict is _FROM_TODAY[today], (row.op_id, today, shadow.trace)
+            denial = requester_check_denial(descriptor.op_id, _operator(), {})
+            if denial is not None:
+                assert (today, reason) == (PermissionVerdict.DENY, denial), row.op_id
+                requester_denied.add(row.op_id)
+            else:
+                assert shadow.verdict is _FROM_TODAY[today], (row.op_id, today, shadow.trace)
             never = never_covered_reason(descriptor)
             if never is not None:
                 kinds_seen.add(never[0])
@@ -468,6 +540,38 @@ async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_co
     finally:
         work_ref_var.reset(token)
     assert {"credential_read", "caller_address", "delete_shaped"} <= kinds_seen
+    assert requester_denied == ({"policy.apply", "policy.classify"} if classification else set())
+
+
+@pytest.mark.asyncio
+async def test_a_standing_grant_and_a_run_approval_cover_the_same_operations(
+    classification: bool,
+) -> None:
+    """One login holds only standing grants, another only a run approval, for every operation.
+
+    Each operation is covered under both or under neither. The one
+    exception: a standing grant may cover an operation that runs a command
+    as root on the host, a run approval never does. So a check of what is
+    never covered that is added to only one of the two paths fails here.
+    """
+    del classification
+    await _seed_ingested_rows()
+    rows = await _register_all()
+    await _seed_grants(rows, _ONLY_GRANT)
+    await _approved_before_upgrade(rows, _ONLY_RUN_APPROVAL)
+    granted_count = 0
+
+    for row in rows:
+        _, grant_reason = await _decide(row, _ONLY_GRANT)
+        _, run_reason = await _decide(row, _ONLY_RUN_APPROVAL)
+        granted = grant_reason.startswith("auto-granted by ")
+        run_approved = run_reason.startswith("auto-approved by run approval ")
+        granted_count += granted
+        if is_root_shell(row.op_id):
+            assert not run_approved, (row.op_id, run_reason)
+        else:
+            assert granted == run_approved, (row.op_id, grant_reason, run_reason)
+    assert granted_count > 10, "too few operations that a standing grant covers"
 
 
 @pytest.mark.asyncio

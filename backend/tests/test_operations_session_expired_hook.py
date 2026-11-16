@@ -607,7 +607,7 @@ async def test_401_on_a_typed_write_is_not_sent_again(
     assert connector.writes == 1
     rows = await _audit_rows()
     assert len(rows) == 1
-    assert rows[0].payload["session_relogin"] is False
+    assert rows[0].payload["session_relogin"] is True
     assert rows[0].payload["session_resent"] is False
     assert rows[0].payload["session_relogin_status"] == 401
 

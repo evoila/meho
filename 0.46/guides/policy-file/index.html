@@ -3617,6 +3617,33 @@ meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"
 <li>explain asks about a call <strong>with no parameters</strong>. For an operation
   whose answer depends on its parameters, the answer is the one of a call
   without parameters.</li>
+<li>explain also asks two checks that come after the policy rules, as the
+  call does. When one of them refuses the call, the answer is <strong>deny</strong>
+  with its reason:</li>
+<li>the announce rule of your tenant: an agent or a service login must
+    announce a write of risk level <code>caution</code> or higher before it runs
+    (asked only when the call would run at once);</li>
+<li>an operation ingested from an API file, on a target whose connector
+    runs only its own hand-written operations.</li>
+<li>Some checks after the policy rules need the call's parameters, the
+  vendor, or a later step of the call. explain does <strong>not</strong> ask them. The
+  last line of the answer names each one that can still refuse the call
+  (<code>Not checked: ...</code>). When there is no such line, nothing after the
+  policy rules can refuse the call. The names:</li>
+<li><code>connector_resolution</code>: MEHO finds the connector of the target, and
+    only one.</li>
+<li><code>operation_param_check</code>: the operation's own check of its parameters
+    before the call waits (for example, a user write that names two
+    different users).</li>
+<li><code>destructive_preview_binding</code>: a <code>destructive</code> call waits, or runs
+    at once with a delete grant, only with the hash of a matching preview.</li>
+<li><code>permission_preflight</code>: the operation asks the vendor whether its
+    login may do the write.</li>
+<li><code>idempotency_key</code>: another waiting call holds the same idempotency
+    key.</li>
+<li>Who may approve is a list of <strong>MEHO group kinds</strong> (<code>MEHO-Operators</code>,
+  <code>MEHO-Admins</code>, ...). These are not the names of the login groups of
+  your install. Each login group is bound to one of these kinds.</li>
 <li>explain works with <code>POLICY_ENGINE_SHADOW</code> off. It then shows today's
   answer only.</li>
 <li>Only a tenant admin or a platform admin sees the entries of the policy
@@ -3638,6 +3665,7 @@ Rules in order:
 Risk level: caution, always waits: yes, category: compute
   matched file:classifications[0]
   matched file:classifications[1]
+Not checked: idempotency_key, connector_resolution
 </code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">The policy evaluator is off by default</p>

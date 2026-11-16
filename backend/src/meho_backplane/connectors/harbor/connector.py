@@ -97,7 +97,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["HarborConnector"]
+__all__ = ["HarborConnector", "robot_access_actions"]
 
 _log = structlog.get_logger(__name__)
 
@@ -148,6 +148,20 @@ def _parse_harbor_version(harbor_version: str) -> tuple[str | None, str | None]:
 #: ``vnd.scanner.adapter.vuln.report.harbor+json; version=1.0`` (first-match
 #: wins); pinning the current type alone keeps the projected field names
 #: stable instead of depending on which format Harbor falls back to.
+def robot_access_actions(params: dict[str, Any]) -> list[str]:
+    """The repository actions ``harbor.robot.create`` grants, in Harbor order.
+
+    Reads the optional ``access`` param (default push and pull). The handler
+    and the approval card preview both use it, so the card shows what the
+    handler sends.
+    """
+    requested = set(params.get("access", ("push", "pull")))
+    actions = [a for a in ("push", "pull") if a in requested]
+    if not actions or requested - {"push", "pull"}:
+        raise ValueError("access must be a non-empty list of 'push' and 'pull'")
+    return actions
+
+
 _VULN_REPORT_MIME = "application/vnd.security.vulnerability.report; version=1.1"
 
 
@@ -527,10 +541,7 @@ class HarborConnector(HttpConnector):
         name = str(params["name"])
         project = str(params["project"])
         duration = int(params["duration"])
-        requested = set(params.get("access", ("push", "pull")))
-        actions = [a for a in ("push", "pull") if a in requested]
-        if not actions or requested - {"push", "pull"}:
-            raise ValueError("access must be a non-empty list of 'push' and 'pull'")
+        actions = robot_access_actions(params)
 
         body: dict[str, Any] = {
             "name": name,

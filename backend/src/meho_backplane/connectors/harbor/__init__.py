@@ -52,6 +52,7 @@ from typing import Final
 
 from meho_backplane.connectors.harbor import (
     op_classes,  # noqa: F401 -- declares the op classes
+    ops_robot_create_preview,  # noqa: F401 -- registers the approval card preview of robot.create at import
     ops_robot_delete_preview,  # noqa: F401 -- registers the destructive-tier blast-radius preview builder at import
 )
 from meho_backplane.connectors.harbor.connector import HarborConnector

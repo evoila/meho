@@ -1,5 +1,5 @@
 {
- "measured_at": "2026-11-15",
+ "measured_at": "2026-11-16",
  "how": "tests/_unit_shard_split.py --measure <pytest junit xml files>",
  "seconds": {
   "tests/acceptance/test_audit_replay_acceptance.py": 21.51,
@@ -925,6 +925,7 @@
   "tests/test_policy_routing.py": 3.54,
   "tests/test_policy_routing_classified.py": 0.54,
   "tests/test_policy_shadow.py": 12.77,
+  "tests/test_policy_small_team_parity.py": 75.0,
   "tests/test_preamble_doc_collections_band.py": 1.39,
   "tests/test_preview_grant_cover.py": 1.0,
   "tests/test_principal_display_name.py": 1.22,
@@ -1098,6 +1099,7 @@
   "tests/test_typed_op_admin_edits_kept.py": 0.69,
   "tests/test_ui_account.py": 38.69,
   "tests/test_ui_account_push.py": 97.36,
+  "tests/test_ui_account_tools.py": 59.72,
   "tests/test_ui_agent_grants.py": 44.96,
   "tests/test_ui_agent_principals.py": 44.24,
   "tests/test_ui_agent_run_console.py": 62.83,

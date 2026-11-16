@@ -120,6 +120,8 @@ from meho_backplane.operations._audit import (
     agent_session_id_var,
     parent_audit_id_var,
     policy_decision_var,
+    policy_rule_columns,
+    policy_rule_var,
     resolve_agent_session_id,
     work_ref_var,
 )
@@ -174,6 +176,12 @@ from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
+from meho_backplane.policy.routing import (
+    ROUTING_INVALID_RULE,
+    routing_enabled,
+    routing_refusal,
+    stamp_approver_set,
+)
 from meho_backplane.version import running_release_id
 from meho_backplane.work_ref import work_ref_filter_values
 
@@ -190,6 +198,7 @@ __all__ = [
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
     "ApprovalRoleFloorError",
+    "ApprovalRoutingError",
     "ApprovalRule",
     "ApprovalSignInReusedError",
     "ApprovalSignInTooOldError",
@@ -260,6 +269,8 @@ _DECISION_STATUS_CODE_EXPIRED: int = 410
 #: MEHO was updated while the request waited (#5030), or the target changed
 #: or no longer resolves (:func:`refuse_resume_if_target_changed`).
 _RESUME_REFUSED_STATUS_CODE: int = 409
+#: The audit status of a park refused because the stored routing is not valid.
+_ROUTING_REFUSED_STATUS_CODE: int = 409
 
 #: Who may approve another person's ``dangerous`` or ``destructive`` change,
 #: in words for the refusal texts. The rule itself is in
@@ -545,6 +556,7 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
     ``docs/decisions/approval-groups-and-self-approval.md``. Subclasses
     :class:`UnauthorizedApprovalError`, so every handler of that error still
     answers 403; the approve routes catch this one first to show its text.
+    *reason* replaces that text (:class:`ApprovalRoutingError` passes its own).
     """
 
     def __init__(
@@ -554,11 +566,12 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         operator_sub: str,
         role: str,
         safety_level: str,
+        reason: str | None = None,
     ) -> None:
         self.request_id = request_id
         self.safety_level = safety_level
         #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = (
+        self.reason_text = reason or (
             f"You cannot approve this {safety_level} change of another person. "
             f"Only {_HIGH_RISK_APPROVERS_TEXT} may approve dangerous and "
             "destructive changes."
@@ -570,6 +583,23 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
                 f"operator {operator_sub!r} may not approve approval_request "
                 f"{request_id}: {self.reason_text}"
             ),
+        )
+
+
+class ApprovalRoutingError(ApprovalGroupForbiddenError):
+    """The person is not in a login group kind the request is routed to.
+
+    Raised by :func:`approve_request` when the ``POLICY_APPROVER_ROUTING``
+    switch is on, the request stored the group kinds that may approve it
+    (:mod:`meho_backplane.policy.routing`), and the person's kind is not one
+    of them. Subclasses :class:`ApprovalGroupForbiddenError`, so every
+    approve route answers 403 with :attr:`reason_text`: one sentence that
+    names who may approve.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, reason: str) -> None:
+        super().__init__(
+            request_id, operator_sub=operator_sub, role=role, safety_level="", reason=reason
         )
 
 
@@ -1288,6 +1318,14 @@ def _bounded_expires_at(
     return min(requested, ceiling)
 
 
+def _policy_rule_fields() -> dict[str, Any]:
+    """``policy_rule`` and ``policy_version`` of a new request, from ``policy_rule_var``."""
+    stamp = policy_rule_var.get()
+    if stamp is None:
+        return {}
+    return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1345,10 +1383,21 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The group kind the policy file's bindings gave the person who acted on
+    # this row (POLICY_APPROVER_ROUTING), so a decision row says where the
+    # approver's right came from.
+    if operator.bound_kind is not None:
+        payload["bound_kind"] = operator.bound_kind.value
     # The login client of the person who acted on this row (the requester on
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.
     apply_client_block(payload, operator)
+    # Approver routing: the group kinds that may approve the request and
+    # the routing entry that set them. Only on a request routed while the
+    # POLICY_APPROVER_ROUTING switch was on.
+    if request.approver_rule is not None:
+        payload["approver_rule"] = request.approver_rule
+        payload["approver_roles"] = request.approver_roles
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1363,6 +1412,12 @@ async def _write_audit_row(
     policy_kwargs: dict[str, Any] = {}
     if hasattr(AuditLog, "policy_decision"):
         policy_kwargs["policy_decision"] = policy_decision_var.get()
+    # The matched policy rule (#6044), only on the "request" row. A
+    # "decision" row can be written on the task of another call: a retry
+    # that expires an old overdue request writes that request's decision
+    # row while the retry's own rule is bound.
+    if path == "approval.request":
+        policy_kwargs.update(policy_rule_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -1473,6 +1528,7 @@ async def create_pending_request(
     requester: ResumeRequester | None = None,
     reveal_secret: bool = False,
     rights_change: bool = False,
+    category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1551,6 +1607,10 @@ async def create_pending_request(
             run deleted the payload. It is not part of *params_hash*, so
             the retry check and the approval surfaces compare the call
             without it.
+        category: The category the classification gave the operation
+            (the looked-up row's ``policy_category``). Approver routing
+            matches a ``category`` entry on it
+            (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1683,9 +1743,15 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        **_policy_rule_fields(),
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
+    try:
+        await stamp_approver_set(session, request, category=category)
+    except ValueError as exc:
+        await _audit_routing_refusal(operator, request, request_audit_id, str(exc))
+        raise
     if idempotency_key is None:
         session.add(request)
         await session.flush()
@@ -1727,6 +1793,42 @@ async def create_pending_request(
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def _audit_routing_refusal(
+    operator: Operator, request: ApprovalRequest, audit_id: uuid.UUID, routing_error: str
+) -> None:
+    """Write the audit row of a park refused because the stored routing is not valid.
+
+    The caller's transaction rolls back with the refusal, so the row is
+    written in its own session. Its id *audit_id* is the request's
+    ``request_audit_id``, the id the "request" row would have had. A failed
+    write is logged; the park is refused either way.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            await _write_audit_row(
+                session,
+                audit_id=audit_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                operator=operator,
+                request=request,
+                path="approval.request",
+                status_code=_ROUTING_REFUSED_STATUS_CODE,
+                duration_ms=0.0,
+                extra_payload={
+                    "result_status": "routing_invalid",
+                    "approver_rule": ROUTING_INVALID_RULE,
+                    "routing_error": routing_error,
+                },
+            )
+            await session.commit()
+    except Exception:
+        _log().exception(
+            "approval_routing_refusal_audit_failed", approval_request_id=str(request.id)
+        )
 
 
 def _approval_lock_key(scope: str, key: str) -> int:
@@ -1958,6 +2060,9 @@ async def approve_request(
         ApprovalGroupForbiddenError: Another person's ``dangerous`` or
             ``destructive`` change, and the approver is not in a group that
             may approve it (#3328).
+        ApprovalRoutingError: With approver routing on, the person is not
+            in a login group kind the request stored as the ones that may
+            approve it (:mod:`meho_backplane.policy.routing`).
         ApprovalRoleFloorError: The operation needs a role from the person
             who runs it, and the approver's role is below it.
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
@@ -3763,6 +3868,25 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`ApprovalRoutingError` when *operator* is not in the stored group kinds.
+
+    Runs after today's checks. Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off, or when the request stored no
+    group kinds (it keeps today's rule).
+    """
+    if not routing_enabled():
+        return
+    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+
+
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
     """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
     from meho_backplane.policy.shadow import shadow_approval
@@ -3783,7 +3907,8 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → params-hash check (only when
+    (:func:`_check_approver_role_floor`) → the stored approver group kinds
+    (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
     rule that allowed the approval; the caller flips status + writes the
@@ -3810,6 +3935,7 @@ async def _load_pending_for_approval(
         _shadow_approval(operator, request, today=False)
         raise
     _shadow_approval(operator, request, today=True)
+    _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)

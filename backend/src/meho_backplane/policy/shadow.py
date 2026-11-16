@@ -20,6 +20,11 @@ Today's answer is always the one that counts. A failure inside the shadow
 is logged as ``policy_shadow_failed`` and never reaches the caller.
 
 With the switch off, nothing here runs.
+
+:func:`shadow_call` also keeps the rule the evaluator matched
+(:func:`~meho_backplane.policy.stamp.take_rule`). The dispatcher takes it right after the gate
+and writes it on the audit row and the approval request, marked as a rule
+that did not decide (#6044).
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from meho_backplane.policy.evaluate import (
     Verdict,
     evaluate,
 )
+from meho_backplane.policy.stamp import RuleStamp, forget_rule, keep_rule
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -242,6 +248,18 @@ async def evaluate_call(
     return evaluate(asker, asked, Lookups(**found))
 
 
+def _shadow_stamp(decision: Decision) -> RuleStamp:
+    """The rule of *decision*, marked as not deciding: in shadow mode today's checks decide."""
+    rule = decision.rule
+    return RuleStamp(
+        source=rule.source,
+        rule_id=rule.rule_id,
+        text=rule.text,
+        policy_version=rule.policy_version,
+        decided=False,
+    )
+
+
 async def shadow_call(
     *,
     operator: Operator,
@@ -254,8 +272,11 @@ async def shadow_call(
 ) -> None:
     """Compare the evaluator with today's verdict *today* for one call. Never raises.
 
+    Keeps the rule the evaluator matched
+    (:func:`~meho_backplane.policy.stamp.keep_rule`).
     Does nothing while the ``POLICY_ENGINE_SHADOW`` switch is off.
     """
+    forget_rule()
     if not shadow_enabled():
         return
     try:
@@ -267,6 +288,7 @@ async def shadow_call(
             preview_hash=preview_hash,
             decide_only=decide_only,
         )
+        keep_rule(_shadow_stamp(decision))
         today_verdict, today_reason = today
         if decision.verdict is _FROM_TODAY[today_verdict]:
             return

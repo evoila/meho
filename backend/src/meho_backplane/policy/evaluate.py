@@ -23,8 +23,9 @@ The schema is fixed. There is no rule language. The order is fixed too:
    service login's wait (never a floor, except a sandbox delete grant).
 
 Some steps stay in the dispatcher and are not here: the children of an
-approved run, the wait of a secret reveal, the announce gate, the role
-floor check when an approved call resumes, and the satellite ladder.
+approved run, the wait of a secret reveal, the announce gate (it never
+asks a person for a claim, and asks every other caller), the role floor
+check when an approved call resumes, and the satellite ladder.
 
 The function is pure: no database, no settings, no log line. The caller
 does the lookups (:mod:`meho_backplane.policy.shadow`). While the
@@ -57,6 +58,7 @@ __all__ = [
     "Decision",
     "Lookups",
     "RuleRef",
+    "Step",
     "Verdict",
     "approver_groups",
     "evaluate",
@@ -188,12 +190,26 @@ class RuleRef:
 
 
 @dataclass(frozen=True)
+class Step:
+    """One step of the evaluator: the rule it matched and the answer of that rule."""
+
+    rule: RuleRef
+    verdict: Verdict
+
+    def line(self) -> str:
+        """The step as one trace line: ``<source> <rule id>: <verdict>``."""
+        return f"{self.rule.source} {self.rule.rule_id}: {self.verdict.value}"
+
+
+@dataclass(frozen=True)
 class Decision:
     """The answer of :func:`evaluate`.
 
     ``approvers`` names the groups that may approve, only when the call
     waits. ``waits_because`` is :data:`TOKEN_CALL_WAIT` when a person's
-    ``caution`` call waits only because it came with a token.
+    ``caution`` call waits only because it came with a token. ``steps``
+    holds every rule the evaluator matched, in order; ``trace`` is the
+    same as text lines.
     """
 
     verdict: Verdict
@@ -201,6 +217,7 @@ class Decision:
     approvers: tuple[str, ...] = ()
     waits_because: str | None = None
     trace: tuple[str, ...] = ()
+    steps: tuple[Step, ...] = ()
 
 
 def approver_groups(risk: str, op_id: str) -> tuple[str, ...]:
@@ -224,17 +241,17 @@ class _Steps:
     def __init__(self, verdict: Verdict, rule: RuleRef) -> None:
         self.verdict = verdict
         self.rule = rule
-        self.trace: list[str] = [f"{rule.source} {rule.rule_id}: {verdict.value}"]
+        self.steps: list[Step] = [Step(rule, verdict)]
 
     def tighten(self, verdict: Verdict, rule: RuleRef, *, on_tie: bool = False) -> None:
         """Make the answer *verdict* when it is stricter (or as strict, with *on_tie*)."""
-        self.trace.append(f"{rule.source} {rule.rule_id}: {verdict.value}")
+        self.steps.append(Step(rule, verdict))
         if verdict.rank > self.verdict.rank or (on_tie and verdict.rank == self.verdict.rank):
             self.verdict, self.rule = verdict, rule
 
     def set(self, verdict: Verdict, rule: RuleRef) -> None:
         """Set the answer, also when it is looser (a grant that clears a wait)."""
-        self.trace.append(f"{rule.source} {rule.rule_id}: {verdict.value}")
+        self.steps.append(Step(rule, verdict))
         self.verdict, self.rule = verdict, rule
 
 
@@ -404,7 +421,7 @@ def _hosted_run(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     if agent.verdict is Verdict.DENY or (agent.verdict is Verdict.WAIT and asker.kind != "agent"):
         return agent
     caller = _for_caller(replace(asker, acting_agent=None), asked, found, found.agent_grant)
-    caller.trace = [*agent.trace, *caller.trace]
+    caller.steps = [*agent.steps, *caller.steps]
     return caller if caller.verdict.rank >= agent.verdict.rank else agent
 
 
@@ -432,5 +449,6 @@ def evaluate(asker: Asker, asked: Asked, found: Lookups) -> Decision:
         rule=steps.rule,
         approvers=approver_groups(asked.risk, asked.op_id) if waiting else (),
         waits_because=_waits_because(asker, asked, steps.verdict),
-        trace=tuple(steps.trace),
+        trace=tuple(step.line() for step in steps.steps),
+        steps=tuple(steps.steps),
     )

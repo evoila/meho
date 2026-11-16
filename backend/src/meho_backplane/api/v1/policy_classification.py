@@ -45,7 +45,7 @@ from meho_backplane.policy.bulk import (
     preview_classification_edit,
     request_classification_edit,
 )
-from meho_backplane.policy.classification import DEFAULT_TAXONOMY
+from meho_backplane.policy.classification import DEFAULT_TAXONOMY, label_text_ok
 from meho_backplane.policy.store import (
     ClassificationEdit,
     classification_enabled,
@@ -120,7 +120,8 @@ class ClassificationEditBody(BaseModel):
         default=None,
         description=(
             "true: every call of a matched operation waits for approval. false: back to "
-            "the operation's own value, never below it."
+            "the operation's own value, never below it. false is refused when the "
+            "install's policy makes a matched operation always wait."
         ),
     )
 
@@ -297,7 +298,7 @@ def _entry_out(entry: Any) -> ClassificationEntryOut:
         scope=entry.scope,
         match=match,
         category=entry.category,
-        labels=dict(entry.labels),
+        labels={k: v for k, v in entry.labels.items() if label_text_ok(k, v)},
         risk=entry.risk,
         always_wait=entry.always_wait,
     )

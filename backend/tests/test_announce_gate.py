@@ -5,8 +5,12 @@
 
 The enforcing companion to the reflex advisory: off by default and
 opt-in per tenant, it rejects a caution-or-higher write-class op before
-execution when the caller holds no active announce claim covering it, with
-a structured ``announce_required`` denial naming ``meho_broadcast_announce``.
+execution when the caller holds no active announce claim covering it,
+with a structured ``announce_required`` denial naming
+``meho_broadcast_announce``. Since #3762 only a person skips it: a
+person's write is never refused for a missing claim, because only agents
+publish on Broadcast. Agents, hosted agent runs, service logins and
+runner logins are asked.
 Fail-open throughout -- a disabled or unreadable policy, or an unreachable
 claim scan, never blocks a dispatch.
 
@@ -14,9 +18,9 @@ Coverage mirrors the acceptance criteria on the issue, by name:
 
 * enablement is a structured per-tenant flag, default OFF, read through a
   cache-aware fail-open resolver;
-* the gate blocks only for enabled-tenant + write-class + ``safety_level
-  >= caution`` + no covering claim; a covering claim, a read-class op, a
-  ``safe`` op, and a disabled tenant each pass;
+* the gate blocks only for a caller that is not a person + enabled-tenant + write-class +
+  ``safety_level >= caution`` + no covering claim; a person, a covering
+  claim, a read-class op, a ``safe`` op, and a disabled tenant each pass;
 * the gate composes on the shared dispatch path -- an enabled-tenant
   dispatch is rejected identically with and without an agent session
   (CLI/MCP parity), and a disabled-tenant dispatch executes;
@@ -36,6 +40,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select, update
 
+from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
     reset_broadcast_client_for_testing,
@@ -83,7 +88,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _operator(sub: str = "user-b", *, tenant_id: UUID = _TENANT) -> Operator:
     # The announce gate checks only a call that runs at once. A person's
     # ``caution`` call runs at once only in the web interface; with a token
-    # it waits for approval first (#3980).
+    # it waits for approval first (#3980). Inside a hosted agent run
+    # (:func:`_hosted_agent_run`) the same operator counts as an agent.
     return Operator(
         sub=sub,
         name=sub,
@@ -94,6 +100,35 @@ def _operator(sub: str = "user-b", *, tenant_id: UUID = _TENANT) -> Operator:
         principal_kind=PrincipalKind.USER,
         web_session=True,
     )
+
+
+def _agent(sub: str = "agent-b") -> Operator:
+    """An agent token: the gate asks it for a claim (#3762)."""
+    return _machine(PrincipalKind.AGENT, sub)
+
+
+def _machine(kind: PrincipalKind, sub: str = "machine-b") -> Operator:
+    """A login that is not a person: the gate asks it for a claim (#3762)."""
+    return Operator(
+        sub=sub,
+        name=sub,
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=kind,
+        runner_id=uuid.uuid4() if kind is PrincipalKind.RUNNER else None,
+    )
+
+
+@contextmanager
+def _hosted_agent_run() -> Iterator[None]:
+    """A call inside a hosted agent run: an agent, also with a person's token."""
+    token = current_agent_run_id_var.set(uuid.uuid4())
+    try:
+        yield
+    finally:
+        current_agent_run_id_var.reset(token)
 
 
 @contextmanager
@@ -190,7 +225,7 @@ async def test_gate_blocks_enabled_write_caution_no_claim() -> None:
         new=AsyncMock(return_value=False),
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
+            _agent(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is not None
     assert "meho_broadcast_announce" in block
@@ -210,7 +245,7 @@ async def test_gate_blocks_enabled_write_destructive_no_claim() -> None:
         new=AsyncMock(return_value=False),
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="write", safety_level="destructive", target_name="vault-1"
+            _agent(), op_class="write", safety_level="destructive", target_name="vault-1"
         )
     assert block is not None
     assert "meho_broadcast_announce" in block
@@ -224,7 +259,7 @@ async def test_gate_passes_when_claim_covers_op() -> None:
         new=AsyncMock(return_value=True),
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
+            _agent(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is None
 
@@ -237,7 +272,7 @@ async def test_gate_passes_for_disabled_tenant() -> None:
         "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
+            _agent(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is None
     # Short-circuited on enablement -- the claim scan never ran.
@@ -252,7 +287,7 @@ async def test_gate_passes_for_read_class_op() -> None:
         "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="credential_read", safety_level="caution", target_name="vault-1"
+            _agent(), op_class="credential_read", safety_level="caution", target_name="vault-1"
         )
     assert block is None
     claim.assert_not_called()
@@ -266,10 +301,80 @@ async def test_gate_passes_for_safe_write_op() -> None:
         "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="write", safety_level="safe", target_name="vault-1"
+            _agent(), op_class="write", safety_level="safe", target_name="vault-1"
         )
     assert block is None
     claim.assert_not_called()
+
+
+async def test_gate_never_asks_a_person() -> None:
+    """A person is never refused for a missing claim (#3762).
+
+    The gate stops before the policy read and the claim scan: a person
+    cannot publish a claim, so the answer could never change.
+    """
+    await _seed_tenant(enabled=True)
+    claim = AsyncMock(return_value=False)
+    enabled = AsyncMock(return_value=True)
+    with (
+        patch("meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim", new=claim),
+        patch("meho_backplane.broadcast.announce_gate.announce_gate_enabled", new=enabled),
+    ):
+        block = await announce_gate_blocks(
+            _operator(), op_class="write", safety_level="destructive", target_name="vault-1"
+        )
+    assert block is None
+    enabled.assert_not_called()
+    claim.assert_not_called()
+
+
+async def test_gate_asks_a_hosted_agent_run() -> None:
+    """A call inside a hosted agent run is an agent's call, also with a person's token."""
+    await _seed_tenant(enabled=True)
+    with (
+        patch(
+            "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+            new=AsyncMock(return_value=False),
+        ),
+        _hosted_agent_run(),
+    ):
+        block = await announce_gate_blocks(
+            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
+        )
+    assert block is not None
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.SERVICE, PrincipalKind.RUNNER])
+async def test_gate_asks_a_service_or_runner_login(kind: PrincipalKind) -> None:
+    """Only a person skips the gate: a service or runner login is asked (#3762)."""
+    await _seed_tenant(enabled=True)
+    with patch(
+        "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+        new=AsyncMock(return_value=False),
+    ):
+        block = await announce_gate_blocks(
+            _machine(kind), op_class="write", safety_level="caution", target_name="vault-1"
+        )
+    assert block is not None
+    assert "meho_broadcast_announce" in block
+
+
+async def test_gate_asks_a_token_without_a_kind_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client login whose token names no kind counts as a service login, so it is asked."""
+    from meho_backplane.auth.jwt import _extract_principal_kind
+
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
+    get_settings.cache_clear()
+    kind = _extract_principal_kind({"azp": "deploy-bot", "client_id": "deploy-bot"}, get_settings())
+    await _seed_tenant(enabled=True)
+    with patch(
+        "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+        new=AsyncMock(return_value=False),
+    ):
+        block = await announce_gate_blocks(
+            _machine(kind), op_class="write", safety_level="caution", target_name="vault-1"
+        )
+    assert block is not None
 
 
 async def test_gate_fails_open_on_claim_scan_error() -> None:
@@ -283,7 +388,7 @@ async def test_gate_fails_open_on_claim_scan_error() -> None:
         patch("meho_backplane.broadcast.announce_gate._log") as mock_log,
     ):
         block = await announce_gate_blocks(
-            _operator(), op_class="write", safety_level="caution", target_name="vault-1"
+            _agent(), op_class="write", safety_level="caution", target_name="vault-1"
         )
     assert block is None
     assert any(
@@ -378,7 +483,7 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     session: UUID | None,
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Enabled tenant + caution write + no claim -> denied, both surfaces.
+    """Agent + enabled tenant + caution write + no claim -> denied, both surfaces.
 
     Parametrised over an MCP session and a session-less CLI dispatch: the
     gate keys on announce-state, not on the surface, so both are rejected
@@ -393,6 +498,7 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
             new=AsyncMock(return_value=False),
         ),
         _bound_session(session),
+        _hosted_agent_run(),
     ):
         result = await dispatch(
             operator=_operator(),
@@ -434,6 +540,7 @@ async def test_dispatch_rejects_a_write_whose_last_word_is_unknown(
             new=claim,
         ),
         _bound_session(_SESSION),
+        _hosted_agent_run(),
     ):
         result = await dispatch(
             operator=_operator(),
@@ -454,7 +561,7 @@ async def test_dispatch_executes_when_gate_disabled(
     """A disabled tenant runs the same op unaffected."""
     await _seed_tenant(enabled=False)
     await _register_op("vault.kv.delete", stub_embedding_service)
-    with _bound_session(_SESSION):
+    with _bound_session(_SESSION), _hosted_agent_run():
         result = await dispatch(
             operator=_operator(),
             connector_id="vault-1.x",
@@ -478,6 +585,7 @@ async def test_dispatch_executes_when_claim_present(
             new=AsyncMock(return_value=True),
         ),
         _bound_session(_SESSION),
+        _hosted_agent_run(),
     ):
         result = await dispatch(
             operator=_operator(),

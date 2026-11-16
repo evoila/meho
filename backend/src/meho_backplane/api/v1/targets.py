@@ -163,7 +163,11 @@ from meho_backplane.connectors._shared.gsm_creds import (
     gsm_project_of,
     is_gsm_project_allowed,
 )
-from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
+from meho_backplane.connectors._shared.vault_creds import (
+    DEFAULT_KV_MOUNT,
+    TargetSecretForbiddenError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -178,6 +182,7 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
+from meho_backplane.operations._errors_target_secret import target_secret_error_detail
 from meho_backplane.operations._handler_resolve import (
     forget_target_in_connectors,
     get_or_create_connector_instance,
@@ -198,6 +203,10 @@ from meho_backplane.targets.schemas import (
 from meho_backplane.targets.secret_field_map import (
     check_secret_field_map_sources,
     merge_secret_field_map,
+)
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination,
 )
 from meho_backplane.targets.vault_login_extras import enforce_vault_login_extras_platform_admin
 
@@ -1403,6 +1412,21 @@ def _raise_fingerprint_failed(
     raise HTTPException(status_code=500, detail=detail) from exc
 
 
+def _raise_target_secret_error(
+    exc: TargetSecretNotFoundError | TargetSecretForbiddenError, *, operator: Operator
+) -> NoReturn:
+    """Turn a target secret MEHO cannot read into a 422 with a clear error code.
+
+    ``detail.error`` is ``target_secret_not_found`` (Vault has no secret at
+    the ref) or ``connector_vault_forbidden`` (Vault refused the read). The
+    detail is the answer a call gets (:func:`target_secret_error_detail`):
+    the target, the ref, whether MEHO built the ref from the target name,
+    and the fix. It has no Vault text and no Vault address.
+    """
+    detail = target_secret_error_detail(exc, tenant_id=operator.tenant_id)
+    raise HTTPException(status_code=422, detail=detail) from exc
+
+
 @router.post("/{name}/probe", response_model=FingerprintResult)
 async def probe_target(
     name: str,
@@ -1433,6 +1457,13 @@ async def probe_target(
       the dispatcher's ``connector_error`` envelope at the route
       boundary so probe + dispatch agree on the shape of a connector
       failure — sub-signal A of consumer feedback).
+    * **422** when MEHO cannot read the target's secret.
+      ``detail.error`` is ``target_secret_not_found`` when Vault has no
+      secret at the target's ``secret_ref``, and
+      ``connector_vault_forbidden`` when Vault refuses the read. The
+      detail names the target and the ref, says whether MEHO built the
+      ref from the target name (``secret_ref_derived``), and gives the
+      fix in ``message``. It has no Vault text and no Vault address.
 
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
@@ -1441,7 +1472,10 @@ async def probe_target(
     ``targets.probe`` operation calls too.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
-    fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    try:
+        fp = await probe_and_store_fingerprint(session, t, operator=operator)
+    except (TargetSecretNotFoundError, TargetSecretForbiddenError) as secret_exc:
+        _raise_target_secret_error(secret_exc, operator=operator)
     return fp
 
 
@@ -1456,8 +1490,12 @@ async def probe_and_store_fingerprint(
     operation can check MEHO's policy for that target before the system
     is contacted. Returns the detected fingerprint. Raises
     :class:`HTTPException` with the status codes :func:`probe_target`
-    lists. The caller owns the transaction: this function only
-    ``flush``-es.
+    lists, except for a target secret MEHO cannot read:
+    :class:`TargetSecretNotFoundError` and
+    :class:`TargetSecretForbiddenError` pass to the caller unchanged. The
+    route turns them into its 422; the ``targets.probe`` operation lets
+    the dispatcher turn them into the result a call gets. The caller owns
+    the transaction: this function only ``flush``-es.
     """
     cls, label, exception_message = resolve_connector_or_label(t, for_probe=True)
     if label == "no_connector":
@@ -1486,6 +1524,8 @@ async def probe_and_store_fingerprint(
         await check_secret_field_map_sources(t, operator)
         fp = await cls().fingerprint(t, operator=operator)
     except HTTPException:
+        raise
+    except (TargetSecretNotFoundError, TargetSecretForbiddenError):
         raise
     except Exception as exc:
         _raise_fingerprint_failed(exc, cls=cls, t=t, operator=operator)
@@ -1668,6 +1708,7 @@ _CONNECTION_FIELDS = frozenset(
         "port",
         "fqdn",
         "secret_ref",
+        "secret_field_map",
         "auth_model",
         "verify_tls",
         "tls_ca_pin",
@@ -1719,6 +1760,34 @@ async def _drop_kept_logins_on_connection_change(
         _drop_again_after_commit(session, t)
 
 
+def screen_destination_change(updates: dict[str, Any], t: TargetORM) -> None:
+    """Run the SSRF guard on the destination a PATCH leaves, when it changes.
+
+    *updates* holds only the sent fields (``exclude_unset``). The new
+    destination is each sent ``host`` / ``fqdn`` / ``port``, else the stored
+    one. A sent host or fqdn is screened with the new port. A sent port
+    (also ``null``, which clears it) screens the stored host and fqdn
+    again, because a ``host:port`` allowlist entry admits one port only.
+    Raises :class:`TargetDestinationBlockedError`.
+    """
+    port_sent = "port" in updates
+    port = updates["port"] if port_sent else t.port
+    for key in ("host", "fqdn"):
+        if key not in updates and not port_sent:
+            continue
+        value = updates[key] if key in updates else getattr(t, key)
+        if value is not None:
+            assert_public_destination(value, port)
+
+
+def _screen_sent_destination(updates: dict[str, Any], t: TargetORM) -> None:
+    """:func:`screen_destination_change` with the route's 422 answer."""
+    try:
+        screen_destination_change(updates, t)
+    except TargetDestinationBlockedError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1754,6 +1823,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
@@ -1851,6 +1921,10 @@ async def apply_target_update(
     # at create time, and only when ``secret_ref`` is omitted (see
     # :func:`create_target`).
     t.updated_at = datetime.now(UTC)
+    if _CONNECTION_FIELDS.intersection(updates):
+        # Other processes drop their kept logins when this moves, also when
+        # the same values were sent again (#3879). A probe does not move it.
+        t.connection_changed_at = t.updated_at
     _log.info(
         "target_updated",
         target_id=str(t.id),

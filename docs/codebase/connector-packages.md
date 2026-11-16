@@ -846,6 +846,37 @@ command. The list file then says `"old"` for that name, and the second
 number goes up. In a later kit version the name may go: the command and
 the test refuse to remove a name that the list file did not mark as old.
 
+### `is_session_expired`
+
+A connector whose product ends a login session with a status other than 401
+(for example 403 with a body of its own) can add the method
+`is_session_expired(self, response: httpx.Response) -> bool`. It needs no kit
+name: the dispatcher finds it by name, as it finds `invalidate_session`.
+
+What the method must return:
+
+- `True` only when the status and the body together say that the login
+  session ended. The dispatcher asks only for a 4xx answer.
+- `False` for a wrong password or a locked account. Those are not "the
+  session ended": a new sign-in cannot fix them, and more tries can lock the
+  account. Report them from the sign-in as a `ConnectorAuthError` instead.
+- `False` for a real 403 (missing rights). A raise counts as `False`.
+
+What the dispatcher does on `True`:
+
+- It calls `invalidate_session`, so the next call signs in again.
+- It repeats the call once only when that cannot send a change twice: the
+  operation's risk level is `safe`, or it is an ingested operation with one
+  request. A typed write, a multi-step operation and a call that runs after
+  a person's approval are not sent again. The caller then gets
+  `connector_auth_failed` that says the change may or may not have been made.
+- It never repeats twice. If the sign-in is refused, the caller gets
+  `connector_auth_failed` that says the product refused the sign-in. If the
+  same answer comes back, the text says the product took the new sign-in and
+  still ended the session.
+- The connector needs `invalidate_session` as well; without it the hook is not
+  asked. Details: `docs/architecture/connector-auth.md`.
+
 ### `Connector.execute`
 
 MEHO never calls `Connector.execute`. The dispatcher runs the handler that

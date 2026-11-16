@@ -30,7 +30,7 @@ URL contract::
 
     GET /ui/agents/runs
         [?status=pending|running|awaiting_approval|succeeded|failed|cancelled
-         &work_ref=<exact-match string>]
+         &work_ref=<ticket id, checked with the shared rule>]
 
 An out-of-enum ``status`` -> 422 (the ``StrEnum`` query validator at the
 HTTP boundary). The list never exposes ``system_prompt`` / ``toolset`` /
@@ -54,6 +54,7 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.agents.runs.operator import resolve_run_reader
 from meho_backplane.ui.routes.agents.runs.views import project_run_to_view
+from meho_backplane.ui.routes.work_ref_form import filter_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_runs_list_router"]
@@ -145,7 +146,7 @@ def build_runs_list_router() -> APIRouter:
     async def _handler(
         request: Request,
         status: Annotated[AgentRunStatus | None, EMPTY_STR_TO_NONE, Query()] = None,
-        work_ref: str | None = Query(default=None, max_length=256),
+        work_ref: str | None = Query(default=None),
         session_ctx: UISessionContext = _require_session_dep,
         operator: Operator = _run_reader_dep,
     ) -> HTMLResponse:
@@ -153,7 +154,7 @@ def build_runs_list_router() -> APIRouter:
         return await _render(
             request,
             status_filter=status,
-            work_ref=work_ref,
+            work_ref=filter_work_ref(work_ref),
             session_ctx=session_ctx,
             operator=operator,
         )

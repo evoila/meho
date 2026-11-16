@@ -18,6 +18,7 @@ The rules:
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -588,6 +589,48 @@ async def test_rest_and_mcp_list_match_the_service(
 async def test_mcp_refuses_a_non_boolean_filter() -> None:
     with pytest.raises(McpInvalidParamsError):
         await _list_handler(_operator(), {"outcome_unknown": "yes"})
+
+
+# A padded and a decomposed (NFD) filter find the cleaned id; the exact old
+# text still finds a row stored before the ticket id rule.
+_WORK_REF_SEARCHES: tuple[tuple[str, str], ...] = (
+    ("  CHG1  ", "CHG1"),
+    (unicodedata.normalize("NFD", "Ä-1"), "Ä-1"),
+    ("  OLD-7  ", "  OLD-7  "),
+)
+
+
+async def _seed_work_refs() -> dict[str, uuid.UUID]:
+    stored = {stored for _, stored in _WORK_REF_SEARCHES}
+    ids = {
+        ref: await _seed(resume_result=_UNCERTAIN, resumed_at=_ago(1), work_ref=ref)
+        for ref in stored
+    }
+    await _seed(resume_result=_UNCERTAIN, resumed_at=_ago(1), work_ref="CHG2")
+    return ids
+
+
+@pytest.mark.asyncio
+async def test_the_work_ref_filter_finds_cleaned_and_old_ids(
+    client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = client
+    ids = await _seed_work_refs()
+    for typed, stored in _WORK_REF_SEARCHES:
+        async with get_sessionmaker()() as session:
+            rows = await list_outcome_unknown(session, tenant_id=_TENANT, work_ref=typed)
+        assert [r.id for r in rows] == [ids[stored]], typed
+
+        for params in ({"outcome_unknown": "true"}, {"status": "all"}):
+            response = await ac.get(
+                "/api/v1/approvals", params={**params, "work_ref": typed}, headers=_headers(key)
+            )
+            assert response.status_code == 200, response.text
+            assert [uuid.UUID(item["id"]) for item in response.json()] == [ids[stored]], params
+
+        for arguments in ({"outcome_unknown": True}, {"status": "all"}):
+            mcp = await _list_handler(_operator(), {**arguments, "work_ref": typed})
+            assert [uuid.UUID(item["id"]) for item in mcp["items"]] == [ids[stored]], arguments
 
 
 @pytest.mark.asyncio

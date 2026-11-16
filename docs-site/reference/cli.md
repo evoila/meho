@@ -127,6 +127,27 @@ meho admin keycloak bootstrap-clients [flags]
 - `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
 - `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
 
+### `meho admin tools`
+
+Admin work on the tool logins of people in your tenant
+
+```
+meho admin tools
+```
+
+#### `meho admin tools sign-out`
+
+Sign out one tool of a person; their other tools keep working
+
+```
+meho admin tools sign-out [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--tool` — the tool kind: cli, claude-code, claude-desktop or other-mcp (required)
+- `--user` — the person: Keycloak user id or exact username (required)
+
 ## `meho agent`
 
 Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)

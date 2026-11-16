@@ -1114,6 +1114,37 @@ Code: `auth/tool_sign_out.py` (tool kinds, last use, the sign-out and the
 audit row), `ui/routes/account_tools.py` (the route and the card rows),
 `templates/account/_tools.html`. Tests: `tests/test_ui_account_tools.py`.
 
+### An admin signs out a tool of another person
+
+There is no console page for this. A tenant admin runs
+`meho admin tools sign-out --user <name or id> --tool <kind>`. The verb
+calls the typed operation `tools.sign_out` of the synthetic connector
+`tools-admin-1.x` (`connectors/tools/ops.py`) through the normal
+dispatch path:
+
+- `caution` with `requires_approval`, a `tenant_admin` role floor, and a
+  requester check: only a person asks, not an agent, a service login or
+  a call on someone's behalf. Every call waits for approval; a tenant
+  admin in `MEHO-SA-Operators` may approve their own.
+- `tool` is one of the kinds above that have a sign-out button. Like the
+  card, the operation refuses while `MCP_CLIENT_PER_TOOL_KIND` is off.
+- `user` is found in MEHO's own sign-in realm through MEHO's Keycloak
+  admin client, never a Keycloak target (`auth/realm_users.py`): by user
+  id, else by exact username. The person must be in a role group of the
+  caller's tenant: a group (or a parent group) whose `meho_tenant` or
+  `tenant_id` attribute names the tenant. MEHO reads every page of the
+  person's groups. A failed read is an error, never "not found".
+- The approval card names the person by id (`user.id`). The approved run
+  signs out that id and checks the tenant again; it never looks the name
+  up again. A card without a person id is refused.
+- The run calls the same `sign_out_tool`, with `for_user`. The audit row
+  `auth.tool_sign_out` has the admin as `operator_sub`, and `user_id` and
+  `username` of the person in the payload. A failed Keycloak call is an
+  error result and writes only the 502 row with `outcome` `failed`.
+
+Tests: `tests/test_tools_sign_out_op.py`, `tests/test_realm_users.py`,
+`cli/internal/cmd/admin/tools/tools_test.go`.
+
 ## Dependencies
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no

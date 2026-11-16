@@ -70,6 +70,33 @@ The web console has no button here. To sign out a browser, use the card
 
 You can sign out only your own tools.
 
+## An admin signs out a tool for someone else
+
+A tenant admin can sign out one tool of another person, for example
+when a laptop with Claude Desktop is lost. There is no console page for
+this. Use the command line:
+
+```bash
+meho admin tools sign-out --user <username or user id> --tool claude-desktop
+```
+
+- `--user` is the person's username or Keycloak user id in the realm
+  MEHO uses for sign-in. MEHO finds only people of your tenant.
+- `--tool` is `cli`, `claude-code`, `claude-desktop` or `other-mcp`. The
+  web console cannot be signed out this way.
+- You need the `tenant_admin` role. The call waits until a person
+  approves it, in the console or with `meho approvals approve`. If you
+  are in `MEHO-SA-Operators`, you may approve it yourself.
+- The approval shows the person by user id. MEHO signs out that user id,
+  even if the username points at someone else by then.
+- The person's other tools keep working.
+- The same limits hold as for your own sign-out: the tool's last access
+  token works for a few more minutes, and the tool can sign in again.
+  To stop the person, disable their account in Keycloak.
+- The audit entry `auth.tool_sign_out` names you, the person
+  (`user_id`, `username`) and the login client. If the call fails, the
+  command shows the error, and no "signed out" entry is written.
+
 ## Before you start
 
 The card shows only when your MEHO admin has given each AI tool its own

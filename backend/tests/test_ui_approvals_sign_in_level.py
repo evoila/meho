@@ -26,9 +26,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import respx
 
+from meho_backplane.auth.approval_sign_in_flow import ApprovalSignInStatus, SignInLevel
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.routes.approvals.sign_in import web_sign_in_level
 from tests.test_ui_approvals import (
     _REQUESTER_SUB,
     _RESOLVE_OPERATOR,
@@ -204,3 +206,68 @@ def test_observe_and_off_modal_keep_the_approve_button_and_the_old_sign_in_link(
 
     assert 'data-action="approve"' in text
     assert _APPROVAL_SIGN_IN_URL not in text
+
+
+_READ_APPROVAL_SIGN_IN = "meho_backplane.auth.approval_sign_in_flow.read_approval_sign_in"
+
+
+def _empty_console_client(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setenv("UI_KEYCLOAK_APPROVE_CLIENT_ID", "")
+    _set_mode(monkeypatch, mode)
+
+
+def _bound_cli_client() -> ApprovalSignInStatus:
+    return ApprovalSignInStatus(state="ok", client=get_settings().keycloak_cli_approve_client_id)
+
+
+async def test_auto_with_an_empty_console_client_records_only_also_when_the_cli_client_is_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _empty_console_client(monkeypatch, "auto")
+
+    with patch(
+        _READ_APPROVAL_SIGN_IN, new_callable=AsyncMock, return_value=_bound_cli_client()
+    ) as read:
+        level = await web_sign_in_level()
+
+    assert level == SignInLevel("observe")
+    read.assert_not_called()
+
+
+def test_auto_with_an_empty_console_client_keeps_the_approve_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _empty_console_client(monkeypatch, "auto")
+
+    with patch(_READ_APPROVAL_SIGN_IN, new_callable=AsyncMock, return_value=_bound_cli_client()):
+        text = _modal(None)
+
+    assert 'data-action="approve"' in text
+    assert _APPROVAL_SIGN_IN_URL not in text
+
+
+def test_auto_with_an_empty_console_client_approves_and_records_observe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _empty_console_client(monkeypatch, "auto")
+
+    with patch(_READ_APPROVAL_SIGN_IN, new_callable=AsyncMock, return_value=_bound_cli_client()):
+        response, rid = _approve(None, sign_in_age=1)
+
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    recorded = _decision_approval_auth(rid)
+    assert isinstance(recorded, dict)
+    assert recorded["level_in_force"] == "observe"
+
+
+def test_required_with_an_empty_console_client_still_refuses_a_console_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _empty_console_client(monkeypatch, "required")
+
+    response, rid = _approve(None, sign_in_age=1)
+
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert 'data-testid="approval-fresh-sign-in"' in response.text  # type: ignore[attr-defined]
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value

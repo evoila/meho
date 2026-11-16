@@ -1073,7 +1073,10 @@ only for the sign-in before an approve. Its redirect URI is
 - The approve (`ui/routes/approvals/sign_in.py`,
   `auth/web_approval_sign_in.py:check_web_approval_sign_in`) resolves the
   setting with `sign_in_level_in_force(…, client_id=meho-web-approve)`,
-  so `auto` reads the binding of the console's approval client.
+  so `auto` reads the binding of the console's approval client. When
+  `UI_KEYCLOAK_APPROVE_CLIENT_ID` is empty, `auto` only records (the
+  console has no approval sign-in to offer); an explicit `required`
+  still refuses.
   `required`: only the kept token approves, and only with the approval
   level, a recent `auth_time`, `acr` not `"0"` and the same person; the
   modal shows **Sign in to approve** with the approval sign-in link in

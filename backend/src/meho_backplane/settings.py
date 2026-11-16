@@ -1006,8 +1006,8 @@ class Settings(BaseModel):
         uses it only for the new sign-in before an approve; the normal
         console login keeps :attr:`ui_keycloak_client_id`. Only its tokens
         carry the approval level into a console approve. Empty means the
-        console has no approval sign-in: with the approval level required
-        it then refuses every approve. Env var
+        console has no approval sign-in: ``auto`` then only records the
+        level, and an explicit ``required`` refuses every approve. Env var
         ``UI_KEYCLOAK_APPROVE_CLIENT_ID``.
     ui_keycloak_client_secret:
         Client secret of the confidential ``meho-web`` Keycloak client.
@@ -1355,7 +1355,8 @@ class Settings(BaseModel):
         level, else ``required``, also when the check failed. Any other value
         stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``. The console
         uses the same setting for its own approval sign-in (#6282); ``auto``
-        there reads the binding of :attr:`ui_keycloak_approve_client_id`.
+        there reads the binding of :attr:`ui_keycloak_approve_client_id`,
+        and only records when that setting is empty.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``

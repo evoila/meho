@@ -36,8 +36,9 @@ tenant with the gate on, a caution-or-higher write that would run at
 once is refused when the caller holds no active claim. A write that
 waits for approval is not asked. A claim counts only when it is trusted,
 not completed, and its TTL has not run out. A service login and a runner
-login cannot make a claim, so there those writes are refused. `announce_gate_enabled` turns the gate
-on or off. See
+login cannot make a claim, so their `caution`-or-higher writes that would
+run at once are refused. `announce_gate_enabled` turns the gate on or off.
+See
 [the decision record](../decisions/2026-11-08-broadcast-people-read-agents-publish.md).
 
 ## Key types

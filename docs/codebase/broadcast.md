@@ -622,7 +622,8 @@ cannot make:
   would run at once is refused when the caller holds no active claim. A
   write that waits for approval is not asked. A claim counts only when it
   is trusted, not completed, and its TTL has not run out. A service login
-  and a runner login cannot make a claim, so their writes are refused.
+  and a runner login cannot make a claim, so their `caution`-or-higher
+  writes that would run at once are refused.
   See [reflex-advisory.md](reflex-advisory.md).
 - **Reads use trusted claims.** The target advisory and the reflex claim
   lookup use only trusted claims, judged by their newest step (see *When

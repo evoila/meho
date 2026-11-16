@@ -481,7 +481,11 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.license_reads import is_license_read
-from meho_backplane.operations.op_class_of import descriptor_op_class, write_note_op_class
+from meho_backplane.operations.op_class_of import (
+    descriptor_op_class,
+    note_ran_op_class,
+    write_note_op_class,
+)
 from meho_backplane.operations.op_policy import approval_classification
 from meho_backplane.operations.reducer import (
     SECRET_REVEAL_CONTEXT_KEY,
@@ -4150,6 +4154,8 @@ async def _dispatch_now(
     # row. A stored class of an ingested op (a connector's safety floor set it
     # at ingest) counts like any other.
     op_class = descriptor_op_class(descriptor)
+    # The outer MCP row of ``call_operation`` hides the detail by this class.
+    note_ran_op_class(op_class)
     secret_read = op_class == "credential_read" or hides_secret_values(op_id)
     makes_new_secret = op_class == "credential_mint"
     params_error = _params_error(descriptor, op_id, params, started)

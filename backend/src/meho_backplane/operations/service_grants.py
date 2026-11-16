@@ -123,6 +123,7 @@ __all__ = [
     "classify_orphaned_grants",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
+    "credential_mint_grant_reason",
     "credential_read_grant_reason",
     "credential_write_grant_reason",
     "delete_grant_reason",
@@ -130,6 +131,7 @@ __all__ = [
     "find_live_grant",
     "null_target_only_park_hint",
     "per_call_approval_grant_reason",
+    "secret_grant_reason",
 ]
 
 #: Either standing-grant table. The lookup, list and revoke code takes one.
@@ -353,6 +355,32 @@ def credential_write_grant_reason(op_id: str, stored_op_class: str | None = None
     return (
         f"A standing grant cannot cover {op_id}: it sends a secret and has no preview "
         "that hides it, so a person always approves it."
+    )
+
+
+def credential_mint_grant_reason(op_id: str, stored_op_class: str | None = None) -> str | None:
+    """Return why a grant cannot cover *op_id*, or ``None`` when it can.
+
+    An operation whose row stores ``credential_mint`` makes a new secret.
+    Like a ``credential_read``, a person approves every call of it
+    (:func:`~meho_backplane.operations.credential_read.has_credential_read_floor`),
+    so no grant covers it. *stored_op_class* is the class a connector's
+    safety floor stored on the row of an ingested operation.
+    """
+    if stored_op_class != "credential_mint":
+        return None
+    return (
+        f"A standing grant cannot cover {op_id}: it makes a new secret, so a person "
+        "always approves it."
+    )
+
+
+def secret_grant_reason(op_id: str, stored_op_class: str | None) -> str | None:
+    """Return why a grant cannot cover an operation that reads, makes or sends a secret."""
+    return (
+        credential_read_grant_reason(op_id, stored_op_class)
+        or credential_mint_grant_reason(op_id, stored_op_class)
+        or credential_write_grant_reason(op_id, stored_op_class)
     )
 
 
@@ -734,9 +762,7 @@ class ServicePrincipalGrantService:
             tenant_id, payload.connector_id, payload.op_id
         )
         stored_class = getattr(descriptor, "op_class", None)
-        secret_reason = credential_read_grant_reason(
-            payload.op_id, stored_class
-        ) or credential_write_grant_reason(payload.op_id, stored_class)
+        secret_reason = secret_grant_reason(payload.op_id, stored_class)
         if secret_reason is not None:
             raise GrantValidationError(secret_reason)
         per_call_reason = per_call_approval_grant_reason(payload.op_id)
@@ -1457,10 +1483,7 @@ async def consult_and_record_grant(
     real call sends, and the real call checks the hash and the blast
     radius before it uses the grant.
     """
-    stored_class = getattr(descriptor, "op_class", None)
-    secret_reason = credential_read_grant_reason(
-        descriptor.op_id, stored_class
-    ) or credential_write_grant_reason(descriptor.op_id, stored_class)
+    secret_reason = secret_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None))
     if secret_reason is not None:
         _log.info(
             "service_grant_refused_credential_read",

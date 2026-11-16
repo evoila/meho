@@ -24,6 +24,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.operations.ingest.safety_floors import _FLOORS
+from meho_backplane.operations.op_class_of import note_ran_op_class
 from tests._stored_op_class_harness import CONNECTOR_ID, GET_CLIENTS, MADE_UP_VALUE, ingest
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -102,4 +103,54 @@ async def test_outer_row_detail_comes_from_the_class_stored_on_the_inner_operati
     (row,) = rows
     assert row.payload["op_id"] == "call_operation"
     assert row.payload["broadcast_detail_effective"] == detail
+    assert MADE_UP_VALUE not in str(row.payload)
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_outer_row_detail_comes_from_the_row_the_dispatcher_ran(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    seeded_operator_tenant: None,  # noqa: F811
+    stub_call_operation: AsyncMock,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The named row stores no class; the row the dispatcher picked stores a secret class."""
+    client, _operator = client_with_operator
+    await ingest(stub_embedding_service, {})
+
+    async def _ran_another_row(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        note_ran_op_class("credential_read")
+        return {"status": "ok", "op_id": arguments["op_id"], "duration_ms": 1.0, "result": {}}
+
+    stub_call_operation.side_effect = _ran_another_row
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "call_operation",
+                "arguments": {
+                    "connector_id": CONNECTOR_ID,
+                    "op_id": GET_CLIENTS,
+                    "params": {"q": MADE_UP_VALUE},
+                },
+            },
+        },
+    )
+
+    assert response.json()["result"]["isError"] is False, response.text
+    async with get_sessionmaker()() as session:
+        (row,) = (
+            (
+                await session.execute(
+                    select(AuditLog).where(AuditLog.operator_sub != BOOT_STAMP_OPERATOR_SUB)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert row.payload["broadcast_detail_effective"] == "aggregate"
     assert MADE_UP_VALUE not in str(row.payload)

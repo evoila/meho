@@ -26,6 +26,8 @@ already gives (:func:`~meho_backplane.broadcast.events.resolve_op_class`).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
@@ -37,9 +39,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SECRET_CLASSES",
+    "RanOpClass",
     "descriptor_op_class",
     "lookup_secret_op_class",
+    "note_ran_op_class",
+    "ran_op_class_var",
     "request_op_class",
+    "request_write_note_op_class",
     "write_note_op_class",
 ]
 
@@ -47,6 +53,34 @@ __all__ = [
 SECRET_CLASSES: Final[frozenset[str]] = frozenset(
     {"credential_read", "credential_mint", "credential_write"}
 )
+
+
+@dataclass
+class RanOpClass:
+    """Receives the class of the operation that one call ran.
+
+    The dispatcher can run another row than the one the caller named: it
+    picks the catalog or version that serves the target. The outer MCP row
+    of ``call_operation`` sets this holder, and the dispatcher fills it with
+    the class of the row it picked (:func:`note_ran_op_class`).
+    """
+
+    op_class: str | None = None
+
+
+#: The holder of the open MCP call, or ``None`` when no caller watches.
+ran_op_class_var: ContextVar[RanOpClass | None] = ContextVar("ran_op_class", default=None)
+
+
+def note_ran_op_class(op_class: str) -> None:
+    """Store *op_class* in the open holder, when there is one.
+
+    The first class wins: it is the operation the caller asked for. The
+    steps of a multi-step operation run after it and change nothing.
+    """
+    holder = ran_op_class_var.get()
+    if holder is not None and holder.op_class is None:
+        holder.op_class = op_class
 
 
 def descriptor_op_class(descriptor: EndpointDescriptor) -> str:
@@ -102,6 +136,24 @@ def request_op_class(op_id: str, proposed_effect: Mapping[str, Any] | None) -> s
     """
     stored = proposed_effect.get("op_class") if isinstance(proposed_effect, Mapping) else None
     return resolve_op_class(op_id, stored if isinstance(stored, str) and stored else None)
+
+
+def request_write_note_op_class(op_id: str, proposed_effect: Mapping[str, Any] | None) -> str:
+    """Return the class that decides whether an approval request changes something.
+
+    The request's own version of :func:`write_note_op_class`. The class of
+    the request (:func:`request_op_class`) is the class of the run, so a
+    stored ``credential_read`` on an operation that also changes something
+    (a ``POST``, ``PUT`` or ``DELETE``) says ``credential_read``. Such a
+    request still changes something: this returns the class its op id
+    gives. Only an ingested operation can store a class, and its op id
+    names its HTTP method.
+    """
+    request_class = request_op_class(op_id, proposed_effect)
+    if request_class in WRITE_OP_CLASSES:
+        return request_class
+    without_stored = resolve_operation_op_class(op_id, source_kind="ingested", safety_level=None)
+    return without_stored if without_stored in WRITE_OP_CLASSES else request_class
 
 
 async def lookup_secret_op_class(tenant_id: UUID, connector_id: str, op_id: str) -> str | None:

@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.no_store import mark_answer_holds_secret
-from meho_backplane.operations.op_class_of import request_op_class
+from meho_backplane.operations.op_class_of import request_write_note_op_class
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -64,7 +64,8 @@ __all__ = [
 #: who asked can now fetch the value.
 WAITING_FOR_REQUESTER: Final[str] = "waiting_for_requester"
 
-#: The op classes (:func:`~meho_backplane.operations.op_class_of.request_op_class`) of an
+#: The op classes
+#: (:func:`~meho_backplane.operations.op_class_of.request_write_note_op_class`) of an
 #: operation that only reads. Every other class counts as a change.
 _READ_CLASSES: Final[frozenset[str]] = frozenset({"read", "credential_read"})
 
@@ -106,9 +107,11 @@ def is_write_reveal(request: ApprovalRequest) -> bool:
     Only an operation of class ``read`` or ``credential_read`` counts as a
     read. Every other class counts as a change, also ``other`` (for example
     an apply, a scale, or a reboot). When in doubt, the approve in order stops.
+    A stored ``credential_read`` on an operation that also changes something
+    (a ``POST``, ``PUT`` or ``DELETE``) counts as a change.
     """
     return is_secret_reveal(request) and (
-        request_op_class(request.op_id, request.proposed_effect) not in _READ_CLASSES
+        request_write_note_op_class(request.op_id, request.proposed_effect) not in _READ_CLASSES
     )
 
 

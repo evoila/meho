@@ -597,7 +597,10 @@ finds the field, and returns a copy of the operation with
   - The subject and the preview subject of the approval card
     (`approval_context.py`): no subject for a secret class. The check of an
     approved reveal (`approved_reveal.py`) and the guidance stamp of a run
-    (`approval_outcome.py`) read the class of the request too.
+    (`approval_outcome.py`) read the class of the request too. For the
+    approved reveal, a stored `credential_read` on an operation that also
+    changes something (a `POST`, `PUT` or `DELETE`) counts as a change, so
+    an approve in order stops at it.
   - The stored parameters of an approval request (`approval_queue.py`):
     for a `credential_write` the parameters are not stored in plain. They
     go to the encrypted payload. When the effect of a call cannot be built,
@@ -609,14 +612,17 @@ finds the field, and returns a copy of the operation with
   - The result reducer (`jsonflux_reducer.py`): it gets the class of the row
     in its context. For a stored `credential_mint` the dispatcher also tells
     it to store nothing, so the result store never holds the new credential.
-  - The outer MCP row of `call_operation` (`mcp/handlers.py`): it looks up
-    the operation inside, and a stored secret class makes the broadcast
-    detail the aggregate only.
+  - The outer MCP row of `call_operation` (`mcp/handlers.py`): the
+    dispatcher notes the class of the row it really runs (it can pick
+    another catalog or version than the one named; `note_ran_op_class` in
+    `op_class_of.py`). The row the caller named is looked up too. A secret
+    class on either makes the broadcast detail the aggregate only.
   - The console drawers (`ui/routes/broadcast/aggregate_gate.py`): the
     secret class that the audit row stored wins. The count of write calls in
     `reflex/adoption.py` also counts the stored class.
   - Standing grants (`service_grants.py`): grant create refuses an op with
-    a stored `credential_read`, and an existing grant row does not run it.
+    a stored `credential_read` or `credential_mint`, and an existing grant
+    row does not run it.
     Grant create and use also refuse a `credential_write` that has no
     preview builder, whatever its source, because the approver then sees
     nothing of the call. The shadow policy marks use the same checks

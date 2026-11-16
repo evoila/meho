@@ -3,8 +3,12 @@
 
 """Park-time facts for the Keycloak writes that change who has rights.
 
-``keycloak.group.member.add``, ``keycloak.role_mapping.assign`` and
+``keycloak.group.member.add``, ``keycloak.role_mapping.assign``,
+``keycloak.role_mapping.client.assign`` and
 ``keycloak.group.update_attributes`` change what a login may do in MEHO.
+``keycloak.user.update`` (a new email or user name) and
+``keycloak.user.credential.delete`` (a passkey or one-time code removed)
+change how a login signs in, so they count as a change of rights too.
 When one of them waits for approval, :func:`with_grant_facts` adds a
 ``grant`` block to its preview:
 
@@ -14,10 +18,11 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
   resolves it: an id in the params wins, else the name is looked up on
   the same level (``parent_id``). ``None`` when it cannot be read.
 * ``login_realm``: the target manages a realm that MEHO's own login uses.
-* ``platform_admin``: the change is for the platform admin group or role.
-  Read from the group the handler will change, by id when the params
-  carry one. ``None`` when MEHO could not read the group, which the
-  approval treats as the strict case.
+* ``platform_admin``: the change is for the platform admin group or role,
+  or gives a role of the ``realm-management`` client (it decides who may
+  manage the realm). Read from the group the handler will change, by id
+  when the params carry one. ``None`` when MEHO could not read the group,
+  which the approval treats as the strict case.
 * ``members``: for a group attribute change in the login realm, the ids
   of the logins in the group (up to :data:`MEMBER_CAP`). ``None`` when
   they could not be read, or when there are more than the cap. The
@@ -25,7 +30,10 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
   group.
 
 The same builder runs again right before the approved change runs, so
-the approval check can compare the ids with the live system. The approval
+the approval check can compare the ids with the live system. For
+``keycloak.user.credential.delete`` it also compares the credentials the
+card lists under ``will_remove``: when they differ, the run is refused
+with :data:`CREDENTIALS_CHANGED`. The approval
 rules that use these facts are in
 :mod:`meho_backplane.operations.grant_approval`.
 """
@@ -35,6 +43,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import _GROUP_MEMBERS_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_write_account_common import is_realm_management
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import find_group
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
@@ -46,7 +55,13 @@ from meho_backplane.settings import get_settings
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 
-__all__ = ["GRANT_OPS", "MEMBER_CAP", "register_grant_ops", "with_grant_facts"]
+__all__ = [
+    "CREDENTIALS_CHANGED",
+    "GRANT_OPS",
+    "MEMBER_CAP",
+    "register_grant_ops",
+    "with_grant_facts",
+]
 
 PLATFORM_ADMIN_GROUP = ADMIN_GROUPS[1]
 _WANTED: Final[str] = PLATFORM_ADMIN_GROUP.casefold()
@@ -61,7 +76,20 @@ _MEMBER_PAGE: Final[int] = 100
 GRANT_OPS: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {
     "keycloak.group.member.add": (("user_id",), "group_id", "group_name"),
     "keycloak.role_mapping.assign": (("id",), None, None),
+    "keycloak.role_mapping.client.assign": (("id",), None, None),
+    "keycloak.user.update": (("id",), None, None),
+    "keycloak.user.credential.delete": (("id",), None, None),
     "keycloak.group.update_attributes": ((), "id", "name"),
+}
+
+#: Why an approved credential delete did not run.
+CREDENTIALS_CHANGED: Final[str] = (
+    "The credentials changed since the request; send a new request. The operation did not run."
+)
+
+#: op_id -> (the card key that lists what the run acts on, the refusal when it changed)
+_BOUND_IDS: dict[str, tuple[str, str]] = {
+    "keycloak.user.credential.delete": ("will_remove", CREDENTIALS_CHANGED),
 }
 
 
@@ -72,6 +100,7 @@ def register_grant_ops() -> None:
             op_id,
             user_id_params=user_params,
             group_id_params=(group_id_param,) if group_id_param else (),
+            bound_ids=_BOUND_IDS.get(op_id),
         )
 
 
@@ -204,7 +233,9 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
             return None
         login_realm = _login_realm(ctx)
         group_id: str | None = None
-        if group_id_param is None or group_name_param is None:
+        if op_id == "keycloak.role_mapping.client.assign" and is_realm_management(ctx.params):
+            platform: bool | None = True
+        elif group_id_param is None or group_name_param is None:
             platform = _roles_include_platform_admin(ctx)
         else:
             group_id, group_name = await _group(ctx, group_id_param, group_name_param)

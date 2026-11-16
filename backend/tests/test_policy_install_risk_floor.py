@@ -93,7 +93,8 @@ _RISK_REFUSAL = (
     "sets `risk: caution`, but `install:classifications[0]` sets `irfix.vm.stop` to "
     "`destructive` for the whole install, so `risk: caution` does not count for "
     "`irfix.vm.stop`. The entry still counts for the other operations it matches. Add a "
-    "tenant entry for `irfix.vm.stop` with `risk: destructive` or higher, or leave "
+    "tenant entry for `irfix.vm.stop` of connector `irfix-1.x` with `risk: destructive` "
+    "or higher, or leave "
     "`irfix.vm.stop` out of this entry's match."
 )
 _NARROW_RISK_REFUSAL = (
@@ -619,6 +620,7 @@ async def test_the_rest_single_edit_refuses_ending_an_install_wait(
     detail = resp.json()["detail"]
     assert detail.startswith("classification_refused: This edit sets `always_wait: false`")
     assert "`install:classifications[0]`" in detail
+    assert detail.endswith("Do not send `always_wait: false`.")
     async with get_sessionmaker()() as session:
         assert list((await session.execute(select(ApprovalRequest))).scalars()) == []
         stored = list((await session.execute(select(TenantPolicy))).scalars())

@@ -1261,7 +1261,7 @@ Read recent agent announcements for the operator's tenant
 meho broadcast recent [flags]
 ```
 
-- `--active-only` — exclude expired TTL claims
+- `--active-only` — keep only active claims (not completed, TTL not run out)
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
@@ -4177,7 +4177,7 @@ meho pfsense version [flags]
 
 ## `meho policy`
 
-Manage the policy file (validate / diff / import / export / history)
+Manage the policy file (validate / diff / import / export / history / explain)
 
 ```
 meho policy
@@ -4194,6 +4194,25 @@ meho policy diff FILE [flags]
 - `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — print the server's answer as JSON
 - `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
+
+### `meho policy explain`
+
+Say why a call runs, waits or is denied, and who may approve it
+
+```
+meho policy explain [CONNECTOR_ID OP_ID] [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--file` — a policy file that is not imported
+- `--groups` — ask for a login in these groups: Readers, Operators, SA-Operators, Admins, Approvers
+- `--json` — print the server's answer as JSON
+- `--me` — ask for yourself
+- `--principal` — with --groups: person, agent or service
+- `--request` — show the rule stored on this approval request
+- `--scope` — with --file: tenant or install
+- `--target` — the target's name
+- `--via` — for a person: web or token (default: as you call with --me, token with --groups)
 
 ### `meho policy export`
 

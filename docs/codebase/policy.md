@@ -62,7 +62,13 @@ routing:
   before the install's. Two entries with the same `match` are a mistake.
   Routing only narrows who may approve; see
   [approvals.md](approvals.md), "Approver routing".
-- A later change adds `bindings`. Until then it is an unknown key.
+- `bindings` (a tenant's file only) says which login group is which team:
+  a group, matched by its full path or its group attribute, gets one of the
+  five group kinds and a set of categories. They count only while the
+  switch `POLICY_APPROVER_ROUTING` is on. See
+  [policy-bindings.md](policy-bindings.md).
+- The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
+  sign-in and the routing at the click.
 
 ## Checks
 
@@ -150,10 +156,10 @@ it.
 
 - `build_plan` parses and checks the file and works out the diff. It
   writes nothing. The diff has the sections `description`, `taxonomy`,
-  `classifications` and `routing`, each with `added`, `changed` (`before`
-  and `after`) and `removed`. A routing entry is found by its `match`; it
-  is `changed` when its approvers or its place in the list changed
-  (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
+  `classifications`, `routing` and `bindings`, each with `added`, `changed`
+  (`before` and `after`) and `removed`. A routing entry is found by its
+  `match`; it is `changed` when its approvers or its place in the list
+  changed (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
   values). Entries are told apart by their whole `match` (each part on its
   own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
@@ -228,7 +234,7 @@ waiting with an unknown approver set.
 
 ## Endpoints and CLI
 
-Every route takes `scope` (`tenant`, the default, or `install`). Callers:
+Every file route takes `scope` (`tenant`, the default, or `install`). Callers:
 `tenant_admin` or platform admin; `install` needs a platform admin. The
 import is human-only.
 
@@ -239,6 +245,7 @@ import is human-only.
 | `POST /api/v1/policy/import` | `meho policy import FILE` | 202 with the approval request; 200 "No change."; 422 with mistakes; 409 with the switch off |
 | `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
 | `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
+| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
 
 Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `cli/internal/cmd/policy/`.
@@ -246,7 +253,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 ## Tests
 
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
-versions), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
+versions), `backend/tests/test_policy_bindings.py` (bindings), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
 approval by a second admin),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `backend/tests/test_policy_routing.py` (the `routing` section, its checks,

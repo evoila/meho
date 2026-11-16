@@ -447,3 +447,53 @@ async def test_the_runner_drops_the_kept_login_when_the_descriptor_changed(
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_the_runner_keeps_the_login_after_a_probe_and_drops_it_after_an_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gateway sends ``connection_changed_at``, and the runner uses it.
+
+    A probe moves only ``updated_at``. Without ``connection_changed_at`` in
+    the descriptor, the runner falls back to ``updated_at`` and drops the
+    login after a probe too.
+    """
+    monkeypatch.setenv("MEHO_NETDIAG_PROBE_ALLOWLIST", "127.0.0.1")
+    recorder = _RecordingConnector()
+    _CONNECTOR_INSTANCE_CACHE[type("A", (), {})] = recorder  # type: ignore[index]
+    row = TargetORM(
+        id=uuid.uuid4(),
+        tenant_id=_TENANT,
+        name="srv",
+        aliases=[],
+        product="net",
+        host="127.0.0.1",
+        auth_model="shared_service_account",
+        verify_tls=True,
+        extras={},
+        updated_at=_T0,
+        connection_changed_at=_T0,
+    )
+
+    def _from_gateway(port: int) -> RunnerWorkItem:
+        # The runner reads the work item from the gateway's JSON answer.
+        sent = _runner_item(descriptor_from_target(row), port)
+        return RunnerWorkItem.model_validate_json(sent.model_dump_json())
+
+    server = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        assert (await execute_work_item(_from_gateway(port))).status == "ok"
+
+        row.updated_at = _T1  # a probe
+        assert _from_gateway(port).target_descriptor.connection_changed_at == _T0
+        assert (await execute_work_item(_from_gateway(port))).status == "ok"
+        assert recorder.calls == []
+
+        row.updated_at = row.connection_changed_at = _T1 + timedelta(minutes=1)  # an update
+        assert (await execute_work_item(_from_gateway(port))).status == "ok"
+        assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
+    finally:
+        server.close()
+        await server.wait_closed()

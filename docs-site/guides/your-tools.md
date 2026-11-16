@@ -16,8 +16,9 @@ or go to `/ui/account`. The card **Your tools** lists each tool kind:
 - the name of the tool kind;
 - its login client in Keycloak (for example `meho-mcp-desktop`);
 - its last use: the newest entry of the audit log for you and that tool,
-  in the last 90 days. It shows "none in the last 90 days" when there is
-  none.
+  in the last 90 days. MEHO looks only at your newest 500 entries. It
+  shows "none in your newest 500 audit rows of the last 90 days" when
+  none of them is from that tool.
 
 | Tool kind | Login client |
 |---|---|
@@ -51,10 +52,11 @@ login. Then:
 Sometimes two tools share one login. This happens when both signed in
 through the same browser login, for example Claude Desktop and the
 command line. Keycloak can end such a login only for both tools at once.
-So MEHO keeps it, and your other tool keeps working. The card names the
-other tool. While that login lasts, the signed-out tool can still get new
-access tokens through it. To stop that too, end the login in your
-Keycloak account page.
+So MEHO keeps it, and your other tool keeps working. Then the card says
+"Partly signed out" and names the other tool. While that login lasts,
+the signed-out tool can still get new access tokens through it. To stop
+that too, end the login in your Keycloak account page. Then the other
+tool must sign in again.
 
 If Keycloak has no login of that tool for you, the card says "Nothing
 changed". If a call to Keycloak fails, the card shows an error. Try again
@@ -77,8 +79,8 @@ login client: the setting `MCP_CLIENT_PER_TOOL_KIND` is on. See
 For the admin:
 
 - The last use needs the setting `AUDIT_CLIENT_IDENTITY`, which names the
-  login client in each audit entry. Without it, every tool shows "none in
-  the last 90 days", and the sign-out still works.
+  login client in each audit entry. Without it, no tool shows a last
+  use, and the sign-out still works.
 - MEHO signs a tool out with its Keycloak admin client. That client needs
   the realm role `manage-users`. MEHO's built-in Keycloak has it. On your
   own Keycloak, give it to the admin client of MEHO, or the card shows an

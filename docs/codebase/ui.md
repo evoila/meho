@@ -1058,7 +1058,11 @@ A kind whose client id is not set is left out.
 
 - **Last use** is the newest audit row of the person (every tenant) whose
   `client` block names that client, in the last 90 days. Audit rows name
-  the client only while `AUDIT_CLIENT_IDENTITY` is on.
+  the client only while `AUDIT_CLIENT_IDENTITY` is on. MEHO reads at most
+  the person's newest 500 rows of the 90 days (`LAST_USE_MAX_ROWS`),
+  through the index `audit_log_operator_sub_occurred_at_idx`. A tool
+  with no row among them shows "none in your newest 500 audit rows of the
+  last 90 days".
 - **"Sign out this tool"** asks for a confirm, then posts
   `POST /ui/account/tools/sign-out` with the form field `tool` (the tool
   kind key, never a client id). With the Keycloak admin client (it needs
@@ -1076,14 +1080,21 @@ A kind whose client id is not set is left out.
 
   Keycloak ends an ordinary login only as a whole. A login that this
   client shares with another client (both signed in through one browser
-  login) is kept, so the other tool keeps working; the result line names
-  that tool. The user id is the person of the session, never a form
+  login) is kept, so the other tool keeps working. Then the tool can
+  still renew through that login, so the result line is in the info
+  style and starts with "Partly signed out". It names the other tool and
+  says how to end the shared login in the Keycloak account page. The user id is the person of the session, never a form
   field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
   a real Keycloak that only the signed-out tool stops renewing.
 - After at least one login ended, MEHO writes the audit row
   `auth.tool_sign_out` (method `INTERNAL`, status 200, payload
-  `client_id`, `tool`, `outcome` `signed_out`, `offline_login_ended`,
-  `sessions_ended`, `shared_with`). A failed call (an error answer, no
+  `client_id`, `tool`, `outcome`, `offline_login_ended`,
+  `sessions_ended`, `shared_with`). `outcome` is `signed_out`, or
+  `partly_signed_out` when a shared login was kept. The row is written in
+  the current tenant of the web session, but the sign-out ends the
+  tool's logins of the person in the whole Keycloak realm: a login is
+  per person, not per tenant. The outcomes are listed in
+  [`../architecture/audit.md`](../architecture/audit.md#known-internal-path-values). A failed call (an error answer, no
   answer, no admin client) shows an error line and writes the same row
   with status 502, the `error` class name, and `outcome` `failed`. When
   the call failed after a login already ended

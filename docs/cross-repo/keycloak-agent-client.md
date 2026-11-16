@@ -136,6 +136,12 @@ create and update clients. In Keycloak 22+:
 > operations if your realm's threat model requires it (Keycloak fine-
 > grained admin permissions, available since Keycloak 24, can scope this
 > to clients whose `clientId` starts with `agent:`).
+>
+> `manage-users` is a strong right too. With it, the client can change
+> any user of the realm: their details, their passwords, their roles and
+> their logins. MEHO uses it only for "Sign out this tool": it lists the
+> logins of the signed-in person and ends that person's logins of one
+> tool. MEHO does not use it to read or change other users.
 
 ## Step 3 — Set the backplane env vars
 

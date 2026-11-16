@@ -28,8 +28,9 @@ address of your MEHO.
 
 **With the VPN off**, the app shows the page "MEHO is not reachable.
 Connect to the VPN and try again." It never shows an old copy of the
-approvals list. The app keeps only its icons, styles and this offline
-page on the device. It keeps no approval, broadcast or API answer.
+approvals list. The app keeps only its icons, styles, fonts, theme
+script, app manifest and this offline page on the device. It keeps no
+approval, broadcast or API answer.
 
 ## Get a notification when an approval waits
 

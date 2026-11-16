@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -239,9 +240,11 @@ def build_account_tools_router() -> APIRouter:
         tools: list[ToolRow] | None
         try:
             tools = await tools_section(db_session, session_ctx)
-        except (SQLAlchemyError, OSError) as exc:
+        except (SQLAlchemyError, asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as exc:
             # The result line must reach the person even when the database
             # is down (the audit write may have failed for the same reason).
+            # asyncpg passes some connect errors on unwrapped, for example
+            # CannotConnectNowError while the server restarts.
             _log.warning(
                 "ui_account_tools_last_use_read_failed",
                 operator_sub=session_ctx.operator_sub,

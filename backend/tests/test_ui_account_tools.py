@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
 
+import asyncpg
 import httpx
 import pytest
 import respx
@@ -784,20 +785,32 @@ def test_failed_audit_write_shows_an_error_and_logs_what_ended(
     assert "made-up-admin-secret" not in str(logs)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        OperationalError("SELECT audit_log.occurred_at", {}, Exception("database is gone")),
+        asyncpg.CannotConnectNowError("the database system is starting up"),
+        asyncpg.TooManyConnectionsError("too many clients already"),
+        asyncpg.InterfaceError("connection is closed"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
 def test_failed_audit_write_and_failed_last_use_read_still_show_the_error(
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
 ) -> None:
     """The database is gone: the audit write fails, then the read of the last uses fails.
 
     The card still shows the audit error line, not an HTTP 500, and each
-    row says its last use is unknown.
+    row says its last use is unknown. asyncpg passes some connect errors
+    on without a SQLAlchemy wrapper, so they are tested too.
     """
 
     async def _no_audit(**_kwargs: Any) -> uuid.UUID:
-        raise OperationalError("INSERT INTO audit_log", {}, Exception("database is gone"))
+        raise error
 
     async def _no_read(*_args: Any, **_kwargs: Any) -> dict[str, datetime]:
-        raise OperationalError("SELECT audit_log.occurred_at", {}, Exception("database is gone"))
+        raise error
 
     monkeypatch.setattr(tool_sign_out, "write_internal_audit_row", _no_audit)
     monkeypatch.setattr(account_tools, "last_use_by_client", _no_read)
@@ -816,4 +829,4 @@ def test_failed_audit_write_and_failed_last_use_read_still_show_the_error(
     assert _NONE_FOUND not in text
     failed = next(e for e in logs if e["event"] == "ui_account_tools_last_use_read_failed")
     assert failed["operator_sub"] == _ME
-    assert failed["reason"] == "OperationalError"
+    assert failed["reason"] == type(error).__name__

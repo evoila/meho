@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
@@ -197,3 +198,162 @@ def test_project_create_schema_refuses_bad_input() -> None:
         {"project_name": "x", "extra": 1},
     ):
         assert list(validator.iter_errors(bad)), bad
+
+
+# ---------------------------------------------------------------------------
+# The shared dispatcher: wait for approval, create once, audit, read back
+# ---------------------------------------------------------------------------
+
+
+class _FakeHarborProjects:
+    """A small fake of Harbor's project API that keeps the projects it made."""
+
+    def __init__(self) -> None:
+        self.projects: dict[str, dict[str, Any]] = {}
+        self.post_count = 0
+
+    def create(self, request: httpx.Request) -> respx.MockResponse:
+        self.post_count += 1
+        body = json.loads(request.content)
+        name = body["project_name"]
+        if name in self.projects:
+            return respx.MockResponse(409)
+        self.projects[name] = {"name": name, "metadata": body["metadata"]}
+        return respx.MockResponse(201)
+
+    def info(self, request: httpx.Request, name: str) -> respx.MockResponse:
+        if name not in self.projects:
+            return respx.MockResponse(404)
+        return respx.MockResponse(200, json=self.projects[name])
+
+
+async def _seed_dispatch_target(tenant_id: UUID) -> None:
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Target as TargetORM
+
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                name=_TARGET.name,
+                aliases=[],
+                product="harbor",
+                host=_TARGET.host,
+                port=443,
+                fqdn=None,
+                secret_ref=_TARGET.secret_ref,
+                auth_model=AuthModel.SHARED_SERVICE_ACCOUNT.value,
+                vpn_required=False,
+                extras={},
+                fingerprint={"version": "2.x"},
+                preferred_impl_id="harbor-rest",
+                notes="seeded by test_connectors_harbor_project_create",
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_project_create_waits_for_approval_then_audits_and_reads_back_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import select
+
+    from meho_backplane.connectors.harbor.ops_project_create import (
+        register_harbor_project_create_operation,
+    )
+    from meho_backplane.connectors.harbor.typed_ops import register_harbor_typed_operations
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest, AuditLog
+    from meho_backplane.operations import reset_dispatcher_caches
+    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+    from meho_backplane.operations.approval_queue import (
+        approve_request,
+        resume_dispatch_after_approval,
+    )
+    from meho_backplane.operations.meta_tools import call_operation
+
+    _install_vault(monkeypatch)
+    reset_dispatcher_caches()
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    await register_harbor_typed_operations(embedding_service=embedding)
+    await register_harbor_project_create_operation(embedding_service=embedding)
+    connector = HarborConnector()
+    _CONNECTOR_INSTANCE_CACHE[HarborConnector] = connector
+    requester = _operator()
+    await _seed_dispatch_target(requester.tenant_id)
+
+    harbor = _FakeHarborProjects()
+    args = {
+        "connector_id": "harbor-rest-2.x",
+        "target": _TARGET.name,
+        "params": {"project_name": "demo-images"},
+    }
+    try:
+        with respx.mock(assert_all_called=False) as mock:
+            mock.post(_PROJECTS_URL).mock(side_effect=harbor.create)
+            mock.get(url__regex=rf"^{_PROJECTS_URL}/(?P<name>[^/?]+)$").mock(
+                side_effect=harbor.info
+            )
+
+            # 1) The call waits for approval. Harbor gets no POST yet.
+            call = await call_operation(requester, {**args, "op_id": "harbor.project.create"})
+            assert call["status"] == "awaiting_approval", call
+            request_id = UUID(call["extras"]["approval_request_id"])
+            assert harbor.post_count == 0
+
+            # 2) A second person approves once, and the create runs once.
+            approver = Operator(
+                sub="op-project-approver",
+                name="Harbor Project Approver",
+                email=None,
+                raw_jwt="op.project.approve.jwt",
+                tenant_id=requester.tenant_id,
+                tenant_role=TenantRole.OPERATOR,
+            )
+            async with get_sessionmaker()() as s:
+                approved = await approve_request(s, request_id, operator=approver, params=None)
+                await s.commit()
+            assert approved.status == "approved"
+            async with get_sessionmaker()() as s:
+                row = await s.get(ApprovalRequest, request_id)
+                assert row is not None
+                resume = await resume_dispatch_after_approval(
+                    operator=approver, request=row, params=None
+                )
+            assert resume.status == "ok", resume.error
+            assert resume.result["created"] is True
+            assert harbor.post_count == 1
+
+            # 3) The audit row of the create records success.
+            async with get_sessionmaker()() as s:
+                audit_rows = list(
+                    (
+                        await s.execute(
+                            select(AuditLog).where(AuditLog.path == "harbor.project.create")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert [
+                r.payload.get("result_status") for r in audit_rows if r.method == "DISPATCH"
+            ] == ["ok"]
+
+            # 4) harbor.project.info reads the project back as private.
+            info = await call_operation(
+                requester,
+                {**args, "op_id": "harbor.project.info"},
+            )
+            assert info["status"] == "ok", info
+            assert info["result"]["name"] == "demo-images"
+            assert info["result"]["metadata"]["public"] == "false"
+            assert harbor.post_count == 1
+    finally:
+        _CONNECTOR_INSTANCE_CACHE.pop(HarborConnector, None)
+        reset_dispatcher_caches()
+        await connector.aclose()

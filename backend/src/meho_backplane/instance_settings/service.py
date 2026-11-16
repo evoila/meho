@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.api.v1.targets import (
     _canonicalise_and_validate_product,
     _enforce_tls_trust_exclusion,
+    _require_keycloak_managed_realm,
     _resolve_create_secret_ref,
     _to_full,
     _validate_preferred_impl_id,
@@ -77,6 +78,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     parse_settings_file,
 )
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.secret_field_map import merge_secret_field_map
 from meho_backplane.tenancy.ensure import ensure_tenant
@@ -539,6 +541,7 @@ def _plan_new_target(
         return None
     try:
         product = _canonicalise_and_validate_product(body.product)
+        _require_keycloak_managed_realm(product, body.extras, body.name)
         _validate_preferred_impl_id(body.preferred_impl_id, product)
         secret_ref = _resolve_create_secret_ref(body, operator)
     except HTTPException as exc:
@@ -604,8 +607,9 @@ def _plan_targets(
     rows: list[TargetORM],
     operator: Operator,
     plan: _TenantPlan,
-    mistakes: list[str],
+    import_plan: ImportPlan,
 ) -> list[dict[str, Any]]:
+    mistakes, warnings = import_plan.mistakes, import_plan.warnings
     by_name = {row.name: row for row in rows}
     desired = {row.name: _target_block(row) for row in rows}
     for i, entry in enumerate(entries):
@@ -617,6 +621,7 @@ def _plan_targets(
             if planned_new is not None:
                 desired[entry.name], create_body = planned_new
                 plan.targets.append((i, entry.name, create_body))
+                _add_realm_warnings(path, desired[entry.name], warnings)
             continue
         planned = _plan_existing_target(path, loc_tuple, entry, row, operator, mistakes)
         if planned is None:
@@ -624,7 +629,16 @@ def _plan_targets(
         desired[entry.name], update_body = planned
         if update_body is not None:
             plan.targets.append((i, entry.name, update_body))
+            _add_realm_warnings(path, desired[entry.name], warnings)
     return [desired[name] for name in sorted(desired)]
+
+
+def _add_realm_warnings(path: str, block: dict[str, Any], warnings: list[str]) -> None:
+    """Add the warnings a target write would give (the same as REST) for the target at *path*."""
+    warnings.extend(
+        f"`{path}` ({block['name']}): {warning}"
+        for warning in keycloak_realm_warnings(block.get("product"), block.get("extras"))
+    )
 
 
 async def build_plan(
@@ -704,7 +718,7 @@ async def build_plan(
                 targets.get(tid, []),
                 tenant_operator,
                 tenant_plan,
-                plan.mistakes,
+                plan,
             ),
         }
         in_file[str(tid)] = {

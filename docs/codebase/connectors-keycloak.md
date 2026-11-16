@@ -1434,6 +1434,9 @@ name, is refused like this:
   "Managed realm" field (`ui/routes/connectors/forms_realm.py`); for a
   Keycloak target it is required. The edit form keeps every other extras
   key, so an older target without a realm can be fixed in the console.
+- **Settings file import.** `POST /api/v1/settings/import`
+  (`instance_settings/service.py`) runs the same check in the preview as in
+  the apply, so the preview names the same mistake.
 
 **Allowed, but with a warning.** A managed realm that is the target's
 admin realm (`master` by default), or the realm MEHO itself signs in with
@@ -1448,6 +1451,8 @@ admin realm (`master` by default), or the realm MEHO itself signs in with
 - The console create and edit forms show the lines after the save
   (`_saved_warning_modal.html`, from `forms_realm.saved_with_warnings`)
   instead of going straight back to the targets list.
+- The settings file import puts each line, with the path of the target
+  entry, in the `warnings` of the preview and of the apply.
 - The dispatcher stamps the lines as `target_warnings` on the approval
   card of every write on such a target; the console shows them as a
   "Check the target" box.

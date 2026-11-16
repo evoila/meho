@@ -48,6 +48,7 @@ from meho_backplane.connectors.keycloak import (
     ops_write_preview,  # noqa: F401
     ops_write_realm_smtp,  # noqa: F401 -- refuses an inline SMTP password before approval
     ops_write_rights_card,  # noqa: F401 -- cards with the object now and the new values
+    ops_write_scope_mapper,  # noqa: F401 -- the approval card of the scope mapper write
     rights_changes,  # noqa: F401 -- registers the writes that are changes of rights
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector

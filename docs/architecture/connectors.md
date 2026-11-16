@@ -187,7 +187,7 @@ Connector (ABC)                                      ← G0.2-T1 (shipped)
 │   ├── NSXConnector
 │   ├── HarborConnector
 │   └── ... (HTTP-API vendors)
-└── SshConnector         — asyncssh, key+password, per-target connection pool     ← G0.2-T4 (shipped)
+└── SshConnector         — asyncssh, key+password, one pooled connection per target and caller     ← G0.2-T4 (shipped)
     ├── Bind9Connector
     ├── PfsenseConnector
     └── HolodeckConnector

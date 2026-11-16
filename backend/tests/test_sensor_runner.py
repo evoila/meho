@@ -1789,3 +1789,46 @@ async def test_configured_principal_does_not_change_meho_attribution(
     assert operator.sub == "sensor-identity"
     assert operator.tenant_role is TenantRole.OPERATOR
     assert operator.principal_kind is PrincipalKind.USER
+
+
+@pytest.mark.asyncio
+async def test_about_with_no_login_persists_the_cause_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Sensor on an SSH ``about`` read with no login shows "no login".
+
+    The check runner has no login here, so the connector cannot read the
+    target's secret. The stored evidence names the missing login, not an
+    unreachable target.
+    """
+    from unittest.mock import patch
+
+    from meho_backplane.connectors._shared.vault_creds import OperatorTokenRequiredError
+    from meho_backplane.connectors.adapters.ssh import SshConnector
+    from meho_backplane.connectors.linux import LinuxSshConnector
+    from meho_backplane.operations._errors import result_connector_error
+
+    async def _dispatch(**kwargs: Any) -> OperationResult:
+        target = SimpleNamespace(name="t", host="h.test.invalid", port=22, secret_ref="x/y")
+        boom = AsyncMock(side_effect=OperatorTokenRequiredError("no operator JWT"))
+        try:
+            with patch.object(SshConnector, "_run_command", boom):
+                await LinuxSshConnector().about(target, {})
+        except Exception as exc:
+            return result_connector_error(kwargs["op_id"], exc, 1.0)
+        raise AssertionError("about must raise")
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _dispatch)
+
+    sensor_id = await _create_interval_sensor(interval_seconds=300)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_evidence is not None
+    assert row.last_evidence["reason"] == "dispatch_not_ok"
+    assert "ConnectorLoginRequiredError" in row.last_evidence["dispatch_error"]
+    assert "Unreachable" not in row.last_evidence["dispatch_error"]

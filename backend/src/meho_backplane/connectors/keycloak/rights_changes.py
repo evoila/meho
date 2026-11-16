@@ -57,6 +57,9 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
         "a client scope carries protocol mappers and role scope mappings for tokens"
     ),
     "keycloak.protocol_mapper.create": "a protocol mapper decides which claims a token holds",
+    "keycloak.client_scope.protocol_mapper.update": (
+        "changes a protocol mapper of a client scope, which decides which claims a token holds"
+    ),
     "keycloak.user.reset_password": (
         "a new password for a login is a change of rights; another admin approves it"
     ),

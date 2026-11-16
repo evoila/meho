@@ -194,11 +194,13 @@ _NOT_SECRET_NAMES: Final[frozenset[str]] = frozenset(
         "community_additive",  # FRR route map: append the community (checkbox)
         "community_match",  # FRR route map: BGP community list name
         "community_set",  # FRR route map: BGP community values (AS:NN)
+        "password_type",  # FRR BGP neighbor: which kind of password (select)
         "passwordencrypt",  # FRR: "encrypt passwords" (checkbox)
         "snortcommunityrules",  # Suricata: use the Snort community rules (on/off)
         "usepass",  # OpenVPN client export: protect the file with a password (checkbox)
         "usetoken",  # OpenVPN client export: use the Windows certificate store (checkbox)
         "useproxypass",  # OpenVPN client export: proxy auth method (none/basic/ntlm)
+        "hide_secrets",  # WireGuard: hide keys in the GUI (yes/no)
         "nopasswd",  # sudo: no password needed (checkbox)
         "eve_log_files_hash",  # Suricata: hash algorithm name for file logging
         "pfb_dnsvip_skew",  # pfBlockerNG: CARP skew number for the DNSBL VIP
@@ -269,6 +271,10 @@ _ACME_DNS_NAME_RE: Final[re.Pattern[str]] = re.compile(
     r"^dns_.+(?:key|password|secret|token|pwd|pw)$"
 )
 
+#: The only names of :data:`_NOT_SECRET_NAMES` that skip the shared name
+#: rule. Lowercased, exact match. Every other name it hides stays hidden.
+_SHARED_RULE_EXCEPTIONS: Final[frozenset[str]] = frozenset({"password_type", "hide_secrets"})
+
 NAME_NOISE_RE: Final[re.Pattern[str]] = re.compile(r"[-_.]")
 
 
@@ -300,9 +306,13 @@ def is_secret_name_in(name: str, open_names: Collection[str]) -> bool:
     the scan keeps it up to date as elements open and close.
     """
     # The shared name rule of every other place comes first, so this list
-    # hides at least the names it hides. A namespace prefix counts too:
+    # hides at least the names it hides, except the two plain settings of
+    # :data:`_SHARED_RULE_EXCEPTIONS`. A namespace prefix counts too:
     # ``password:x`` is as secret as ``password``.
-    if any(is_secret_param_name(part) for part in name.split(":")):
+    if any(
+        part.lower() not in _SHARED_RULE_EXCEPTIONS and is_secret_param_name(part)
+        for part in name.split(":")
+    ):
         return True
     lowered = name.lower()
     if any(_name_part_is_secret(part) for part in lowered.split(":")):

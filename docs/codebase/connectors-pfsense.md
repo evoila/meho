@@ -475,12 +475,14 @@ see the cleaned text.
   hides (`is_secret_param_name` in `broadcast/events.py`, see
   `redaction.md`) is hidden here too, before the lists of this connector.
   So this connector hides at least the names that every other place hides.
+  Only two plain settings skip it, by their exact lowercased name:
+  FRR `password_type` and WireGuard `hide_secrets`.
 - **Names that only look secret** (`_NOT_SECRET_NAMES` in
   `redaction_names.py`), checked against the package sources: the FRR
   route-map settings `community_set` / `community_match` / `community_action`
-  / `community_additive`, FRR `passwordencrypt`, Suricata
+  / `community_additive`, FRR `password_type` and `passwordencrypt`, Suricata
   `snortcommunityrules` and `eve_log_files_hash`, the OpenVPN client export
-  `usepass` / `usetoken` / `useproxypass`, sudo
+  `usepass` / `usetoken` / `useproxypass`, WireGuard `hide_secrets`, sudo
   `nopasswd`, pfBlockerNG `pfb_dnsvip_skew`, FreeRADIUS
   `varsettingsmotptokenlength`, and, for the `key` ending, `publickey` /
   `pubkey` / `public_key`, `widgetkey`, `eve_redis_key`, `prefetchkey`, the

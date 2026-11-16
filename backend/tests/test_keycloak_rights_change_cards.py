@@ -25,9 +25,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- registers the cards
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
+    KeycloakConnector,
+)
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import _realm_update_preview
 from meho_backplane.operations._preview import (
     PreviewContext,

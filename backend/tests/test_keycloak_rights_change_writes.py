@@ -29,10 +29,11 @@ from typing import Any
 
 import pytest
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- registers the marks
 from meho_backplane import op_classes
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
+    KeycloakConnector,
+)
 from meho_backplane.connectors.keycloak.ops_write_grant import GRANT_OPS
 from meho_backplane.connectors.keycloak.rights_changes import (
     NOT_RIGHTS_CHANGE_OPS,

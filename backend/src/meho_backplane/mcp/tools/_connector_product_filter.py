@@ -19,6 +19,8 @@ off by default) changes the filter:
 * The answer has a ``product_filter`` block. It names the name that
   matched for each product. When nothing matched, it lists the products
   that exist (after the ``status`` filter) and a hint to ask again.
+* A list in the block that is too long for the answer is stored behind a
+  handle, like a long ``connectors`` list (:func:`reduce_product_filter`).
 
 With the switch off, :func:`filter_by_product` is not called and the answer
 is the same as before.
@@ -26,23 +28,35 @@ is the same as before.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 from uuid import UUID
 
 from meho_backplane.connectors.registry import connectors_for_tenant
 from meho_backplane.operations.ingest import ConnectorListItem
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "LISTED_PRODUCTS_KEY",
     "PRODUCT_FILTER_KEY",
     "connector_list_product_aliases",
     "filter_by_product",
     "keep_allowed_product_filter",
+    "listed_products",
+    "reduce_product_filter",
 ]
 
 #: The key of the block next to ``connectors`` in the answer.
 PRODUCT_FILTER_KEY: Final[str] = "product_filter"
+
+#: The key of ``{connector_id: product}`` for every listed row, before the
+#: product filter. Only the rows not yet reduced carry it: the hosted agent
+#: reads it to name the products it may use, and the reducer drops it.
+LISTED_PRODUCTS_KEY: Final[str] = "_listed_products"
+
+#: The lists of the block that may be long.
+_BLOCK_LISTS: Final[tuple[str, ...]] = ("matches", "known_products")
 
 _NO_MATCH_HINT: Final[str] = (
     "No connector has this product name or another name for it. Ask again "
@@ -51,7 +65,8 @@ _NO_MATCH_HINT: Final[str] = (
 
 _NO_ALLOWED_MATCH_HINT: Final[str] = (
     "No connector this agent may use has this product name or another name "
-    "for it. Leave product out to list the connectors this agent may use."
+    "for it. Ask again with one of known_products, or leave product out to "
+    "list the connectors this agent may use."
 )
 
 
@@ -115,18 +130,57 @@ def filter_by_product(
     return kept, block
 
 
+def listed_products(items: Sequence[ConnectorListItem]) -> dict[str, str]:
+    """Return ``{connector_id: product}`` for *items* (:data:`LISTED_PRODUCTS_KEY`)."""
+    return {item.connector_id: item.product for item in items}
+
+
 def keep_allowed_product_filter(
     block: dict[str, Any],
     kept_rows: Sequence[dict[str, Any]],
+    listed: Mapping[str, str],
+    allowed_connectors: frozenset[str],
 ) -> dict[str, Any]:
     """Narrow a ``product_filter`` *block* to the rows a hosted agent may use.
 
     ``matches`` keeps only the products of *kept_rows*. When none is left,
-    ``known_products`` is dropped (it may name connectors the agent may not
-    use) and the hint says to list without ``product``.
+    ``known_products`` names only the products of the allowed connectors in
+    *listed* (``{connector_id: product}`` before the product filter), so a
+    product the agent may not use is never named.
     """
     products = {row.get("product") for row in kept_rows}
     matches = [match for match in block.get("matches", []) if match.get("product") in products]
     if matches:
         return {**block, "matches": matches}
-    return {"query": block.get("query"), "matches": [], "hint": _NO_ALLOWED_MATCH_HINT}
+    allowed = {product for cid, product in listed.items() if cid in allowed_connectors}
+    return {
+        "query": block.get("query"),
+        "matches": [],
+        "known_products": sorted(allowed),
+        "hint": _NO_ALLOWED_MATCH_HINT,
+    }
+
+
+async def reduce_product_filter(
+    reducer: JsonFluxReducer,
+    block: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Return *block* with each long list stored behind a handle.
+
+    ``matches`` and ``known_products`` each go through *reducer* with the
+    same limits as the rows (more than 50 entries or 4 KB). A short list
+    stays as it is. A long one becomes the reducer's summary with a
+    ``handle``; ``result_query`` reads its rows. ``known_products`` goes to
+    the reducer as ``{"product": name}`` rows.
+    """
+    reduced = dict(block)
+    for key in _BLOCK_LISTS:
+        values = block.get(key)
+        if not values:
+            continue
+        rows = [{"product": v} if isinstance(v, str) else v for v in values]
+        summary, handle = await reducer.reduce({key: rows}, None, context)
+        if handle is not None:
+            reduced[key] = {**summary, "handle": handle.model_dump(mode="json")}
+    return reduced

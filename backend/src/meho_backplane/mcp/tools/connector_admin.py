@@ -125,9 +125,12 @@ from meho_backplane.mcp.tools._connector_classification import (
     request_from_tool,
 )
 from meho_backplane.mcp.tools._connector_product_filter import (
+    LISTED_PRODUCTS_KEY,
     PRODUCT_FILTER_KEY,
     connector_list_product_aliases,
     filter_by_product,
+    listed_products,
+    reduce_product_filter,
 )
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
@@ -253,7 +256,9 @@ async def list_connector_rows(
     keeps only rows with exactly that product; empty text means no
     filter. With the switch ``CONNECTOR_LIST_PRODUCT_ALIASES`` on, the
     filter also matches other product names and adds a ``product_filter``
-    block (:func:`filter_by_product`). ``detail`` picks short rows (the default) or full rows.
+    block (:func:`filter_by_product`) and the products of all listed rows
+    (``LISTED_PRODUCTS_KEY``, dropped by :func:`reduce_connector_list`).
+    ``detail`` picks short rows (the default) or full rows.
     ``target`` (a target name or alias) keeps only the rows that fit that
     target and adds a ``target_fit`` summary
     (:func:`connectors_for_target`); it never chooses a connector.
@@ -272,6 +277,7 @@ async def list_connector_rows(
         connectors, extra[PRODUCT_FILTER_KEY] = filter_by_product(
             listed, product, operator.tenant_id
         )
+        extra[LISTED_PRODUCTS_KEY] = listed_products(listed)
     else:
         connectors = [item for item in listed if not product or item.product == product]
     if not target_name:
@@ -465,18 +471,24 @@ async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> d
     Same pattern as ``list_targets``: the spill is keyed to the caller's
     tenant and subject, which is the key ``result_query`` reads back with.
     A ``target_fit`` or ``product_filter`` summary is not part of the rows:
-    it stays next to the handle.
+    it stays next to the handle. A long list in ``product_filter`` gets its
+    own handle (:func:`reduce_product_filter`).
     """
+    result = {key: value for key, value in result.items() if key != LISTED_PRODUCTS_KEY}
+    context: dict[str, Any] = {
+        "op_id": CONNECTOR_LIST_NAME,
+        "tenant_id": str(operator.tenant_id),
+        "operator_sub": operator.sub,
+    }
+    if PRODUCT_FILTER_KEY in result:
+        result[PRODUCT_FILTER_KEY] = await reduce_product_filter(
+            _CONNECTOR_LIST_REDUCER, result[PRODUCT_FILTER_KEY], context
+        )
     rows = {key: value for key, value in result.items() if key not in _SUMMARY_KEYS}
     summary, handle = await _CONNECTOR_LIST_REDUCER.reduce(
         rows,
         None,
-        {
-            "op_id": CONNECTOR_LIST_NAME,
-            "tenant_id": str(operator.tenant_id),
-            "operator_sub": operator.sub,
-            "pagination_hint": _CONNECTOR_LIST_PAGINATION_HINT,
-        },
+        {**context, "pagination_hint": _CONNECTOR_LIST_PAGINATION_HINT},
     )
     if handle is None:
         return result

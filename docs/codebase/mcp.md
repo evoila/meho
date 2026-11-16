@@ -800,10 +800,20 @@ off by default).
     again with one of them, or without `product`.
 - `status`, `target` and `detail` still apply. A long list still comes
   back as a handle; `product_filter` stays next to it, like `target_fit`.
+- **Long lists in the block.** `matches` and `known_products` have the
+  same limits as the rows (more than 50 entries or 4 KB). A longer one
+  is stored behind its own handle: the block then holds the reducer's
+  summary with a `handle`, and `result_query` reads the rows
+  (`known_products` rows are `{"product": name}`). See
+  `reduce_product_filter`.
 - **Hosted agent.** The agent's connector allow-list also narrows the
   block: `matches` keeps only products of rows the agent may use. When
-  none is left, `known_products` is dropped and the hint says to list
-  without `product` (`keep_allowed_product_filter`).
+  none is left, `known_products` names only the products of the
+  connectors the agent may use, so the agent can ask again
+  (`keep_allowed_product_filter`). The rows not yet reduced carry
+  `{connector_id: product}` of every listed row under
+  `_listed_products` for this; `reduce_connector_list` drops it, so no
+  answer shows it.
 - **Why a switch.** Small models filtered by "vcenter" and gave up when
   the list came back empty. The switch goes on by default only after a
   benchmark run with it off and on, on the same build and models.

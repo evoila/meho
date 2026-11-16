@@ -116,6 +116,7 @@ from meho_backplane.mcp.tools import operations as _operations_tools  # noqa: F4
 from meho_backplane.mcp.tools import result_query as _result_query_tools  # noqa: F401
 from meho_backplane.mcp.tools import topology as _topology_tools  # noqa: F401
 from meho_backplane.mcp.tools._connector_product_filter import (
+    LISTED_PRODUCTS_KEY,
     PRODUCT_FILTER_KEY,
     keep_allowed_product_filter,
 )
@@ -304,7 +305,8 @@ def keep_allowed_connectors(
     the agent is shown only the connectors it may call (#4233). When a
     ``target_fit`` summary had rows and none of them is allowed, the summary
     says ``no_connector``: no connector this agent may use fits the target.
-    A ``product_filter`` block keeps only the products of the allowed rows
+    A ``product_filter`` block keeps only the products of the allowed rows,
+    and with no match names only the products of the allowed connectors
     (:func:`keep_allowed_product_filter`).
     """
     rows = result.get("connectors", [])
@@ -312,7 +314,9 @@ def keep_allowed_connectors(
     narrowed = {**result, "connectors": kept}
     product_filter = result.get(PRODUCT_FILTER_KEY)
     if product_filter is not None:
-        narrowed[PRODUCT_FILTER_KEY] = keep_allowed_product_filter(product_filter, kept)
+        narrowed[PRODUCT_FILTER_KEY] = keep_allowed_product_filter(
+            product_filter, kept, result.get(LISTED_PRODUCTS_KEY, {}), allowed_connectors
+        )
     target_fit = result.get("target_fit")
     if target_fit is not None and rows and not kept:
         narrowed["target_fit"] = {

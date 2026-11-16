@@ -13,7 +13,9 @@ These tests check:
   and a hint;
 * the names come from the connector classes, and only from the classes
   registered for that product;
-* the hosted agent's allow-list narrows the ``product_filter`` block.
+* a long list in the ``product_filter`` block is stored behind a handle;
+* the hosted agent's allow-list narrows the ``product_filter`` block, and a
+  filter with no match names the products the agent may use.
 """
 
 from __future__ import annotations
@@ -32,15 +34,9 @@ import meho_backplane.mcp.tools.connector_admin as ca_mod
 from meho_backplane.agent.toolset_discovery import keep_allowed_connectors
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
-from meho_backplane.mcp.tools._connector_product_filter import (
-    connector_list_product_aliases,
-    filter_by_product,
-)
-from meho_backplane.mcp.tools.connector_admin import (
-    list_connector_rows,
-    reduce_connector_list,
-)
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.operations.ingest import ConnectorListItem
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -157,21 +153,21 @@ def _ids(result: dict[str, Any]) -> list[str]:
 
 
 def test_switch_is_off_by_default() -> None:
-    assert connector_list_product_aliases() is False
+    assert pf_mod.connector_list_product_aliases() is False
 
 
 @pytest.mark.parametrize("product", ["", "vmware", "vcenter", "VMware", "nothing"])
 @pytest.mark.parametrize("detail", ["short", "full"])
 async def test_switch_off_answer_is_the_same_as_before(product: str, detail: str) -> None:
     operator = build_operator(TenantRole.OPERATOR)
-    result = await list_connector_rows(operator, {"product": product, "detail": detail})
+    result = await ca_mod.list_connector_rows(operator, {"product": product, "detail": detail})
     assert json.dumps(result) == json.dumps(_old_answer(product, detail))
 
 
 async def test_switch_off_does_not_read_the_registry(
     _stub_list_and_registry: list[UUID | None],
 ) -> None:
-    await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": "vcenter"})
+    await ca_mod.list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": "vcenter"})
     assert _stub_list_and_registry == []
 
 
@@ -184,7 +180,7 @@ async def test_switch_off_with_target_keeps_the_old_keys(monkeypatch: pytest.Mon
         return target
 
     monkeypatch.setattr(ca_mod, "_load_target", _fake_load)
-    result = await list_connector_rows(
+    result = await ca_mod.list_connector_rows(
         build_operator(TenantRole.OPERATOR), {"product": "vcenter", "target": "t1"}
     )
     assert list(result) == ["connectors", "target_fit"]
@@ -206,8 +202,8 @@ async def test_switch_off_long_list_handle_is_the_same(monkeypatch: pytest.Monke
     monkeypatch.setattr(ca_mod, "list_ingested_connectors", _fake_list)
     monkeypatch.setattr(ca_mod._CONNECTOR_LIST_REDUCER, "reduce", _fake_reduce)
     operator = build_operator(TenantRole.OPERATOR)
-    reduced = await reduce_connector_list(
-        operator, await list_connector_rows(operator, {"product": "vmware"})
+    reduced = await ca_mod.reduce_connector_list(
+        operator, await ca_mod.list_connector_rows(operator, {"product": "vmware"})
     )
     assert reduced == {"preview": "p", "handle": {"id": "h"}}
     assert list(captured[0]) == ["connectors"]
@@ -243,7 +239,7 @@ async def test_switch_on_vcenter_finds_the_vmware_connectors(
 ) -> None:
     _switch_on(monkeypatch)
     operator = build_operator(TenantRole.OPERATOR)
-    result = await list_connector_rows(operator, {"product": "vcenter"})
+    result = await ca_mod.list_connector_rows(operator, {"product": "vcenter"})
     assert _ids(result) == ["vmware-rest-9.0", "vmware-pyvmomi-7.0"]
     assert result["product_filter"] == {
         "query": "vcenter",
@@ -260,7 +256,9 @@ async def test_switch_on_ignores_case(
     monkeypatch: pytest.MonkeyPatch, query: str, matched_name: str
 ) -> None:
     _switch_on(monkeypatch)
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": query})
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": query}
+    )
     assert _ids(result) == ["vmware-rest-9.0", "vmware-pyvmomi-7.0"]
     assert result["product_filter"]["matches"] == [
         {"product": "vmware", "matched_name": matched_name}
@@ -271,7 +269,9 @@ async def test_switch_on_no_match_names_the_products_that_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch_on(monkeypatch)
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": "esxi"})
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "esxi"}
+    )
     assert result["connectors"] == []
     block = result["product_filter"]
     assert block["query"] == "esxi"
@@ -283,7 +283,7 @@ async def test_switch_on_no_match_names_the_products_that_exist(
 async def test_switch_on_blank_product_is_no_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     """A blank ``product`` is no filter, as before; the blank names are never matched."""
     _switch_on(monkeypatch)
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": " "})
+    result = await ca_mod.list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": " "})
     # Blank text is "no filter", as before, with no product_filter block.
     assert "product_filter" not in result
     assert len(result["connectors"]) == 3
@@ -293,7 +293,7 @@ async def test_switch_on_without_product_answer_is_the_same(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch_on(monkeypatch)
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {})
+    result = await ca_mod.list_connector_rows(build_operator(TenantRole.OPERATOR), {})
     assert json.dumps(result) == json.dumps(_old_answer(""))
 
 
@@ -303,14 +303,16 @@ async def test_switch_on_no_rows_at_all(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(ca_mod, "list_ingested_connectors", _empty)
     _switch_on(monkeypatch)
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": "vcenter"})
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "vcenter"}
+    )
     assert result["connectors"] == []
     assert result["product_filter"]["known_products"] == []
 
 
 def test_names_of_one_product_never_match_another() -> None:
     """``vcenter`` is a name of ``vmware`` only; a ``vault`` row never matches it."""
-    rows, block = filter_by_product(
+    rows, block = pf_mod.filter_by_product(
         [_item("vault-1.x", "vault", "1.x", "vault")], "vcenter", tenant_id=None
     )
     assert rows == []
@@ -328,6 +330,8 @@ async def test_switch_on_long_list_keeps_the_block_next_to_the_handle(
     captured: list[dict[str, Any]] = []
 
     async def _fake_reduce(rows: dict[str, Any], *_args: Any) -> tuple[dict[str, Any], Any]:
+        if "connectors" not in rows:
+            return rows, None
         captured.append(rows)
         return {"preview": "p"}, SimpleNamespace(model_dump=lambda mode: {"id": "h"})
 
@@ -339,14 +343,77 @@ async def test_switch_on_long_list_keeps_the_block_next_to_the_handle(
     monkeypatch.setattr(ca_mod._CONNECTOR_LIST_REDUCER, "reduce", _fake_reduce)
     _switch_on(monkeypatch)
     operator = build_operator(TenantRole.OPERATOR)
-    reduced = await reduce_connector_list(
-        operator, await list_connector_rows(operator, {"product": "vcenter"})
+    reduced = await ca_mod.reduce_connector_list(
+        operator, await ca_mod.list_connector_rows(operator, {"product": "vcenter"})
     )
     assert list(captured[0]) == ["connectors"]
     assert reduced["product_filter"]["matches"] == [
         {"product": "vmware", "matched_name": "vcenter"}
     ]
     assert reduced["handle"] == {"id": "h"}
+    assert "_listed_products" not in reduced
+
+
+class _Valkey:
+    """Minimal async Valkey double so the real result store can store rows."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+async def test_switch_on_many_products_go_behind_a_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """160 products and no match: ``known_products`` is stored behind a handle."""
+    many = [
+        _item(
+            f"example-product-number-{n:03d}-1.0", f"example-product-number-{n:03d}", "1.0", "impl"
+        )
+        for n in range(160)
+    ]
+
+    async def _fake_list(**_kwargs: Any) -> list[ConnectorListItem]:
+        return many
+
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(ca_mod, "list_ingested_connectors", _fake_list)
+    monkeypatch.setattr(ca_mod, "_CONNECTOR_LIST_REDUCER", JsonFluxReducer(store=store))
+    _switch_on(monkeypatch)
+    operator = build_operator(TenantRole.OPERATOR)
+    raw = await ca_mod.list_connector_rows(operator, {"product": "vcenter"})
+    assert len(json.dumps(raw["product_filter"]["known_products"])) > 4096
+    reduced = await ca_mod.reduce_connector_list(operator, raw)
+    assert reduced["connectors"] == []
+    assert "_listed_products" not in reduced
+    known = reduced["product_filter"]["known_products"]
+    assert isinstance(known, dict)
+    assert known["row_count"] == 160
+    assert known["handle"]["fetch_more"]["drill_in"]["available"] is True
+    assert len(json.dumps(reduced)) < 4096
+    stored = await store.fetch_rows(
+        tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
+        handle_id=UUID(known["handle"]["handle_id"]),
+    )
+    assert stored is not None
+    assert [row["product"] for row in stored.rows] == sorted(item.product for item in many)
+
+
+async def test_switch_on_short_block_lists_stay_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch_on(monkeypatch)
+    operator = build_operator(TenantRole.OPERATOR)
+    reduced = await ca_mod.reduce_connector_list(
+        operator, await ca_mod.list_connector_rows(operator, {"product": "esxi"})
+    )
+    assert reduced["product_filter"]["known_products"] == ["vault", "vmware"]
+    assert "_listed_products" not in reduced
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -384,7 +451,9 @@ def test_switch_on_mcp_wire_answer(
 
 async def test_allow_list_keeps_matches_of_allowed_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     _switch_on(monkeypatch)
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": "vcenter"})
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "vcenter"}
+    )
     narrowed = keep_allowed_connectors(result, frozenset({"vmware-rest-9.0"}))
     assert _ids(narrowed) == ["vmware-rest-9.0"]
     assert narrowed["product_filter"]["matches"] == [
@@ -392,23 +461,40 @@ async def test_allow_list_keeps_matches_of_allowed_rows(monkeypatch: pytest.Monk
     ]
 
 
-async def test_allow_list_hides_products_the_agent_may_not_use(
+async def test_allow_list_names_only_the_products_the_agent_may_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """No allowed match: ``known_products`` keeps vault (allowed), hides vmware."""
     _switch_on(monkeypatch)
     operator = build_operator(TenantRole.OPERATOR)
     for query in ("vcenter", "esxi"):
-        result = await list_connector_rows(operator, {"product": query})
+        result = await ca_mod.list_connector_rows(operator, {"product": query})
         narrowed = keep_allowed_connectors(result, frozenset({"vault-1.x"}))
         assert narrowed["connectors"] == []
         block = narrowed["product_filter"]
         assert block["query"] == query
         assert block["matches"] == []
-        assert "known_products" not in block
+        assert block["known_products"] == ["vault"]
         assert "this agent may use" in block["hint"]
+        reduced = await ca_mod.reduce_connector_list(operator, narrowed)
+        assert reduced["product_filter"]["known_products"] == ["vault"]
+        assert "_listed_products" not in reduced
+
+
+async def test_allow_list_with_no_allowed_connector_names_no_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "esxi"}
+    )
+    narrowed = keep_allowed_connectors(result, frozenset({"not-listed-1.0"}))
+    assert narrowed["product_filter"]["known_products"] == []
 
 
 async def test_allow_list_switch_off_has_no_block() -> None:
-    result = await list_connector_rows(build_operator(TenantRole.OPERATOR), {"product": "vcenter"})
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "vcenter"}
+    )
     narrowed = keep_allowed_connectors(result, frozenset({"vault-1.x"}))
     assert narrowed == {"connectors": []}

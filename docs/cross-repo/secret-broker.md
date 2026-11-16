@@ -46,7 +46,7 @@ meho secret move \
   --from <kind>:<ref> \
   --to   <kind>:<ref> \
   --reason 'why this move is happening' \
-  [--json] [--backplane <url>]
+  [--merge] [--json] [--backplane <url>]
 ```
 
 `meho secret move` is a thin Cobra layer over
@@ -60,6 +60,15 @@ across the wire is **only** the two references and the reason:
 ```json
 { "from": "<kind>:<ref>", "to": "<kind>:<ref>", "reason": "…" }
 ```
+
+With `--merge`, the verb also sends `"merge": true`. `merge` is a sink
+option of `secret.move`, off by default. When it is on, the sink keeps the
+other fields of the secret and changes only the named field, with
+check-and-set against a parallel change. Only the `vault` and
+`vault-target` sinks support it; another sink kind makes the move fail
+before the source is read. Without `merge`, a Vault sink replaces the
+whole secret. A merge into a secret whose latest version is deleted fails
+and writes nothing.
 
 There is deliberately **no** `--value` / `--secret` / `--password` flag
 of any kind. The value is never a CLI argument, flag, env var, or prompt,
@@ -87,12 +96,13 @@ be non-empty — a malformed intent is rejected at param validation
 not deep inside the handler. `kind` selects the store adapter from the
 registry; `ref` is the store-specific address that adapter interprets.
 
-Three kinds ship today. A move may be **same-kind** (`vault` → `vault`) or
+Four kinds ship today. A move may be **same-kind** (`vault` → `vault`) or
 **cross-kind** (`vault` → `keycloak`, `vault` → `linux`):
 
 | `kind` | Role | `ref` grammar | Example |
 | --- | --- | --- | --- |
 | `vault` | source **and** sink | `<path>#<field>` — a KV-v2 path with a required `#<field>` fragment selecting one field | `vault:secret/db/prod#password` |
+| `vault-target` | source **and** sink | `<target>/<path>#<field>` — a registered Vault target, then the same KV-v2 address as `vault` | `vault-target:vault-prod/secret/db/prod#password` |
 | `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:kc/meho/operator-a#password` |
 | `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file in the home of `<owner>` (a normal user: never `root`, never a system user) on a host of a `linux-ssh` target, mode 0600, written as `<owner>` | `linux:app-host/home/app/.config/app/key#app` |
 
@@ -109,6 +119,18 @@ exit), so the move runs inside the operator's existing authorization
 envelope and per-operator Vault policy — see
 [`connector-vault-policy.md`](./connector-vault-policy.md) for the read
 (§2) and write (§6) ACL stanzas the operator's token needs.
+
+**vault-target** (`vault-target:` —
+[`vault_target_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_target_endpoint.py)).
+Like `vault`, but the read or write logs in to Vault under the role of a
+registered Vault target (`extras["vault_role"]`), not the operator's own
+role. Source and sink each name their own target. Before any Vault login,
+MEHO checks: the tenant path rule of `vault`; the target is a Vault target
+of the caller's tenant with its own role; and the caller's MEHO policy for
+the matching op on that target (`vault.kv.read` for a source,
+`vault.kv.put` for a sink, `vault.kv.patch` for a sink with `merge`). A
+move that fails these checks does not wait for approval.
+`secret.handoff.export` does not accept a `vault-target:` source.
 
 **keycloak** (`keycloak:` —
 [`secret_endpoint.py`](../../backend/src/meho_backplane/connectors/keycloak/secret_endpoint.py)).
@@ -245,15 +267,18 @@ and no value ever rests in a durable artifact.
    `dangerous` carries **two distinct properties** that are worth
    stating precisely, because they are stronger than "parked":
 
-   - **Default with no live grant ⇒ `needs-approval`.** An agent with no
-     matching `AgentPermission` grant — or one whose grant has expired —
-     waits for a person's approval. It never auto-executes.
+   - **No live grant ⇒ depends on `AGENT_GRANT_REQUIRED`.** An agent
+     with no matching `AgentPermission` grant — or one whose grant has
+     expired — waits for a person's approval while the switch is `off`
+     (the default) or `observe`. With `on`, the call is refused
+     (`agent_no_grant`). It never auto-executes.
    - **Ceiling ⇒ `needs-approval`.** A grant can make the verdict
      stricter (`deny`), but a grant that carries `auto-execute` is
      **capped to `needs-approval`** for a `dangerous` op. No grant can
      make a credential move auto-execute.
 
-   In short: no grant ⇒ waits for approval; a `deny` grant ⇒ denied; an
+   In short: no grant ⇒ waits for approval with the switch `off` or
+   `observe`, refused with `on`; a `deny` grant ⇒ denied; an
    `auto-execute` grant ⇒ still waits for approval. A credential move
    never runs without a human in the loop.
 

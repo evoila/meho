@@ -103,6 +103,11 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_CLIENT_SECRET_PATH": ("GET",),
     "_CLIENT_PROTOCOL_MAPPERS_PATH": ("POST",),
     "_CLIENT_SCOPES_PATH": ("GET", "POST"),
+    # Change one protocol mapper of a client scope. The scope read checks
+    # the name sent with a scope id.
+    "_CLIENT_SCOPE_PATH": ("GET",),
+    "_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH": ("GET",),
+    "_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH": ("GET", "PUT"),
     "_USERS_PATH": ("GET", "POST"),
     # Governed user delete (#3944): the delete plus its 404 read-back. The PUT
     # is the user disable / enable write (#4940) and the user update write.
@@ -223,6 +228,9 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
         "GET:/admin/realms/{realm}/authentication/required-actions",
         "GET:/admin/realms/{realm}/client-scopes",
+        "GET:/admin/realms/{realm}/client-scopes/{client-scope-id}",
+        "GET:/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models",
+        "GET:/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models/{id}",
         "GET:/admin/realms/{realm}/clients",
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
@@ -264,6 +272,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/admin/realms/{realm}/users/{user-id}/role-mappings/realm",
         "PUT:/admin/realms/{realm}",
         "PUT:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
+        "PUT:/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models/{id}",
         "PUT:/admin/realms/{realm}/clients/{client-uuid}",
         "PUT:/admin/realms/{realm}/groups/{group-id}",
         "PUT:/admin/realms/{realm}/users/{user-id}",

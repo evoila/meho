@@ -24,7 +24,6 @@ from meho_backplane.main import app
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.agents import _create_handler, _edit_handler
 from tests.test_agent_starting_grants import (  # noqa: F401 -- the autouse fixtures apply by import
-    _TENANT_A,
     _audit_rows,
     _definition,
     _operator,

@@ -239,6 +239,19 @@ Good to know:
 - explain asks about a call **with no parameters**. For an operation
   whose answer depends on its parameters, the answer is the one of a call
   without parameters.
+- explain also asks two checks that come after the policy rules, as the
+  call does. When one of them refuses the call, the answer is **deny**
+  with its reason:
+  - the announce rule of your tenant: an agent must announce a write of
+    risk level `caution` or higher before it runs;
+  - an operation ingested from an API file, on a target whose connector
+    runs only its own hand-written operations.
+- explain does **not** run the operation's own check of its parameters
+  (for example, a user write that names two different users). The last
+  line of the answer says so: `Not checked: ...`.
+- Who may approve is a list of **MEHO group kinds** (`MEHO-Operators`,
+  `MEHO-Admins`, ...). These are not the names of the login groups of
+  your install. Each login group is bound to one of these kinds.
 - explain works with `POLICY_ENGINE_SHADOW` off. It then shows today's
   answer only.
 - Only a tenant admin or a platform admin sees the entries of the policy
@@ -262,6 +275,7 @@ Rules in order:
 Risk level: caution, always waits: yes, category: compute
   matched file:classifications[0]
   matched file:classifications[1]
+Not checked: the operation's own check of its parameters. It runs only with the parameters of a real call.
 ```
 
 !!! note "The policy evaluator is off by default"

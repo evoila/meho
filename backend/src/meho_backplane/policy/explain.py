@@ -33,9 +33,13 @@ it.
 While the evaluator is off or in shadow mode, today's checks decide, so
 ``answer`` is today's answer.
 
+The checks after the policy gate that can still refuse the call are asked
+too (:mod:`meho_backplane.policy.explain_checks`).
+
 Explain asks about a call with no parameters. For an operation whose
 answer depends on its parameters, the answer is the one of a call
-without parameters.
+without parameters. The operation's own check of its parameters is not
+asked; the answer says so (``not_checked``).
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ from meho_backplane.policy.classification import (
 )
 from meho_backplane.policy.evaluate import Decision, RuleRef, Verdict
 from meho_backplane.policy.explain_asker import ExplainInputError, asker_view
+from meho_backplane.policy.explain_checks import NOT_CHECKED, refusal_after_gate
 from meho_backplane.policy.explain_models import (
     Answer,
     ExplainApprovers,
@@ -457,6 +462,15 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
     )
     governance, decision = await _today_and_evaluator(question, descriptor, connector_id, target)
     today_verdict = PermissionVerdict(governance["policy_verdict"])
+    reason = governance.get("policy_reason")
+    refusal = await refusal_after_gate(
+        operator=question.asker,
+        descriptor=descriptor,
+        target=target,
+        answer=_FROM_TODAY[today_verdict],
+    )
+    if refusal is not None:
+        today_verdict, reason = PermissionVerdict.DENY, refusal
     answer = _FROM_TODAY[today_verdict]
     approvers = None
     if answer == "wait":
@@ -476,10 +490,11 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         today=ExplainToday(
             verdict=answer,
             policy_verdict=today_verdict.value,
-            reason=governance.get("policy_reason"),
+            reason=reason,
         ),
         evaluator=_evaluator_view(decision, answer, wait_path) if decision is not None else None,
         classification=_classification_view(descriptor, matched),
+        not_checked=NOT_CHECKED,
     )
 
 

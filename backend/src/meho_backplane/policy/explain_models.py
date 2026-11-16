@@ -155,5 +155,10 @@ class PolicyExplainResponse(_Frozen):
     )
     classification: ExplainClassification | None = None
     request: ExplainStoredRequest | None = None
+    not_checked: str | None = Field(
+        default=None,
+        description="What explain does not check for this call, in one line. "
+        "Null for a stored approval request and for an error.",
+    )
     error: str | None = None
     extras: dict[str, Any] | None = None

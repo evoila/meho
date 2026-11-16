@@ -39282,6 +39282,12 @@
             "$ref": "#/components/schemas/ExplainStoredRequest",
             "nullable": true
           },
+          "not_checked": {
+            "type": "string",
+            "nullable": true,
+            "title": "Not Checked",
+            "description": "What explain does not check for this call, in one line. Null for a stored approval request and for an error."
+          },
           "error": {
             "type": "string",
             "nullable": true,

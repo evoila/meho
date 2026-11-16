@@ -198,6 +198,31 @@ the step checks of a multi-step operation. Then, only with
 `POLICY_ENGINE_SHADOW` on, `evaluate_call(decide_only=True)`. The gate's
 shadow keeps a rule; explain drops it (`forget_rule`).
 
+**Checks after the gate** (`policy/explain_checks.py`,
+`refusal_after_gate`). The policy gate is not the last check of a call.
+Explain asks the two checks that can still refuse a call the gate lets
+run or wait, with the same code the call uses:
+
+| Check | Code | Asked when the gate says |
+|---|---|---|
+| The announce rule of the tenant (`announce_required`) | `announce_gate_blocks` (`broadcast/announce_gate.py`) | `run` only. A call that waits is not asked again after the approval. |
+| An ingested operation on a target whose connector does not take ingested operations (`ingested_ops_not_accepted`) | `_ingested_ops_refusal` (`operations/dispatcher.py`) | `run` or `wait` |
+
+When one refuses, `answer` is `deny`, and `today` holds `deny` with the
+call's reason (`announce_required: ...` or
+`ingested_ops_not_accepted: ...`). The evaluator does not know these
+checks, so its `same_as_today` is then `false`. A call the gate denies is
+not asked again.
+
+**What explain does not check.** The operation's own check before the
+wait for approval (`park_check_refusal`, `operations/_park_check.py`). For
+example, a Keycloak user write refuses an id and a name of two different
+users. This check needs the call's parameters, and explain asks without
+parameters. Every answer about a call says so in one line,
+`not_checked` (`NOT_CHECKED` in `policy/explain_checks.py`); the CLI
+prints it last. The answer for a stored approval request has no such
+line.
+
 - `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
   off or in shadow mode, today's checks decide (`decided_by: today`).
 - `today`: the gate's verdict and reason.
@@ -213,8 +238,11 @@ shadow keeps a rule; explain drops it (`forget_rule`).
   that matches, least specific first, each with its place
   (`install:classifications[0]`, `tenant:classifications[2]`,
   `tenant:override`).
-- `approvers` (only when the answer is `wait`): the login groups that may
-  approve another person's call, and the rule. A change of rights: only
+- `approvers` (only when the answer is `wait`): the groups that may
+  approve another person's call, and the rule. The groups are MEHO group
+  kinds (`MEHO-<kind>`, from `policy/who_approves.py`), not the names of
+  the login groups of the install. Each login group of the install is
+  bound to one of these kinds. A change of rights: only
   `MEHO-Admins` (`rights_change`). With `POLICY_APPROVER_ROUTING` on: the
   first routing entry that fits (`tenant:routing[0]`). Else today's rule
   (`default`).

@@ -8942,8 +8942,11 @@ type PolicyExplainResponse struct {
 	Extras    *map[string]interface{} `json:"extras"`
 
 	// File True when a policy file that is not imported was asked.
-	File *bool   `json:"file,omitempty"`
-	OpId *string `json:"op_id"`
+	File *bool `json:"file,omitempty"`
+
+	// NotChecked What explain does not check for this call, in one line. Null for a stored approval request and for an error.
+	NotChecked *string `json:"not_checked"`
+	OpId       *string `json:"op_id"`
 
 	// Request The rule stored on an approval request.
 	Request *ExplainStoredRequest       `json:"request,omitempty"`

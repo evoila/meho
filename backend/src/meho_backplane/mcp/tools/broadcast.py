@@ -89,7 +89,6 @@ from meho_backplane.broadcast import (
     TTL_DEFAULT_MINUTES,
     TTL_MAX_MINUTES,
     TTL_MIN_MINUTES,
-    WORK_REF_MAX_CHARS,
     AnnouncementClaimError,
     AnnouncementFilter,
     AnnounceRateLimitError,
@@ -298,7 +297,6 @@ register_mcp_tool(
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": WORK_REF_MAX_CHARS,
                             "description": (
                                 "Exact-match filter on an external "
                                 "change-ticket reference (e.g. "
@@ -975,7 +973,6 @@ register_mcp_tool(
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": WORK_REF_MAX_CHARS,
                             "description": (
                                 "Exact-match filter on an external "
                                 "change-ticket reference (e.g. "

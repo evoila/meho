@@ -86,7 +86,7 @@ from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
     UnauthorizedCancellationError,
 )
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WORK_REF_MAX_CHARS, WorkRefFilter
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -416,7 +416,6 @@ async def list_runs(
                 "'gh:evoila/meho#11' — the runs that worked under change ticket X "
                 "(work_ref I3-T2 #1662). Omit for no work_ref filter. " + WORK_REF_FIELD_DESCRIPTION
             ),
-            max_length=WORK_REF_MAX_CHARS,
         ),
     ] = None,
     status: AgentRunStatus | None = Query(

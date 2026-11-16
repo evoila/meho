@@ -209,7 +209,7 @@ from meho_backplane.runbooks.runs_schemas import (
     StartRunRequest,
 )
 from meho_backplane.runbooks.service import TemplateNotFoundError
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WORK_REF_MAX_CHARS, WorkRefFilter
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -520,7 +520,7 @@ async def list_runs(
     template_slug: str | None = Query(default=None),
     work_ref: Annotated[
         WorkRefFilter | None,
-        Query(description=WORK_REF_FIELD_DESCRIPTION, max_length=WORK_REF_MAX_CHARS),
+        Query(description=WORK_REF_FIELD_DESCRIPTION),
     ] = None,
     limit: int = Query(default=100, ge=1, le=500),
     operator: Operator = _require_operator,

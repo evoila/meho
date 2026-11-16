@@ -190,7 +190,6 @@ register_mcp_tool(
                 },
                 "work_ref": {
                     "type": "string",
-                    "maxLength": 256,
                     "description": (
                         "Optional exact-match filter on the trigger's "
                         "change-ticket reference (e.g. 'gh:evoila/meho#13')."

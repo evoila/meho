@@ -76,9 +76,13 @@ from meho_backplane.connectors.keycloak._paths import (
 )
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     CLIENT_LOOKUP_ROLES,
+    ReadBackRefusedError,
     find_client_uuid,
+    flow_refused_error,
     missing_rights_error,
     names_missing_rights,
+    read_or_write,
+    reading_back,
     register_rights_check,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_schemas import (
@@ -479,7 +483,8 @@ async def _bind(
         await connector._write_admin(
             target, "PUT", client_path, operator=operator, json=merged, idempotent_conflict=False
         )
-        client = await connector._get_admin_json(target, client_path, operator=operator)
+        with reading_back():
+            client = await connector._get_admin_json(target, client_path, operator=operator)
         overrides = client.get("authenticationFlowBindingOverrides")
     read_back = overrides.get("browser") if isinstance(overrides, dict) else None
     if read_back != flow_id:
@@ -501,31 +506,85 @@ def _refused_text(
     created: bool,
     level_setting_added: bool,
     level_changed: bool,
+    bound: bool = False,
     client_id: str | None = None,
 ) -> str:
     """Say what the run changed before Keycloak refused *step*.
 
-    Without *client_id* the text is short enough for the error message.
+    Without *client_id* the text is short enough for the error message: it
+    leaves out the flow's name, so the longest step still fits.
     """
+    flag = str(created).lower()
+    refused = f"Keycloak refused (HTTP 403) to {step}"
+    head = f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way"
+    if client_id is None:
+        return (
+            f"{head}: flow id {flow_id!r} (flow_created={flag}); {refused}. See extras.remediation."
+        )
     state = "made" if created else "already there"
     text = (
-        f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way: the flow {APPROVAL_FLOW_ALIAS!r} "
-        f"(id {flow_id!r}, flow_created={str(created).lower()}) is {state}; "
-        f"Keycloak refused (HTTP 403) to {step}"
+        f"{head}: the flow {APPROVAL_FLOW_ALIAS!r} (id {flow_id!r}, flow_created={flag}) "
+        f"is {state}; {refused}"
     )
-    if client_id is None:
-        return f"{text}. See extras.remediation."
     kept = [
         name
         for name, changed in (
             ("the flow", created),
             ("the level setting", level_setting_added),
             ("the level name in the realm's level map", level_changed),
+            ("the binding to the client (MEHO could not read it back)", bound),
         )
         if changed
     ]
     after = f"These stay in the realm: {', '.join(kept)}." if kept else "MEHO changed nothing."
     return f"{text} (client {client_id!r}). {after}"
+
+
+async def _ensure_flow(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+) -> tuple[str, bool, list[dict[str, Any]]]:
+    """Find or make the flow; return ``(flow_id, created, steps)``.
+
+    A 403 says whether the run only read (nothing changed) or may have made
+    the flow only in part.
+    """
+    writing = False
+    try:
+        flow_id = await _find_flow_id(connector, operator, target, realm)
+        created = flow_id is None
+        if flow_id is None:
+            writing = True
+            flow_id = await _make_flow(connector, operator, target, realm)
+        steps = _listed_steps(
+            await _read_steps(connector, operator, target, realm, APPROVAL_FLOW_ALIAS)
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await flow_refused_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+            roles=_ROLES,
+            flow_alias=APPROVAL_FLOW_ALIAS,
+            writing=writing,
+        ) from exc
+    difference = _difference(steps)
+    if difference is not None and created:
+        raise KeycloakApprovalFlowError(
+            "check_failed",
+            f"flow {APPROVAL_FLOW_ALIAS!r} was made, but its steps read back wrong: "
+            f"{difference}. The client was not bound to it.",
+        )
+    if difference is not None:
+        raise KeycloakApprovalFlowError(
+            "other_steps",
+            f"flow {APPROVAL_FLOW_ALIAS!r} exists with other steps: {difference}. "
+            "Nothing was changed. Fix the flow by hand, or delete it and run again.",
+        )
+    return flow_id, created, steps
 
 
 @names_missing_rights(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES)
@@ -557,31 +616,7 @@ async def keycloak_authflow_ensure_approval_flow(
     )
     await _check_levels(self, operator, target, realm_segment, client_path)
 
-    flow_id = await _find_flow_id(self, operator, target, realm_segment)
-    created = flow_id is None
-    if flow_id is not None:
-        steps = _listed_steps(
-            await _read_steps(self, operator, target, realm_segment, APPROVAL_FLOW_ALIAS)
-        )
-        difference = _difference(steps)
-        if difference is not None:
-            raise KeycloakApprovalFlowError(
-                "other_steps",
-                f"flow {APPROVAL_FLOW_ALIAS!r} exists with other steps: {difference}. "
-                "Nothing was changed. Fix the flow by hand, or delete it and run again.",
-            )
-    else:
-        flow_id = await _make_flow(self, operator, target, realm_segment)
-        steps = _listed_steps(
-            await _read_steps(self, operator, target, realm_segment, APPROVAL_FLOW_ALIAS)
-        )
-        difference = _difference(steps)
-        if difference is not None:
-            raise KeycloakApprovalFlowError(
-                "check_failed",
-                f"flow {APPROVAL_FLOW_ALIAS!r} was made, but its steps read back wrong: "
-                f"{difference}. The client was not bound to it.",
-            )
+    flow_id, created, steps = await _ensure_flow(self, operator, target, realm_segment)
 
     setting_added = level_changed = False
     step = "write the settings of the level step"
@@ -597,10 +632,12 @@ async def keycloak_authflow_ensure_approval_flow(
         refused = functools.partial(
             _refused_text,
             flow_id,
-            step=step,
+            step=read_or_write(exc, step),
             created=created,
             level_setting_added=setting_added,
             level_changed=level_changed,
+            # Only the binding step reads back a change it made.
+            bound=isinstance(exc, ReadBackRefusedError),
         )
         raise await missing_rights_error(
             self,

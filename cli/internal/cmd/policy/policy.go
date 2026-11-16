@@ -30,7 +30,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "policy",
-		Short: "Manage the policy file (validate / diff / import / export / history)",
+		Short: "Manage the policy file (validate / diff / import / export / history / explain)",
 		Long: "Manage the policy file (policy: v1): the categories, the " +
 			"classifications of connectors, operation groups and operations, " +
 			"and the routing of approvals (who may approve which changes). " +
@@ -41,6 +41,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	addFileCommands(cmd)
+	cmd.AddCommand(newExplainCmd())
 	return cmd
 }
 

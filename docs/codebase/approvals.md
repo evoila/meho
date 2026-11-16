@@ -1632,10 +1632,11 @@ early-return, and the group rules for another person's change apply
 MEHO-Admin). The full subject/actor lineage stays intact (the
 decision audit row records the human approver; the request row records
 the agent requester). Since #3980 every agent request above `safe`
-waits for a person, also a `dangerous` or `destructive` one. The one
-exception is an agent with no matching grant while
-`AGENT_GRANT_REQUIRED` is `on`: its request is refused
-(`agent_no_grant`), so it never waits.
+waits for a person, also a `dangerous` or `destructive` one. There are
+two exceptions. A matching `deny` grant refuses the request in every
+state of the switch. And with `AGENT_GRANT_REQUIRED` `on`, a request
+that no grant covers is refused (`agent_no_grant`). In both cases the
+request never waits.
 
 ### How the agent becomes the requester
 

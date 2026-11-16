@@ -367,8 +367,8 @@ writes below wait for your current approver, as before.
      (`agent_no_grant`).
    - `off` or `observe`: the two grants do not limit the agent. A call
      that no grant covers gets the default for its risk level: a
-     `safe` read runs at once, on any target of the tenant. A `caution` or
-     `dangerous` call waits for a person's approval.
+     `safe` read runs at once, on any target of the tenant. A call
+     above `safe` waits for a person's approval.
 
    ```bash
    meho agent-principal register tenant-check --grants none

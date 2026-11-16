@@ -142,8 +142,10 @@ For a change-class op like `vmware.composite.vm.snapshot.revert`:
 - A grant with verdict `needs-approval` passes through the ceiling
   unchanged.
 
-So to make the snapshot-revert op pause for human approval (not deny,
-not auto-execute), insert one `AgentPermission` row matching:
+With the switch `on`, the op is refused unless a grant covers it. So
+insert one `AgentPermission` row; the op then waits for a person's
+approval in every state of the switch (with `off` or `observe` it waits
+also without the row):
 
 | Column | Value | Meaning |
 |---|---|---|

@@ -479,8 +479,11 @@ Grants only check operations that run through `call_operation`. The
 discovery tools (`meho_connector_list`, `list_operation_groups`,
 `search_operations`, `list_targets`) are not affected by grants.
 A docs lookup that names a target (`search_docs` or `ask_docs` with
-`target`) is checked like a `safe` call on that target: it runs only when
-the agent's grants would let a `safe` operation run there at once. The
+`target`) is checked like a `safe` call on that target. With `off` or
+`observe`, it runs when no grant covers it or when a grant with
+`auto-execute` covers it. With `on`, it runs only when a grant with
+`auto-execute` covers it. A `needs-approval` or `deny` grant refuses it
+in every state, because a docs lookup cannot wait for approval. The
 grants are matched on the operation `meho.docs.search` (for `search_docs`)
 and `meho.docs.ask` (for `ask_docs`).
 

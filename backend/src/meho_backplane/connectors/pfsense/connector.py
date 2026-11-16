@@ -72,6 +72,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors.adapters.ssh import (
     SshConnector,
     _known_hosts_from_secret,
+    fingerprint_error_extras,
 )
 from meho_backplane.connectors.pfsense.ops import PFSENSE_OPS
 from meho_backplane.connectors.schemas import (
@@ -471,7 +472,7 @@ class PfSenseConnector(SshConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="ssh: cat /etc/version",
-                extras={"error": str(exc)},
+                extras=fingerprint_error_extras(exc),
             )
 
         stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""

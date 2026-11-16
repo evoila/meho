@@ -3659,6 +3659,11 @@ groups and clients.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td>When a system says that the login session ended, MEHO signs in again once. A connector can now say this also for an answer other than 401, for example a 403 with a body of its own (<code>is_session_expired</code>). MEHO sends the operation again only when that cannot change the product twice: a <code>safe</code> operation, or an operation from an API file that sent one request. A write from a hand-written connector, a multi-step operation and a call that ran after an approval are not sent again. The caller then gets <code>connector_auth_failed</code> that says the change may or may not have been made. The audit row shows <code>session_relogin</code>, <code>session_resent</code> and <code>session_relogin_status</code>.</td>
+<td><strong>Nothing to do.</strong> A connector without <code>is_session_expired</code> behaves as before. After a <code>connector_auth_failed</code> with the cause <code>session_ended_&lt;status&gt;_not_resent</code>, check on the system whether the change was made before you call again. Connector package authors: see <a href="https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md"><code>docs/codebase/connector-packages.md</code></a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td>In a tenant that has the announce gate on (<code>announce_gate_enabled</code>), a person is never asked for an announce claim. Agents, hosted agent runs, service logins and runner logins are asked as before: their <code>caution</code>-or-higher writes that would run at once need an active claim first, and a service login or a runner login, which cannot make a claim, is refused. The Broadcast page shows agent announcements only. The operation drawer <code>/ui/broadcast/event/{audit_id}</code> and the page filters <code>op_class</code>, <code>op_id</code> and <code>kind</code> are gone; operations are in the audit log. <code>active_only</code> keeps only trusted claims that are not completed and whose TTL has not run out. The target advisory lists only active agent claims, with <code>owner_sub</code> and <code>expires_at</code> (no <code>actor_sub</code>, no <code>op_id</code>).</td>
 <td><strong>Nothing to do.</strong></td>
 </tr>

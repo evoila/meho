@@ -64,7 +64,6 @@ _CONSOLE_FILTER = (
     "console search box: the handler checks it with filter_work_ref, the rule of the "
     "REST filters; a blank box means no filter"
 )
-_CONSOLE_SEARCH = "console search box: matched with work_ref_filter_values like the REST filter"
 
 #: Parameters that read a ticket id without the shared type. Each has a
 #: reason, and the test fails when an entry no longer matches a route.
@@ -90,17 +89,9 @@ _REST_OTHER_DOORS: dict[tuple[str, str], str] = {
     ("/ui/audit", "work_ref"): _CONSOLE_FILTER,
     ("/ui/audit/results", "work_ref"): _CONSOLE_FILTER,
     ("/ui/scheduler", "work_ref"): _CONSOLE_FILTER,
-    # The approvals search box: the value goes to the same search as the
-    # REST filter (work_ref_filter_values), which finds the cleaned id and
-    # the exact stored text. A bad value finds nothing; the page shows an
-    # empty list instead of a 422.
-    ("/ui/approvals", "work_ref"): _CONSOLE_SEARCH,
-    ("/ui/approvals/list", "work_ref"): _CONSOLE_SEARCH,
-    ("/ui/approvals/in-order", "work_ref"): (
-        "console: reads the pending requests of one ticket with the approvals "
-        "search (work_ref_filter_values); it stores no ticket id, and each step "
-        "keeps the id stored on its own request"
-    ),
+    ("/ui/approvals", "work_ref"): _CONSOLE_FILTER,
+    ("/ui/approvals/list", "work_ref"): _CONSOLE_FILTER,
+    ("/ui/approvals/in-order", "work_ref"): _CONSOLE_FILTER,
 }
 
 #: The search filters that must use the shared type: (router path, parameter).

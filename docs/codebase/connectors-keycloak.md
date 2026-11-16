@@ -515,9 +515,8 @@ their own idempotency above):
   `role_mapping.assign`. A `/`, a dot or a `%` stays part of the name.
   `role_mapping.assign` refuses a role whose returned name is not the
   name asked for, and its result lists the names Keycloak returned.
-  When the user cannot be read before the call and only a username was
-  sent, the approved run is refused, because the approval card has no
-  user id.
+  When the user cannot be read when the request is made, the approved run
+  is refused, because the approval card shows no stored username.
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
   success (`conflict: true`), and the existing object's UUID is resolved.
 - **Password handling.** `user.create` / `user.reset_password` source the
@@ -881,14 +880,18 @@ of them does not use this check.
   `username` is only the stored name. For a user that does not exist, the
   card shows the sent name as `requested_username`.
 - After approval, the op acts on the user id shown on the card. It does not
-  look the username up again. A card without a user id is refused. When
-  the card shows a stored username, the run also compares it with the
-  name Keycloak stores now. So a request sent with only an id is refused
-  too when the user was renamed while it waited. Nothing is written.
+  look the username up again. A card without a user id is refused. A card
+  without a stored username (no `username`, or `user_available` is not
+  true) is refused too: MEHO cannot tell that it is the same user. The
+  run then compares the card's username with the name Keycloak stores
+  now. So a request sent with only an id is refused too when the user was
+  renamed while it waited. Nothing is written. A request that waited
+  across the upgrade to this rule is refused for the same reason: its card
+  has no `user_available`.
 - `user.delete` after approval: it uses the user id and the realm on the
-  card. The run is refused when the card said the user does not exist, or
-  when the username stored for that id is not the one on the card (the
-  user was renamed). A user who was deleted and made again with the same
+  card. The run is refused when the card said the user does not exist,
+  when the card shows no username, or when the username stored for that
+  id is not the one on the card (the user was renamed). A user who was deleted and made again with the same
   name has a new id, so the run finds nothing and answers
   `already_absent: true`. The delete guards are checked again.
 - The result shows the stored username (`group.member.*` results now carry
@@ -927,11 +930,11 @@ login.
   - Answer: `{id, username, realm, changed, added, removed,
     required_actions, unrequested_changes, read_back_checked}`.
   - The approval card shows `{resource, username, id, realm, add, remove,
-    current_available[, current_required_actions,
+    current_available, user_available[, current_required_actions,
     resulting_required_actions][, warning]}`. When the user could be
     read, the card and the answer show the username stored in Keycloak.
     When the user cannot be read at park time, the card still shows the
-    request.
+    request, and the approved run is refused.
   - When the realm is the one MEHO's own sign-in uses and `add` has a
     passkey set-up (`webauthn-register` or
     `webauthn-register-passwordless`), the card's `warning` says: "this
@@ -1428,7 +1431,7 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
-| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
+| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available, user_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |

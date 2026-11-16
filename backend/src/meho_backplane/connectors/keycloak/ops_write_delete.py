@@ -317,7 +317,8 @@ async def _approved_user(
     """The user on the approval card of a user delete, read again by its id.
 
     Raises :exc:`ValueError` when the card said the user does not exist, shows
-    no user id or realm, or names another user than the one stored for the id.
+    no user id, username or realm, or names another user than the one stored
+    for the id.
     """
     block = card.get("blast_radius")
     shown = block.get("object") if isinstance(block, dict) else None
@@ -328,6 +329,7 @@ async def _approved_user(
             "there is no approved user to delete. Nothing was deleted. Send a new request."
         )
     uuid = card_user_id(USER_DELETE_OP, shown)
+    check_card_username(USER_DELETE_OP, shown)
     realm = str_field(shown, "realm")
     if realm is None:
         raise ValueError(

@@ -8,7 +8,9 @@ user id (``id`` or ``user_id``) and a ``username``. For each one it proves:
 
 * the check before the wait for approval is the shared one
   (:func:`~meho_backplane.connectors.keycloak.ops_write_user_identity.refuse_other_user_check`);
-* the run refuses an id and a username of different users, and writes nothing.
+* the run refuses an id and a username of different users, and writes nothing;
+* a request by id only, whose user is renamed while it waits for approval,
+  is refused when it runs, and writes nothing.
 
 A new user write that forgets the check turns this test red.
 """
@@ -26,17 +28,21 @@ import meho_backplane.connectors.keycloak as keycloak_package
 import meho_backplane.operations.typed_register as typed_register
 from meho_backplane.operations._park_check import _PARK_CHECKS
 from tests.test_connectors_keycloak_user_identity import (  # noqa: F401  (fixtures)
-    _GROUP_UUID,
+    _ACTIONS_PATH,
     _KC_BASE_URL,
-    _REALM,
-    _USER_OP_PARAMS,
+    _TOTP_ACTION,
     _USER_UUID,
+    _USER_WRITE_PARAMS,
+    _approve_and_resume,
     _mount_token,
     _mount_user,
+    _mount_user_write,
+    _park,
     _required_settings_env,
     _reset_module_state,
     _run,
     _user,
+    assert_refused_without_write,
     kc,
 )
 
@@ -46,17 +52,8 @@ from tests.test_connectors_keycloak_user_identity import (  # noqa: F401  (fixtu
 for _module in pkgutil.iter_modules(keycloak_package.__path__):
     importlib.import_module(f"{keycloak_package.__name__}.{_module.name}")
 
-_ACTIONS_PATH = f"/admin/realms/{_REALM}/authentication/required-actions"
-_TOTP_ACTION = {"alias": "CONFIGURE_TOTP", "name": "Configure OTP", "enabled": True}
-
 #: The other parameters each user write needs to reach the user check.
-_OTHER_PARAMS: dict[str, dict[str, Any]] = {
-    **_USER_OP_PARAMS,
-    "keycloak.user.delete": {},
-    "keycloak.user.required_actions.update": {"add": ["CONFIGURE_TOTP"]},
-    "keycloak.group.member.add": {"group_id": _GROUP_UUID},
-    "keycloak.group.member.remove": {"group_id": _GROUP_UUID},
-}
+_OTHER_PARAMS: dict[str, dict[str, Any]] = _USER_WRITE_PARAMS
 
 
 async def _user_writes(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
@@ -107,3 +104,20 @@ async def test_every_keycloak_user_write_refuses_an_id_and_a_username_of_differe
         # Some ops withhold the error text, so the check falls back to the error class.
         assert "different users" in str(result) or "ValueError" in str(result), (op_id, result)
         assert not writes.called, op_id
+
+
+async def test_every_keycloak_user_write_refuses_a_user_renamed_while_it_waits(
+    kc: keycloak_package.KeycloakConnector,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as patch:
+        user_writes = await _user_writes(patch)
+    missing = sorted(set(user_writes) - set(_OTHER_PARAMS))
+    assert not missing, f"add the other parameters of {missing} to _OTHER_PARAMS"
+    for op_id, id_key in sorted(user_writes.items()):
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            user_read, writes = _mount_user_write(mock)
+            request_id = await _park(op_id, {id_key: _USER_UUID, **_OTHER_PARAMS[op_id]})
+            user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
+            resumed = await _approve_and_resume(request_id)
+        assert_refused_without_write(resumed, writes)

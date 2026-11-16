@@ -27,9 +27,10 @@ Three pieces, used at three moments:
   card shows it as ``requested_username``.
 * :func:`read_user_for_write` runs when the call runs. In the approved run
   it acts on the user id on the card, not on a new lookup of the name. It
-  reads the user and refuses the run when the sent username, or the
-  username on the card, is not the stored one (for example the user was
-  renamed after the request).
+  refuses the run when the card shows no stored username (the user could
+  not be read for the card). It reads the user and refuses the run when the
+  sent username, or the username on the card, is not the stored one (for
+  example the user was renamed after the request).
 """
 
 from __future__ import annotations
@@ -121,12 +122,21 @@ def card_user_id(op_id: str, card: dict[str, Any], id_key: str = "id") -> str:
     return uuid
 
 
-def check_card_username(op_id: str, card: dict[str, Any], user: dict[str, Any]) -> None:
-    """Refuse the run when *user*'s stored username is not the one on the card.
+def check_card_username(
+    op_id: str, card: dict[str, Any], user: dict[str, Any] | None = None
+) -> None:
+    """Refuse the run when the card shows no username, or *user*'s is another.
 
-    For example, the user was renamed after the approval.
+    Without a username on the card, MEHO cannot tell that the user is still
+    the one the approver saw. A stored username that is not the one on the
+    card means, for example, that the user was renamed after the approval.
     """
-    if _opt_str(card.get("username")) is None or not user_matches_username(card, user):
+    if _opt_str(card.get("username")) is None:
+        raise ValueError(
+            f"{op_id}: the approval request shows no user name, so MEHO cannot tell that "
+            "it is the same user. Nothing was changed. Send a new request."
+        )
+    if user is not None and not user_matches_username(card, user):
         raise ValueError(
             f"{op_id}: the user's name in Keycloak is not the name on the approval "
             "card. Nothing was changed. Send a new request."
@@ -155,6 +165,9 @@ async def read_user_for_write(
     realm = resolve_realm_config(target).managed_realm
     card = approved_preview(op_id)
     uuid = card_user_id(op_id, card, id_key) if card is not None else _opt_str(params.get(id_key))
+    if card is not None:
+        # A card whose user could not be read shows no stored name: no run.
+        check_card_username(op_id, card if card.get("user_available") is True else {})
     username = _opt_str(params.get("username"))
     if uuid is None:
         if username is None:
@@ -171,7 +184,7 @@ async def read_user_for_write(
     if not user_matches_username(params, user):
         raise ValueError(other_user_reason(op_id, id_key))
     # A request by id alone sends no username, so compare with the card too.
-    if card is not None and _opt_str(card.get("username")) is not None:
+    if card is not None:
         check_card_username(op_id, card, user)
     return UserOfWrite(uuid=uuid, path=path, user=user)
 

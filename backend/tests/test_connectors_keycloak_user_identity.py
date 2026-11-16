@@ -77,7 +77,10 @@ def _user(enabled: bool) -> dict[str, Any]:
 
 
 def _operator(
-    sub: str = "kc-identity-requester", role: TenantRole = TenantRole.OPERATOR
+    sub: str = "kc-identity-requester",
+    role: TenantRole = TenantRole.OPERATOR,
+    *,
+    platform_admin: bool = False,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -87,6 +90,7 @@ def _operator(
         tenant_id=_TENANT_ID,
         tenant_role=role,
         principal_kind=PrincipalKind.USER,
+        platform_admin=platform_admin,
     )
 
 
@@ -185,6 +189,15 @@ _USER_OP_PARAMS: dict[str, dict[str, Any]] = {
 _CREDENTIALS_PATH = f"{_USER_PATH}/credentials"
 _OTP_CREDENTIAL = {"id": "cred-otp-1", "type": "otp", "userLabel": "phone", "createdDate": 1}
 _MEMBER_OPS = ("keycloak.group.member.add", "keycloak.group.member.remove")
+_ACTIONS_PATH = f"/admin/realms/{_REALM}/authentication/required-actions"
+_TOTP_ACTION = {"alias": "CONFIGURE_TOTP", "name": "Configure OTP", "enabled": True}
+#: The other parameters of every Keycloak user write (all 13).
+_USER_WRITE_PARAMS: dict[str, dict[str, Any]] = {
+    **_USER_OP_PARAMS,
+    "keycloak.user.delete": {},
+    "keycloak.user.required_actions.update": {"add": ["CONFIGURE_TOTP"]},
+    **{op_id: {"group_id": _GROUP_UUID} for op_id in _MEMBER_OPS},
+}
 
 
 def _call_args(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -205,8 +218,43 @@ def _mount_user(mock: respx.MockRouter, user: dict[str, Any]) -> respx.Route:
     return mock.get(_USER_PATH).respond(200, json=user)
 
 
-async def _approve_and_resume(request_id: uuid.UUID) -> Any:
-    approver = _operator("kc-identity-approver", TenantRole.TENANT_ADMIN)
+def _by_id(op_id: str) -> dict[str, Any]:
+    """The params of a user write that names the user by id only."""
+    id_key = "user_id" if op_id in _MEMBER_OPS else "id"
+    return {id_key: _USER_UUID, **_USER_WRITE_PARAMS[op_id]}
+
+
+def _mount_user_write(mock: respx.MockRouter) -> tuple[respx.Route, respx.Route]:
+    """Mount what any user write reads; return the user read and the writes."""
+    _mount_token(mock)
+    user_read = _mount_user(mock, _user(True))
+    mock.get(f"/admin/realms/{_REALM}/groups/{_GROUP_UUID}").respond(
+        200, json={"id": _GROUP_UUID, "name": "event-guests", "path": "/event-guests"}
+    )
+    mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
+    mock.get(_CREDENTIALS_PATH).respond(200, json=[_OTP_CREDENTIAL])
+    mock.get(_ACTIONS_PATH).respond(200, json=[_TOTP_ACTION])
+    writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
+    return user_read, writes
+
+
+async def _park(op_id: str, params: dict[str, Any]) -> uuid.UUID:
+    """Send a user write so that it waits for approval; return the request id."""
+    args = _call_args(op_id, params)
+    if op_id == "keycloak.user.delete":
+        # A delete waits for approval only with the hash of its preview.
+        preview = await preview_operation(_operator(), args)
+        assert preview["status"] == "ok", preview
+        args["preview_hash"] = preview["preview_hash"]
+    call = await call_operation(_operator(), args)
+    assert call["status"] == "awaiting_approval", (op_id, call)
+    return uuid.UUID(call["extras"]["approval_request_id"])
+
+
+async def _approve_and_resume(request_id: uuid.UUID, *, platform_admin: bool = False) -> Any:
+    approver = _operator(
+        "kc-identity-approver", TenantRole.TENANT_ADMIN, platform_admin=platform_admin
+    )
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
         await session.commit()
@@ -456,8 +504,7 @@ _RENAME_CASES = [
         for op_id in _MEMBER_OPS
     ),
     # A request by id alone: the run compares the stored name with the card.
-    *((op_id, {"id": _USER_UUID, **extra}) for op_id, extra in sorted(_USER_OP_PARAMS.items())),
-    *((op_id, {"group_id": _GROUP_UUID, "user_id": _USER_UUID}) for op_id in _MEMBER_OPS),
+    *((op_id, _by_id(op_id)) for op_id in sorted(_USER_WRITE_PARAMS)),
 ]
 
 
@@ -470,24 +517,36 @@ async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
     kc: KeycloakConnector, op_id: str, params: dict[str, Any]
 ) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        _mount_token(mock)
-        user_read = _mount_user(mock, _user(True))
-        mock.get(f"/admin/realms/{_REALM}/groups/{_GROUP_UUID}").respond(
-            200, json={"id": _GROUP_UUID, "name": "event-guests", "path": "/event-guests"}
-        )
-        mock.get(_CREDENTIALS_PATH).respond(200, json=[_OTP_CREDENTIAL])
-        writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
-        call = await call_operation(_operator(), _call_args(op_id, params))
-        assert call["status"] == "awaiting_approval", call
-        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        user_read, writes = _mount_user_write(mock)
+        request_id = await _park(op_id, params)
         user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
         resumed = await _approve_and_resume(request_id)
+    assert_refused_without_write(resumed, writes)
+
+
+def assert_refused_without_write(resumed: Any, writes: respx.Route) -> None:
+    """The approved run was refused, and nothing was written."""
     assert resumed.status != "ok"
     # Some ops withhold the error text, so the check is on the error class. A
     # rights change can stop one step earlier: its card cannot be checked again.
     dumped = str(resumed.model_dump(mode="json"))
     assert "ValueError" in dumped or "object_changed_since_approval" in dumped, dumped
     assert not writes.called
+
+
+@pytest.mark.parametrize("op_id", sorted(_USER_WRITE_PARAMS))
+async def test_a_request_whose_card_shows_no_stored_name_is_refused_when_it_runs(
+    kc: KeycloakConnector, op_id: str
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        user_read, writes = _mount_user_write(mock)
+        # The user cannot be read while the approval request is made.
+        user_read.respond(404)
+        request_id = await _park(op_id, _by_id(op_id))
+        user_read.respond(200, json=_user(True))
+        # A rights change for a user MEHO could not read needs a platform admin.
+        resumed = await _approve_and_resume(request_id, platform_admin=True)
+    assert_refused_without_write(resumed, writes)
 
 
 async def test_a_username_request_is_refused_when_the_user_is_renamed(

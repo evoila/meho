@@ -560,9 +560,10 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     """Card: the user, the realm, and what is added or removed (with before and after).
 
     The before and after come from one live read of the user, and the card
-    then shows the username stored in Keycloak. When the user cannot be read
-    (no live connector, an unknown name, a fault), the card still shows the
-    request and says ``current_available: false``.
+    then shows the username stored in Keycloak (``user_available: true``).
+    When the user cannot be read (no live connector, an unknown name, a
+    fault), the card still shows the request and says
+    ``current_available: false`` and ``user_available: false``.
     """
     add = _names(ctx.params.get("add"))
     remove = _names(ctx.params.get("remove"))
@@ -574,6 +575,7 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
         "add": add,
         "remove": remove,
         "current_available": False,
+        "user_available": False,
     }
     requested = _opt_str(ctx.params.get("username"))
     if requested is not None:
@@ -610,6 +612,7 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     stored = _opt_str(user.get("username"))
     if stored is not None:
         preview["username"] = stored
+        preview["user_available"] = True
         preview.pop("requested_username", None)
     preview["current_available"] = True
     preview["current_required_actions"] = current

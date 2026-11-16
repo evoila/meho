@@ -3679,13 +3679,13 @@ groups and clients.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
-<td>With <code>POLICY_CLASSIFICATION</code> on: when the install's policy file makes an operation always wait for approval, it now waits in every tenant. A tenant's entry can make more operations wait, but cannot set an install-wide "always wait" back. A tenant policy import or a single classification edit that tries it is refused, and the message names the install entry. A tenant entry stored before the upgrade that set such a wait back no longer has that effect (its category and labels still count). No database migration.</td>
+<td>With <code>POLICY_CLASSIFICATION</code> on (Helm <code>config.policy.classification</code>, default off): when the install's policy file makes an operation always wait for approval, it now waits in every tenant. A tenant's entry can make more operations wait, but cannot set an install-wide "always wait" back. A tenant policy import or a single classification edit that tries it is refused, and the message names the install entry. A tenant entry stored before the upgrade that set such a wait back no longer has that effect (its category and labels still count). No database migration.</td>
 <td><strong>Nothing to do</strong> while <code>POLICY_CLASSIFICATION</code> is off. Otherwise run <code>meho policy export</code> for each tenant: an entry with a <code># Has no effect:</code> comment above it no longer ends the wait. Remove it from the file before the next import, or the import is refused. See <a href="../../guides/policy-file/#rules-that-no-file-can-loosen">Rules that no file can loosen</a>.</td>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
-<td>With <code>POLICY_CLASSIFICATION</code> on, the stricter of the install's and the tenant's policy counts. A risk level that the install's policy file sets is now a floor for every tenant: a tenant entry with a lower level no longer lowers it. A tenant's own "always wait" now holds also under a more specific install entry with <code>always_wait: false</code>. A tenant policy import with a lower risk level than a matching install entry is refused, and the message names the install entry. For a tenant entry stored before the upgrade with such a lower level, its level does not count for the operations that the install sets higher. A wide entry still counts for its other operations. No database migration.</td>
-<td><strong>Nothing to do</strong> while <code>POLICY_CLASSIFICATION</code> is off. Otherwise run <code>meho policy export</code> for each tenant: each <code># Has no effect:</code> comment says that the level of the entry below it "does not count for <code>&lt;op&gt;</code>". A wide entry still counts for its other operations, so do not remove its level: add a tenant entry for <code>&lt;op&gt;</code> with the install's level or higher, or leave <code>&lt;op&gt;</code> out of the match. Fix it before the next import, or the import is refused. Check also the operations where a tenant made something wait and the install's file has <code>always_wait: false</code>: they now wait. See <a href="../../guides/policy-file/#rules-that-no-file-can-loosen">Rules that no file can loosen</a>.</td>
+<td>With <code>POLICY_CLASSIFICATION</code> on (Helm <code>config.policy.classification</code>, default off), the stricter of the install's and the tenant's policy counts. A risk level that the install's policy file sets is now a floor for every tenant: a tenant entry with a lower level no longer lowers it. A tenant's own "always wait" now holds also under a more specific install entry with <code>always_wait: false</code>. A tenant policy import with a lower risk level than a matching install entry is refused, and the message names the install entry. For a tenant entry stored before the upgrade with such a lower level, its level does not count for the operations that the install sets higher. A wide entry still counts for its other operations. No database migration.</td>
+<td><strong>Nothing to do</strong> while <code>POLICY_CLASSIFICATION</code> is off. Otherwise run <code>meho policy export</code> for each tenant: each <code># Has no effect:</code> comment says that the level of the entry below it "does not count for <code>&lt;op&gt;</code>". A wide entry still counts for its other operations, so do not remove its level: add a tenant entry for <code>&lt;op&gt;</code> of the connector that the comment names (and with the group, when the comment names one), with the install's level or higher, or leave <code>&lt;op&gt;</code> out of the match. Fix it before the next import, or the import is refused. Check also the operations where a tenant made something wait and the install's file has <code>always_wait: false</code>: they now wait. See <a href="../../guides/policy-file/#rules-that-no-file-can-loosen">Rules that no file can loosen</a>.</td>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
@@ -3696,6 +3696,16 @@ groups and clients.</p>
 <td><strong>v0.47.0</strong></td>
 <td>Migration <code>0168</code> adds four columns that may be empty: <code>policy_rule</code> and <code>policy_version</code> on <code>audit_log</code> and on <code>approval_request</code>. They name the policy rule that matched a call and the version of the policy file. No existing row changes; rows made before the upgrade keep them empty. MEHO fills them only while <code>POLICY_ENGINE_SHADOW</code> (Helm <code>config.policy.engineShadow</code>, default off) is on. Then the rule is marked as one that did not decide the call: <code>(shadow)</code> on the audit row, <code>"decided": false</code> on the approval request.</td>
 <td><strong>Nothing to do.</strong> The migration runs by itself.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>Migration <code>0169</code> adds two columns that may be empty to <code>dispatch_trace</code>: <code>request_id</code> and <code>operator_sub</code>. No existing row changes. An older trace has neither and is found by time only.</td>
+<td><strong>Nothing to do.</strong> The migration runs by itself.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>Migration <code>0170</code> adds the column <code>targets.connection_changed_at</code>. Old rows get the value of <code>updated_at</code>. No other row changes. A probe no longer makes MEHO sign in to the target again. A secret that changed only in the secret store (Vault) is used after a failed login, or after a person sends the same <code>secret_ref</code> again.</td>
+<td><strong>Nothing to do</strong> for the upgrade: the migration runs by itself. After a secret changes in the store alone, send the <code>secret_ref</code> again: <code>meho targets update &lt;name&gt; --secret-ref &lt;same path&gt;</code>.</td>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>

@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write_effective_roles import (
@@ -32,7 +31,6 @@ from meho_backplane.operations.grant_approval import (
     GRANT_REASON_STRICTER,
     grant_changed_since_request,
 )
-from tests._oidc_jwt_helpers import APPROVAL_CLIENT_ID  # noqa: F401
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )

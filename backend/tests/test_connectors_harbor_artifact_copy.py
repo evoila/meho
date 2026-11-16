@@ -118,12 +118,12 @@ async def test_copy_by_tag_posts_from_and_reports_copied(monkeypatch: pytest.Mon
 
     with respx.mock(assert_all_called=True) as mock:
         mock.get(_SRC_TAG_URL).mock(return_value=respx.MockResponse(200, json={"digest": _DIGEST}))
-        mock.get(_dst_url("1.27")).mock(return_value=respx.MockResponse(404))
+        mock.get(_dst_url(_DIGEST)).mock(return_value=respx.MockResponse(404))
         mock.post(_DST_ARTIFACTS_URL).mock(side_effect=_capture)
         result = await connector.artifact_copy(_operator(), _TARGET, _PARAMS_TAG)
 
     assert len(sent) == 1
-    assert sent[0].url.params["from"] == "cache/library/nginx:1.27"
+    assert sent[0].url.params["from"] == f"cache/library/nginx@{_DIGEST}"
     assert result == {
         "project": "apps",
         "repository": "nginx",
@@ -170,28 +170,50 @@ async def test_second_call_reports_copied_false_and_posts_nothing(
 
 
 @pytest.mark.asyncio
-async def test_tag_held_with_same_digest_is_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "target_tag_status",
+    [
+        pytest.param(404, id="tag-missing-on-target"),
+        pytest.param(200, id="tag-on-target-points-elsewhere"),
+    ],
+)
+async def test_tag_request_with_digest_held_is_no_op(
+    monkeypatch: pytest.MonkeyPatch, target_tag_status: int
+) -> None:
+    """The target holds the digest, under another tag or none: nothing is copied.
+
+    The target is checked by digest only. The tag route on the target is
+    mocked so a read by tag would be seen, and it must not happen.
+    """
     _install_vault(monkeypatch)
     connector = HarborConnector()
     with respx.mock(assert_all_called=False) as mock:
         mock.get(_SRC_TAG_URL).mock(return_value=respx.MockResponse(200, json={"digest": _DIGEST}))
-        mock.get(_dst_url("1.27")).mock(
+        by_digest = mock.get(_dst_url(_DIGEST)).mock(
             return_value=respx.MockResponse(200, json={"digest": _DIGEST})
+        )
+        by_tag = mock.get(_dst_url("1.27")).mock(
+            return_value=respx.MockResponse(target_tag_status, json={"digest": _OTHER_DIGEST})
         )
         post = mock.post(_DST_ARTIFACTS_URL).mock(return_value=respx.MockResponse(201))
         result = await connector.artifact_copy(_operator(), _TARGET, _PARAMS_TAG)
 
+    assert by_digest.call_count == 1
+    assert by_tag.call_count == 0
     assert post.call_count == 0
     assert result["copied"] is False
+    assert result["digest"] == _DIGEST
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_tag_held_with_other_digest_is_copied(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_tag_on_target_with_other_digest_is_copied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The target tag points to another image and the digest is not there: copy it."""
     _install_vault(monkeypatch)
     connector = HarborConnector()
-    with respx.mock(assert_all_called=True) as mock:
+    with respx.mock(assert_all_called=False) as mock:
         mock.get(_SRC_TAG_URL).mock(return_value=respx.MockResponse(200, json={"digest": _DIGEST}))
+        mock.get(_dst_url(_DIGEST)).mock(return_value=respx.MockResponse(404))
         mock.get(_dst_url("1.27")).mock(
             return_value=respx.MockResponse(200, json={"digest": _OTHER_DIGEST})
         )
@@ -199,7 +221,42 @@ async def test_tag_held_with_other_digest_is_copied(monkeypatch: pytest.MonkeyPa
         result = await connector.artifact_copy(_operator(), _TARGET, _PARAMS_TAG)
 
     assert post.call_count == 1
+    assert post.calls[0].request.url.params["from"] == f"cache/library/nginx@{_DIGEST}"
     assert result["copied"] is True
+    assert result["digest"] == _DIGEST
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_source_tag_that_moves_still_copies_the_digest_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source tag moves after it was read: the copy still names the digest read.
+
+    The source tag answers with one digest, and with another one on any later
+    read. The copy request must name the first digest, so the reported digest
+    is the one Harbor copies.
+    """
+    _install_vault(monkeypatch)
+    connector = HarborConnector()
+    with respx.mock(assert_all_called=False) as mock:
+        source = mock.get(_SRC_TAG_URL).mock(
+            side_effect=[
+                respx.MockResponse(200, json={"digest": _DIGEST}),
+                respx.MockResponse(200, json={"digest": _OTHER_DIGEST}),
+            ]
+        )
+        mock.get(_dst_url(_DIGEST)).mock(return_value=respx.MockResponse(404))
+        post = mock.post(_DST_ARTIFACTS_URL).mock(return_value=respx.MockResponse(201))
+        result = await connector.artifact_copy(_operator(), _TARGET, _PARAMS_TAG)
+
+    assert source.call_count == 1
+    assert post.call_count == 1
+    sent_from = post.calls[0].request.url.params["from"]
+    assert sent_from == f"cache/library/nginx@{_DIGEST}"
+    assert ":1.27" not in sent_from
+    assert result["digest"] == _DIGEST
+    assert result["from"] == "cache/library/nginx:1.27"
     await connector.aclose()
 
 

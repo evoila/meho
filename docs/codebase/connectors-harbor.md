@@ -367,8 +367,11 @@ not one of the 9.
 `harbor.artifact.copy` (`ops_artifact_copy.py`) copies an image inside Harbor
 from `from` (`<project>/<repository>@<digest>` or `:<tag>`) into `project` and
 `repository`. Nothing is uploaded. It is safe to run twice: it reads the source
-digest (for a tag), then reads the target by the same reference. When the
-target holds that digest, it returns `copied: false` and sends no copy. Only a
+digest (for a tag), then reads the target by that digest. When the target holds
+that digest, under any tag or none, it returns `copied: false` and sends no
+copy. The copy itself names the source by digest (`from=<project>/<repository>@<digest>`),
+so a tag that moves after the read cannot change what is copied. Harbor copies
+the tags of the source image along with it. Only a
 `404` counts as "not there"; any other failed read, a missing source, and any
 copy error are raised. The result carries the `digest` and names
 `harbor.artifact.list` as the read back. Its tests are in

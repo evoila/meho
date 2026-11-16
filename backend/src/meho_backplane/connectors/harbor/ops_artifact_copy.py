@@ -9,10 +9,12 @@ for approval and lands in the audit log. Harbor does the copy inside the
 registry, so no image data is uploaded.
 
 The operation is safe to run twice. Before it copies, the handler reads the
-source to get its digest, then reads the target. When the target already holds
-that digest (or that tag with that digest), it reports ``copied: false`` and
-changes nothing. A failed read raises; it never looks like "not there" unless
-Harbor answered ``404``.
+source to get its digest, then reads the target by that digest. When the target
+already holds that digest (under any tag, or none), it reports ``copied: false``
+and changes nothing. The copy names the source by that digest, so a tag that
+moves in the meantime cannot change what is copied. Harbor copies the tags of
+the source image along with it. A failed read raises; it never looks like
+"not there" unless Harbor answered ``404``.
 
 The handler body lives here and
 :meth:`~meho_backplane.connectors.harbor.connector.HarborConnector.artifact_copy`
@@ -90,7 +92,10 @@ _ARTIFACT_COPY_RESPONSE_SCHEMA: dict[str, Any] = {
         "project": {"type": "string"},
         "repository": {"type": "string"},
         "from": {"type": "string", "description": "The source image as it was asked for."},
-        "digest": {"type": "string", "description": "Digest of the source image."},
+        "digest": {
+            "type": "string",
+            "description": "Digest of the source image. This is the image that is copied.",
+        },
         "copied": {
             "type": "boolean",
             "description": (
@@ -118,12 +123,15 @@ _ARTIFACT_COPY_LLM_INSTRUCTIONS: dict[str, Any] = {
     "parameter_hints": {
         "project": "The target project. It must already exist.",
         "repository": "The repository name in the target project.",
-        "from": "<project>/<repository>@<digest>, or <project>/<repository>:<tag> to keep the tag.",
+        "from": (
+            "<project>/<repository>@<digest>, or <project>/<repository>:<tag>. A tag is looked "
+            "up once, and the image it points to is copied with all its tags."
+        ),
     },
     "output_shape": (
-        "{project, repository, from, digest, copied, read_back}. copied is true when this "
-        "call copied the image. When the target already holds it, copied is false and "
-        "nothing changed."
+        "{project, repository, from, digest, copied, read_back}. digest is the image that "
+        "was copied. copied is true when this call copied the image. When the target already "
+        "holds that digest, under any tag, copied is false and nothing changed."
     ),
     "next_step": (
         "Call harbor.artifact.list for the target project and repository and check that "
@@ -200,10 +208,13 @@ async def harbor_artifact_copy_impl(
             raise LookupError(f"source image {source} was not found")
         digest = found
 
+    # Check and copy by digest: a tag can move between the reads and the copy,
+    # and the target can hold the image under another tag. Harbor copies the
+    # tags of the source image along with it.
     held = await _read_digest(
-        connector, operator, target, _artifact_path(project, repository, reference)
+        connector, operator, target, _artifact_path(project, repository, digest)
     )
-    copied = held != digest
+    copied = held is None
     if copied:
         path = fill_path(
             _ARTIFACTS_PATH,
@@ -212,7 +223,8 @@ async def harbor_artifact_copy_impl(
                 "repository_name": encode_segment(repository),
             },
         )
-        await connector._post_json(target, path, operator=operator, params={"from": source})
+        pinned = f"{src_project}/{src_repository}@{digest}"
+        await connector._post_json(target, path, operator=operator, params={"from": pinned})
     return {
         "project": project,
         "repository": repository,

@@ -28,7 +28,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerStatus,
 )
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
-from meho_backplane.work_ref import WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = [
     "CHECK_EVENTS_OFF_NOTICE",
@@ -255,7 +255,7 @@ class ScheduledTriggerCreate(BaseModel):
         ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT
     )
     tenant_id: uuid.UUID | None = None
-    work_ref: WorkRef | None = None
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
 
     @model_validator(mode="after")
     def _validate_discriminated_union(self) -> ScheduledTriggerCreate:

@@ -204,6 +204,7 @@ from meho_backplane.ui.routes.approvals.run_watch import (
 )
 from meho_backplane.ui.routes.approvals.sign_in import approve_sign_in_state, web_approval_auth
 from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
+from meho_backplane.ui.routes.work_ref_form import filter_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_approvals_router"]
@@ -230,12 +231,6 @@ _WAITING_SCAN_BATCH: Final[int] = 500
 
 #: The bell counts the requests for a person up to here; it shows "99+" from 100.
 _BADGE_COUNT_CAP: Final[int] = 100
-
-#: Maximum work_ref length accepted by the history filter. ``work_ref`` is
-#: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
-#: bounding the wire shape rejects an oversized paste at the form boundary
-#: (FastAPI 422) rather than forwarding it into the WHERE clause.
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 #: The status-tab vocabulary the full-page console exposes. Each entry maps
 #: a tab key the template renders to the ``list_pending`` ``status``
@@ -627,7 +622,7 @@ def build_approvals_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_session,
         tab: str = Query(default=_DEFAULT_HISTORY_TAB),
-        work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Query(default=""),
         offset: int = Query(default=0, ge=0),
         partial: str = Query(default=""),
         order: str = Query(default=""),
@@ -647,7 +642,7 @@ def build_approvals_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_session,
         tab: str = Query(default=_DEFAULT_HISTORY_TAB),
-        work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Query(default=""),
         offset: int = Query(default=0, ge=0),
         order: str = Query(default=""),
     ) -> HTMLResponse:
@@ -760,7 +755,8 @@ async def _build_history_context(
     projection + pager state, so they share this builder -- the markup is
     identical across a direct navigation and a tab/pager swap. The
     ``work_ref`` filter is applied only when non-blank (a blank box means
-    "no work_ref filter", i.e. every request for the active tab).
+    "no work_ref filter", i.e. every request for the active tab). It is
+    checked with the shared ticket id rule; a value that breaks it is a 422.
 
     ``order`` (#3596) is the operator's oldest/newest toggle. When it is
     empty, the Pending tab lists oldest first if a change ticket has two or
@@ -769,7 +765,7 @@ async def _build_history_context(
     """
     tab = _resolve_history_tab(tab)
     order_choice = _resolve_history_order(order)
-    work_ref_filter = work_ref.strip() or None
+    work_ref_filter = filter_work_ref(work_ref)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         positions = await pending_chain_positions(
@@ -839,7 +835,7 @@ async def _build_history_context(
         "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
         "tabs": [t for t in _HISTORY_TABS if t != _FOR_YOU_TAB or routing_enabled()],
-        "work_ref": work_ref.strip(),
+        "work_ref": work_ref_filter or "",
         "offset": offset,
         "page_size": _HISTORY_PAGE_SIZE,
         "next_offset": offset + _HISTORY_PAGE_SIZE,

@@ -137,6 +137,7 @@ from meho_backplane.ui.routes.approvals.render import (
     set_csrf_cookie,
 )
 from meho_backplane.ui.routes.approvals.sign_in import sign_in_url, web_sign_in_level
+from meho_backplane.ui.routes.work_ref_form import filter_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_in_order_router", "group_warnings"]
@@ -154,8 +155,6 @@ _PAGE: Final[int] = 500
 #: claimed (``already_resumed``), and how often it looks.
 _RESULT_WAIT_SECONDS: Final[float] = 30.0
 _RESULT_POLL_SECONDS: Final[float] = 0.5
-
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 _ONE_USE: Final[str] = (
     "An approval is used once, so this step cannot run again from here. "
@@ -230,28 +229,29 @@ def build_in_order_router() -> APIRouter:
     async def approvals_in_order_plan(
         request: Request,
         session: UISessionContext = _require_session,
-        work_ref: str = Query(min_length=1, max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Query(),
     ) -> HTMLResponse:
         """Render the in-order modal with the steps and a Start button."""
+        ref = _ticket(work_ref)
         operator = await _routes._resolve_operator(session)
-        run = _Run(steps=await _load_steps(operator, work_ref.strip()))
+        run = _Run(steps=await _load_steps(operator, ref))
         run.warnings = group_warnings([s.row for s in run.steps])
-        return await _render(request, session, work_ref.strip(), run, reason="", started=False)
+        return await _render(request, session, ref, run, reason="", started=False)
 
     @router.post("/ui/approvals/in-order", response_class=HTMLResponse)
     async def approvals_in_order_run(
         request: Request,
         session: UISessionContext = _require_session,
-        work_ref: str = Form(min_length=1, max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(),
         reason: str = Form(default="", max_length=MAX_REASON_LENGTH),
         confirm_id: str = Form(default=""),
         step_id: list[str] = Form(default_factory=list),
     ) -> HTMLResponse:
         """Run the steps in order; render what happened to each."""
+        ref = _ticket(work_ref)
         operator = await _routes._resolve_operator(session)
         confirmed = _parse_confirm_id(confirm_id)
         shown = {_parse_request_id(raw, "step_id") for raw in step_id}
-        ref = work_ref.strip()
         run = _Run(steps=await _load_steps(operator, ref))
         run.warnings = group_warnings([s.row for s in run.steps])
         run.unseen = _unseen_pending(run.steps, shown)
@@ -274,6 +274,17 @@ def build_in_order_router() -> APIRouter:
         return response
 
     return router
+
+
+def _ticket(raw: str) -> str:
+    """The change ticket of the page, checked like the approvals search box.
+
+    The page needs a ticket, so a blank value is a 422 too.
+    """
+    ref = filter_work_ref(raw)
+    if ref is None:
+        raise HTTPException(status_code=422, detail="work_ref must name a change ticket")
+    return ref
 
 
 def _parse_confirm_id(raw: str) -> uuid.UUID | None:

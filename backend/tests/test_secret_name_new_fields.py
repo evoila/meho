@@ -15,6 +15,7 @@ Each row is checked in four spellings, with an SNMP prefix too.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from meho_backplane.broadcast.events import (
     scrub_secret_named_values,
 )
 from meho_backplane.connectors.keycloak.ops_read import keycloak_realm_get
+from meho_backplane.connectors.keycloak.ops_write_account_preview import _user_update_preview
 from meho_backplane.connectors.keycloak.redaction import (
     REDACTED,
     redact_preview_fields,
@@ -235,3 +237,11 @@ async def test_keycloak_read_hides_shared_names_by_default_and_reveal_returns_th
     assert revealed["realm"]["passwordPolicy"] == "length(8)"
     assert revealed["realm"]["attributes"]["snmpAuthKey"] == _VALUE
     assert revealed["realm"]["smtpServer"]["password"] == REDACTED
+
+
+async def test_keycloak_user_update_preview_hides_shared_names() -> None:
+    params = {"realm": "demo", "changes": {"email": "j@example.com", "snmpAuthKey": _VALUE}}
+    ctx = SimpleNamespace(params=params, connector_instance=None, target=None)
+    card = await _user_update_preview(ctx)  # type: ignore[arg-type]
+    assert card is not None
+    assert card["changes"] == {"email": "j@example.com", "snmpAuthKey": REDACTED}

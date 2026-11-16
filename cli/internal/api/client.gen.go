@@ -9859,21 +9859,24 @@ type RunApprovalListResponse struct {
 
 // RunApprovalRead One run approval with its status.
 type RunApprovalRead struct {
-	ApprovedAt    *time.Time            `json:"approved_at"`
-	ApprovedBySub *string               `json:"approved_by_sub"`
-	EndedAt       *time.Time            `json:"ended_at"`
-	Entries       []RunApprovalEntry    `json:"entries"`
-	ExpiresAt     time.Time             `json:"expires_at"`
-	Id            openapi_types.UUID    `json:"id"`
-	PrincipalSub  string                `json:"principal_sub"`
-	Reason        string                `json:"reason"`
-	RequestedAt   time.Time             `json:"requested_at"`
-	RevokedAt     *time.Time            `json:"revoked_at"`
-	RevokedBySub  *string               `json:"revoked_by_sub"`
-	RevokedReason *string               `json:"revoked_reason"`
-	Status        RunApprovalReadStatus `json:"status"`
-	TenantId      openapi_types.UUID    `json:"tenant_id"`
-	WorkRef       string                `json:"work_ref"`
+	ApprovedAt    *time.Time         `json:"approved_at"`
+	ApprovedBySub *string            `json:"approved_by_sub"`
+	EndedAt       *time.Time         `json:"ended_at"`
+	Entries       []RunApprovalEntry `json:"entries"`
+
+	// EntriesThatWait Entries the run approval never covers: each of their calls waits for a person. Filled by request, show and approve; null in the list.
+	EntriesThatWait *[]RunApprovalWaitNote `json:"entries_that_wait"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	Id              openapi_types.UUID     `json:"id"`
+	PrincipalSub    string                 `json:"principal_sub"`
+	Reason          string                 `json:"reason"`
+	RequestedAt     time.Time              `json:"requested_at"`
+	RevokedAt       *time.Time             `json:"revoked_at"`
+	RevokedBySub    *string                `json:"revoked_by_sub"`
+	RevokedReason   *string                `json:"revoked_reason"`
+	Status          RunApprovalReadStatus  `json:"status"`
+	TenantId        openapi_types.UUID     `json:"tenant_id"`
+	WorkRef         string                 `json:"work_ref"`
 }
 
 // RunApprovalReadStatus defines model for RunApprovalRead.Status.
@@ -9882,6 +9885,21 @@ type RunApprovalReadStatus string
 // RunApprovalRevoke Body of “POST /api/v1/service-principals/run-approvals/{id}/revoke“.
 type RunApprovalRevoke struct {
 	Reason *string `json:"reason"`
+}
+
+// RunApprovalWaitNote An entry the run approval never covers; each of its calls waits for a person.
+//
+// The list keeps the entry (the request is not refused), and this note
+// says so to the add-on that asks and to the person who approves.
+type RunApprovalWaitNote struct {
+	ConnectorId string `json:"connector_id"`
+
+	// Entry The position of the entry in ``entries``, from 0.
+	Entry int    `json:"entry"`
+	OpId  string `json:"op_id"`
+
+	// Reason Why each call of this entry waits for a person.
+	Reason string `json:"reason"`
 }
 
 // RunCompletedResponse Returned by “meho_runbook_next“ when the previous step was the last.

@@ -28,6 +28,7 @@ from meho_backplane.operations.run_approvals import as_utc, target_kinds_enabled
 from meho_backplane.operations.service_grants import (
     always_wait_grant_reason,
     caller_address_grant_reason,
+    credential_read_grant_reason,
     delete_grant_reason,
 )
 
@@ -76,6 +77,14 @@ def _target_fields(target: Any) -> tuple[uuid.UUID | None, str | None]:
 def _never_covered(descriptor: EndpointDescriptor) -> bool:
     from meho_backplane.settings import get_settings
 
+    secret_reason = credential_read_grant_reason(
+        descriptor.op_id, getattr(descriptor, "op_class", None)
+    )
+    if secret_reason is not None:
+        _log.info(
+            "run_approval_refused_credential_read", op_id=descriptor.op_id, reason=secret_reason
+        )
+        return True
     if (
         is_root_shell(descriptor.op_id)
         or needs_per_call_approval(descriptor.op_id)
@@ -144,8 +153,9 @@ async def consult_and_record_run_approval(
     for approval and that no standing grant covers. The run reference is
     the request's ``Meho-Work-Ref``; a call without one is never covered.
     An operation with a delete sign, one that connects to an address the
-    caller gives, one that runs a command as root on the host, or one a
-    connector marks for per-call approval, is never covered.
+    caller gives, one that runs a command as root on the host, one a
+    connector marks for per-call approval, or one of the ``credential_read``
+    class (it reads a credential), is never covered.
 
     On a hit with ``record=True`` it writes one ``approval.decision`` audit
     row (same shape as a standing grant use) in its own committed

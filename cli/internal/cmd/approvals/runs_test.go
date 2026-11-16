@@ -125,3 +125,25 @@ func TestPrintRunApprovalShowsEveryEntry(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintRunApprovalSaysWhichEntriesWait: an entry the run approval never
+// covers carries a line under it, so the approver sees that each of its
+// calls still waits for a person.
+func TestPrintRunApprovalSaysWhichEntriesWait(t *testing.T) {
+	run := newRunApproval(t, "pending")
+	run.Entries = append(run.Entries, api.RunApprovalEntry{ConnectorId: "kubernetes-1.x", OpId: "k8s.secret.read_to_ref"})
+	reason := "op 'k8s.secret.read_to_ref' reads a credential. A run approval never covers it: each call waits for a person"
+	run.EntriesThatWait = &[]api.RunApprovalWaitNote{
+		{Entry: 2, ConnectorId: "kubernetes-1.x", OpId: "k8s.secret.read_to_ref", Reason: reason},
+	}
+	var buf bytes.Buffer
+	printRunApproval(&buf, &run)
+	out := buf.String()
+	want := "k8s.secret.read_to_ref  no target\n      waits for a person on every call: " + reason + "\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("output missing %q; got:\n%s", want, out)
+	}
+	if strings.Count(out, "waits for a person on every call") != 1 {
+		t.Errorf("only the listed entry waits; got:\n%s", out)
+	}
+}

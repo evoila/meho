@@ -969,6 +969,7 @@
   "tests/test_retrieval_retriever.py": 0.54,
   "tests/test_retrieval_usage.py": 3.03,
   "tests/test_retrieve_isolation.py": 0.3,
+  "tests/test_run_approval_credential_reads.py": 22.6,
   "tests/test_run_approvals.py": 6.59,
   "tests/test_run_approvals_routing.py": 0.65,
   "tests/test_runbook_check_approval.py": 18.0,

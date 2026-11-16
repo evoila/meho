@@ -12,6 +12,8 @@ Shapes for the REST surface (:mod:`meho_backplane.api.v1.run_approvals`):
 * :class:`RunApprovalRevoke` -- the optional reason of a revoke.
 * :class:`RunApprovalRead` / :class:`RunApprovalListResponse` -- the
   stored request with its status.
+* :class:`RunApprovalWaitNote` -- an entry the run approval never covers:
+  each of its calls still waits for a person.
 
 Request shapes set ``extra="forbid"`` so an unknown field is a 422 at the
 boundary, like the grant schemas.
@@ -35,6 +37,7 @@ __all__ = [
     "RunApprovalRead",
     "RunApprovalRevoke",
     "RunApprovalStatus",
+    "RunApprovalWaitNote",
 ]
 
 #: Upper bound on entries in one request. Enough for a long run; keeps the
@@ -100,6 +103,21 @@ class RunApprovalRevoke(BaseModel):
     reason: str | None = Field(default=None, min_length=1, max_length=2048)
 
 
+class RunApprovalWaitNote(BaseModel):
+    """An entry the run approval never covers; each of its calls waits for a person.
+
+    The list keeps the entry (the request is not refused), and this note
+    says so to the add-on that asks and to the person who approves.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry: int = Field(description="The position of the entry in ``entries``, from 0.")
+    connector_id: str
+    op_id: str
+    reason: str = Field(description="Why each call of this entry waits for a person.")
+
+
 class RunApprovalRead(BaseModel):
     """One run approval with its status."""
 
@@ -120,6 +138,13 @@ class RunApprovalRead(BaseModel):
     revoked_by_sub: str | None = None
     revoked_reason: str | None = None
     ended_at: datetime | None = None
+    entries_that_wait: list[RunApprovalWaitNote] | None = Field(
+        default=None,
+        description=(
+            "Entries the run approval never covers: each of their calls waits for a "
+            "person. Filled by request, show and approve; null in the list."
+        ),
+    )
 
 
 class RunApprovalListResponse(BaseModel):

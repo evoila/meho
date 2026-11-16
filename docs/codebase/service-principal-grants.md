@@ -394,7 +394,8 @@ parent's audit id when a child step was cleared). Details:
 A standing grant covers one operation for good. A **run approval** covers
 the operation list of one automation run: the add-on asks, a person
 approves the list once, and it ends with the run. The gate checks it after
-the standing grants, with the same delete rule. See
+the standing grants, with the same delete rule and the same credential
+read rule. See
 [run-approvals.md](run-approvals.md).
 
 ## Read scope: limit a service principal's reads to named targets (#4992)

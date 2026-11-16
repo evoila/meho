@@ -41132,6 +41132,15 @@
             "format": "date-time",
             "nullable": true,
             "title": "Ended At"
+          },
+          "entries_that_wait": {
+            "items": {
+              "$ref": "#/components/schemas/RunApprovalWaitNote"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Entries That Wait",
+            "description": "Entries the run approval never covers: each of their calls waits for a person. Filled by request, show and approve; null in the list."
           }
         },
         "type": "object",
@@ -41163,6 +41172,37 @@
         "type": "object",
         "title": "RunApprovalRevoke",
         "description": "Body of ``POST /api/v1/service-principals/run-approvals/{id}/revoke``."
+      },
+      "RunApprovalWaitNote": {
+        "properties": {
+          "entry": {
+            "type": "integer",
+            "title": "Entry",
+            "description": "The position of the entry in ``entries``, from 0."
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Why each call of this entry waits for a person."
+          }
+        },
+        "type": "object",
+        "required": [
+          "entry",
+          "connector_id",
+          "op_id",
+          "reason"
+        ],
+        "title": "RunApprovalWaitNote",
+        "description": "An entry the run approval never covers; each of its calls waits for a person.\n\nThe list keeps the entry (the request is not refused), and this note\nsays so to the add-on that asks and to the person who approves."
       },
       "RunCompletedResponse": {
         "properties": {

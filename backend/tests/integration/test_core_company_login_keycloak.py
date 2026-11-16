@@ -872,12 +872,10 @@ def _approval_token(
     return claims
 
 
-def _approval_client(kc: _Keycloak) -> dict[str, Any]:
+def _approval_client(kc: _Keycloak, client_id: str = _APPROVAL_CLIENT) -> dict[str, Any]:
     admin = f"{kc.base_url}/admin/realms/meho"
     headers = _master_headers(kc)
-    (found,) = httpx.get(
-        f"{admin}/clients", headers=headers, params={"clientId": _APPROVAL_CLIENT}
-    ).json()
+    (found,) = httpx.get(f"{admin}/clients", headers=headers, params={"clientId": client_id}).json()
     client = httpx.get(f"{admin}/clients/{found['id']}", headers=headers)
     client.raise_for_status()
     return dict(client.json())
@@ -900,10 +898,14 @@ def _take_the_approval_flow_out(kc: _Keycloak) -> None:
     """
     admin = f"{kc.base_url}/admin/realms/meho"
     headers = _master_headers(kc)
-    client = _approval_client(kc)
-    client["authenticationFlowBindingOverrides"] = {"browser": ""}
-    httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
-    assert _approval_client(kc).get("authenticationFlowBindingOverrides", {}) == {}
+    # The console's approval client is bound to the same flow (#6282).
+    for client_id in (_APPROVAL_CLIENT, _CONSOLE_APPROVAL.client_id):
+        client = _approval_client(kc, client_id)
+        client["authenticationFlowBindingOverrides"] = {"browser": ""}
+        httpx.put(
+            f"{admin}/clients/{client['id']}", headers=headers, json=client
+        ).raise_for_status()
+        assert _approval_client(kc, client_id).get("authenticationFlowBindingOverrides", {}) == {}
     for alias in (
         _APPROVAL_FLOW,
         f"{_APPROVAL_FLOW} - level 2",

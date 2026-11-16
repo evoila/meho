@@ -9,13 +9,18 @@ the errors a person can fix (a duplicate name, an unknown
 ``identity_ref``, a missing or wrong starting grant pick) into the
 per-field messages the create and edit modals show
 (:mod:`~meho_backplane.ui.routes.agents.forms`).
+
+Both bind the same ``audit_*`` values as ``POST`` / ``PATCH
+/api/v1/agents``, so the console's audit row names the operation and
+the picked set (and its targets).
 """
 
 from __future__ import annotations
 
+import structlog
 from fastapi import HTTPException
 
-from meho_backplane.agents.grant_sets import StartingGrantsError
+from meho_backplane.agents.grant_sets import StartingGrantsError, audit_fields
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentDefinitionUpdate
 from meho_backplane.agents.service import (
     AgentDefinitionExistsError,
@@ -39,6 +44,12 @@ async def save_create(
     body: AgentDefinitionCreate,
 ) -> dict[str, str] | None:
     """Create the definition; return the field errors of a known failure."""
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.create",
+        audit_op_class="write",
+        audit_agent_name=body.name,
+        **audit_fields(body.starting_grants),
+    )
     try:
         await AgentDefinitionService().create(
             tenant_id=session_ctx.tenant_id,
@@ -61,6 +72,13 @@ async def save_edit(
     body: AgentDefinitionUpdate,
 ) -> dict[str, str] | None:
     """Save the edit; return the field errors of a known failure (404 when absent)."""
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.edit",
+        audit_op_class="write",
+        audit_agent_name=name,
+    )
+    if body.identity_ref is not None:
+        structlog.contextvars.bind_contextvars(**audit_fields(body.starting_grants))
     try:
         entry = await AgentDefinitionService().update(
             session_ctx.tenant_id, name, body, updated_by_sub=operator.sub

@@ -204,7 +204,10 @@ Rules:
 - The audit row of the creation carries `starting_grants` (the set, or
   `not-chosen` when no set was picked) and, for `read-targets`,
   `starting_grant_targets` (the names as sent). So does the audit row of
-  an edit that sends `identity_ref`.
+  an edit that sends `identity_ref`. The console forms write the same
+  audit values as the API (`ui/routes/agents/form_saves.py`,
+  `principals_forms.py`); `test_ui_agent_starting_grants_audit.py`
+  checks the stored rows.
 
 Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`,
 `PATCH /api/v1/agents/{name}`, the admin MCP tools

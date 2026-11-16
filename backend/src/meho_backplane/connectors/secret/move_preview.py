@@ -40,6 +40,15 @@ the row. (For a credential-class op the preview is suppressed to ``None``;
 both safe and the point.) ``build_proposed_effect`` wraps the returned
 dict as ``{"op_class": "other", "preview": <this dict>}``.
 
+A ``vault-target:`` side the caller may not use
+==============================================
+
+The op's permission preflight is
+:func:`~meho_backplane.connectors.secret.vault_target_endpoint.vault_target_move_preflight`.
+It checks the named Vault target (it must have its own role) and the
+caller's policy on it. When it says no, the dispatcher refuses the call and
+makes no approval card.
+
 A ``linux:`` sink the path check refuses
 ========================================
 
@@ -57,8 +66,10 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref
+from meho_backplane.connectors.secret.vault_target_endpoint import vault_target_move_preflight
 from meho_backplane.operations._preview import (
     PreviewContext,
+    register_permission_preflight,
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
@@ -77,7 +88,12 @@ def _ref_summary(spec: SecretRef) -> dict[str, str]:
     ``ref`` is an address (a Vault KV path + ``#<field>`` fragment), never
     a value.
     """
-    return {"kind": spec.kind, "ref": spec.ref}
+    summary = {"kind": spec.kind, "ref": spec.ref}
+    if spec.kind == "vault-target":
+        # The target whose role does this read or write, named on its own
+        # so a reviewer does not have to cut it out of the ref.
+        summary["target"] = spec.ref.partition("/")[0]
+    return summary
 
 
 def _linux_sink_refusal(raw_to: str) -> str | None:
@@ -140,6 +156,7 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         "action": "secret.move",
         "source": _ref_summary(source),
         "sink": _ref_summary(sink),
+        "merge": ctx.params.get("merge") is True,
     }
     reason = ctx.params.get("reason")
     if isinstance(reason, str) and reason:
@@ -148,8 +165,9 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 def _register_secret_move_preview_builder() -> None:
-    """Wire the ``secret.move`` preview builder and params check. Import-time."""
+    """Wire the ``secret.move`` preview builder, permission check and params check. Import-time."""
     register_preview_builder("secret.move", build_secret_move_preview)
+    register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
 
 

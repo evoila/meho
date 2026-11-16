@@ -26,6 +26,7 @@ func newMoveCmd() *cobra.Command {
 		from      string
 		to        string
 		reason    string
+		merge     bool
 		jsonOut   bool
 		backplane string
 	)
@@ -38,6 +39,9 @@ func newMoveCmd() *cobra.Command {
 			"'vault:secret/db/prod#password'); 'kind' selects the store adapter\n" +
 			"and 'ref' is the store-specific address. --reason is recorded for\n" +
 			"the approver and the audit trail.\n\n" +
+			"--merge keeps the other fields of the sink secret and changes only\n" +
+			"the named field (Vault sinks only, with a check against a parallel\n" +
+			"change). Without --merge, a Vault sink replaces the whole secret.\n\n" +
 			"References, not values: there is NO inline-secret flag of any kind.\n" +
 			"The value is never passed on the command line, so it never lands in\n" +
 			"shell history, ps output, or the op params. The response returns\n" +
@@ -54,7 +58,7 @@ func newMoveCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runMove(cmd, from, to, reason, jsonOut, backplane)
+			return runMove(cmd, moveParams(from, to, reason, merge), jsonOut, backplane)
 		},
 	}
 	// References-not-values: --from / --to carry only opaque '<kind>:<ref>'
@@ -66,6 +70,8 @@ func newMoveCmd() *cobra.Command {
 		"sink '<kind>:<ref>' reference the credential is written to (required)")
 	cmd.Flags().StringVar(&reason, "reason", "",
 		"justification recorded for the approver and the audit trail (required)")
+	cmd.Flags().BoolVar(&merge, "merge", false,
+		"keep the other fields of the sink secret; change only the named field (Vault sinks)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the full OperationResult envelope as JSON")
 	cmd.Flags().StringVar(&backplane, "backplane", "",
@@ -78,23 +84,32 @@ func newMoveCmd() *cobra.Command {
 	return cmd
 }
 
+// moveParams builds the secret.move params. Only references, the reason
+// and the merge option ever cross the wire — never a value. merge is sent
+// only when set, so a plain move sends the same params as before.
+func moveParams(from, to, reason string, merge bool) map[string]any {
+	params := map[string]any{
+		"from":   from,
+		"to":     to,
+		"reason": reason,
+	}
+	if merge {
+		params["merge"] = true
+	}
+	return params
+}
+
 // runMove resolves the backplane, dispatches secret.move with the
-// reference/reason params, and renders the value-free result.
+// given params, and renders the value-free result.
 func runMove(
 	cmd *cobra.Command,
-	from, to, reason string,
+	params map[string]any,
 	jsonOut bool,
 	backplaneOverride string,
 ) error {
 	backplaneURL, err := resolveBackplane(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
-	}
-	// Only references and the reason ever cross the wire — never a value.
-	params := map[string]any{
-		"from":   from,
-		"to":     to,
-		"reason": reason,
 	}
 	r, err := conn.Call(cmd.Context(), backplaneURL, opMove, "", params)
 	if err != nil {

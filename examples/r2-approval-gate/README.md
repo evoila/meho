@@ -133,15 +133,19 @@ For a change-class op like `vmware.composite.vm.snapshot.revert`:
 
 - The op is shipped with `safety_level="dangerous"` and
   `requires_approval=True` ([composites registry][composites]).
-- A `dangerous` op with no matching grant defaults to **deny**.
+- A `dangerous` op with no matching grant waits for approval while the
+  switch `AGENT_GRANT_REQUIRED` is `off` (the default) or `observe`.
+  With `on`, it is refused (`agent_no_grant`).
 - A grant with verdict `auto-execute` is *tightened* to
   `needs-approval` by the safety-level ceiling — destructive ops are
   never auto-executed.
 - A grant with verdict `needs-approval` passes through the ceiling
   unchanged.
 
-So to make the snapshot-revert op pause for human approval (not deny,
-not auto-execute), insert one `AgentPermission` row matching:
+With the switch `on`, the op is refused unless a grant covers it. So
+insert one `AgentPermission` row; the op then waits for a person's
+approval in every state of the switch (with `off` or `observe` it waits
+also without the row):
 
 | Column | Value | Meaning |
 |---|---|---|
@@ -426,8 +430,12 @@ meho login $MEHO_INSTANCE
 #    backend creates the kind=agent Keycloak client and a DB row; the
 #    assigned `sub` is the clientId (`agent:<name>`). --owner-sub sets
 #    the kill-switch owner and defaults to the caller's sub.
+#    --grants none: no starting grant, because step 3 adds the grants
+#    this demo needs. MEHO asks for the pick when the switch
+#    AGENT_GRANT_REQUIRED is observe or on.
 meho agent-principal register vmware-snapshot-revert-agent \
-  --owner-sub $MY_SUB
+  --owner-sub $MY_SUB \
+  --grants none
 AGENT_SUB="agent:vmware-snapshot-revert-agent"
 
 # 3. Apply the AgentPermission grants. The grant API takes one
@@ -451,7 +459,8 @@ meho agent grant create \
 #    the value must be a JSON object, so extract the nested
 #    `toolset` field out of agent_definition.json first. Required
 #    flags: --identity-ref, --model-tier, --system-prompt,
-#    --turn-budget.
+#    --turn-budget. It needs no --grants: the agent already has the
+#    grants from step 3.
 jq .toolset agent_definition.json > /tmp/r2-toolset.json
 meho agent create vmware-snapshot-revert-agent \
   --identity-ref "$AGENT_SUB" \

@@ -58,8 +58,10 @@ policy denies.
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any
 
+import hvac
 import structlog
 
 import meho_backplane.auth.vault as _auth_vault
@@ -67,6 +69,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     strip_credential_value,
 )
+from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.secret.endpoints import (
     SecretMaterial,
     register_secret_endpoint,
@@ -77,6 +80,7 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "SecretMergeDeletedVersionError",
     "VaultKvSecretEndpoint",
     "VaultSecretRefError",
 ]
@@ -94,6 +98,21 @@ class VaultSecretRefError(ValueError):
     ``exception_class="VaultSecretRefError"``. The message names the
     path and field, never the value.
     """
+
+
+class SecretMergeDeletedVersionError(VaultSecretRefError, ConnectorOwnMessage):
+    """A merge was asked into a secret whose latest version is deleted or destroyed.
+
+    Its other fields cannot be read, so the merge would lose them. Nothing
+    is written. The message is a fixed MEHO sentence, so the caller sees it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the latest version of the sink secret is deleted, so a merge cannot keep "
+            "its other fields. Nothing was written. Restore the version (undelete) "
+            "first, or move without merge to write a new version"
+        )
 
 
 def _parse_vault_ref(ref: str) -> tuple[str, str]:
@@ -126,6 +145,18 @@ class VaultKvSecretEndpoint:
         self._path, self._field = _parse_vault_ref(ref)
         self._mount = mount
 
+    def _client(self, operator: Operator, op_id: str) -> AbstractAsyncContextManager[hvac.Client]:
+        """Open the Vault client this endpoint talks through.
+
+        Here: the calling operator's own Vault identity; *op_id* (the
+        ``vault.kv.*`` op this read or write matches) is not used. The
+        ``vault-target`` kind overrides it to check the caller's policy for
+        *op_id* on a registered Vault target and log in under that
+        target's role instead.
+        """
+        del op_id
+        return _auth_vault.vault_client_for_operator(operator)
+
     async def read_secret(self, operator: Operator) -> SecretMaterial:
         """Read the addressed field and wrap its value in a :class:`SecretMaterial`.
 
@@ -146,7 +177,7 @@ class VaultKvSecretEndpoint:
         # ``meho-mcp`` ACL policy, never a replacement for it. ``read_only``
         # so the platform-path allow-list applies on the read side.
         enforce_tenant_scope(operator, mount=self._mount, path=self._path, read_only=True)
-        async with _auth_vault.vault_client_for_operator(operator) as client:
+        async with self._client(operator, "vault.kv.read") as client:
             payload = await asyncio.to_thread(
                 client.secrets.kv.v2.read_secret_version,
                 path=self._path,
@@ -176,7 +207,8 @@ class VaultKvSecretEndpoint:
 
         KV-v2 replaces the latest version wholesale (no server-side
         merge), so the write sends a single-field secret body
-        ``{<field>: <value>}``. The value is decoded back to ``str`` from
+        ``{<field>: <value>}`` (other fields are dropped; use
+        :meth:`write_secret_merged` to keep them). The value is decoded back to ``str`` from
         the material's bytes — KV-v2 stores JSON string values, and the
         source read coerced via :func:`strip_credential_value`, so the
         round-trip is lossless for the credential strings the broker
@@ -186,7 +218,7 @@ class VaultKvSecretEndpoint:
         _log.debug("secret_broker.vault.write", path=self._path, field=self._field)
         self.check_write_allowed(operator)
         body: dict[str, str] = {self._field: material.value.decode("utf-8")}
-        async with _auth_vault.vault_client_for_operator(operator) as client:
+        async with self._client(operator, "vault.kv.put") as client:
             await asyncio.to_thread(
                 client.secrets.kv.v2.create_or_update_secret,
                 path=self._path,
@@ -194,6 +226,67 @@ class VaultKvSecretEndpoint:
                 cas=None,
                 mount_point=self._mount,
             )
+
+    async def write_secret_merged(self, operator: Operator, material: SecretMaterial) -> None:
+        """Write *material* into the addressed field and keep the other fields.
+
+        The merge option of ``secret.move``. Reads the current secret,
+        sets the one field, and writes the whole body back with a
+        check-and-set (CAS) guard on the version that was read. If another
+        writer changed the secret in between, Vault refuses the write and
+        nothing is lost. A secret that does not exist yet is created with
+        ``cas=0`` (Vault: "only if it does not exist"). A secret whose
+        latest version is deleted or destroyed is refused and nothing is
+        written: its other fields cannot be read, so a merge would lose them.
+        """
+        _log.debug("secret_broker.vault.write_merged", path=self._path, field=self._field)
+        self.check_write_allowed(operator)
+        value = material.value.decode("utf-8")
+        async with self._client(operator, "vault.kv.patch") as client:
+            await asyncio.to_thread(self._merge_write, client, value)
+
+    def _merge_write(self, client: hvac.Client, value: str) -> None:
+        """Blocking read-modify-write with CAS (runs in a worker thread)."""
+        kv = client.secrets.kv.v2
+        body: dict[str, Any]
+        try:
+            payload = kv.read_secret_version(
+                path=self._path, mount_point=self._mount, raise_on_deleted_version=False
+            )
+        except hvac.exceptions.InvalidPath as exc:
+            # A destroyed latest version also answers 404, but with metadata.
+            if _version_metadata(exc.json) is not None:
+                raise SecretMergeDeletedVersionError from None
+            body, cas = {}, 0
+        else:
+            metadata = _version_metadata(payload) or {}
+            if metadata.get("deletion_time") or metadata.get("destroyed") is True:
+                raise SecretMergeDeletedVersionError
+            body = dict(_structural_unwrap(payload, path=self._path))
+            version = metadata.get("version")
+            if not isinstance(version, int) or isinstance(version, bool):
+                raise VaultSecretRefError(
+                    f"vault KV-v2 read for {self._path!r} returned no version, "
+                    "so the merge cannot be guarded with check-and-set"
+                )
+            cas = version
+        body[self._field] = value
+        try:
+            kv.create_or_update_secret(
+                path=self._path, secret=body, cas=cas, mount_point=self._mount
+            )
+        except hvac.exceptions.InvalidRequest as exc:
+            raise VaultSecretRefError(
+                f"vault refused the merge write at {self._path!r} (check-and-set failed). "
+                "The secret may have changed while the move ran: run the move again"
+            ) from exc
+
+
+def _version_metadata(payload: object) -> dict[str, Any] | None:
+    """The ``data.metadata`` dict of a KV-v2 read answer, or ``None``."""
+    outer = payload.get("data") if isinstance(payload, dict) else None
+    metadata = outer.get("metadata") if isinstance(outer, dict) else None
+    return metadata if isinstance(metadata, dict) else None
 
 
 def _structural_unwrap(payload: object, *, path: str) -> dict[str, Any]:

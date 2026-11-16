@@ -13,8 +13,8 @@
   whole install, every operation keeps its risk level, its "always wait",
   who may approve it, and the answer of the real policy check
   (``policy_gate``: run, wait or refuse, and the reason) for seven kinds of
-  caller, with grants and a run approval. A file with one more entry or
-  routing line fails this check. A binding in the file fails the
+  caller, with grants and a run approval, also with ``AGENT_GRANT_REQUIRED=on``.
+  A file with one more entry or routing line fails this check. A binding in the file fails the
   ``validate`` check: an install's file may not hold bindings.
 """
 
@@ -52,6 +52,8 @@ from meho_backplane.policy.document import document_of, parse_policy_file
 from meho_backplane.policy.evaluate import Asker, AskerKind, Lookups, Via, evaluate
 from meho_backplane.policy.service import (
     NO_CHANGE,
+    POLICY_CHANGED,
+    PolicyApplyError,
     apply_policy,
     build_plan,
     builtin_install_document,
@@ -453,3 +455,68 @@ async def test_importing_the_file_changes_no_operation(monkeypatch: pytest.Monke
     assert any(changed[k]["approvers"] != with_file[k]["approvers"] for k in with_file)
     assert any(changed[k]["always_wait"] != with_file[k]["always_wait"] for k in with_file)
     assert any(changed[k]["gate"] != with_file[k]["gate"] for k in with_file)
+
+
+@pytest.mark.asyncio
+async def test_importing_the_file_changes_no_operation_when_agents_need_a_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same comparison with ``AGENT_GRANT_REQUIRED=on``: the file still changes no answer."""
+    monkeypatch.setenv("AGENT_GRANT_REQUIRED", "on")
+    await _register_all()
+    rows = await _all_rows()
+    assert len(rows) > 100, "the registrars registered too few operations"
+    await _seed_grants(rows)
+
+    _switch(monkeypatch, False)
+    today = await _answers(rows)
+    _switch(monkeypatch, True)
+    without_file = await _answers(rows)
+
+    await _store_install_policy(_small_team())
+    with_file = await _answers(rows)
+
+    assert with_file == without_file
+    assert _without_classification(with_file) == _without_classification(today)
+    gates = [answer["gate"] for answer in with_file.values()]
+    assert any(g["agent with a grant"] != g["agent without a grant"] for g in gates)
+
+
+@pytest.mark.asyncio
+async def test_an_import_planned_before_the_policy_changed_is_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan is made, then the stored policy moves: the approved import writes nothing."""
+    _switch(monkeypatch, True)
+    await _register_all()
+    content = _small_team().replace(
+        b"classifications: []\n",
+        b"classifications:\n  - match: {op: '*.list'}\n    always_wait: true\n",
+    )
+    other = _small_team().replace(
+        b"classifications: []\n",
+        b"classifications:\n  - match: {op: '*.delete'}\n    always_wait: true\n",
+    )
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(session, scope="install", tenant_id=None, content=content)
+    assert plan.mistakes == []
+    assert plan.no_change is False
+
+    await _store_install_policy(other)
+
+    with pytest.raises(PolicyApplyError) as stopped:
+        async with get_sessionmaker()() as session, session.begin():
+            await apply_policy(
+                session,
+                scope="install",
+                tenant_id=None,
+                content=content,
+                expected_sha256=plan.file_sha256,
+                based_on=plan.based_on,
+                imported_by="admin-a",
+                approved_by="admin-b",
+            )
+    assert str(stopped.value) == POLICY_CHANGED
+    assert "The policy changed after this import was planned." in POLICY_CHANGED
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(PolicyRevision))).scalars().all() == []

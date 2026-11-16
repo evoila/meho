@@ -9,11 +9,14 @@ or creates an agent definition
 (:meth:`~meho_backplane.agents.service.AgentDefinitionService.create`),
 they pick one of three sets (#6191):
 
-* ``none`` -- no row. The agent runs nothing until an admin adds a grant.
+* ``none`` -- no row. With ``AGENT_GRANT_REQUIRED=on`` the agent then runs
+  nothing until an admin adds a grant; with ``off`` or ``observe`` it can
+  still run safe operations at once.
 * ``read-everything`` -- one row: ``op_pattern="*"``, ``target_scope="*"``,
   ``auto-execute``.
 * ``read-targets`` -- one row per named target: ``op_pattern="*"``,
-  ``target_scope=<target id>``, ``auto-execute``.
+  ``target_scope=<target id>``, ``auto-execute``. Only with ``on`` does
+  this keep the agent off other targets.
 
 The risk-level ceiling (``auth/permissions.py``) keeps every operation
 above ``safe`` waiting for a person's approval, so ``auto-execute`` here
@@ -51,6 +54,7 @@ __all__ = [
     "NOT_CHOSEN",
     "PERSON_ONLY_REMEDIATION",
     "STARTING_GRANTS_JSON_SCHEMA",
+    "STARTING_GRANT_SETS_TEXT",
     "StartingGrantSet",
     "StartingGrants",
     "StartingGrantsError",
@@ -83,19 +87,24 @@ class StartingGrantSet(StrEnum):
     READ_TARGETS = "read-targets"
 
 
+#: What each set does. True in every state of ``AGENT_GRANT_REQUIRED``.
+STARTING_GRANT_SETS_TEXT: Final[str] = (
+    "'none': MEHO writes no grant. With AGENT_GRANT_REQUIRED='on' the agent then "
+    "runs nothing until an admin adds a grant; with 'off' or 'observe' it can "
+    "still run safe operations at once. "
+    "'read-everything': safe operations run at once on every target; "
+    "everything else waits for a person's approval. "
+    "'read-targets': one grant for each target in 'targets'; safe operations "
+    "run at once there. Only with 'on' does this keep the agent off other targets."
+)
+
+
 class StartingGrants(BaseModel):
     """The first grants of a new agent, picked when it is registered or defined."""
 
     model_config = ConfigDict(extra="forbid")
 
-    set: StartingGrantSet = Field(
-        description=(
-            "'none': the agent runs nothing until an admin adds a grant. "
-            "'read-everything': safe operations run at once on every target; "
-            "everything else waits for a person's approval. "
-            "'read-targets': the same, but only on the targets in 'targets'."
-        ),
-    )
+    set: StartingGrantSet = Field(description=STARTING_GRANT_SETS_TEXT)
     targets: list[str] = Field(
         default_factory=list,
         max_length=MAX_STARTING_TARGETS,
@@ -122,10 +131,7 @@ STARTING_GRANTS_JSON_SCHEMA: Final[dict[str, object]] = {
     "description": (
         "The agent's first grants. Required while AGENT_GRANT_REQUIRED is not "
         "'off' (for an agent definition: only when its agent has no grant yet). "
-        "set='none': the agent runs nothing until an admin adds a grant. "
-        "set='read-everything': safe operations run at once on every target; "
-        "everything else waits for a person's approval. "
-        "set='read-targets': the same, only on the targets named in 'targets'."
+        "The values of 'set': " + STARTING_GRANT_SETS_TEXT
     ),
     "properties": {
         "set": {"type": "string", "enum": [member.value for member in StartingGrantSet]},
@@ -340,8 +346,9 @@ def _has_expired(expires_at: datetime | None, now: datetime) -> bool:
 def audit_fields(starting: StartingGrants | None, *, agent: str | None = None) -> dict[str, object]:
     """The ``audit_*`` values that name the picked set on the creation's audit row.
 
-    An edit passes *agent*, the ``identity_ref`` it points the definition
-    at, so its audit row also names the agent that got the grants.
+    A definition create or edit passes *agent*, the ``identity_ref`` of
+    the definition, so its audit row also names the agent that gets the
+    grants.
     """
     fields: dict[str, object] = {}
     if agent is not None:

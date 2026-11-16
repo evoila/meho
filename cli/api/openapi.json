@@ -43834,7 +43834,7 @@
         "properties": {
           "set": {
             "$ref": "#/components/schemas/StartingGrantSet",
-            "description": "'none': the agent runs nothing until an admin adds a grant. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': the same, but only on the targets in 'targets'."
+            "description": "'none': MEHO writes no grant. With AGENT_GRANT_REQUIRED='on' the agent then runs nothing until an admin adds a grant; with 'off' or 'observe' it can still run safe operations at once. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': one grant for each target in 'targets'; safe operations run at once there. Only with 'on' does this keep the agent off other targets."
           },
           "targets": {
             "items": {

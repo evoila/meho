@@ -52,6 +52,8 @@ from typing import Any, Final, Literal
 __all__ = [
     "DEFAULT_RULE_REF",
     "DEFAULT_TAXONOMY",
+    "LABEL_KEY_MAX",
+    "LABEL_VALUE_MAX",
     "RISK_LEVELS",
     "Classification",
     "ClassificationConflictError",
@@ -83,6 +85,10 @@ _SCOPES: Final[tuple[Scope, ...]] = ("install", "tenant")
 _GLOB_METACHARS: Final[frozenset[str]] = frozenset("*?[")
 _LABEL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
 
+#: The longest label key and label value, in characters.
+LABEL_KEY_MAX: Final[int] = 63
+LABEL_VALUE_MAX: Final[int] = 255
+
 #: The rule reference of an operation that no entry matches.
 DEFAULT_RULE_REF: Final[str] = "taxonomy.default"
 
@@ -107,8 +113,15 @@ def label_text_ok(key: str, value: str) -> bool:
 
     A key has only letters, digits and ``. _ / -``. A value has only
     printable characters, so no line breaks and no control characters.
+    A key has 1 to :data:`LABEL_KEY_MAX` characters and a value 1 to
+    :data:`LABEL_VALUE_MAX`, the same limits a write has.
     """
-    return bool(_LABEL_KEY_RE.fullmatch(key)) and value.isprintable()
+    return _label_key_ok(key) and 0 < len(value) <= LABEL_VALUE_MAX and value.isprintable()
+
+
+def _label_key_ok(key: str) -> bool:
+    """Whether *key* passes the key part of :func:`label_text_ok`."""
+    return len(key) <= LABEL_KEY_MAX and bool(_LABEL_KEY_RE.fullmatch(key))
 
 
 @dataclass(frozen=True)
@@ -193,6 +206,7 @@ class Classification:
     specific entry that matched, or :data:`DEFAULT_RULE_REF`.
     ``conflict`` is the one-sentence reason when two entries of the same
     rank disagree; the operation then has no category and waits.
+    ``labels`` holds only the labels that pass :func:`label_text_ok`.
     """
 
     category: str | None
@@ -234,10 +248,8 @@ def _category(
     return first.category, None
 
 
-def _labels(
-    coords: OpCoordinates, matched: Sequence[ClassificationEntry]
-) -> tuple[dict[str, str], str | None]:
-    """Each key from the most specific entry that sets it; a tie with two values is a conflict."""
+def _label_conflict(coords: OpCoordinates, matched: Sequence[ClassificationEntry]) -> str | None:
+    """A tie with two values for one key, found on the labels as stored."""
     labels: dict[str, str] = {}
     source: dict[str, ClassificationEntry] = {}
     for entry in sorted(matched, key=lambda e: e.rank, reverse=True):
@@ -247,9 +259,20 @@ def _labels(
                 labels[key] = value
                 source[key] = entry
             elif earlier.rank == entry.rank and labels[key] != value:
-                what = f"value for label {key!r}"
-                return labels, _conflict_text(coords.op_id, what, earlier, entry)
-    return labels, None
+                # A key MEHO does not show is not printed in the sentence either.
+                name = f"label {key!r}" if _label_key_ok(key) else "a label that is not shown"
+                return _conflict_text(coords.op_id, f"value for {name}", earlier, entry)
+    return None
+
+
+def _shown_labels(matched: Sequence[ClassificationEntry]) -> dict[str, str]:
+    """Each key from the most specific entry whose label passes :func:`label_text_ok`."""
+    labels: dict[str, str] = {}
+    for entry in sorted(matched, key=lambda e: e.rank, reverse=True):
+        for key, value in entry.labels.items():
+            if key not in labels and label_text_ok(key, value):
+                labels[key] = value
+    return labels
 
 
 def _scope_top(
@@ -296,14 +319,20 @@ def install_wait_undone(
     return None
 
 
-def install_wait_text(name: str, op_id: str, install_ref: str) -> str:
-    """The sentences that refuse or mark an entry found by :func:`install_wait_undone`."""
-    return (
+def install_wait_text(name: str, op_id: str, install_ref: str, *, single_edit: bool = False) -> str:
+    """The sentences that refuse or mark an entry found by :func:`install_wait_undone`.
+
+    *single_edit* is true for one edit sent on its own: it has no file
+    entry, so the text says what not to send.
+    """
+    head = (
         f"{name} sets `always_wait: false` on `{op_id}`, but `{install_ref}` makes it "
         "always wait for the whole install. A tenant can make more operations wait, "
-        "not fewer. Remove `always_wait: false` from the tenant entry; its other "
-        "fields can stay."
+        "not fewer."
     )
+    if single_edit:
+        return f"{head} Do not send `always_wait: false`."
+    return f"{head} Remove `always_wait: false` from the tenant entry; its other fields can stay."
 
 
 def _tenant_risk_decided_by(
@@ -327,11 +356,11 @@ def install_risk_lowered(
     entry: ClassificationEntry,
     coords: Iterable[OpCoordinates],
     entries: Sequence[ClassificationEntry],
-) -> tuple[str, str, str] | None:
+) -> tuple[OpCoordinates, str, str] | None:
     """Where a tenant *entry* decides a lower risk level than the install's policy.
 
     *entries* are the install's entries and the other entries of the
-    tenant. Returns ``(op_id, install_ref, install_level)`` for the first
+    tenant. Returns ``(coords, install_ref, install_level)`` for the first
     operation in *coords* that *entry* matches, where *entry* decides the
     tenant's level and an install entry sets a higher one. A more specific
     tenant entry that sets the install's level or higher decides that
@@ -351,18 +380,34 @@ def install_risk_lowered(
         if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
             install_level
         ):
-            return one.op_id, install.ref, install_level
+            return one, install.ref, install_level
     return None
 
 
 def install_risk_text(
-    name: str, risk: str, op_id: str, install_ref: str, level: str, *, wide: bool
+    name: str,
+    risk: str,
+    coords: OpCoordinates,
+    install_ref: str,
+    level: str,
+    *,
+    wide: bool,
+    with_group: bool = False,
 ) -> str:
     """The sentences that refuse or mark an entry found by :func:`install_risk_lowered`.
 
     *wide* is true when the entry also matches other operations. Then the
-    text keeps its risk level, because it still counts for those.
+    text keeps its risk level, because it still counts for those. The
+    suggested entry names the connector too: the same op id can exist on
+    another connector, and an entry without a connector would set its
+    level as well. *with_group* is true when the entry names a group: the
+    suggested entry then names the group too, so it is more specific than
+    the entry and decides the operation's level.
     """
+    op_id = coords.op_id
+    where = f"connector `{coords.connector_id}`"
+    if with_group and coords.group_key is not None:
+        where += f" and group `{coords.group_key}`"
     head = (
         f"{name} sets `risk: {risk}`, but `{install_ref}` sets `{op_id}` to `{level}` "
         f"for the whole install, so `risk: {risk}` does not count for `{op_id}`."
@@ -371,8 +416,8 @@ def install_risk_text(
         return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
     return (
         f"{head} The entry still counts for the other operations it matches. Add a "
-        f"tenant entry for `{op_id}` with `risk: {level}` or higher, or leave `{op_id}` "
-        "out of this entry's match."
+        f"tenant entry for `{op_id}` of {where} with "
+        f"`risk: {level}` or higher, or leave `{op_id}` out of this entry's match."
     )
 
 
@@ -394,8 +439,17 @@ def install_floor_texts(
         texts.append(install_wait_text(name, *undone))
     lowered = install_risk_lowered(entry, coords, entries)
     if lowered is not None and entry.risk is not None:
-        wide = any(entry.matches(one) and one.op_id != lowered[0] for one in coords)
-        texts.append(install_risk_text(name, entry.risk, *lowered, wide=wide))
+        found = lowered[0]
+        wide = any(
+            entry.matches(one)
+            and (one.connector_id, one.op_id) != (found.connector_id, found.op_id)
+            for one in coords
+        )
+        texts.append(
+            install_risk_text(
+                name, entry.risk, *lowered, wide=wide, with_group=entry.group is not None
+            )
+        )
     return texts
 
 
@@ -411,7 +465,10 @@ def classify(
     risk = max(risks, key=RISK_LEVELS.index) if risks else None
     always_wait = any(_scope_wait(matched, scope) is not None for scope in _SCOPES)
     category, category_conflict = _category(coords, matched, taxonomy)
-    labels, label_conflict = _labels(coords, matched)
+    # Conflicts are found on the labels as stored, so a label MEHO cannot show
+    # can still make the call wait. What MEHO shows skips such a label.
+    label_conflict = _label_conflict(coords, matched)
+    labels = _shown_labels(matched)
     conflict = category_conflict or label_conflict
     rule_ref = max(matched, key=lambda e: e.rank).ref if matched else DEFAULT_RULE_REF
     if conflict is not None:
@@ -464,7 +521,7 @@ def _entry_from_raw(raw: Mapping[str, Any], *, ref: str, scope: Scope) -> Classi
         category=_text(raw.get("category")),
         risk=risk,
         always_wait=always_wait,
-        labels={k: v for k, v in labels.items() if label_text_ok(k, v)},
+        labels=dict(labels),
     )
 
 

@@ -226,6 +226,14 @@ async def test_a_runbook_step_is_refused_before_the_call(
             "op-runbook",
             start.run_id,
             NextStepRequest(last_verified=True, verify_response=None),
+            caller=Operator(
+                sub="op-runbook",
+                name="op-runbook",
+                email=None,
+                raw_jwt="",
+                tenant_id=TENANT_ID,
+                tenant_role=TenantRole.OPERATOR,
+            ),
         )
 
     assert len(results) == 1

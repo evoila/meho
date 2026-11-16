@@ -24,6 +24,54 @@ You keep the policy as one file, `policy: v1`. You can:
 The policy file is not part of the [settings file](settings-file.md). It
 has its own command, `meho policy`.
 
+## Start from the "small team" file
+
+MEHO ships a default policy file, "small team":
+[`deploy/policy-profiles/small-team.yaml`](https://github.com/evoila/meho/blob/main/deploy/policy-profiles/small-team.yaml).
+It describes what MEHO does when no policy file is imported:
+
+- it lists the six built-in categories (`network`, `storage`, `compute`,
+  `identity`, `secrets`, `other`),
+- every operation has the category `other`,
+- it has no entries, so every operation keeps the risk level and the
+  approval rule it has in MEHO's code.
+
+Until you import a file for the whole install, MEHO uses this file. So
+importing it changes nothing:
+
+```bash
+meho policy validate --scope install small-team.yaml # no mistakes
+meho policy diff --scope install small-team.yaml     # answers "No change."
+```
+
+Check this file with `--scope install`. Without it, `validate` checks the
+file as a tenant's file and reports `taxonomy.default` as a mistake.
+
+On a fresh install, the diff of an install file with no `taxonomy` block
+shows the six built-in categories as removed, but they still apply. An
+install file with no entries and no `taxonomy` block is not the same as the
+"small team" file, so its import waits for a second admin to approve it.
+
+On a fresh install, `meho policy export --scope install` writes the same
+policy, without the comments. To start your own policy:
+
+1. Export the install's policy, or copy `small-team.yaml`.
+2. Add your entries under `classifications`, and your own categories under
+   `taxonomy.categories`.
+3. Run `meho policy validate --scope install` to check it, and
+   `meho policy diff --scope install` to see what changes.
+4. Import it. A second admin approves the import.
+
+An import replaces the whole stored policy of its scope. When your install
+already has a policy, importing `small-team.yaml` removes every entry of
+that policy, also an entry that made an operation stricter. So export the
+install's policy first and add your entries to that file. A second admin
+must approve every import that changes something, and the changes made to
+single operations (`meho connector edit-op`) stay.
+
+The "small team" file is for the whole install (`--scope install`). A
+tenant's own file cannot set `taxonomy.default`.
+
 ## A small example
 
 ```yaml
@@ -172,11 +220,21 @@ refused, and the message names the entry and the operation.
   operations of `X`. So do not remove the level. Add a more specific
   tenant entry for that operation with the install's level or higher, or
   leave the operation out of the match. With such an entry, the file is
-  accepted.
+  accepted. The message names the operation and its connector. Put both
+  in the new entry, for example
+  `{match: {connector: X, op: <op-id>}, risk: <level>}`. The same
+  operation id can exist on another connector, for example on another
+  version of the product. An entry without the connector sets that
+  operation's level too. When the refused entry names a group, the
+  message names the group as well. Put it in the new entry too, for
+  example `{match: {connector: X, group: <group>, op: <op-id>}, risk: <level>}`.
+  Without the group, the new entry is less specific than the refused
+  one, and the file is refused again.
 - Which install values make **every** call wait: `always_wait: true` and
-  `risk: destructive`. With `risk: dangerous`, a call waits too, but a
-  standing grant or a run approval of a service account can still let it
-  run without a new approval.
+  `risk: destructive`. With `risk: dangerous`, a call waits too, but
+  two things can still let it run without a new approval: a standing
+  grant of a service account, and a run approval of a service account.
+  An agent grant cannot: a `dangerous` call of an agent always waits.
 - An install entry matches connectors by their id, not by product. A
   connector that a tenant registers itself, under its own id, is matched
   only by an install entry with a wildcard connector, for example
@@ -195,6 +253,76 @@ meho policy history                  # the last 20 imported files
 
 Add `--scope install` to work on the policy of the whole install. Only a
 platform admin may do that.
+
+## Why does a call run, wait or fail? `meho policy explain`
+
+`meho policy explain` says what MEHO does with one call: it **runs**,
+**waits** for approval, or is **denied**. It also says why, and who may
+approve it. Nothing runs and nothing is written.
+
+```bash
+meho policy explain <connector-id> <op-id> --me
+meho policy explain <connector-id> <op-id> --groups Operators --target <target-name>
+meho policy explain <connector-id> <op-id> --groups Operators --principal agent
+meho policy explain <connector-id> <op-id> --groups Operators --file policy.yaml
+meho policy explain --request <request-id>
+```
+
+- `--me` asks for yourself. You need the operator role, as for a call.
+- `--groups` asks for a login in these groups, with no grants of its own.
+  `--principal` says if it is a `person` (the default), an `agent` or a
+  `service` login. `--via web` asks for a person in the web interface.
+  For a person, `--via` is `token` by default with `--groups`, and as you
+  call with `--me`. Only a tenant admin or a platform admin may ask for
+  other groups.
+- `--file` asks with a policy file that is not imported. The file takes
+  the place of your stored policy. It needs `POLICY_CLASSIFICATION`.
+- `--request` shows the rule stored on an approval request, and the
+  groups that may approve it. The groups stored on the request count only
+  while `POLICY_APPROVER_ROUTING` is on. With it off, explain shows
+  today's groups, the same groups the approve check uses.
+
+Good to know:
+
+- explain asks about a call **with no parameters**. For an operation
+  whose answer depends on its parameters, the answer is the one of a call
+  without parameters.
+- explain works with `POLICY_ENGINE_SHADOW` off. It then shows today's
+  answer only.
+- Only a tenant admin or a platform admin sees the entries of the policy
+  and their places in it. Everyone else gets the answer, the reason, the
+  risk level and who may approve.
+
+An example answer, for a person with a token who asks for a `caution`
+operation that a file makes always wait:
+
+```text
+Answer: wait (today's checks decide)
+Who may approve: MEHO-Operators, MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers (rule: default)
+Today: needs-approval: <today's reason>
+Policy evaluator (shadow): wait, same as today
+Decided by: floor token_runs_only_safe: wait (<rule text>)
+Floor: floor token_runs_only_safe: wait (<rule text>)
+Rules in order:
+  1. default person.token.caution: wait (risk level caution waits)
+  2. default always_wait: wait (the operation always waits) at file:classifications[1]
+  3. floor token_runs_only_safe: wait (<rule text>)
+Risk level: caution, always waits: yes, category: compute
+  matched file:classifications[0]
+  matched file:classifications[1]
+```
+
+!!! note "The policy evaluator is off by default"
+
+    The lines about the policy evaluator need the setting
+    `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`). With it
+    on, the evaluator works out its own answer next to today's checks, and
+    explain lists every rule it matched, in order. Only the `always_wait`
+    step carries a place in the policy file (for example
+    `file:classifications[1]`). The other classification entries that
+    match are listed under the classification (the `matched` lines).
+    Today's checks still decide. With the setting off, explain shows
+    today's answer only.
 
 ## What an import does
 
@@ -229,6 +357,8 @@ platform admin may do that.
 | `POST /api/v1/policy/import` | asks to import; waits for approval |
 | `GET /api/v1/policy/export` | the stored policy as a file |
 | `GET /api/v1/policy/history` | the imported files |
+| `POST /api/v1/policy/explain` | why a call runs, waits or is denied; runs nothing |
 
 Send the file as the request body with `Content-Type: application/yaml`.
-Every route takes `?scope=tenant` (the default) or `?scope=install`.
+Every file route takes `?scope=tenant` (the default) or `?scope=install`.
+`explain` takes a JSON body with the same questions as the command.

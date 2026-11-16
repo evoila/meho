@@ -390,6 +390,33 @@ const (
 	EventSourceStatusPaused EventSourceStatus = "paused"
 )
 
+// Defines values for ExplainAskerVia.
+const (
+	ExplainAskerViaToken ExplainAskerVia = "token"
+	ExplainAskerViaWeb   ExplainAskerVia = "web"
+)
+
+// Defines values for ExplainEvaluatorVerdict.
+const (
+	ExplainEvaluatorVerdictDeny ExplainEvaluatorVerdict = "deny"
+	ExplainEvaluatorVerdictRun  ExplainEvaluatorVerdict = "run"
+	ExplainEvaluatorVerdictWait ExplainEvaluatorVerdict = "wait"
+)
+
+// Defines values for ExplainRuleVerdict.
+const (
+	ExplainRuleVerdictDeny ExplainRuleVerdict = "deny"
+	ExplainRuleVerdictRun  ExplainRuleVerdict = "run"
+	ExplainRuleVerdictWait ExplainRuleVerdict = "wait"
+)
+
+// Defines values for ExplainTodayVerdict.
+const (
+	ExplainTodayVerdictDeny ExplainTodayVerdict = "deny"
+	ExplainTodayVerdictRun  ExplainTodayVerdict = "run"
+	ExplainTodayVerdictWait ExplainTodayVerdict = "wait"
+)
+
 // Defines values for FilterPredicateOp.
 const (
 	FilterPredicateOpEmpty            FilterPredicateOp = "!="
@@ -581,6 +608,44 @@ const (
 	PermissionVerdictAutoExecute   PermissionVerdict = "auto-execute"
 	PermissionVerdictDeny          PermissionVerdict = "deny"
 	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
+)
+
+// Defines values for PolicyExplainBodyPrincipal.
+const (
+	PolicyExplainBodyPrincipalAgent   PolicyExplainBodyPrincipal = "agent"
+	PolicyExplainBodyPrincipalPerson  PolicyExplainBodyPrincipal = "person"
+	PolicyExplainBodyPrincipalService PolicyExplainBodyPrincipal = "service"
+)
+
+// Defines values for PolicyExplainBodyScope.
+const (
+	PolicyExplainBodyScopeInstall PolicyExplainBodyScope = "install"
+	PolicyExplainBodyScopeTenant  PolicyExplainBodyScope = "tenant"
+)
+
+// Defines values for PolicyExplainBodyVia.
+const (
+	PolicyExplainBodyViaToken PolicyExplainBodyVia = "token"
+	PolicyExplainBodyViaWeb   PolicyExplainBodyVia = "web"
+)
+
+// Defines values for PolicyExplainResponseAnswer.
+const (
+	PolicyExplainResponseAnswerDeny PolicyExplainResponseAnswer = "deny"
+	PolicyExplainResponseAnswerRun  PolicyExplainResponseAnswer = "run"
+	PolicyExplainResponseAnswerWait PolicyExplainResponseAnswer = "wait"
+)
+
+// Defines values for PolicyExplainResponseEngine.
+const (
+	PolicyExplainResponseEngineOff    PolicyExplainResponseEngine = "off"
+	PolicyExplainResponseEngineShadow PolicyExplainResponseEngine = "shadow"
+)
+
+// Defines values for PolicyExplainResponseStatus.
+const (
+	PolicyExplainResponseStatusError PolicyExplainResponseStatus = "error"
+	PolicyExplainResponseStatusOk    PolicyExplainResponseStatus = "ok"
 )
 
 // Defines values for PolicyImportResponseScope.
@@ -2985,6 +3050,11 @@ type BodyUiAccountPushUnsubscribeUiAccountPushUnsubscribePost struct {
 // BodyUiAccountRevokeSessionUiAccountSessionsRevokePost defines model for Body_ui_account_revoke_session_ui_account_sessions_revoke_post.
 type BodyUiAccountRevokeSessionUiAccountSessionsRevokePost struct {
 	SessionRef *string `json:"session_ref,omitempty"`
+}
+
+// BodyUiAccountToolSignOutUiAccountToolsSignOutPost defines model for Body_ui_account_tool_sign_out_ui_account_tools_sign_out_post.
+type BodyUiAccountToolSignOutUiAccountToolsSignOutPost struct {
+	Tool *string `json:"tool,omitempty"`
 }
 
 // BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost defines model for Body_ui_agent_grants_create_submit_ui_agents_grants_create_post.
@@ -6584,6 +6654,107 @@ type EventSourceUpdate struct {
 	Status *EventSourceStatus `json:"status,omitempty"`
 }
 
+// ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
+type ExplainApprovers struct {
+	Groups []string `json:"groups"`
+
+	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	Rule *string `json:"rule"`
+}
+
+// ExplainAsker Who the question is for.
+type ExplainAsker struct {
+	Groups *[]string       `json:"groups,omitempty"`
+	Kind   string          `json:"kind"`
+	Me     bool            `json:"me"`
+	Role   string          `json:"role"`
+	Via    ExplainAskerVia `json:"via"`
+}
+
+// ExplainAskerVia defines model for ExplainAsker.Via.
+type ExplainAskerVia string
+
+// ExplainClassification The values the call is checked with, and the classification entries that matched.
+type ExplainClassification struct {
+	// Category Category, labels and entries are shown only to a tenant admin or a platform admin.
+	Category *string `json:"category"`
+
+	// Entries Every matching entry, least specific first.
+	Entries          *[]ExplainEntry    `json:"entries,omitempty"`
+	Labels           *map[string]string `json:"labels,omitempty"`
+	RequiresApproval bool               `json:"requires_approval"`
+	RiskLevel        string             `json:"risk_level"`
+}
+
+// ExplainEntry One classification entry that matches the operation.
+type ExplainEntry struct {
+	AlwaysWait *bool              `json:"always_wait"`
+	Category   *string            `json:"category"`
+	Labels     *map[string]string `json:"labels,omitempty"`
+	Path       string             `json:"path"`
+	Risk       *string            `json:"risk"`
+}
+
+// ExplainEvaluator The answer of the policy evaluator. It decides nothing yet (shadow mode).
+type ExplainEvaluator struct {
+	// Floor One rule. ``path`` is its place in the policy, when the policy set it.
+	Floor *ExplainRule `json:"floor,omitempty"`
+
+	// Rule One rule. ``path`` is its place in the policy, when the policy set it.
+	Rule ExplainRule `json:"rule"`
+
+	// Rules Every rule the evaluator matched, in order.
+	Rules       []ExplainRule           `json:"rules"`
+	SameAsToday bool                    `json:"same_as_today"`
+	Verdict     ExplainEvaluatorVerdict `json:"verdict"`
+}
+
+// ExplainEvaluatorVerdict defines model for ExplainEvaluator.Verdict.
+type ExplainEvaluatorVerdict string
+
+// ExplainRule One rule. “path“ is its place in the policy, when the policy set it.
+type ExplainRule struct {
+	// Path Place in the policy, for example tenant:classifications[2].
+	Path   *string `json:"path"`
+	RuleId string  `json:"rule_id"`
+
+	// Source floor, role_floor, default, agent_grant, standing_grant, ...
+	Source string `json:"source"`
+	Text   string `json:"text"`
+
+	// Verdict The answer of this step.
+	Verdict *ExplainRuleVerdict `json:"verdict"`
+}
+
+// ExplainRuleVerdict The answer of this step.
+type ExplainRuleVerdict string
+
+// ExplainStoredRequest The rule stored on an approval request.
+type ExplainStoredRequest struct {
+	// Approvers The login groups that may approve another person's call, and the rule that says so.
+	Approvers   ExplainApprovers `json:"approvers"`
+	ConnectorId string           `json:"connector_id"`
+	OpId        string           `json:"op_id"`
+
+	// PolicyRule {source, rule_id, text, decided}; null when none was stored.
+	PolicyRule    *map[string]interface{} `json:"policy_rule"`
+	PolicyVersion *int                    `json:"policy_version"`
+	RequestId     openapi_types.UUID      `json:"request_id"`
+	RiskLevel     *string                 `json:"risk_level"`
+	Status        string                  `json:"status"`
+}
+
+// ExplainToday Today's answer: what the policy gate does with the call now.
+type ExplainToday struct {
+	// PolicyVerdict auto-execute, needs-approval or deny.
+	PolicyVerdict string              `json:"policy_verdict"`
+	Reason        *string             `json:"reason"`
+	Verdict       ExplainTodayVerdict `json:"verdict"`
+}
+
+// ExplainTodayVerdict defines model for ExplainToday.Verdict.
+type ExplainTodayVerdict string
+
 // FeatureStatus One gated feature from “/ready“'s “features“ block (#4830).
 //
 // “configured“ is the feature's state; “missing_env“ lists the
@@ -8713,6 +8884,90 @@ type PairingHealth struct {
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
 
+// PolicyExplainBody The question of “POST /api/v1/policy/explain“.
+//
+// Ask about one call (“connector_id“ and “op_id“) for yourself
+// (“me“) or for a login with “groups“ (“principal“ says which kind),
+// or about a stored approval request (“request_id“) alone.
+type PolicyExplainBody struct {
+	ConnectorId *string `json:"connector_id"`
+
+	// File A policy file (policy: v1) that is not imported; it replaces the stored policy of `scope`.
+	File *string `json:"file"`
+
+	// Groups Login group kinds, e.g. Operators.
+	Groups    *[]string                   `json:"groups,omitempty"`
+	Me        *bool                       `json:"me,omitempty"`
+	OpId      *string                     `json:"op_id"`
+	Principal *PolicyExplainBodyPrincipal `json:"principal,omitempty"`
+	RequestId *openapi_types.UUID         `json:"request_id"`
+	Scope     *PolicyExplainBodyScope     `json:"scope,omitempty"`
+
+	// Target The target's name.
+	Target *string `json:"target"`
+
+	// Via For a person: web interface or token. Default: as you call with `me`, token with `groups`.
+	Via *PolicyExplainBodyVia `json:"via"`
+}
+
+// PolicyExplainBodyPrincipal defines model for PolicyExplainBody.Principal.
+type PolicyExplainBodyPrincipal string
+
+// PolicyExplainBodyScope defines model for PolicyExplainBody.Scope.
+type PolicyExplainBodyScope string
+
+// PolicyExplainBodyVia For a person: web interface or token. Default: as you call with `me`, token with `groups`.
+type PolicyExplainBodyVia string
+
+// PolicyExplainResponse The answer of “POST /api/v1/policy/explain“.
+//
+// “status“ is “error“ when the operation or the target cannot be
+// found; “error“ and “extras“ then say why, as in the preview.
+type PolicyExplainResponse struct {
+	// Answer What MEHO does with the call now: run, wait or deny.
+	Answer *PolicyExplainResponseAnswer `json:"answer"`
+
+	// Approvers The login groups that may approve another person's call, and the rule that says so.
+	Approvers *ExplainApprovers `json:"approvers,omitempty"`
+
+	// Asker Who the question is for.
+	Asker *ExplainAsker `json:"asker,omitempty"`
+
+	// Classification The values the call is checked with, and the classification entries that matched.
+	Classification *ExplainClassification `json:"classification,omitempty"`
+	ConnectorId    *string                `json:"connector_id"`
+	DecidedBy      *string                `json:"decided_by"`
+
+	// Engine off: the evaluator does not run. shadow: it runs, but today's checks decide.
+	Engine PolicyExplainResponseEngine `json:"engine"`
+	Error  *string                     `json:"error"`
+
+	// Evaluator The answer of the policy evaluator. It decides nothing yet (shadow mode).
+	Evaluator *ExplainEvaluator       `json:"evaluator,omitempty"`
+	Extras    *map[string]interface{} `json:"extras"`
+
+	// File True when a policy file that is not imported was asked.
+	File *bool   `json:"file,omitempty"`
+	OpId *string `json:"op_id"`
+
+	// Request The rule stored on an approval request.
+	Request *ExplainStoredRequest       `json:"request,omitempty"`
+	Status  PolicyExplainResponseStatus `json:"status"`
+	Target  *string                     `json:"target"`
+
+	// Today Today's answer: what the policy gate does with the call now.
+	Today *ExplainToday `json:"today,omitempty"`
+}
+
+// PolicyExplainResponseAnswer What MEHO does with the call now: run, wait or deny.
+type PolicyExplainResponseAnswer string
+
+// PolicyExplainResponseEngine off: the evaluator does not run. shadow: it runs, but today's checks decide.
+type PolicyExplainResponseEngine string
+
+// PolicyExplainResponseStatus defines model for PolicyExplainResponse.Status.
+type PolicyExplainResponseStatus string
+
 // PolicyImportResponse The preview and the import answer.
 //
 // “diff“ has the sections “description“, “taxonomy“,
@@ -8864,6 +9119,9 @@ type PreviewOperationBody_Target struct {
 // target-resolution or rate-limit envelope adds (“duration_ms“,
 // “retry_after_seconds“, ...) on the wire unchanged.
 type PreviewOperationResponse struct {
+	// Approvers Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise.
+	Approvers *[]string `json:"approvers"`
+
 	// ConnectorId The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target.
 	ConnectorId *string `json:"connector_id"`
 
@@ -8887,6 +9145,9 @@ type PreviewOperationResponse struct {
 
 	// PolicyReason The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once).
 	PolicyReason *string `json:"policy_reason"`
+
+	// PolicyRule Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed.
+	PolicyRule *map[string]interface{} `json:"policy_rule"`
 
 	// PolicyVerdict Three-state verdict returned by the permission resolver.
 	//
@@ -13481,6 +13742,11 @@ type PreviewClassificationApiV1PolicyClassificationPreviewPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ExplainApiV1PolicyExplainPostParams defines parameters for ExplainApiV1PolicyExplainPost.
+type ExplainApiV1PolicyExplainPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ExportApiV1PolicyExportGetParams defines parameters for ExportApiV1PolicyExportGet.
 type ExportApiV1PolicyExportGetParams struct {
 	Scope         *ExportApiV1PolicyExportGetParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
@@ -14613,6 +14879,9 @@ type RequestClassificationApiV1PolicyClassificationPostJSONRequestBody = Classif
 // PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody defines body for PreviewClassificationApiV1PolicyClassificationPreviewPost for application/json ContentType.
 type PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody = ClassificationEditBody
 
+// ExplainApiV1PolicyExplainPostJSONRequestBody defines body for ExplainApiV1PolicyExplainPost for application/json ContentType.
+type ExplainApiV1PolicyExplainPostJSONRequestBody = PolicyExplainBody
+
 // ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
 type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
 
@@ -14720,6 +14989,9 @@ type UiAccountPushUnsubscribeUiAccountPushUnsubscribePostFormdataRequestBody = B
 
 // UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody defines body for UiAccountRevokeSessionUiAccountSessionsRevokePost for application/x-www-form-urlencoded ContentType.
 type UiAccountRevokeSessionUiAccountSessionsRevokePostFormdataRequestBody = BodyUiAccountRevokeSessionUiAccountSessionsRevokePost
+
+// UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody defines body for UiAccountToolSignOutUiAccountToolsSignOutPost for application/x-www-form-urlencoded ContentType.
+type UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody = BodyUiAccountToolSignOutUiAccountToolsSignOutPost
 
 // UiAgentsListUiAgentsGetJSONRequestBody defines body for UiAgentsListUiAgentsGet for application/json ContentType.
 type UiAgentsListUiAgentsGetJSONRequestBody = UISessionContext
@@ -15145,6 +15417,14 @@ func (a *PreviewOperationResponse) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if raw, found := object["approvers"]; found {
+		err = json.Unmarshal(raw, &a.Approvers)
+		if err != nil {
+			return fmt.Errorf("error reading 'approvers': %w", err)
+		}
+		delete(object, "approvers")
+	}
+
 	if raw, found := object["connector_id"]; found {
 		err = json.Unmarshal(raw, &a.ConnectorId)
 		if err != nil {
@@ -15207,6 +15487,14 @@ func (a *PreviewOperationResponse) UnmarshalJSON(b []byte) error {
 			return fmt.Errorf("error reading 'policy_reason': %w", err)
 		}
 		delete(object, "policy_reason")
+	}
+
+	if raw, found := object["policy_rule"]; found {
+		err = json.Unmarshal(raw, &a.PolicyRule)
+		if err != nil {
+			return fmt.Errorf("error reading 'policy_rule': %w", err)
+		}
+		delete(object, "policy_rule")
 	}
 
 	if raw, found := object["policy_verdict"]; found {
@@ -15308,6 +15596,13 @@ func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
 	var err error
 	object := make(map[string]json.RawMessage)
 
+	if a.Approvers != nil {
+		object["approvers"], err = json.Marshal(a.Approvers)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'approvers': %w", err)
+		}
+	}
+
 	if a.ConnectorId != nil {
 		object["connector_id"], err = json.Marshal(a.ConnectorId)
 		if err != nil {
@@ -15361,6 +15656,13 @@ func (a PreviewOperationResponse) MarshalJSON() ([]byte, error) {
 		object["policy_reason"], err = json.Marshal(a.PolicyReason)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling 'policy_reason': %w", err)
+		}
+	}
+
+	if a.PolicyRule != nil {
+		object["policy_rule"], err = json.Marshal(a.PolicyRule)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'policy_rule': %w", err)
 		}
 	}
 
@@ -17433,6 +17735,11 @@ type ClientInterface interface {
 
 	PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ExplainApiV1PolicyExplainPostWithBody request with any body
+	ExplainApiV1PolicyExplainPostWithBody(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ExplainApiV1PolicyExplainPost(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ExportApiV1PolicyExportGet request
 	ExportApiV1PolicyExportGet(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17799,6 +18106,11 @@ type ClientInterface interface {
 
 	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost request
 	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountToolSignOutUiAccountToolsSignOutPostWithBody request with any body
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBody(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsListUiAgentsGetWithBody request with any body
 	UiAgentsListUiAgentsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20976,6 +21288,30 @@ func (c *Client) PreviewClassificationApiV1PolicyClassificationPreviewPost(ctx c
 	return c.Client.Do(req)
 }
 
+func (c *Client) ExplainApiV1PolicyExplainPostWithBody(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExplainApiV1PolicyExplainPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExplainApiV1PolicyExplainPost(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExplainApiV1PolicyExplainPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ExportApiV1PolicyExportGet(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewExportApiV1PolicyExportGetRequest(c.Server, params)
 	if err != nil {
@@ -22574,6 +22910,30 @@ func (c *Client) UiAccountRevokeSessionUiAccountSessionsRevokePostWithFormdataBo
 
 func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountToolSignOutUiAccountToolsSignOutPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBody(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -35804,6 +36164,61 @@ func NewPreviewClassificationApiV1PolicyClassificationPreviewPostRequestWithBody
 	return req, nil
 }
 
+// NewExplainApiV1PolicyExplainPostRequest calls the generic ExplainApiV1PolicyExplainPost builder with application/json body
+func NewExplainApiV1PolicyExplainPostRequest(server string, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewExplainApiV1PolicyExplainPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewExplainApiV1PolicyExplainPostRequestWithBody generates requests for ExplainApiV1PolicyExplainPost with any type of body
+func NewExplainApiV1PolicyExplainPostRequestWithBody(server string, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/explain")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewExportApiV1PolicyExportGetRequest generates requests for ExportApiV1PolicyExportGet
 func NewExportApiV1PolicyExportGetRequest(server string, params *ExportApiV1PolicyExportGetParams) (*http.Request, error) {
 	var err error
@@ -42369,6 +42784,46 @@ func NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(server str
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithFormdataBody calls the generic UiAccountToolSignOutUiAccountToolsSignOutPost builder with application/x-www-form-urlencoded body
+func NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithFormdataBody(server string, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody generates requests for UiAccountToolSignOutUiAccountToolsSignOutPost with any type of body
+func NewUiAccountToolSignOutUiAccountToolsSignOutPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/tools/sign-out")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -54080,6 +54535,11 @@ type ClientWithResponsesInterface interface {
 
 	PreviewClassificationApiV1PolicyClassificationPreviewPostWithResponse(ctx context.Context, params *PreviewClassificationApiV1PolicyClassificationPreviewPostParams, body PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewClassificationApiV1PolicyClassificationPreviewPostResponse, error)
 
+	// ExplainApiV1PolicyExplainPostWithBodyWithResponse request with any body
+	ExplainApiV1PolicyExplainPostWithBodyWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error)
+
+	ExplainApiV1PolicyExplainPostWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error)
+
 	// ExportApiV1PolicyExportGetWithResponse request
 	ExportApiV1PolicyExportGetWithResponse(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1PolicyExportGetResponse, error)
 
@@ -54446,6 +54906,11 @@ type ClientWithResponsesInterface interface {
 
 	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request
 	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error)
+
+	// UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse request with any body
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error)
+
+	UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error)
 
 	// UiAgentsListUiAgentsGetWithBodyWithResponse request with any body
 	UiAgentsListUiAgentsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsListUiAgentsGetResponse, error)
@@ -58518,6 +58983,29 @@ func (r PreviewClassificationApiV1PolicyClassificationPreviewPostResponse) Statu
 	return 0
 }
 
+type ExplainApiV1PolicyExplainPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PolicyExplainResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExplainApiV1PolicyExplainPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExplainApiV1PolicyExplainPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ExportApiV1PolicyExportGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -60869,6 +61357,28 @@ func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountToolSignOutUiAccountToolsSignOutPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountToolSignOutUiAccountToolsSignOutPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountToolSignOutUiAccountToolsSignOutPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -67438,6 +67948,23 @@ func (c *ClientWithResponses) PreviewClassificationApiV1PolicyClassificationPrev
 	return ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp)
 }
 
+// ExplainApiV1PolicyExplainPostWithBodyWithResponse request with arbitrary body returning *ExplainApiV1PolicyExplainPostResponse
+func (c *ClientWithResponses) ExplainApiV1PolicyExplainPostWithBodyWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error) {
+	rsp, err := c.ExplainApiV1PolicyExplainPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExplainApiV1PolicyExplainPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ExplainApiV1PolicyExplainPostWithResponse(ctx context.Context, params *ExplainApiV1PolicyExplainPostParams, body ExplainApiV1PolicyExplainPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExplainApiV1PolicyExplainPostResponse, error) {
+	rsp, err := c.ExplainApiV1PolicyExplainPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExplainApiV1PolicyExplainPostResponse(rsp)
+}
+
 // ExportApiV1PolicyExportGetWithResponse request returning *ExportApiV1PolicyExportGetResponse
 func (c *ClientWithResponses) ExportApiV1PolicyExportGetWithResponse(ctx context.Context, params *ExportApiV1PolicyExportGetParams, reqEditors ...RequestEditorFn) (*ExportApiV1PolicyExportGetResponse, error) {
 	rsp, err := c.ExportApiV1PolicyExportGet(ctx, params, reqEditors...)
@@ -68607,6 +69134,23 @@ func (c *ClientWithResponses) UiAccountRevokeOthersUiAccountSessionsRevokeOthers
 		return nil, err
 	}
 	return ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp)
+}
+
+// UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse request with arbitrary body returning *UiAccountToolSignOutUiAccountToolsSignOutPostResponse
+func (c *ClientWithResponses) UiAccountToolSignOutUiAccountToolsSignOutPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error) {
+	rsp, err := c.UiAccountToolSignOutUiAccountToolsSignOutPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBodyWithResponse(ctx context.Context, body UiAccountToolSignOutUiAccountToolsSignOutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error) {
+	rsp, err := c.UiAccountToolSignOutUiAccountToolsSignOutPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse(rsp)
 }
 
 // UiAgentsListUiAgentsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsListUiAgentsGetResponse
@@ -76071,6 +76615,39 @@ func ParsePreviewClassificationApiV1PolicyClassificationPreviewPostResponse(rsp 
 	return response, nil
 }
 
+// ParseExplainApiV1PolicyExplainPostResponse parses an HTTP response from a ExplainApiV1PolicyExplainPostWithResponse call
+func ParseExplainApiV1PolicyExplainPostResponse(rsp *http.Response) (*ExplainApiV1PolicyExplainPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExplainApiV1PolicyExplainPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PolicyExplainResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseExportApiV1PolicyExportGetResponse parses an HTTP response from a ExportApiV1PolicyExportGetWithResponse call
 func ParseExportApiV1PolicyExportGetResponse(rsp *http.Response) (*ExportApiV1PolicyExportGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -79278,6 +79855,32 @@ func ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp *ht
 	response := &UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse parses an HTTP response from a UiAccountToolSignOutUiAccountToolsSignOutPostWithResponse call
+func ParseUiAccountToolSignOutUiAccountToolsSignOutPostResponse(rsp *http.Response) (*UiAccountToolSignOutUiAccountToolsSignOutPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountToolSignOutUiAccountToolsSignOutPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

@@ -1097,8 +1097,12 @@ login client (see the `client` block in [audit_query.md](audit_query.md)):
 ## Changes of rights: the login is never its own approver
 
 `operations/grant_approval.py` checks the Keycloak writes that change who
-has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
-`keycloak.group.update_attributes`. The connector registers them
+has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign`,
+`keycloak.role_mapping.client.assign` and `keycloak.group.update_attributes`.
+It also checks two writes that change how a login signs in:
+`keycloak.user.update` (a new email or user name) and
+`keycloak.user.credential.delete` (a passkey or one-time code removed).
+The connector registers them
 (`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
 preview of the waiting request:
 
@@ -1111,7 +1115,8 @@ preview of the waiting request:
 - `login_realm`: the target manages a realm of MEHO's own login, see
   `_backplane_login_realms()`.
 - `platform_admin`: the group the handler will change is the platform
-  admin group, or the roles include the platform admin role.
+  admin group, the roles include the platform admin role, or the change
+  gives a role of the `realm-management` client (in any case).
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
@@ -1162,7 +1167,13 @@ same check refuses the run:
   refused too;
 - when the change now needs a stricter approval than the one it got: the
   live card says login realm or platform admin where the saved one said
-  no, or cannot say which it is.
+  no, or cannot say which it is;
+- for an operation registered with `bound_ids` (a card key and a refusal),
+  when the live card lists other ids under that key than the saved card.
+  `keycloak.user.credential.delete` uses it for `will_remove`, so the run
+  removes only the credentials the approver saw. This check runs before the
+  handler reads the system again, so the handler also compares its own
+  read with the approved card (`approved_preview`) before it deletes.
 
 ## The rights-change mark: another admin must approve
 
@@ -1621,7 +1632,11 @@ early-return, and the group rules for another person's change apply
 MEHO-Admin). The full subject/actor lineage stays intact (the
 decision audit row records the human approver; the request row records
 the agent requester). Since #3980 every agent request above `safe`
-waits for a person, also a `dangerous` or `destructive` one.
+waits for a person, also a `dangerous` or `destructive` one. There are
+two exceptions. A matching `deny` grant refuses the request in every
+state of the switch. And with `AGENT_GRANT_REQUIRED` `on`, a request
+that no grant covers is refused (`agent_no_grant`). In both cases the
+request never waits.
 
 ### How the agent becomes the requester
 
@@ -1662,8 +1677,13 @@ and it is the difference between the two agent-run entry points in
 
 1. **Register the agent principal** —
    [`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)
-   (`meho agent-principal register <name>` → a `agent:<name>`
-   `client_credentials` client carrying `principal_kind=agent`).
+   (`meho agent-principal register <name> --grants none` → a `agent:<name>`
+   `client_credentials` client carrying `principal_kind=agent`). Then
+   give it one grant for the write, on the one target:
+   `meho agent grant create --principal agent:<name> --op <write-op-id>
+   --target <target-uuid> --verdict needs-approval`. With the switch
+   `AGENT_GRANT_REQUIRED` `on`, an agent with no grant is refused, so
+   the write would never wait. The grant never lets it run alone.
 2. **Author an agent definition whose `identity_ref` is that client** —
    [`agent-definition.md`](agent-definition.md); `identity_ref` is
    validated against `agent_principal.keycloak_client_id`, and
@@ -2604,7 +2624,11 @@ Three invariants make the hook safe to wire on the park path:
    `credential_mint` / `credential_write`) — the generic echo can only do
    generic key-name / value-shape redaction and is not trusted to scrub a
    connector-specific secret shape, so a credential-class op with no
-   bespoke builder collapses to the identifier-only default. A **bespoke
+   bespoke builder collapses to the identifier-only default. For an
+   ingested op, the class stored on its row by a connector floor counts
+   too (`resolve_op_class`): a stored `credential_read` hides the
+   parameters, and the request and its audit row carry that class
+   ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)). A **bespoke
    builder is the deliberate exception (#1857)**: like the
    permission-preflight hook, it is trusted to own its own field
    discipline and runs even for a credential-class op (e.g. the keycloak
@@ -2658,8 +2682,11 @@ way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{cascade_resources}` from read-only GETs against the live
 Application / AppProject — wired in
 `connectors/argocd/ops_write_preview.py`. The `secret.move` broker op
-populates a ref-only `{action, source, sink}` summary with no store I/O
-(#1580, `connectors/secret/move_preview.py`). The 8 vmware write
+populates a ref-only `{action, source, sink, merge}` summary with no store
+I/O (#1580, `connectors/secret/move_preview.py`). `source` and `sink` are
+`{kind, ref}`; a `vault-target` side also has `target`, the name of the
+Vault target whose role does that read or write. `merge` is `true` when
+the sink keeps the other fields of the secret. The 8 vmware write
 composites register builders in
 `connectors/vmware_rest/composites/_write_preview.py` (#1608): the
 fan-out composites (`vm.power.bulk`, `host.evacuate`,
@@ -4769,7 +4796,7 @@ never approves. The rule is recorded in
 
 | Principal kind | Destructive op | Code |
 |---|---|---|
-| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
+| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. With no matching grant, it waits while `AGENT_GRANT_REQUIRED` is `off` (the default) or `observe`, and is refused (`agent_no_grant`) with `on`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
 | `service` | Waits for approval. No grant can approve it in advance, except a delete grant on an instance in sandbox mode (see [service-principal-grants.md](service-principal-grants.md)). | `operations/_validate.py` `_non_agent_park_reason` (the `destructive` branch, called by `_non_agent_verdict`); `operations/service_grants.py:1272` `consult_and_record_grant` refuses the tier before any grant lookup |
 | `user` | Waits for approval. | `operations/_validate.py:724` `_non_agent_verdict` |
 

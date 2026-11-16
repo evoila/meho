@@ -47,9 +47,9 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset. Two more, `keycloak.user.lock_status` and
 `keycloak.realm.lock_settings`, show whether a user is locked after failed
-sign-ins. In total the connector registers 44
-operations: 19 `safe` reads and 25 writes that wait for
-approval (7 `caution`, 14 `dangerous`, 4 `destructive`).
+sign-ins. In total the connector registers 49
+operations: 19 `safe` reads and 30 writes that wait for
+approval (8 `caution`, 18 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
 (see "One-time code set-up").
@@ -73,7 +73,10 @@ fresh target with no asserted version still resolves.
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
+  `user_logout`, `user_disable`, `user_enable`,
+  `client_scope_protocol_mapper_update`, `realm_delete`, `user_check_login`,
+  `role_mapping_client_assign`, `role_mapping_client_remove`, `user_update`,
+  `user_credential_delete`,
   `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`,
   `authflow_ensure_approval_touch`),
   the `_get_admin_json` / `_get_admin_list` GET
@@ -104,7 +107,9 @@ fresh target with no asserted version still resolves.
   the nine original approval-gated write ops plus `user.logout` (#3851),
   with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
   (`ops_write_user_enabled_schemas.py`; handlers in
-  `ops_write_user_enabled.py`) spliced in,
+  `ops_write_user_enabled.py`) and `SCOPE_MAPPER_OPS`
+  (`ops_write_scope_mapper_schemas.py`; handler in
+  `ops_write_scope_mapper.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -423,6 +428,11 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 | `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
 | `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
+| `keycloak.client_scope.protocol_mapper.update` | dangerous | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
+| `keycloak.role_mapping.client.assign` | dangerous | `POST .../users/{user-id}/role-mappings/clients/{client-id}` |
+| `keycloak.role_mapping.client.remove` | dangerous | `DELETE .../users/{user-id}/role-mappings/clients/{client-id}` |
+| `keycloak.user.update` | caution | `PUT .../users/{user-id}` |
+| `keycloak.user.credential.delete` | dangerous | `DELETE .../users/{user-id}/credentials/{credentialId}` |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
@@ -436,7 +446,7 @@ and optionally placed in a file on a host, use the three-step recipe in
 machine login for an agent seat". Step 1 is `keycloak.client.create`, which never returns
 the secret.
 
-Six more writes are `dangerous` because they can change who gets which
+Seven more writes are `dangerous` because they can change who gets which
 tenant rights, or how strong a sign-in is. MEHO reads the rights from the
 login token, and these writes change what goes into it, who can sign in as
 whom, or what a sign-in asks for:
@@ -446,6 +456,9 @@ whom, or what a sign-in asks for:
   scopes that fill the token.
 - `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
   and `tenant_role`.
+- `client_scope.protocol_mapper.update`: the same, for a mapper on a client
+  scope. It is also a change of rights, so its approval rules are stricter
+  (see "Change a protocol mapper of a client scope").
 - `user.reset_password`: it sets the password of any user of the realm.
 - `user.required_actions.update`: taking a required action away (for
   example the one-time code set-up) makes a user's sign-in weaker.
@@ -703,6 +716,141 @@ longer sign in to any app that uses this realm.
   because `.disable` and `.enable` are not write suffixes).
 - The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
   and carries no credential.
+### Client roles, user details and one stored credential
+
+Four writes in the group `account_write` (rows in
+`ops_write_account_schemas.py`, approval cards in
+`ops_write_account_preview.py`). All need approval, and a person approves
+each call. No standing grant of a service account and no run approval
+covers them: `op_classes.py` marks all four with
+`declare_per_call_approval`, because they change who can sign in and with
+what rights.
+
+`client.assign`, `user.update` and `user.credential.delete` count as a
+change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can
+change a person's email or user name, and `user.credential.delete` can
+remove their passkey or one-time code, so both change how a person signs
+in. For these three, the person the change is for never approves it. In
+MEHO's own login realm another admin must approve it; a person who may
+approve their own changes cannot approve these alone. In MEHO's own login
+realm, a role of the `realm-management` client (in any case) also needs a
+platform admin as approver: it decides who may manage the realm. In another
+realm these writes are not a change of rights: the normal approval rules of
+their risk level apply, and only the person the change is for is refused.
+
+- `keycloak.role_mapping.client.assign` and `.remove` (dangerous). Pass the
+  user (`id`, or the exact `username`), `client_id` (the client's name, for
+  example `realm-management`) and `roles` (role names of that client, for
+  example `realm-admin`). The handler finds the client's UUID, reads every
+  role on that client, and only then sends the role representations. An
+  unknown client or role is an error before anything is sent, so a typo never
+  gives or removes part of the roles. Both are safe to run twice. The result
+  has `not_applied`: the names whose state after the write is not the
+  requested one, from a read of the user's roles on that client
+  (`read_back_checked: false` and `not_applied: null` when that read fails;
+  the write itself ran). The `.remove` card for a `realm-management` role
+  has one `warning` line and `holders_after`: how many users still hold
+  each role directly after the change (read from
+  `GET .../clients/{client-uuid}/roles/{role-name}/users`, up to 1000;
+  "unknown" when MEHO cannot read it).
+- `keycloak.user.update` (caution). The user is found by `id` or the current
+  `username`; the new values go in `changes`, with only `username`, `email`,
+  `firstName` and `lastName` allowed. The handler reads the user, puts the
+  fields on top, writes the user back and reads it again. Keycloak changes
+  the user name only when the realm sets `editUsernameAllowed`, and
+  otherwise keeps the old name and still answers 204. So the result has
+  `applied_fields` and `not_applied` (each with a reason that names
+  `editUsernameAllowed` for the user name), and `unrequested_changes` as in
+  `ops_write_merge.py`. User name and email are compared without regard to
+  case, because Keycloak stores them in lower case. Values are never returned.
+  The card shows the current user name and email (`current`, `null` when
+  MEHO cannot read the user) next to the new values in `changes`.
+- `keycloak.user.credential.delete` (dangerous). Pass the user and either
+  `credential_id` or `credential_type` (for example `otp` or
+  `webauthn-passwordless`); a type removes every credential of that type that
+  the user has when the call runs. The handler reads
+  `GET .../users/{user-id}/credentials`, deletes each match, and reads the
+  list again. No match is an error that names the types the user has. When a
+  delete fails after others ran, the error names the ids already removed.
+  Keycloak's list holds `secretData` and `credentialData`; both stay inside the
+  handler. Every credential is cut to an allow-list of `id`, `type`,
+  `userLabel` and `createdDate` (`CREDENTIAL_FIELDS` in
+  `ops_write_user_credential.py`), and that list is the only way a field gets
+  into a result or an approval card. The card shows what will be removed
+  (`will_remove`) and what stays (`will_keep`), and one `warning` line when
+  the user is left with no second factor or with no credential at all. The
+  approved run removes only the credentials on the card: right before it
+  runs, MEHO builds the card again, and when `will_remove` lists other ids
+  (for example a new one-time code of the same type), the run is refused
+  with "the credentials changed since the request; send a new request" and
+  nothing is deleted (`bound_ids` in `operations/grant_approval.py`). The
+  handler checks again with its own read: in the approved run it compares
+  the credentials it matched with the ids on the card the approver saw
+  (`approved_preview`, not the call params). When they differ, it deletes
+  nothing (`KeycloakCredentialsChangedError`). So a credential added
+  between the check and the delete is never removed.
+  A test with recorded `secretData` and `credentialData` checks the result,
+  the approval rows and the audit rows
+  (`tests/test_connectors_keycloak_account_writes.py`).
+
+### Change a protocol mapper of a client scope (#5930)
+
+`keycloak.client_scope.protocol_mapper.update` changes one protocol mapper
+that already exists on a client scope. Example: add one value to a
+hardcoded-claim mapper, such as the `capabilities` claim that lists which
+document collections a person may open. A second hardcoded-claim mapper with
+the same claim name would not add values, it would overwrite the first, so
+the existing mapper is changed.
+
+- Pass the scope as `scope_id` (UUID) or `scope_name` (exact name), and the
+  mapper as `mapper_id` (UUID) or `mapper_name` (exact name on that scope).
+  Pass only the fields to change in `representation`.
+- The op reads the mapper, puts `representation` on top and writes the whole
+  mapper back (`read_merge_write`). Fields not sent stay. `config` merges key
+  by key, so `{"config": {"claim.value": "..."}}` changes only that key.
+- `representation` may hold only `name` and `config`. A change of the
+  mapper's type (`protocolMapper`) or `protocol` makes another kind of
+  mapper, whose config keys mean other things, so the approver could not
+  compare the old and the new values. MEHO refuses such a request
+  (`invalid_params`).
+- A name that matches nothing raises `KeycloakUserNotFoundError` (the shared
+  "not found" error) and nothing is written. A name that matches more than
+  one object raises `ValueError`. A scope list that cannot be read is an
+  error, never "not found".
+- An id and a name sent together must name one object: the name stored in
+  Keycloak for that id must be the name sent. Otherwise MEHO refuses the
+  request before it waits for approval (`refused_before_approval`), and
+  again when it runs. Nothing is written.
+- Safe to run twice. The result shows the ids and the names stored in
+  Keycloak, and lists the changed field names (`changed_fields`,
+  `unrequested_changes`), never values. Check the new value with
+  `keycloak.client_scope.list`.
+- Risk level `dangerous`, approval required, group `protocol_mapper_write`.
+- It is a change of rights: a mapper decides what goes into the login
+  token, so a change can give rights. The call waits for approval, and
+  another admin must approve:
+  - The op is registered with `register_rights_change_op`. The requester
+    never approves their own request, also as a tenant admin and with the
+    self-approval switch on. The approver is another person who is a
+    tenant admin or a platform admin. A MEHO-SA-Operator who is not an
+    admin cannot approve it.
+  - A person approves each call (`declare_per_call_approval`). No standing
+    grant and no run approval covers it. An agent grant does not either:
+    the op needs approval, so an agent's call always waits.
+- The approval card shows the scope and the mapper with their ids and the
+  names stored in Keycloak (also when the caller sent only one of them). It
+  shows the mapper as it is now (`current`): its type (`protocolMapper`),
+  `protocol`, the claim name, and the old value of each field sent. The new
+  values are in `representation`. Secrets are hidden in both.
+- After approval the run acts on the ids on the card and does not look a
+  name up again. It reads the mapper again before the write. The run is
+  refused and nothing is written when a stored name is no longer the one
+  on the card, when the mapper's type, protocol or config changed after the
+  card was made (then a new request is needed), or when the card lacks the
+  ids or that content (the objects could not be read when the request was
+  made).
+- Not offered: adding a mapper to a client scope, and changing or deleting a
+  mapper on a client.
 
 ### One user, as Keycloak stores it
 
@@ -1317,10 +1465,12 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 49 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 55 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886, +8 login flow and identity provider
-paths at #5621, +3 passkey step paths, +1 user PUT path at #4940) are served by the pinned
+paths at #5621, +3 passkey step paths, +1 user PUT path at #4940,
++5 client role and credential delete paths, +1 client role users path)
+are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched

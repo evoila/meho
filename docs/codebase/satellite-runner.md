@@ -65,10 +65,15 @@ client polls are `GET /api/v1/checks/assignment` and
     target table). v1 carries `name` / `product` / `version` /
     `fingerprint` / `extras` / `preferred_impl_id`; #2499 widens it with
     the connection-routing set (host/port/secret_ref/TLS). #3879 adds
-    `updated_at`: the executor drops the login it keeps for the target
-    when this value differs from the one it saw last, so a changed
-    secret or host is used on the next run and not only after the
-    kept login expires.
+    `updated_at`, and #6504 adds `connection_changed_at` (the time a
+    person last changed the connection). The executor drops the login
+    it keeps for the target when `connection_changed_at`, or the
+    connector class that serves the target, differs from what it saw
+    last, so a changed secret or host is used on the next run and not
+    only after the kept login expires. It uses `updated_at` only when
+    the gateway sends no `connection_changed_at` (an older gateway). A
+    probe moves `updated_at` but does not drop the login. See
+    [targets.md](targets.md).
   - `RunnerResult` / `RunnerResultBatch` — each result carries a
     runner-generated `result_uid` (uuid4) so central ingest can
     deduplicate spool re-posts idempotently. `status` is a runner-level

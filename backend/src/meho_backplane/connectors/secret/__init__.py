@@ -49,6 +49,9 @@ from meho_backplane.connectors.linux import secret_endpoint as _linux_endpoint  
 from meho_backplane.connectors.secret import handoff_preview as _handoff_preview  # noqa: F401
 from meho_backplane.connectors.secret import move_preview as _move_preview  # noqa: F401
 from meho_backplane.connectors.secret import vault_endpoint as _vault_endpoint  # noqa: F401
+from meho_backplane.connectors.secret import (  # noqa: F401
+    vault_target_endpoint as _vault_target_endpoint,
+)
 from meho_backplane.connectors.secret.handoff_ops import register_secret_handoff_operations
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.op_classes import declare_per_call_approval

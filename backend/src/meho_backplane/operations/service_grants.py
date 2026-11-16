@@ -93,7 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -108,6 +108,7 @@ from meho_backplane.op_classes import needs_per_call_approval
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
+from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 __all__ = [
@@ -319,14 +320,16 @@ def delete_grant_reason(
     return reason
 
 
-def credential_read_grant_reason(op_id: str) -> str | None:
+def credential_read_grant_reason(op_id: str, stored_op_class: str | None = None) -> str | None:
     """Return why a grant cannot cover *op_id*, or ``None`` when it can.
 
-    An operation that shows a secret (``classify_op`` says
-    ``credential_read``) always waits for a person. Grant create refuses it
-    and :func:`consult_and_record_grant` never lets a grant row clear it.
+    An operation that shows a secret (``credential_read``) always waits for
+    a person. Grant create refuses it and :func:`consult_and_record_grant`
+    never lets a grant row clear it. The class comes from the op id, or from
+    *stored_op_class*: the class a connector's safety floor stored on the
+    row of an ingested operation.
     """
-    if classify_op(op_id) != "credential_read":
+    if resolve_op_class(op_id, stored_op_class) != "credential_read":
         return None
     return (
         f"A standing grant cannot cover {op_id}: it shows a secret, so a person always approves it."
@@ -702,6 +705,8 @@ class ServicePrincipalGrantService:
         """
         from meho_backplane.settings import get_settings
 
+        if payload.principal_sub == WHAT_IF_SUB:
+            raise GrantValidationError(WHAT_IF_SUB_REFUSAL)
         _reject_wildcards(payload)
         secret_reason = credential_read_grant_reason(payload.op_id)
         if secret_reason is not None:
@@ -721,8 +726,10 @@ class ServicePrincipalGrantService:
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
-        address_reason = caller_address_grant_reason(descriptor) or always_wait_grant_reason(
-            descriptor
+        address_reason = (
+            credential_read_grant_reason(payload.op_id, getattr(descriptor, "op_class", None))
+            or caller_address_grant_reason(descriptor)
+            or always_wait_grant_reason(descriptor)
         )
         if address_reason is not None:
             raise GrantValidationError(address_reason)
@@ -1427,7 +1434,9 @@ async def consult_and_record_grant(
     real call sends, and the real call checks the hash and the blast
     radius before it uses the grant.
     """
-    secret_reason = credential_read_grant_reason(descriptor.op_id)
+    secret_reason = credential_read_grant_reason(
+        descriptor.op_id, getattr(descriptor, "op_class", None)
+    )
     if secret_reason is not None:
         _log.info(
             "service_grant_refused_credential_read",

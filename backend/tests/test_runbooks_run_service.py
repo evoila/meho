@@ -57,7 +57,6 @@ from meho_backplane import audit_cutover
 from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vault_creds import (
-    VaultCredentialsReadError,
     load_basic_credentials,
 )
 from meho_backplane.connectors.base import Connector
@@ -83,7 +82,6 @@ from meho_backplane.runbooks.run_service import (
     PreviousStepFailedError,
     RunAlreadyTerminalError,
     RunbookRunService,
-    _build_operator_for_dispatch,
 )
 from meho_backplane.runbooks.runs_schemas import (
     AbortRunRequest,
@@ -116,6 +114,18 @@ _TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
 OPERATOR = "operator-alpha"
 OPERATOR_BETA = "operator-beta"
 ADMIN = "tenant-admin-1"
+
+
+def _person(tenant_id: uuid.UUID = _TENANT_A, sub: str = OPERATOR) -> Operator:
+    """The checked login of a person who advances a run (no token)."""
+    return Operator(
+        sub=sub,
+        name=sub,
+        email=None,
+        raw_jwt="",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +318,8 @@ async def _vault_backed_handler(
 
     Module-level (the typed-op registry rejects closures). Performs the
     operator-context Vault read every Vault-backed connector loader
-    performs; under the synthetic runbook-dispatch operator the read
-    must refuse locally before Vault is contacted.
+    performs; for a caller whose login carries no token the read must
+    refuse locally before Vault is contacted.
     """
     await load_basic_credentials(target, operator)
     return {"ok": True}  # pragma: no cover - the read above must refuse
@@ -543,6 +553,7 @@ async def test_next_step_operation_call_match_advances(
             last_verified=True,
             verify_response=None,  # engine populates it from the dispatched call
         ),
+        caller=_person(tenant_id),
     )
     assert isinstance(resp, RunCompletedResponse)
 
@@ -855,6 +866,7 @@ async def test_next_step_operation_call_audit_row_has_run_and_step_id(
         OPERATOR,
         start.run_id,
         NextStepRequest(last_verified=True, verify_response=None),
+        caller=_person(tenant_id),
     )
 
     rows = (
@@ -915,57 +927,8 @@ async def test_abort_run_writes_dispatch_audit_row(
 
 
 # ---------------------------------------------------------------------------
-# Synthetic dispatch operator fails closed on Vault-backed reads
+# A caller without a token fails closed on Vault-backed reads
 # ---------------------------------------------------------------------------
-
-
-def test_build_operator_for_dispatch_carries_empty_raw_jwt() -> None:
-    """The synthetic runbook-dispatch operator honours the fail-closed shape.
-
-    ``raw_jwt`` must be the empty string (the synthetic-operator
-    convention every Vault-touching layer short-circuits on) — never a
-    non-empty placeholder that sails past ``_resolve_secret_ref``'s
-    empty-``raw_jwt`` guard and reaches Vault's JWT/OIDC login. The
-    audit identity (``sub`` / ``tenant_id``) is preserved unchanged.
-    """
-    operator = _build_operator_for_dispatch(sub=OPERATOR, tenant_id=_TENANT_A)
-
-    assert operator.raw_jwt == ""
-    assert operator.sub == OPERATOR
-    assert operator.name == OPERATOR
-    assert operator.tenant_id == _TENANT_A
-
-
-@pytest.mark.asyncio
-async def test_dispatch_operator_vault_read_refused_before_vault_contact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Vault-backed credential read under the synthetic operator fails closed locally.
-
-    ``load_basic_credentials`` must raise ``VaultCredentialsReadError``
-    from the ``_resolve_secret_ref`` precondition guard (no
-    authenticated operator) **before** any Vault contact: the login
-    entry point (``vault_client_for_operator``) is never invoked. The
-    target carries a populated ``secret_ref`` so the empty-``raw_jwt``
-    guard is the only precondition that can refuse the read.
-    """
-    vault_login = MagicMock(name="vault_client_for_operator")
-    monkeypatch.setattr(
-        "meho_backplane.connectors._shared.vault_creds.vault_client_for_operator",
-        vault_login,
-    )
-
-    class _VaultBackedTarget:
-        name = "n"
-        host = "stub-host.example"
-        secret_ref = "targets/n"
-
-    operator = _build_operator_for_dispatch(sub=OPERATOR, tenant_id=_TENANT_A)
-
-    with pytest.raises(VaultCredentialsReadError, match="authenticated operator"):
-        await load_basic_credentials(_VaultBackedTarget(), operator)
-
-    vault_login.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -978,14 +941,12 @@ async def test_next_step_vault_backed_verify_fails_closed_without_vault_contact(
 
     End-to-end through ``next_step``: the verify ``op_id`` resolves to a
     handler that performs the operator-context Vault read
-    (``load_basic_credentials``). Under the synthetic runbook-dispatch
-    operator the read must fail closed at the local precondition guard —
-    the dispatch surfaces a structured refusal (step ``failed``,
-    subsequent calls raise :class:`PreviousStepFailedError`) and the
-    Vault login entry points are **never** invoked. Complements
-    :func:`test_next_step_operation_call_match_advances`, which proves
-    the non-Vault typed verify path dispatches unchanged with the same
-    synthetic operator.
+    (``load_basic_credentials``). The step runs as the caller; a caller
+    whose login carries no token makes the read fail closed at the local
+    precondition guard -- the dispatch surfaces a structured refusal
+    (step ``failed``, subsequent calls raise
+    :class:`PreviousStepFailedError`) and the Vault login entry points
+    are **never** invoked.
     """
     vault_login = MagicMock(name="vault_client_for_operator")
     monkeypatch.setattr(
@@ -1026,6 +987,7 @@ async def test_next_step_vault_backed_verify_fails_closed_without_vault_contact(
             OPERATOR,
             start.run_id,
             NextStepRequest(last_verified=True, verify_response=None),
+            caller=_person(tenant_id),
         )
 
     vault_login.assert_not_called()
@@ -1086,6 +1048,7 @@ async def test_start_run_persists_work_ref_and_step_audit_inherits(
         OPERATOR,
         start.run_id,
         NextStepRequest(last_verified=True, verify_response=None),
+        caller=_person(tenant_id),
     )
     rows = (
         await db_session.scalars(
@@ -1125,6 +1088,7 @@ async def test_start_run_without_work_ref_leaves_audit_null(
         OPERATOR,
         start.run_id,
         NextStepRequest(last_verified=True, verify_response=None),
+        caller=_person(tenant_id),
     )
     rows = (
         await db_session.scalars(
@@ -1870,7 +1834,7 @@ async def test_next_step_falsy_operation_result_preserved_in_forensics(
         # (a DB lookup before the dispatch) still runs against the seeded
         # stub op.
         async def _falsy_call(operator: Any, arguments: Any, _r: Any = falsy_result) -> Any:
-            return {"status": "success", "result": _r}
+            return {"status": "ok", "result": _r}
 
         monkeypatch.setattr("meho_backplane.runbooks.run_service.call_operation", _falsy_call)
 
@@ -1883,6 +1847,7 @@ async def test_next_step_falsy_operation_result_preserved_in_forensics(
                 OPERATOR,
                 start.run_id,
                 NextStepRequest(last_verified=True, verify_response=None),
+                caller=_person(tenant_id),
             )
 
         row = (
@@ -2047,16 +2012,24 @@ async def test_retry_on_operation_call_step_runs_the_check_again(
     answers = [{"ok": False}, {"ok": True}]
 
     async def _call(operator: Any, arguments: Any) -> Any:
-        return {"status": "success", "result": answers.pop(0)}
+        return {"status": "ok", "result": answers.pop(0)}
 
     monkeypatch.setattr("meho_backplane.runbooks.run_service.call_operation", _call)
 
     with pytest.raises(PreviousStepFailedError):
         await run_service.next_step(
-            tenant_id, OPERATOR, start.run_id, NextStepRequest(last_verified=True)
+            tenant_id,
+            OPERATOR,
+            start.run_id,
+            NextStepRequest(last_verified=True),
+            caller=_person(tenant_id),
         )
     resp = await run_service.next_step(
-        tenant_id, OPERATOR, start.run_id, NextStepRequest(last_verified=True, retry=True)
+        tenant_id,
+        OPERATOR,
+        start.run_id,
+        NextStepRequest(last_verified=True, retry=True),
+        caller=_person(tenant_id),
     )
 
     assert isinstance(resp, RunCompletedResponse)

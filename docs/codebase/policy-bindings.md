@@ -10,7 +10,8 @@ roles.
 Everything here is behind the switch `POLICY_APPROVER_ROUTING` (off by
 default; Helm `config.policy.approverRouting`). With the switch off, MEHO
 reads no binding and the login works as before. The file still accepts and
-checks a `bindings` section with the switch off.
+checks a `bindings` section with the switch off; the stored bindings take
+effect when the switch goes on.
 
 The bindings come in with the policy file, and every policy command
 (`validate`, `diff`, `import`, `export`) needs the switch
@@ -103,6 +104,15 @@ another case.
      that matches has another role than the token (for example `Admins`
      for an `operator` token), it is left out and logged as
      `policy_binding_other_base_level`. The login keeps today's kind.
+   - A shipped binding counts only when its kind gives the same
+     `approver` and `self_approver` flags as the token. Else it is left
+     out and logged as `policy_shipped_binding_other_flags`, and the login
+     keeps today's kind. So a shipped group alone never gives or takes the
+     right to approve: a person in `/MEHO-Approvers` without the
+     `approver` claim (or with `approver: false`) gets no approve right,
+     and a person with `approver: true` in `/MEHO-Readers` keeps it, as
+     with the switch off. A stored binding is the tenant's own choice:
+     there the group alone gives the flags of its kind.
    - Else the login gets the `approver` and `self_approver` flags of that
      kind (`group_grant` in `auth/operator.py`), `bound_kind` and the
      categories of all these bindings together. `"*"` means every
@@ -137,13 +147,23 @@ switches on and read its `bindings`: each group must have the kind you
 expect. A group with a name like `Corp-Read-Only` is missing there; write
 its binding in the file yourself.
 
-They count only for a login without a tenant list (step 4 above). The
+They count only for a login without a tenant list (step 4 above), and
+only where they agree with the token's approve flags (step 5 above). The
 shipped realm sends a tenant list, so there the shipped bindings change
 nothing; they are for a site with the older mappers.
 
+What the switch on without stored bindings changes: no answer, no role
+and no approve flag of any login. A login without a tenant list that
+matches a shipped binding only notes its kind and categories
+(`bound_kind`, `bound_categories`). `test_policy_bindings_parity.py` pins
+this for every login shape it lists.
+
 `meho policy export` writes them into a tenant's file when the tenant has
 no stored bindings and the switch is on. After an import, the file holds
-the bindings.
+the bindings. They are then stored bindings: they count for a login with
+a tenant list too, and the group alone gives the flags of the kind. In a
+setup with tenant lists, remove the shipped bindings from the exported
+file before the import (`test_policy_bindings_stored.py`).
 
 The import diff (and `meho policy diff`) compares the file with the
 **stored** bindings, not with the shipped ones. So the first import of an
@@ -188,6 +208,11 @@ attribute values with the tenant's name in them.
 
 ## Other places that read the kind
 
+- Approver routing (`policy/routing.py`, [approvals.md](approvals.md)):
+  at the click, `kind_of` reads the role and the `approver` and
+  `self_approver` flags. A binding sets these flags, so it sets the kind
+  that the routing checks.
+
 - A delegated agent run (`delegated_operator` in `auth/delegation.py`)
   clears `bound_kind` and `bound_categories`, next to the `approver` and
   self-approval flags.
@@ -220,6 +245,9 @@ attribute values with the tenant's name in them.
   `docs/cross-repo/keycloak-tenant-claims.md`.
 - Tests: `backend/tests/test_policy_bindings.py`,
   `backend/tests/test_policy_bindings_parity.py` (the switch on without
-  stored bindings changes no login) and
+  stored bindings changes no answer, role or approve flag of any listed
+  login shape),
+  `backend/tests/test_policy_bindings_stored.py` (exported shipped
+  bindings after an import; a binding and the routing together) and
   `backend/tests/integration/test_keycloak_role_groups_e2e.py` (the
   claims of a real Keycloak with full paths and the `meho-groups` mapper).

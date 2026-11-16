@@ -303,7 +303,8 @@ Rules for the repeat:
   still gave the same "session ended" answer, and that the account may be
   locked or not allowed to start a session.
 - Any other answer to the repeated call is classified as it would be alone.
-- The audit row of the call has `session_relogin` (MEHO signed in again),
+- The audit row of the call has `session_relogin` (MEHO dropped the kept
+  login; true also when the operation was not sent again),
   `session_resent` (MEHO sent the operation again) and
   `session_relogin_status` (the rejected status) in its payload, and the
   trace has one `typed` span named `session_relogin`. Both are written

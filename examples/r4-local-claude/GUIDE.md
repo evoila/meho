@@ -54,8 +54,11 @@ You have, in this order:
    empty list, the role is below `read_only` — see
    [`docs/cross-repo/mcp-client-setup.md` § `tools/list` returns an empty list](../../docs/cross-repo/mcp-client-setup.md#toolslist-returns-an-empty-list).
 5. **An agent principal for the cheap-tier triage agent.**
-   `meho agent-principal register r4-alert-triage` is the verb
+   `meho agent-principal register r4-alert-triage --grants none` is the verb
    ([G11.2-T1 #815](https://github.com/evoila/meho/issues/815)).
+   `--grants none` picks no starting grant: the agent runs no
+   operation, so it needs none (see Step 4). MEHO asks for the pick
+   when the switch `AGENT_GRANT_REQUIRED` is `observe` or `on`.
    The agent principal's `client_credentials` token is what the
    scheduler will impersonate when the cron fires; the principal's
    JWT `sub` is `agent:r4-alert-triage` (clientId format from
@@ -78,8 +81,12 @@ meho agent create r4-alert-triage \
   --model-tier fast \
   --turn-budget 8 \
   --system-prompt "$(jq -r .system_prompt examples/r4-local-claude/agent.alert-triage.json)" \
-  --toolset "@examples/r4-local-claude/toolset.json"
+  --toolset "@examples/r4-local-claude/toolset.json" \
+  --grants none
 ```
+
+`--grants none` is needed when the switch `AGENT_GRANT_REQUIRED` is
+`observe` or `on`, because the agent has no grant yet.
 
 > The `--toolset` flag accepts inline JSON, `@<path>` (file
 > contents), or `@-` (stdin), per the CLI's `loadJSONObjectFlag`

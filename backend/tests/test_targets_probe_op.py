@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 import respx
+import structlog.testing
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -383,7 +384,7 @@ async def test_rest_answers_an_unreadable_secret_with_a_422(kind: str) -> None:
 
     key = make_rsa_keypair("kid-probe")
     client = TestClient(_build_app())
-    with respx.mock as mock_router:
+    with respx.mock as mock_router, structlog.testing.capture_logs() as logs:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
             "/api/v1/targets/rest-no-secret/probe",
@@ -391,6 +392,12 @@ async def test_rest_answers_an_unreadable_secret_with_a_422(kind: str) -> None:
         )
 
     assert response.status_code == 422, response.text
+    events = [e for e in logs if e["event"] == "target_probe_secret_unreadable"]
+    assert len(events) == 1, logs
+    assert events[0]["target_name"] == "rest-no-secret"
+    assert events[0]["error_code"] == _SECRET_ERROR_CODES[kind]
+    assert events[0]["secret_ref"] == ref
+    assert "vault.test" not in str(events[0])
     detail = response.json()["detail"]
     assert detail["error"] == _SECRET_ERROR_CODES[kind]
     assert detail["target"] == "rest-no-secret"

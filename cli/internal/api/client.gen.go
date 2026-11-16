@@ -14423,6 +14423,19 @@ type UiAuditResultsUiAuditResultsGetParams struct {
 	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
 }
 
+// UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams defines parameters for UiAuthApprovalCallbackUiAuthApprovalCallbackGet.
+type UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams struct {
+	Code             *string `form:"code,omitempty" json:"code,omitempty"`
+	State            *string `form:"state,omitempty" json:"state,omitempty"`
+	Error            *string `form:"error,omitempty" json:"error,omitempty"`
+	ErrorDescription *string `form:"error_description,omitempty" json:"error_description,omitempty"`
+}
+
+// UiAuthApprovalSignInUiAuthApprovalSignInGetParams defines parameters for UiAuthApprovalSignInUiAuthApprovalSignInGet.
+type UiAuthApprovalSignInUiAuthApprovalSignInGetParams struct {
+	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+}
+
 // UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
 type UiAuthCallbackUiAuthCallbackGetParams struct {
 	Code             *string `form:"code,omitempty" json:"code,omitempty"`
@@ -18306,6 +18319,12 @@ type ClientInterface interface {
 
 	// UiAuditDrawerUiAuditShowAuditIdGet request
 	UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthApprovalCallbackUiAuthApprovalCallbackGet request
+	UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthApprovalSignInUiAuthApprovalSignInGet request
+	UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthCallbackUiAuthCallbackGet request
 	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -23834,6 +23853,30 @@ func (c *Client) UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet(ctx conte
 
 func (c *Client) UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditDrawerUiAuditShowAuditIdGetRequest(c.Server, auditId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -45311,6 +45354,152 @@ func NewUiAuditDrawerUiAuditShowAuditIdGetRequest(server string, auditId openapi
 	return req, nil
 }
 
+// NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest generates requests for UiAuthApprovalCallbackUiAuthApprovalCallbackGet
+func NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest(server string, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/approval-callback")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Code != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "code", runtime.ParamLocationQuery, *params.Code); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Error != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error", runtime.ParamLocationQuery, *params.Error); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ErrorDescription != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error_description", runtime.ParamLocationQuery, *params.ErrorDescription); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest generates requests for UiAuthApprovalSignInUiAuthApprovalSignInGet
+func NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest(server string, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/approval-sign-in")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReturnTo != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAuthCallbackUiAuthCallbackGetRequest generates requests for UiAuthCallbackUiAuthCallbackGet
 func NewUiAuthCallbackUiAuthCallbackGetRequest(server string, params *UiAuthCallbackUiAuthCallbackGetParams) (*http.Request, error) {
 	var err error
@@ -55107,6 +55296,12 @@ type ClientWithResponsesInterface interface {
 	// UiAuditDrawerUiAuditShowAuditIdGetWithResponse request
 	UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error)
 
+	// UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse request
+	UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error)
+
+	// UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse request
+	UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error)
+
 	// UiAuthCallbackUiAuthCallbackGetWithResponse request
 	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
 
@@ -62369,6 +62564,50 @@ func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthApprovalSignInUiAuthApprovalSignInGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthApprovalSignInUiAuthApprovalSignInGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthApprovalSignInUiAuthApprovalSignInGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69796,6 +70035,24 @@ func (c *ClientWithResponses) UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx
 		return nil, err
 	}
 	return ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp)
+}
+
+// UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse request returning *UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse
+func (c *ClientWithResponses) UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error) {
+	rsp, err := c.UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse(rsp)
+}
+
+// UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse request returning *UiAuthApprovalSignInUiAuthApprovalSignInGetResponse
+func (c *ClientWithResponses) UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error) {
+	rsp, err := c.UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse(rsp)
 }
 
 // UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
@@ -81033,6 +81290,58 @@ func ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp *http.Response) (*UiAud
 	}
 
 	response := &UiAuditDrawerUiAuditShowAuditIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse parses an HTTP response from a UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse call
+func ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse(rsp *http.Response) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse parses an HTTP response from a UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse call
+func ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse(rsp *http.Response) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthApprovalSignInUiAuthApprovalSignInGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

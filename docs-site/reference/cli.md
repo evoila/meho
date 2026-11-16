@@ -125,6 +125,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
 - `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
 - `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
+- `--web-approve-client-id` — the console's approval sign-in client_id (matches the backplane's UI_KEYCLOAK_APPROVE_CLIENT_ID); when the realm has it, it is bound to the approval sign-in flow
 - `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
 
 ## `meho agent`

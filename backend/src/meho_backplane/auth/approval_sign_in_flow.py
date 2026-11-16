@@ -256,23 +256,30 @@ async def _state(kc: KeycloakAdminClient, client_id: str) -> tuple[ApprovalSignI
     return _client_state(client, client_id, flow_id)
 
 
-async def read_approval_sign_in(settings: Settings | None = None) -> ApprovalSignInStatus:
-    """The approval sign-in flow and its binding, read at most every :data:`_KEEP_S` s."""
+async def read_approval_sign_in(
+    settings: Settings | None = None, *, client_id: str | None = None
+) -> ApprovalSignInStatus:
+    """The approval sign-in flow and its binding, read at most every :data:`_KEEP_S` s.
+
+    *client_id* is the client whose binding is read; the default is the
+    command line's approval client. The console passes its own approval
+    client (#6282).
+    """
     settings = settings or get_settings()
-    key = (settings.keycloak_admin_url, settings.keycloak_cli_approve_client_id)
+    client_id = client_id or settings.keycloak_cli_approve_client_id
+    key = (settings.keycloak_admin_url, client_id)
     kept = _kept.get(key)
     if kept is not None:
         keep = _KEEP_FAILED_S if read_failed(kept[1]) else _KEEP_S
         if time.monotonic() - kept[0] < keep:
             return kept[1]
-    status = await _read(settings)
+    status = await _read(settings, client_id)
     _kept[key] = (time.monotonic(), status)
     return status
 
 
-async def _read(settings: Settings) -> ApprovalSignInStatus:
-    """Read the approval sign-in flow and its binding; never raises."""
-    client_id = settings.keycloak_cli_approve_client_id
+async def _read(settings: Settings, client_id: str) -> ApprovalSignInStatus:
+    """Read the approval sign-in flow and the binding of *client_id*; never raises."""
 
     def not_checked(reason: str) -> ApprovalSignInStatus:
         return ApprovalSignInStatus(state="not_checked", client=client_id, detail=reason)
@@ -340,18 +347,22 @@ class SignInLevel(NamedTuple):
     check_failed: bool = False
 
 
-async def sign_in_level_in_force(settings: Settings) -> SignInLevel:
+async def sign_in_level_in_force(
+    settings: Settings, *, client_id: str | None = None
+) -> SignInLevel:
     """What MEHO does now with a token of the approval client that lacks the level (#6281).
 
     ``off``, ``observe`` and ``required`` are the setting itself. ``auto``
     reads the approval sign-in (:func:`read_approval_sign_in`, kept for a
     short time): ``observe`` only when MEHO knows for sure that the realm
     does not give the level, else ``required``; also when the read failed.
+    *client_id* is the approval client whose binding counts; the console
+    passes its own (#6282).
     """
     mode = settings.approval_sign_in_level
     if mode != "auto":
         return SignInLevel(sign_in_level_for_status(mode, None))
-    status = await read_approval_sign_in(settings)
+    status = await read_approval_sign_in(settings, client_id=client_id)
     return SignInLevel(sign_in_level_for_status(mode, status), check_failed=read_failed(status))
 
 

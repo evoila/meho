@@ -795,4 +795,8 @@ def build_router() -> APIRouter:
         response_class=RedirectResponse,
         status_code=status.HTTP_302_FOUND,
     )
+    # Imported here: that module imports helpers from this one (#6282).
+    from meho_backplane.ui.auth.approval_sign_in_routes import add_approval_sign_in_routes
+
+    add_approval_sign_in_routes(router)
     return router

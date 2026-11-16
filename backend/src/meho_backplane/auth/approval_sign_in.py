@@ -59,8 +59,20 @@ refuses it with the same ``401`` and one more sentence that names
 that the realm does not give the level, else ``required`` (also when the
 check failed); the routes resolve it with
 :func:`~meho_backplane.auth.approval_sign_in_flow.sign_in_level_in_force`.
-The web interface does not use the approval client, so the level is not
-checked there.
+
+The console's approval sign-in (#6282). The console has its own approval
+client
+(:attr:`~meho_backplane.settings.Settings.ui_keycloak_approve_client_id`,
+default ``meho-web-approve``), bound to the same approval sign-in flow.
+The console's normal login does not use it. When the level is required,
+the console sends the person to a sign-in with this client and keeps the
+token of that sign-in on the session row. An approve then needs that
+token
+(:func:`~meho_backplane.auth.web_approval_sign_in.check_web_approval_sign_in`):
+the same person as the session, the console's approval client, credentials asked, recent, and
+the approval level. A normal console session, also a fresh one, never
+carries the level. With ``observe`` or ``off`` the console approves as
+before on the session's own sign-in; ``observe`` records the level it saw.
 
 A refreshed token keeps the time of the first sign-in (RFC 9470 §6.1), so
 renewing a token never makes the window longer. The refusal is ``401``

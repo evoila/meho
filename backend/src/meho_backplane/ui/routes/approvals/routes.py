@@ -139,11 +139,7 @@ import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.auth.approval_sign_in import (
-    WEB_FRESH_SIGN_IN_REMEDIATION,
-    check_fresh_web_approval_sign_in,
-    has_fresh_web_approval_sign_in,
-)
+from meho_backplane.auth.approval_sign_in import WEB_FRESH_SIGN_IN_REMEDIATION
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -193,7 +189,6 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
-from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import (
     RESULT_STATE_PILL,
@@ -207,6 +202,7 @@ from meho_backplane.ui.routes.approvals.run_watch import (
     live_runs_for,
     start_approved_run,
 )
+from meho_backplane.ui.routes.approvals.sign_in import approve_sign_in_state, web_approval_auth
 from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
 from meho_backplane.ui.templating import get_templates
 
@@ -934,11 +930,13 @@ async def _render_detail_modal(
     the refusal text (#3329: an approve refusal says the web interface is
     the normal place to approve).
 
-    An approve needs a recent sign-in that asked for the credentials
-    (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`).
-    When the session's sign-in is already too old for any approval, the
-    modal offers the sign-in link in place of the Approve button
-    (``approve_needs_sign_in``); the POST checks again either way.
+    An approve needs the sign-in that ``APPROVAL_SIGN_IN_LEVEL`` asks for
+    (:mod:`meho_backplane.ui.routes.approvals.sign_in`, #6282): under
+    ``required`` the console's approval sign-in with the approval level,
+    else a recent sign-in that asked for the credentials. When the session
+    cannot approve, the modal offers the sign-in link in place of the
+    Approve button (``approve_needs_sign_in``); the POST checks again
+    either way.
     """
     operator = await _resolve_operator(session)
     approval, reviewer_context, delegation, chain = await _get_request_with_context_or_404(
@@ -949,7 +947,9 @@ async def _render_detail_modal(
     # button state match what the POST decides. The POST checks again.
     right = approve_right(operator, approval)
     self_approval_blocked = not right.may_approve and right.reason == ApproveRightReason.OWN_CHANGE
-    approve_needs_sign_in = not has_fresh_web_approval_sign_in(operator, get_settings())
+    approve_needs_sign_in, sign_in_url = await approve_sign_in_state(
+        operator, session.session_id, _APPROVALS_PATH
+    )
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
         "request": project_request_to_view(approval, delegation, chain),
@@ -966,7 +966,7 @@ async def _render_detail_modal(
         "self_approval_error": self_approval_error,
         "fresh_sign_in_error": fresh_sign_in_error,
         "approve_needs_sign_in": approve_needs_sign_in,
-        "sign_in_url": login_location(_APPROVALS_PATH, fresh_sign_in=True),
+        "sign_in_url": sign_in_url,
         "operator_sub": operator.sub,
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
@@ -1007,7 +1007,11 @@ async def _decide(
     operator = await _resolve_operator(session)
     try:
         approval = await _commit_decision(
-            operator=operator, request_id=request_id, decision=decision, reason=reason
+            operator=operator,
+            request_id=request_id,
+            decision=decision,
+            reason=reason,
+            session_id=session.session_id,
         )
     except HTTPException as exc:
         # Recoverable: re-render the modal with the typed error banner so
@@ -1078,13 +1082,15 @@ async def _commit_decision(
     request_id: uuid.UUID,
     decision: str,
     reason: str,
+    session_id: uuid.UUID,
 ) -> ApprovalRequest:
     """Run approve/reject in one transaction + publish; map errors to HTTP.
 
-    An approve first needs the console session's sign-in to be recent and
-    to have asked for the credentials
-    (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`,
-    the same checks as REST). A reject needs no new sign-in. The
+    An approve first needs the sign-in ``APPROVAL_SIGN_IN_LEVEL`` asks for
+    (:func:`~meho_backplane.ui.routes.approvals.sign_in.web_approval_auth`,
+    #6282): under ``required`` the console approval sign-in of the session
+    *session_id* with the approval level, else a recent sign-in that asked
+    for the credentials. A reject needs no new sign-in. The
     self-approval guard, role gate, tenant-isolation 404, already-decided
     409 and the sign-in age and one-use rules of the request's risk level
     all live in the service
@@ -1098,7 +1104,7 @@ async def _commit_decision(
     try:
         async with sessionmaker() as db_session:
             if decision == "approved":
-                approval_auth = check_fresh_web_approval_sign_in(operator, get_settings())
+                approval_auth = await web_approval_auth(operator, session_id)
                 request = await approve_request(
                     db_session,
                     request_id,

@@ -50,7 +50,7 @@
 # module `meho_connector_kit` that connector packages import), so every image
 # carries the kit next to MEHO. The builder stage installs every wheel in
 # /wheels/. See docs/codebase/connector-packages.md, "The connector kit".
-FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS wheelbuilder
+FROM --platform=$BUILDPLATFORM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS wheelbuilder
 COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
 ENV UV_PYTHON_DOWNLOADS=0 \
     UV_LINK_MODE=copy
@@ -87,7 +87,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # never rebuilt under emulation. `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
-FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS builder
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -306,7 +306,7 @@ done
 EOF
 
 # ---------- Runtime ----------------------------------------------------------
-FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS runtime
 
 # ---------- Base-OS security patch: base packages Trivy flags fixable --------
 # The pinned base carries several Debian trixie packages that Trivy flags as

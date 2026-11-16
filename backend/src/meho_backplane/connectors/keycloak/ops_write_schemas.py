@@ -26,6 +26,9 @@ a tenant-rights change, like ``keycloak.group.member.add`` and
   carries the mappers and scopes that fill the token.
 * ``keycloak.protocol_mapper.create`` -- a mapper decides the claims, also
   ``tenant_id`` / ``tenant_role``.
+* ``keycloak.client_scope.protocol_mapper.update`` -- the same, for a
+  mapper on a client scope. It is also registered as a change of rights:
+  the requester never approves it and the approver is another admin.
 * ``keycloak.user.reset_password`` -- sets the password of any user of the
   realm, so it lets someone sign in as that user.
 
@@ -50,6 +53,7 @@ from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     WHEN_TO_USE_GROUP_WRITE,
 )
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import SMTP_PASSWORD_SECRET_PROPS
+from meho_backplane.connectors.keycloak.ops_write_scope_mapper_schemas import SCOPE_MAPPER_OPS
 from meho_backplane.connectors.keycloak.ops_write_user_enabled_schemas import USER_ENABLED_OPS
 
 __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
@@ -619,6 +623,9 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Turn a user off and on (``user.disable`` / ``user.enable``) -- rows in
     # ``ops_write_user_enabled_schemas``, handlers in ``ops_write_user_enabled``.
     *USER_ENABLED_OPS,
+    # Change one protocol mapper of a client scope -- row in
+    # ``ops_write_scope_mapper_schemas``, handler in ``ops_write_scope_mapper``.
+    *SCOPE_MAPPER_OPS,
     # Client roles, user details and one stored credential -- rows in
     # ``ops_write_account_schemas``, handlers in the ``ops_write_client_role``,
     # ``ops_write_user_update`` and ``ops_write_user_credential`` modules.

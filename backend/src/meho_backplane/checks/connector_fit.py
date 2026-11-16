@@ -15,7 +15,9 @@ The match is the resolver's own
 connector named as the one that fits is the one the resolver picks for the
 target (:func:`~meho_backplane.connectors.resolve_connector_or_label`), and
 its id is checked with the same match before it is named. No second version
-check is written here.
+check is written here. A connector also fits when the resolver picks a
+subclass of it for the target: the subclass runs the same operations (for
+example OpenBao 2.x on the Vault connector's operations).
 
 The check runs each time a Sensor is listed, so a new probe that changes the
 target's version shows in the next list.
@@ -78,6 +80,8 @@ def connector_fit(connector_id: str, target: Any) -> SensorConnectorFit:
     if target_product == product:
         if target_version is None or connector_serves_target(product, version, impl_id, target):
             return fit
+        if _resolves_to_subclass(target, connector_class):
+            return fit
         problem = (
             f"The target runs {target_product} {target_version}. Connector "
             f"{connector_id} works only with versions "
@@ -98,6 +102,19 @@ def connector_fit(connector_id: str, target: Any) -> SensorConnectorFit:
             "matching_connector_id": matching,
         }
     )
+
+
+def _resolves_to_subclass(target: Any, own_class: type[Any]) -> bool:
+    """Whether the resolver picks a subclass of *own_class* for *target*.
+
+    Operations are stored under one connector id. A subclass registered
+    under another id, with another version range, runs them too: the
+    dispatcher runs an operation on the picked class when its handler is
+    on that class or a base class. So a Sensor on the base connector's id
+    fits a target the resolver serves with the subclass.
+    """
+    resolved, _label, _message = resolve_connector_or_label(target)
+    return resolved is not None and resolved is not own_class and issubclass(resolved, own_class)
 
 
 def _matching_connector_id(target: Any, own_class: type[Any]) -> str | None:

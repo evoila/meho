@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import structlog
@@ -227,10 +227,21 @@ async def _run_forget_hooks(target: Any) -> None:
                 )
 
 
-def _target_version(target: Any) -> tuple[Any, type[Connector] | None] | None:
+def _detected_product(target: Any) -> str | None:
+    """The product the last probe found, or ``None``. Reads a dict or an object."""
+    probe_result = getattr(target, "fingerprint", None)
+    value = (
+        probe_result.get("product")
+        if isinstance(probe_result, Mapping)
+        else getattr(probe_result, "product", None)
+    )
+    return value if isinstance(value, str) and value else None
+
+
+def _target_version(target: Any) -> tuple[Any, type[Connector] | None, str | None] | None:
     """Return what a kept login depends on, as one comparable value.
 
-    The value has two parts:
+    The value has three parts:
 
     * the time a person last changed the target (``connection_changed_at``;
       ``updated_at`` for a row or descriptor that has no such value). A
@@ -254,7 +265,7 @@ def _target_version(target: Any) -> tuple[Any, type[Connector] | None] | None:
         connector_cls, _label, _message = resolve_connector_or_label(target)
     except Exception:
         connector_cls = None
-    return changed_at, connector_cls
+    return changed_at, connector_cls, _detected_product(target)
 
 
 def _record_seen_version(target: Any) -> None:
@@ -272,11 +283,11 @@ async def forget_target_if_changed(target: Any) -> bool:
     the dispatcher does, and so does the runner executor. A change shows as
     a new ``connection_changed_at`` on the row (the update route always sets
     it, also when the same ``secret_ref`` is sent again), or as another
-    connector serving the target (see :func:`_target_version`). A probe
-    that stores the same product and version, or only a new probe time,
-    changes neither. When the value differs from the one this process saw
-    last, the kept logins are dropped and the next login uses the new
-    values.
+    connector serving the target (see :func:`_target_version`), or as a
+    probe that detected another product. A probe that stores the same
+    product and version, or only a new probe time, changes none of these.
+    When the value differs from the one this process saw last, the kept
+    logins are dropped and the next login uses the new values.
 
     The check and the drop run under the target's lock. A second call with
     the same new version waits until the first call's drop is done, then

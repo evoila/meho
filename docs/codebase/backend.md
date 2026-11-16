@@ -461,6 +461,29 @@ this stage it exposes:
   deprecated and removed by G0.6-T11 (#412) once T8's substrate route
   shipped — two parallel dispatch surfaces violated CLAUDE.md
   postulate 5's narrow-waist contract.
+* Session ended: sign in again once, never send a change twice —
+  `operations/dispatcher.py` (`_handle_http_status_error`) and
+  `operations/_session_expired_hook.py`. A 401 (or a status the
+  connector's profile names) drops the kept session and repeats the call
+  once. A connector can also say that another 4xx answer means "the
+  session ended", with an optional method `is_session_expired(response)`.
+  The dispatcher asks it only for a 4xx answer: after a 5xx or a timeout
+  the call may have run, so it is never repeated. On "yes" the dispatcher
+  drops the kept session (`invalidate_session`). It repeats the call once
+  only when that cannot send a change twice
+  (`may_resend_after_session_end`): the operation's risk level is `safe`,
+  or it is an ingested operation that sent exactly one request (that
+  request was refused, so nothing ran). A typed handler or a multi-step
+  operation that is not `safe` may have sent a write before, so it is not
+  repeated. A call that runs after a person's approval is never repeated:
+  one approval is one run. When MEHO does not repeat, the caller gets
+  `connector_auth_failed` (cause `session_ended_<status>_not_resent`)
+  that says the change may or may not have been made and to check the
+  product before a new call. The repeat never loops: at most two sign-ins
+  per call. The audit row has `session_relogin` (MEHO signed in again),
+  `session_resent` (MEHO sent the operation again) and
+  `session_relogin_status`; the trace has one `session_relogin` span.
+  Details: `docs/architecture/connector-auth.md`.
 * Spec ingestion + connector review (G0.7-T6 #406) —
   `src/meho_backplane/api/v1/connectors_ingest.py` exposes the twelve
   `/api/v1/connectors*` routes that drive the ingestion pipeline and

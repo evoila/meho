@@ -227,6 +227,21 @@ bindings:
   tenant list (`meho_tenants`, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
   `meho policy export` shows them.
+- A shipped binding counts only when it agrees with the token. The group
+  alone never gives or takes the right to approve: a person in the
+  shipped approver group may approve only when the token also says
+  `approver: true`, and a person with `approver: true` keeps that right in
+  the shipped readers group. So with the setting on and no stored
+  bindings, every person may approve exactly what they may approve with
+  the setting off.
+- A binding in your file (a stored binding) is your own choice. There the
+  group alone gives the flags of the kind: a read-only person in a group
+  bound to `Approvers` may approve, whatever the token says.
+- `meho policy export` with the setting on writes the shipped bindings into
+  your file. After an import they are stored bindings, and then they count
+  for every person, also for a person with a tenant list, whose groups may
+  belong to another tenant. In a setup with tenant lists, remove the
+  shipped bindings from the exported file before you import it.
 - A shipped binding takes its kind from the **end** of the group name:
   `Corp-Operators` gives `Operators`. If your site renamed the groups,
   check that each name ends with its kind. Run `meho policy export` and
@@ -244,7 +259,9 @@ bindings:
 !!! note "Off by default"
 
     Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
-    `config.policy.approverRouting`) is on. The policy commands, and so
+    `config.policy.approverRouting`) is on. You can import a file with
+    `bindings` while the setting is off: the bindings take effect when the
+    setting goes on. The policy commands, and so
     the import of bindings, also need the setting `POLICY_CLASSIFICATION`
     (Helm `config.policy.classification`).
 

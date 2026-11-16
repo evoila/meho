@@ -63,8 +63,8 @@ from meho_backplane.ui.routes.account_tools import (
     FORBIDDEN_TEXT,
     NOT_CONFIGURED_TEXT,
     NOTHING_TO_SIGN_OUT_TEXT,
+    PARTLY_SHARED_TEXT,
     PARTLY_SIGNED_OUT_TEXT,
-    SHARED_KEPT_TEXT,
     SHARED_ONLY_TEXT,
     SIGNED_OUT_TEXT,
 )
@@ -530,7 +530,11 @@ def test_sign_out_ends_an_ordinary_login_without_offline() -> None:
 
 
 def test_shared_login_is_kept_and_named() -> None:
-    """A login shared with the command line is kept; the line says so."""
+    """A login shared with the command line is kept, so the tool can still renew.
+
+    The line says "partly signed out" in the info style, names the other
+    tool and how to end the shared login. The row says ``partly_signed_out``.
+    """
     client, csrf = _client_for(_ME)
     with respx.mock(assert_all_called=False) as router:
         kc = _FakeKeycloak(
@@ -541,15 +545,24 @@ def test_shared_login_is_kept_and_named() -> None:
         )
         response = _post(client, csrf, "claude-desktop")
     assert response.status_code == 200, response.text
-    assert 'data-result="success"' in response.text
-    assert SHARED_KEPT_TEXT.format(
-        label="Claude Desktop", others="Command line (meho)"
-    ) in html.unescape(response.text)
+    text = html.unescape(response.text)
+    assert 'data-result="info"' in response.text
+    assert 'data-result="success"' not in response.text
+    assert PARTLY_SHARED_TEXT.format(label="Claude Desktop", others="Command line (meho)") in text
+    assert "Partly signed out:" in text
+    assert "Keycloak account page" in text
+    assert "is signed out" not in text
     assert kc.can_renew(_ME, "meho-cli")
+    assert kc.can_renew(_ME, "meho-mcp-desktop")
     assert len(kc.session_deletes) == 1
     rows = _sign_out_rows()
     assert len(rows) == 1
+    assert rows[0].status_code == 200
+    assert rows[0].payload["outcome"] == "partly_signed_out"
+    assert rows[0].payload["offline_login_ended"] is True
+    assert rows[0].payload["sessions_ended"] == 1
     assert rows[0].payload["shared_with"] == ["meho-cli"]
+    assert "error" not in rows[0].payload
 
 
 def test_only_a_shared_login_changes_nothing() -> None:
@@ -581,6 +594,27 @@ def test_failed_session_list_changes_nothing_and_writes_a_failed_row() -> None:
     assert consent.call_count == 0
     assert 'data-result="error"' in response.text
     _assert_one_failed_row("KeycloakAdminError")
+
+
+def test_session_list_that_is_not_json_shows_an_error_and_writes_a_failed_row() -> None:
+    """Keycloak answers 200 with a body that is not JSON: the same error as other failures."""
+    client, csrf = _client_for(_ME)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "admin-tok"})
+        )
+        router.get(url__regex=r"/sessions$").mock(
+            return_value=httpx.Response(200, text="<html>proxy error</html>")
+        )
+        consent = router.delete(url__regex=r"/consents/").mock(return_value=httpx.Response(204))
+        response = _post(client, csrf, "claude-desktop")
+    assert response.status_code == 200, response.text
+    assert consent.call_count == 0
+    assert 'data-result="error"' in response.text
+    assert FAILED_TEXT.format(label="Claude Desktop") in html.unescape(response.text)
+    payload = _assert_one_failed_row("KeycloakAdminError")
+    assert payload["offline_login_ended"] is False
+    assert payload["sessions_ended"] == 0
 
 
 def test_forbidden_session_delete_names_the_missing_right() -> None:

@@ -13,10 +13,11 @@ off, the account page has no such section and the route answers 404.
   person's logins for that one client
   (:func:`~meho_backplane.auth.tool_sign_out.sign_out_tool`) and answers
   the section again with one result line. A login the tool shares with
-  another tool is kept, and the line says so. The person comes from the
-  session, never from the form, so a person can sign out only their own
-  tools. An unknown key, or a kind without a sign-out button (the web
-  console), answers 404.
+  another tool is kept. Then the tool can still renew, so the line says
+  "partly signed out", names the other tool and how to end that login.
+  The person comes from the session, never from the form, so a person
+  can sign out only their own tools. An unknown key, or a kind without a
+  sign-out button (the web console), answers 404.
 
 A Keycloak failure answers the section with an error line; the audit row
 of the failed try says what ended before it, if anything. The logic is in
@@ -65,11 +66,12 @@ SIGNED_OUT_TEXT = (
     "the access token lifetime (about five minutes on MEHO's built-in "
     "Keycloak). If it signs in again, it gets a new login."
 )
-SHARED_KEPT_TEXT = (
-    " {label} also shares one browser login with {others}. MEHO did not end "
-    "that login, so {others} keep working. While it lasts, {label} can still "
-    "get new access tokens through it. To stop that too, end the login in "
-    "your Keycloak account page."
+PARTLY_SHARED_TEXT = (
+    "Partly signed out: MEHO ended the logins that only {label} uses, but "
+    "{label} also shares one browser login with {others}. MEHO did not end "
+    "that login, so {others} keep working, and {label} can still get new "
+    "access tokens through it. To end it too, sign out of that login in "
+    "your Keycloak account page. Then {others} must sign in again."
 )
 SHARED_ONLY_TEXT = (
     "{label} has no login of its own: it shares one browser login with "
@@ -184,10 +186,9 @@ async def _do_sign_out(session_ctx: UISessionContext, kind: ToolKind) -> _Result
     others = _labels(ended.shared_with)
     if not ended.ended_any:
         return _Result("info", SHARED_ONLY_TEXT.format(label=kind.label, others=others))
-    text = SIGNED_OUT_TEXT.format(label=kind.label)
     if ended.shared_with:
-        text += SHARED_KEPT_TEXT.format(label=kind.label, others=others)
-    return _Result("success", text)
+        return _Result("info", PARTLY_SHARED_TEXT.format(label=kind.label, others=others))
+    return _Result("success", SIGNED_OUT_TEXT.format(label=kind.label))
 
 
 def build_account_tools_router() -> APIRouter:

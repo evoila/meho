@@ -251,7 +251,9 @@ async def sign_out_tool(
     *operator_sub* is the Keycloak user id of the person. The Keycloak
     calls run first, then the audit row is written:
 
-    * at least one login ended: a row with status 200;
+    * at least one login ended: a row with status 200. Its ``outcome`` is
+      ``signed_out``, or ``partly_signed_out`` when a login shared with
+      another client was kept (the tool can still renew through it);
     * a Keycloak call failed (also "not configured"): a row with status
       502 that names the error and what ended before it. Then the error
       reaches the caller;
@@ -285,7 +287,7 @@ async def sign_out_tool(
         kind=kind,
         ended=ended,
         started=started,
-        outcome="signed_out",
+        outcome="partly_signed_out" if ended.shared_with else "signed_out",
     )
     _log.info(
         "tool_sign_out",

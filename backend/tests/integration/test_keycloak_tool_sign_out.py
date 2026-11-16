@@ -14,7 +14,7 @@ renew each login with its refresh token:
    command line signs in with an ordinary login only, like
    ``meho login --offline=false``.
 2. Sign out Desktop of the first person. Both Desktop logins of that
-   person can no longer renew. Their Code and command line logins, and
+   person cannot renew. Their Code and command line logins, and
    both Desktop logins of the other person, still renew.
 3. Sign out the command line of the first person. It had no offline
    login, so Keycloak's consent call finds nothing, but its ordinary login

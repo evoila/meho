@@ -3175,9 +3175,13 @@ def _build_reducer_context(
         # the answer may hold a secret (``jsonflux_reducer._is_credential_class``).
         "op_class": descriptor_op_class(descriptor),
     }
-    # A reveal's answer holds secret values, and so does the answer of an
-    # operation that makes a new credential: the reducer keeps no copy of it.
-    if reveal_secret_var.get() is True or reducer_context["op_class"] == "credential_mint":
+    # A reveal's answer holds secret values: the reducer keeps no copy of it. So
+    # does the answer of an ingested operation whose row stores
+    # ``credential_mint`` (a connector floor set it): it holds a new credential.
+    if (
+        reveal_secret_var.get() is True
+        or getattr(descriptor, "op_class", None) == "credential_mint"
+    ):
         reducer_context[SECRET_REVEAL_CONTEXT_KEY] = True
     # G0.20-T7 (#1507): carry the operator's tenant id so the reducer can
     # spill the full materialized set into the tenant-scoped

@@ -607,8 +607,8 @@ finds the field, and returns a copy of the operation with
   - The policy file check (`policy/validate.py`): an operation that shows a
     secret is known as one.
   - The result reducer (`jsonflux_reducer.py`): it gets the class of the row
-    in its context. For a `credential_mint` the dispatcher also tells it to
-    store nothing, so the result store never holds the new credential.
+    in its context. For a stored `credential_mint` the dispatcher also tells
+    it to store nothing, so the result store never holds the new credential.
   - The outer MCP row of `call_operation` (`mcp/handlers.py`): it looks up
     the operation inside, and a stored secret class makes the broadcast
     detail the aggregate only.

@@ -10,7 +10,8 @@
   ``tools_result`` shows at its top.
 
   Each row: the tool kind, its login client and the last use from the
-  person's audit rows of the last 90 days. The web console has no button:
+  person's newest 500 audit rows of the last 90 days (LAST_USE_MAX_ROWS
+  and LAST_USE_WINDOW in ``auth/tool_sign_out.py``; a test pins the words). The web console has no button:
   the "Active sessions" card signs out a browser.
 
   The CSRF header comes from the enclosing ``<section hx-headers>`` of the
@@ -54,7 +55,7 @@
             {% if t.last_used_at is not none %}
               <span data-field="last-use" title="{{ t.last_used_at.isoformat() }}">{{ t.last_used_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
             {% else %}
-              <span data-field="last-use">none in the last 90 days</span>
+              <span data-field="last-use">none in your newest 500 audit rows of the last 90 days</span>
             {% endif %}
           </div>
         </div>

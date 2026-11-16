@@ -11,8 +11,9 @@ person's other tools keep working.
 
 * :func:`tool_kinds` -- the tool kinds MEHO knows, with their login client.
 * :func:`last_use_by_client` -- the last audit row of the person per login
-  client. Audit rows name the client only while ``AUDIT_CLIENT_IDENTITY``
-  is on, so with it off no tool has a last use.
+  client, among the person's newest :data:`LAST_USE_MAX_ROWS` rows. Audit
+  rows name the client only while ``AUDIT_CLIENT_IDENTITY`` is on, so
+  with it off no tool has a last use.
 * :func:`end_tool_logins` -- the Keycloak part. It ends both kinds of
   login of the person for one client:
 
@@ -49,7 +50,7 @@ from datetime import datetime, timedelta
 from typing import Any, Final
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.auth_config import MCP_TOOL_CLIENTS
@@ -65,6 +66,7 @@ from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.settings import Settings
 
 __all__ = [
+    "LAST_USE_MAX_ROWS",
     "LAST_USE_WINDOW",
     "OTHER_MCP_CLIENT_ID",
     "TOOL_SIGN_OUT_AUDIT_PATH",
@@ -84,6 +86,9 @@ TOOL_SIGN_OUT_AUDIT_PATH: Final[str] = "auth.tool_sign_out"
 
 #: How far back :func:`last_use_by_client` looks.
 LAST_USE_WINDOW: Final[timedelta] = timedelta(days=90)
+
+#: The most audit rows :func:`last_use_by_client` reads on one page load.
+LAST_USE_MAX_ROWS: Final[int] = 500
 
 #: The shared login client of MCP clients that have no client of their own.
 OTHER_MCP_CLIENT_ID: Final[str] = "meho-mcp"
@@ -131,24 +136,30 @@ async def last_use_by_client(
     """Return the newest audit row time of *operator_sub* per login client.
 
     Reads only the person's own rows of the last :data:`LAST_USE_WINDOW`,
-    in every tenant (a login is per person, not per tenant). A client with
-    no such row is missing from the answer.
+    in every tenant (a login is per person, not per tenant), newest first,
+    and at most :data:`LAST_USE_MAX_ROWS` of them. The index
+    ``audit_log_operator_sub_occurred_at_idx`` serves this read, so a page
+    load reads at most that many rows. A client with no row among them is
+    missing from the answer.
     """
-    wanted = list(client_ids)
+    wanted = set(client_ids)
     if not wanted:
         return {}
     azp = AuditLog.payload[("client", "azp")].as_string()
     stmt = (
-        select(azp, func.max(AuditLog.occurred_at))
+        select(azp, AuditLog.occurred_at)
         .where(
             AuditLog.operator_sub == operator_sub,
             AuditLog.occurred_at >= now - LAST_USE_WINDOW,
-            azp.in_(wanted),
         )
-        .group_by(azp)
+        .order_by(AuditLog.occurred_at.desc())
+        .limit(LAST_USE_MAX_ROWS)
     )
-    result = await db_session.execute(stmt)
-    return {str(client): last for client, last in result.all() if last is not None}
+    last_use: dict[str, datetime] = {}
+    for client, occurred_at in (await db_session.execute(stmt)).all():
+        if client in wanted and client not in last_use:
+            last_use[str(client)] = occurred_at
+    return last_use
 
 
 @dataclass(frozen=True)

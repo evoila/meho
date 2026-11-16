@@ -41,7 +41,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.tool_sign_out import TOOL_SIGN_OUT_AUDIT_PATH, tool_kinds
+from meho_backplane.auth.tool_sign_out import (
+    LAST_USE_MAX_ROWS,
+    LAST_USE_WINDOW,
+    TOOL_SIGN_OUT_AUDIT_PATH,
+    tool_kinds,
+)
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.settings import get_settings
@@ -78,6 +83,9 @@ _ME = "5d0c1a52-0000-4000-8000-00000000aaaa"
 _OTHER = "5d0c1a52-0000-4000-8000-00000000bbbb"
 _PAGE = "/ui/account"
 _SIGN_OUT = "/ui/account/tools/sign-out"
+_NONE_FOUND = (
+    f"none in your newest {LAST_USE_MAX_ROWS} audit rows of the last {LAST_USE_WINDOW.days} days"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -157,14 +165,14 @@ def _headers(csrf: str) -> dict[str, str]:
     return {"X-CSRF-Token": csrf, "HX-Request": "true"}
 
 
-def _seed_audit(operator_sub: str, azp: str, occurred_at: datetime) -> None:
+def _seed_audit(operator_sub: str, azp: str, *occurred_at: datetime) -> None:
     async def _do() -> None:
         async with get_sessionmaker()() as session, session.begin():
-            session.add(
+            session.add_all(
                 AuditLog(
                     id=uuid.uuid4(),
                     event_class=AuditEventClass.OPERATION_EXECUTION,
-                    occurred_at=occurred_at,
+                    occurred_at=at,
                     operator_sub=operator_sub,
                     tenant_id=_TENANT,
                     method="POST",
@@ -172,6 +180,7 @@ def _seed_audit(operator_sub: str, azp: str, occurred_at: datetime) -> None:
                     status_code=200,
                     payload={"client": {"azp": azp, "channel": "token"}},
                 )
+                for at in occurred_at
             )
 
     asyncio.run(_do())
@@ -313,11 +322,29 @@ def test_section_lists_tool_kinds_with_last_use() -> None:
     code_row = body.split('data-tool-row="claude-code"', 1)[1].split("data-tool-row=", 1)[0]
     assert recent.strftime("%Y-%m-%d %H:%M UTC") in code_row
     desktop_row = body.split('data-tool-row="claude-desktop"', 1)[1].split("data-tool-row=", 1)[0]
-    assert "none in the last 90 days" in desktop_row
+    assert _NONE_FOUND in desktop_row
     cli_row = body.split('data-tool-row="cli"', 1)[1].split("data-tool-row=", 1)[0]
-    assert "none in the last 90 days" in cli_row
+    assert _NONE_FOUND in cli_row
     assert "access token lifetime" in body
     assert "not a" in body and "block" in body
+
+
+def test_last_use_reads_at_most_the_newest_rows() -> None:
+    """Only the person's newest LAST_USE_MAX_ROWS rows count; an older use is not found."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    _seed_audit(_ME, "meho-mcp-desktop", now - timedelta(days=2))
+    _seed_audit(
+        _ME,
+        "meho-mcp-code",
+        *(now - timedelta(minutes=i) for i in range(1, LAST_USE_MAX_ROWS + 1)),
+    )
+    client, _csrf = _client_for(_ME)
+    with respx.mock(assert_all_called=False):
+        body = client.get(_PAGE).text
+    code_row = body.split('data-tool-row="claude-code"', 1)[1].split("data-tool-row=", 1)[0]
+    assert (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M UTC") in code_row
+    desktop_row = body.split('data-tool-row="claude-desktop"', 1)[1].split("data-tool-row=", 1)[0]
+    assert _NONE_FOUND in desktop_row
 
 
 def test_web_console_row_has_no_sign_out_button() -> None:

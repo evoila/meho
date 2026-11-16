@@ -906,12 +906,21 @@ job never confirms a candidate.
 
 ### Weekly upkeep (`lessons/upkeep.py`)
 
-A background job keeps the store clean. It runs once per
-`KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
-its last recorded run, and can be turned off with
-`KNOWLEDGE_UPKEEP_ENABLED=false` (Helm: `config.knowledgeUpkeepEnabled`
-and `config.knowledgeUpkeepIntervalSeconds`). On PostgreSQL an advisory lock lets
-one replica at a time run it. Each run:
+A background job keeps the store clean. It is **off by default**. It
+changes which entries `search_knowledge` returns to agents, and a change
+to what the agent sees ships off until it is measured. An operator turns
+it on with `KNOWLEDGE_UPKEEP_ENABLED=true` (Helm:
+`config.knowledgeUpkeepEnabled: "true"`). `GET /version` lists the switch
+under `agent_switches`. When on, it runs once per
+`KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default, Helm:
+`config.knowledgeUpkeepIntervalSeconds`), counted from its last recorded
+run. On PostgreSQL an advisory lock lets one replica at a time run it.
+
+While it is off, nothing below happens: no duplicate is merged, no
+expired entry gets `status: retired`, no report is written, and recorded
+retrievals are not deleted.
+
+Each run:
 
 1. **Merges duplicates.** Entries of one tenant with exactly the same
    body are one entry. Case and spaces count, because `MODE=prod` and

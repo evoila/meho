@@ -414,7 +414,9 @@ async def advance_run(
         audit_op_class="write",
     )
     try:
-        return await service.next_step(operator.tenant_id, operator.sub, run_id, request)
+        return await service.next_step(
+            operator.tenant_id, operator.sub, run_id, request, caller=operator
+        )
     except (
         RunNotFoundError,
         NotRunAssigneeError,

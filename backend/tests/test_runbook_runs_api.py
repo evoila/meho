@@ -496,6 +496,10 @@ def test_next_operation_call_match_advances_200(client: TestClient) -> None:
         )
     assert response.status_code == 200
     assert response.json()["current_step"]["id"] == "verify-cluster"
+    # The step runs as the caller of the request: its checked login goes to the service.
+    caller = fake_next.await_args.kwargs["caller"]
+    assert caller.sub == "op-operator"
+    assert caller.raw_jwt == token
 
 
 def test_next_completes_200(client: TestClient) -> None:

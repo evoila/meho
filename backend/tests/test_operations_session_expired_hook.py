@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import structlog
+import structlog.testing
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -230,6 +232,10 @@ def _assert_not_resent(result: Any, connector: _NoHook403Connector) -> None:
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["cause"] == "session_ended_403_not_resent"
+    assert result.error is not None
+    assert "the login session ended (HTTP 403)" in result.error
+    assert "did not send the operation again" in result.error
+    assert "auth/permission fault" not in result.error
     assert "may or may not have been made" in result.extras["remediation"]
     assert "Check the state on the product" in result.extras["remediation"]
     assert connector.calls == 1
@@ -362,6 +368,11 @@ async def test_hook_yes_and_refused_sign_in_makes_one_try_and_a_clear_error(
     assert "refused the sign-in" in result.extras["remediation"]
     assert "locked" in result.extras["remediation"]
     assert "permission" not in result.extras["remediation"].lower()
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_relogin"] is True
+    assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["session_relogin_status"] == 403
 
 
 @pytest.mark.asyncio
@@ -401,6 +412,11 @@ async def test_connector_without_hook_behaves_as_before(
 
 
 def test_session_expired_by_hook_edge_inputs() -> None:
+    with structlog.testing.capture_logs() as logs:
+        _check_hook_edge_inputs(logs)
+
+
+def _check_hook_edge_inputs(logs: list[Any]) -> None:
     response = httpx.Response(
         403, json=_EXPIRED_BODY, request=httpx.Request("GET", "https://x.test")
     )
@@ -411,6 +427,9 @@ def test_session_expired_by_hook_edge_inputs() -> None:
     connector = _HookConnector()
     connector.is_session_expired = lambda _r: "yes"  # type: ignore[method-assign, assignment, return-value]
     assert session_expired_by_hook(connector, response) is False
+    assert any(
+        e["event"] == "session_expired_hook_bad_answer" and e["answer_type"] == "str" for e in logs
+    )
     empty = httpx.Response(403, request=httpx.Request("GET", "https://x.test"))
     assert (
         session_expired_by_hook(_HookConnector(), empty) is False
@@ -455,7 +474,7 @@ async def test_typed_write_is_not_sent_again(
     rows = await _audit_rows()
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
-    assert rows[0].payload["session_relogin"] is False
+    assert rows[0].payload["session_relogin"] is True
     assert rows[0].payload["session_resent"] is False
     assert rows[0].payload["session_relogin_status"] == 403
 
@@ -644,4 +663,4 @@ def test_session_relogin_span(resent: bool) -> None:
     attributes = scope.spans[0].attributes
     assert attributes["rejected_status"] == 403
     assert attributes["resent"] is resent
-    assert attributes["session_relogin"] is resent
+    assert attributes["session_relogin"] is True

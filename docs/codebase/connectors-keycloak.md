@@ -462,20 +462,25 @@ MEHO-SA-Operator who is not an admin cannot. The single-operator
 self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them.
 The test `backend/tests/test_keycloak_identity_write_approvers.py` checks
 both rules for the first five. `user.required_actions.update` is
-`dangerous` and not a change of rights: a MEHO-SA-Operator or a tenant
-admin may approve another person's request. The test of the one-time code
+`dangerous` and a change of rights too. The test of the one-time code
 set-up checks that it is `dangerous`.
 
 ### Writes that are changes of rights
 
-A Keycloak write that can change what a login token says, or who has which
-role, is a change of rights. For such a write:
+A Keycloak write that can change what a login token says, who has which
+role, who may sign in, or how strong a sign-in is, is a change of rights.
+For such a write:
 
 - the requester never approves their own request;
 - another admin (a tenant admin or a platform admin) must approve it, so a
   MEHO-SA-Operator who is not an admin cannot;
 - a standing grant, an older grant row and a run approval never cover it:
-  each call waits for its own approval. An agent's call waits too.
+  each call waits for its own approval. An agent's call waits too;
+- no operation setting turns its approval off. An edit that tries is
+  refused (`approval_off_rights_change`), and a floor in
+  `operations/op_policy.py` keeps approval on when an older override row
+  turned it off. This holds for every registered change of rights, not
+  only the Keycloak ones.
 
 `connectors/keycloak/rights_changes.py` holds the decision for every
 Keycloak write, with the reason:
@@ -489,36 +494,40 @@ Keycloak write, with the reason:
 | `client_scope.create` | yes | a client scope carries protocol mappers and role scope mappings |
 | `protocol_mapper.create` | yes | a mapper decides which claims a token holds |
 | `user.create` | yes | the new user can carry groups, roles and attributes that mappers read |
-| `user.reset_password` | yes | sets the password of any login, also of an admin, from a Vault path the requester names; whoever reads that path can sign in as that login |
+| `user.reset_password` | yes | a new password for a login is a change of rights; another admin approves it |
 | `role_mapping.assign` | yes | gives a user realm roles |
 | `role_mapping.client.assign` | yes | gives a user roles of a client |
 | `user.update` | yes | changes a user's user name and email, which tokens carry and which a login or a password reset uses |
 | `user.credential.delete` | yes | removes a user's passkey or one-time code, so it changes how that login signs in |
+| `user.enable` | yes | turns a login on, so it decides who may sign in |
+| `user.required_actions.update` | yes | sets the steps a user must do at the next sign-in, such as setting up a passkey or a one-time code, so it changes how strong that sign-in is |
 | `group.member.add` | yes | puts a user into a group and gives them its roles |
 | `group.update_attributes` | yes | group attributes fill the tenant claims of every member |
 | `authflow.ensure_approval_flow` | yes | maps the `acr` name `meho-approve` to a sign-in level; MEHO reads that `acr` claim of a token to accept an approval |
 | `authflow.ensure_approval_touch` | yes | adds or changes the client's `amr` protocol mapper, which puts a claim into every token, and maps the `acr` name `meho-touch` to a sign-in level |
-| `user.required_actions.update` | no | changes the next sign-in steps, not roles or claims |
+| `authflow.ensure_passkey_code_skip` | yes | binds MEHO's own copy of the browser sign-in flow, so it changes the steps and the strength of every sign-in in the realm |
 | `user.check_login` | no | tests one sign-in and changes nothing |
 | `user.logout`, `user.disable`, `user.delete` | no | they only take away |
-| `user.enable` | no | turns a login back on with the roles it already has |
 | `group.create` | no | a new group has no members; adding one is `group.member.add` |
 | `group.member.remove`, `role_mapping.client.remove`, `group.delete`, `client.delete`, `realm.delete` | no | they only take away |
-| `authflow.ensure_passkey_code_skip` | no | it adds a step to a copy of the browser sign-in flow; it writes no mapper and no `acr` name |
 
 The core has no ingested (spec-based) Keycloak operations, so the table
 covers the typed writes only. `backend/tests/test_keycloak_rights_change_writes.py`
 fails when a Keycloak write is on neither side of the table, so a new
-write needs this decision in the same pull request. The same test checks,
+write needs this decision in the same pull request. It counts every
+operation that is not a `safe` read without approval tagged `read-only`,
+so a write registered as `safe` is on the list too. The same test checks,
 for each change of rights, that the requester cannot approve it, that a
 standing grant and a run approval do not clear the wait, and that an
 agent's call waits.
 
 Every "yes" write is registered with `register_rights_change_op`, so the
-rule holds in every realm, not only in MEHO's own login realm. The three
-writes of one login or group (`group.member.add`, `role_mapping.assign`,
-`group.update_attributes`) are also registered with `register_grant_op`,
-which adds the checks of who the change is for (see "Changes of rights:
+rule holds in every realm, not only in MEHO's own login realm. Six writes
+of one login or one group are also registered with `register_grant_op`
+(`GRANT_OPS` in `ops_write_grant.py`): `group.member.add`,
+`role_mapping.assign`, `role_mapping.client.assign`, `user.update`,
+`user.credential.delete` and `group.update_attributes`. That adds the
+checks of who the change is for (see "Changes of rights:
 the login is never its own approver" in [approvals.md](approvals.md)).
 Both functions add the per-call mark, so no connector has to set it a
 second time.
@@ -539,15 +548,34 @@ the card says `current_values_available: false` (or
 writes that make a new object show the new values; there is nothing to
 read yet.
 
-These cards are behind the switch `KEYCLOAK_RIGHTS_CHANGE_CARDS`
-(`Settings.keycloak_rights_change_cards`, off by default), because the
-same card is also the answer of `preview_operation` that an agent reads.
-Off, `client.update` and `protocol_mapper.create` show the generic params
-echo, and `realm.update` shows the realm card of `ops_write_realm_smtp.py`
-without `current_values`. The card builders of `client.update` and
-`protocol_mapper.create` also get a switch with
-`register_preview_builder_switch`, so with the switch off the op previews
-as if it had no builder.
+The approval request a person reads (the approval card in the console
+and the approvals API) always shows these cards, on a default install.
+What the caller gets back from `preview_operation` is behind the switch
+`KEYCLOAK_RIGHTS_CHANGE_CARDS` (`Settings.keycloak_rights_change_cards`,
+off by default), because an agent reads it. Off, that preview of
+`client.update` and `protocol_mapper.create` is the generic params echo,
+and the one of `realm.update` is the realm card of
+`ops_write_realm_smtp.py` without `current_values`. The card builders of
+`client.update` and `protocol_mapper.create` get the switch with
+`register_preview_builder_switch`; it applies only when
+`PreviewContext.for_agent` is true. A call that waits for approval gives
+the caller no card, only the request id.
+
+A client attribute with a secret in it is hidden like the client secret:
+`client.secret.rotated` (the old secret during a rotation) is on the
+Keycloak list of secret fields in `redaction.py`.
+
+The other changes of rights keep the card they had. The cards of
+`role_mapping.assign`, `group.member.add`, `user.reset_password` and the
+two login flow writes do not yet show the object as it is now (the roles
+the user has now, the members the group has now, the flow that is bound
+now).
+
+**MEHO's own realm.** The checks that are stricter in MEHO's own login
+realm read the realm from Keycloak (`GET /admin/realms/{realm}`) and
+compare the `realm` name in the answer with the realms of MEHO's own
+login, without letter case and without spaces at the ends. When the read
+fails, the target counts as MEHO's own realm.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /

@@ -236,7 +236,8 @@ groups and clients.
 
 ## Version-specific notes
 
-Read these when your upgrade crosses the version in question:
+Read these when your upgrade crosses the version in question.
+Rows of the next release are in this table at once.
 
 | Crossing | What changes | Action |
 |---|---|---|
@@ -273,9 +274,9 @@ Read these when your upgrade crosses the version in question:
 | **v0.47.0** | MEHO ships the "small team" policy file (`deploy/policy-profiles/small-team.yaml`). While no policy is imported for the whole install, MEHO uses this file as the install's policy. It changes no answer: every operation keeps its risk level, its approval rule and who may approve it. An install policy import (`--scope install`) that waits for a second admin during the upgrade, on an install without an imported install policy, stops at the approval with "The policy changed after this import was planned." No database migration. | Run that import again after the upgrade: `meho policy diff --scope install <file>`, then `meho policy import --scope install <file>`. A second admin approves it. Tenant imports are not affected. See [Start from the "small team" file](../guides/policy-file.md#start-from-the-small-team-file). |
 | **v0.47.0** | With `MCP_CLIENT_PER_TOOL_KIND` on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role `manage-users`. Migration `0172` adds one index on `audit_log` (person and time); it changes no row, and on a large audit log it takes a while. | **Built-in Keycloak:** nothing to do; `meho-admin` already has `manage-users`. **Your own Keycloak:** give MEHO's Keycloak admin client `manage-users` before you turn the switch on. Without the role, the button shows an error that names it. See [The MCP clients of the AI tools](keycloak-realm.md#the-mcp-clients-of-the-ai-tools). |
 
-Rows for v0.48.0 and later come from one small file per row in
+New rows come from one small file per row in
 [`docs/upgrade-rows/`](https://github.com/evoila/meho/tree/main/docs/upgrade-rows).
-Each release also adds them to
+Each release also adds the rows of that release to
 [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes);
 release notes for each version are on the
 [releases page](https://github.com/evoila/meho/releases) with the full

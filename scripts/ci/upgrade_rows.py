@@ -18,24 +18,30 @@ row is its own file::
     What the operator does.
 
 Each section is one line of text. The version is the folder name, for
-example ``v0.48.0``. A link in a row must be a full ``https://`` address:
+example ``v0.47.0``. A link in a row must be a full ``https://`` address:
 the same row goes into two tables in two folders, so a relative link would
 work in one of them only.
 
-This file does four things:
+The rows sort by version, then by file name. A version is released when
+``CHANGELOG.md`` has a ``## [X.Y.Z]`` heading for it.
+
+This file does these things:
 
 * ``collect_rows`` reads and checks the row files.
 * ``check_table_files`` checks the two tables (``docs/deploying.md`` and
   ``docs-site/install/upgrades.md``): no conflict marker line, 3 columns in
   every row, no doubled row.
-* ``on_page_markdown`` is a ``mkdocs`` hook. It adds the rows of the folder
-  to the end of the table of ``install/upgrades.md`` when the site is built.
-  A broken row or table fails the build.
-* ``write_deploying`` adds the rows of the folder that are not there yet to
-  the end of the table in ``docs/deploying.md``. The release pull request
-  runs it (``--write``), so contributors never edit that table.
-  ``check_released_rows`` fails when a row of a released version (a
-  ``## [X.Y.Z]`` heading in ``CHANGELOG.md``) is missing there.
+* ``check_frozen_tables`` fails on a row added by hand. The rows that were
+  there before the row files came are frozen (``FROZEN_ROWS``). Below them,
+  ``docs/deploying.md`` holds only rows that ``--write`` added.
+* ``on_page_markdown`` is a ``mkdocs`` hook. It runs all checks and adds the
+  rows of the folder to the end of the table of ``install/upgrades.md`` when
+  the site is built. A broken row or table fails the build.
+* ``write_deploying`` adds the rows of the newest released version that are
+  not there yet to the end of the table in ``docs/deploying.md``. The release
+  pull request runs it (``--write``), so contributors never edit that table.
+  ``check_released_rows`` fails when such a row is missing there, and when a
+  new row is in the folder of a version that was released before.
 
 ``python scripts/ci/upgrade_rows.py`` runs the checks and prints the rows as
 table lines, so you can see what the site will show.
@@ -61,6 +67,16 @@ TABLE_FILES: dict[str, str] = {
     "docs-site/install/upgrades.md": "## Version-specific notes",
 }
 DEPLOYING = "docs/deploying.md"
+# Rows of each table before the row files came. They stay as they are; a new
+# row is a row file.
+FROZEN_ROWS: dict[str, int] = {
+    "docs/deploying.md": 66,
+    "docs-site/install/upgrades.md": 32,
+}
+_MOVE_HINT = (
+    "Do not edit this table. Move your row to "
+    "docs/upgrade-rows/<version>/<short-name>.md (see docs/upgrade-rows/README.md)."
+)
 SITE_PAGE = "install/upgrades.md"
 
 _VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
@@ -81,6 +97,12 @@ class UpgradeRowError(Exception):
     """A row file or an upgrade table is wrong."""
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    match = _VERSION_RE.match(version)
+    assert match is not None
+    return tuple(int(part) for part in match.groups())
+
+
 @dataclass(frozen=True)
 class Row:
     version: str
@@ -89,9 +111,7 @@ class Row:
     action: str
 
     def sort_key(self) -> tuple[tuple[int, ...], str]:
-        match = _VERSION_RE.match(self.version)
-        assert match is not None
-        return tuple(int(part) for part in match.groups()), self.name
+        return _version_key(self.version), self.name
 
     def as_table_line(self) -> str:
         return f"| **{self.version}** | {self.note} | {self.action} |"
@@ -143,10 +163,17 @@ def collect_rows(rows_dir: Path = ROWS_DIR) -> list[Row]:
     rows: list[Row] = []
     if not rows_dir.is_dir():
         return rows
-    for version_dir in sorted(p for p in rows_dir.iterdir() if p.is_dir()):
+    for version_dir in sorted(rows_dir.iterdir()):
+        if not version_dir.is_dir():
+            if version_dir.name == "README.md":
+                continue
+            raise UpgradeRowError(
+                f"{version_dir.name}: a row file belongs in a version folder, "
+                f"for example v0.47.0/{version_dir.name}"
+            )
         if not _VERSION_RE.match(version_dir.name):
             raise UpgradeRowError(
-                f"{version_dir.name}: the folder name must be a version like v0.48.0"
+                f"{version_dir.name}: the folder name must be a version like v0.47.0"
             )
         for path in sorted(version_dir.iterdir()):
             if path.suffix != ".md" or not path.is_file():
@@ -176,6 +203,12 @@ def _table_block(lines: list[str], heading: str) -> tuple[int, int]:
     while end < len(lines) and lines[end].startswith("|"):
         end += 1
     return start, end
+
+
+def _data_rows(lines: list[str], heading: str) -> range:
+    """Return the line indexes of the rows under the header and separator."""
+    start, end = _table_block(lines, heading)
+    return range(start + 2, end)
 
 
 def check_table_text(text: str, heading: str, label: str) -> None:
@@ -209,6 +242,31 @@ def check_table_files(root: Path = REPO_ROOT) -> None:
         check_table_text((root / rel).read_text(encoding="utf-8"), heading, rel)
 
 
+def released_versions(root: Path = REPO_ROOT) -> list[str]:
+    """Return the released versions (``## [X.Y.Z]`` in CHANGELOG.md), newest first."""
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    return sorted((f"v{v}" for v in _RELEASED_RE.findall(text)), key=_version_key, reverse=True)
+
+
+def check_frozen_tables(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> None:
+    """Fail on a row added by hand below the frozen rows of a table."""
+    released = set(released_versions(root))
+    written = {row.as_table_line() for row in collect_rows(rows_dir) if row.version in released}
+    for rel, heading in TABLE_FILES.items():
+        lines = (root / rel).read_text(encoding="utf-8").splitlines()
+        rows = _data_rows(lines, heading)
+        frozen = FROZEN_ROWS[rel]
+        if len(rows) < frozen:
+            raise UpgradeRowError(
+                f"{rel}: the table has {len(rows)} rows, expected at least {frozen}; "
+                "do not remove rows"
+            )
+        allowed = written if rel == DEPLOYING else set()
+        for index in rows[frozen:]:
+            if lines[index] not in allowed:
+                raise UpgradeRowError(f"{rel}:{index + 1}: this row has no row file. {_MOVE_HINT}")
+
+
 def add_rows_to_table(text: str, heading: str, rows: list[Row]) -> str:
     """Return ``text`` with ``rows`` added at the end of the table under ``heading``."""
     if not rows:
@@ -231,26 +289,43 @@ def missing_rows(text: str, heading: str, rows: list[Row]) -> list[Row]:
     return [row for row in rows if row.as_table_line() not in table]
 
 
+def _missing_released_rows(root: Path, rows_dir: Path) -> list[Row]:
+    """Return the rows of the newest release that ``docs/deploying.md`` lacks.
+
+    Fails on a missing row that ``--write`` must not add: a row of an older
+    release, or a row of the newest release when ``--write`` already ran for
+    it (some of its rows are in the table). Such a row came after the release.
+    """
+    released = released_versions(root)
+    if not released:
+        return []
+    rows = [row for row in collect_rows(rows_dir) if row.version in released]
+    text = (root / DEPLOYING).read_text(encoding="utf-8")
+    missing = missing_rows(text, TABLE_FILES[DEPLOYING], rows)
+    newest = [row for row in rows if row.version == released[0]]
+    written = any(row not in missing for row in newest)
+    for row in missing:
+        if row.version != released[0] or written:
+            raise UpgradeRowError(
+                f"{row.version}/{row.name}.md: {row.version} is already released; "
+                "put the row in the folder of the next release"
+            )
+    return missing
+
+
 def write_deploying(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> list[Row]:
-    """Add the folder rows that ``docs/deploying.md`` lacks; return them."""
-    path = root / DEPLOYING
-    text = path.read_text(encoding="utf-8")
-    heading = TABLE_FILES[DEPLOYING]
-    rows = missing_rows(text, heading, collect_rows(rows_dir))
+    """Add the rows of the newest release that ``docs/deploying.md`` lacks; return them."""
+    rows = _missing_released_rows(root, rows_dir)
     if rows:
-        path.write_text(add_rows_to_table(text, heading, rows), encoding="utf-8")
+        path = root / DEPLOYING
+        text = path.read_text(encoding="utf-8")
+        path.write_text(add_rows_to_table(text, TABLE_FILES[DEPLOYING], rows), encoding="utf-8")
     return rows
 
 
 def check_released_rows(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> None:
     """Fail when a row of a released version is missing in ``docs/deploying.md``."""
-    released = {
-        f"v{version}"
-        for version in _RELEASED_RE.findall((root / "CHANGELOG.md").read_text(encoding="utf-8"))
-    }
-    rows = [row for row in collect_rows(rows_dir) if row.version in released]
-    text = (root / DEPLOYING).read_text(encoding="utf-8")
-    missing = missing_rows(text, TABLE_FILES[DEPLOYING], rows)
+    missing = _missing_released_rows(root, rows_dir)
     if missing:
         names = ", ".join(f"{row.version}/{row.name}.md" for row in missing)
         raise UpgradeRowError(
@@ -259,13 +334,21 @@ def check_released_rows(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> No
         )
 
 
+def check_all(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> list[Row]:
+    """Run every check; return the rows of the folder."""
+    check_table_files(root)
+    rows = collect_rows(rows_dir)
+    check_frozen_tables(root, rows_dir)
+    check_released_rows(root, rows_dir)
+    return rows
+
+
 def on_page_markdown(markdown: str, page: Any, config: Any, files: Any) -> str:
-    """mkdocs hook: check the tables and add the folder rows to the site page."""
+    """mkdocs hook: run every check and add the folder rows to the site page."""
     if page.file.src_uri != SITE_PAGE:
         return markdown
     try:
-        check_table_files(REPO_ROOT)
-        rows = collect_rows(ROWS_DIR)
+        rows = check_all(REPO_ROOT, ROWS_DIR)
         return add_rows_to_table(markdown, TABLE_FILES["docs-site/install/upgrades.md"], rows)
     except UpgradeRowError as err:
         from mkdocs.exceptions import PluginError
@@ -278,16 +361,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--write",
         action="store_true",
-        help=f"add the missing folder rows to the table in {DEPLOYING}",
+        help=f"add the missing rows of the newest release to the table in {DEPLOYING}",
     )
     args = parser.parse_args(argv)
     try:
-        check_table_files()
-        rows = collect_rows()
         if args.write:
             for row in write_deploying():
                 print(f"added to {DEPLOYING}: {row.version}/{row.name}.md")
-        check_released_rows()
+        rows = check_all()
     except UpgradeRowError as err:
         print(f"upgrade rows: {err}", file=sys.stderr)
         return 1

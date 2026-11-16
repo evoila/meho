@@ -109,17 +109,17 @@ def test_missing_heading_fails() -> None:
 
 
 def test_rows_are_read_and_sorted_by_version_not_by_text(tmp_path: Path) -> None:
-    _row_file(tmp_path, "v0.10.0", "a", _GOOD.replace("What changes.", "Ten."))
-    _row_file(tmp_path, "v0.9.0", "b", _GOOD.replace("What changes.", "Nine."))
-    rows = ur.collect_rows(tmp_path)
+    _row_file(tmp_path / "rows", "v0.10.0", "a", _GOOD.replace("What changes.", "Ten."))
+    _row_file(tmp_path / "rows", "v0.9.0", "b", _GOOD.replace("What changes.", "Nine."))
+    rows = ur.collect_rows(tmp_path / "rows")
     assert [r.version for r in rows] == ["v0.9.0", "v0.10.0"]
     assert rows[0].as_table_line() == "| **v0.9.0** | Nine. | What to do. |"
 
 
 def test_two_rows_for_one_version_do_not_touch_the_same_file(tmp_path: Path) -> None:
-    _row_file(tmp_path, "v0.2.0", "first", _GOOD)
-    _row_file(tmp_path, "v0.2.0", "second", _GOOD.replace("What to do.", "Other."))
-    assert [r.name for r in ur.collect_rows(tmp_path)] == ["first", "second"]
+    _row_file(tmp_path / "rows", "v0.2.0", "first", _GOOD)
+    _row_file(tmp_path / "rows", "v0.2.0", "second", _GOOD.replace("What to do.", "Other."))
+    assert [r.name for r in ur.collect_rows(tmp_path / "rows")] == ["first", "second"]
 
 
 @pytest.mark.parametrize(
@@ -141,34 +141,34 @@ def test_two_rows_for_one_version_do_not_touch_the_same_file(tmp_path: Path) -> 
     ],
 )
 def test_broken_row_file_fails(tmp_path: Path, body: str, match: str) -> None:
-    _row_file(tmp_path, "v0.2.0", "bad", body)
+    _row_file(tmp_path / "rows", "v0.2.0", "bad", body)
     with pytest.raises(ur.UpgradeRowError, match=match):
-        ur.collect_rows(tmp_path)
+        ur.collect_rows(tmp_path / "rows")
 
 
 def test_row_file_with_a_bad_folder_or_file_name_fails(tmp_path: Path) -> None:
-    _row_file(tmp_path, "next", "x", _GOOD)
+    _row_file(tmp_path / "rows", "next", "x", _GOOD)
     with pytest.raises(ur.UpgradeRowError, match="version"):
-        ur.collect_rows(tmp_path)
+        ur.collect_rows(tmp_path / "rows")
 
 
 def test_row_file_that_is_not_markdown_fails(tmp_path: Path) -> None:
-    (tmp_path / "v0.2.0").mkdir()
-    (tmp_path / "v0.2.0" / "x.txt").write_text("x")
+    (tmp_path / "rows" / "v0.2.0").mkdir(parents=True)
+    (tmp_path / "rows" / "v0.2.0" / "x.txt").write_text("x")
     with pytest.raises(ur.UpgradeRowError, match=r"\.md"):
-        ur.collect_rows(tmp_path)
+        ur.collect_rows(tmp_path / "rows")
 
 
 def test_same_text_in_two_files_of_one_version_fails(tmp_path: Path) -> None:
-    _row_file(tmp_path, "v0.2.0", "one", _GOOD)
-    _row_file(tmp_path, "v0.2.0", "two", _GOOD)
+    _row_file(tmp_path / "rows", "v0.2.0", "one", _GOOD)
+    _row_file(tmp_path / "rows", "v0.2.0", "two", _GOOD)
     with pytest.raises(ur.UpgradeRowError, match="same text"):
-        ur.collect_rows(tmp_path)
+        ur.collect_rows(tmp_path / "rows")
 
 
 def test_rows_are_added_at_the_end_of_the_table(tmp_path: Path) -> None:
-    _row_file(tmp_path, "v0.2.0", "x", _GOOD)
-    out = ur.add_rows_to_table(_TABLE, _HEADING, ur.collect_rows(tmp_path))
+    _row_file(tmp_path / "rows", "v0.2.0", "x", _GOOD)
+    out = ur.add_rows_to_table(_TABLE, _HEADING, ur.collect_rows(tmp_path / "rows"))
     lines = out.splitlines()
     assert lines[lines.index("| **v0.1.0** | A note. | An action. |") + 1] == (
         "| **v0.2.0** | What changes. | What to do. |"
@@ -178,17 +178,17 @@ def test_rows_are_added_at_the_end_of_the_table(tmp_path: Path) -> None:
 
 
 def test_a_row_already_in_the_table_fails(tmp_path: Path) -> None:
-    _row_file(tmp_path, "v0.1.0", "x", "## Note\nA note.\n\n## Action\nAn action.\n")
+    _row_file(tmp_path / "rows", "v0.1.0", "x", "## Note\nA note.\n\n## Action\nAn action.\n")
     with pytest.raises(ur.UpgradeRowError, match="already holds"):
-        ur.add_rows_to_table(_TABLE, _HEADING, ur.collect_rows(tmp_path))
+        ur.add_rows_to_table(_TABLE, _HEADING, ur.collect_rows(tmp_path / "rows"))
 
 
 def test_no_rows_leaves_the_page_unchanged() -> None:
     assert ur.add_rows_to_table(_TABLE, _HEADING, []) == _TABLE
 
 
-def _repo_copy(root: Path, changelog: str) -> Path:
-    """A small repo: the two tables, a CHANGELOG and an empty rows folder."""
+def _repo_copy(root: Path, changelog: str, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A small repo: the two tables (one frozen row each), a CHANGELOG, a rows folder."""
     for rel, heading in ur.TABLE_FILES.items():
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +196,10 @@ def _repo_copy(root: Path, changelog: str) -> Path:
     (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
     rows_dir = root / "docs" / "upgrade-rows"
     rows_dir.mkdir(parents=True)
+    (rows_dir / "README.md").write_text("# Upgrade rows\n", encoding="utf-8")
+    monkeypatch.setattr(ur, "FROZEN_ROWS", dict.fromkeys(ur.TABLE_FILES, 1))
+    monkeypatch.setattr(ur, "REPO_ROOT", root)
+    monkeypatch.setattr(ur, "ROWS_DIR", rows_dir)
     return rows_dir
 
 
@@ -204,30 +208,58 @@ class _Page:
         src_uri = ur.SITE_PAGE
 
 
+_LINE = "| **v0.2.0** | What changes. | What to do. |"
+_UNRELEASED = "## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n"
+_RELEASED = "## [Unreleased]\n\n## [0.2.0] - 2026-02-01\n\n## [0.1.0] - 2026-01-01\n"
+
+
+def _deploying_lines(root: Path) -> list[str]:
+    return (root / ur.DEPLOYING).read_text(encoding="utf-8").splitlines()
+
+
+def _release(root: Path) -> None:
+    (root / "CHANGELOG.md").write_text(_RELEASED, encoding="utf-8")
+
+
 def test_a_new_row_file_reaches_both_tables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n")
+    rows_dir = _repo_copy(tmp_path, _UNRELEASED, monkeypatch)
     _row_file(rows_dir, "v0.2.0", "x", _GOOD)
-    line = "| **v0.2.0** | What changes. | What to do. |"
-    monkeypatch.setattr(ur, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(ur, "ROWS_DIR", rows_dir)
 
-    site = ur.on_page_markdown(_TABLE, _Page(), None, None)
-    assert line in site.splitlines()
-
-    deploying = tmp_path / ur.DEPLOYING
-    assert [r.name for r in ur.write_deploying(tmp_path, rows_dir)] == ["x"]
-    assert line in deploying.read_text(encoding="utf-8").splitlines()
-    ur.check_table_files(tmp_path)
-
-    before = deploying.read_text(encoding="utf-8")
+    # Before the release: the site shows the row at once, --write adds nothing.
+    assert _LINE in ur.on_page_markdown(_TABLE, _Page(), None, None).splitlines()
     assert ur.write_deploying(tmp_path, rows_dir) == []
-    assert deploying.read_text(encoding="utf-8") == before
+    assert _LINE not in _deploying_lines(tmp_path)
+
+    # The release pull request rolls the CHANGELOG and runs --write.
+    _release(tmp_path)
+    assert [r.name for r in ur.write_deploying(tmp_path, rows_dir)] == ["x"]
+    assert _LINE in _deploying_lines(tmp_path)
+    ur.check_all(tmp_path, rows_dir)
+
+    before = _deploying_lines(tmp_path)
+    assert ur.write_deploying(tmp_path, rows_dir) == []
+    assert _deploying_lines(tmp_path) == before
 
 
-def test_a_released_row_missing_in_deploying_fails(tmp_path: Path) -> None:
-    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n\n## [0.2.0] - 2026-01-01\n")
+def test_a_linked_row_reaches_both_tables_with_the_same_full_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
+    url = "https://evoila.github.io/meho/latest/install/keycloak-realm/#the-approval-level"
+    _row_file(rows_dir, "v0.2.0", "x", f"## Note\nA change.\n\n## Action\nSee [setup]({url}).\n")
+    line = f"| **v0.2.0** | A change. | See [setup]({url}). |"
+
+    ur.write_deploying(tmp_path, rows_dir)
+    assert line in _deploying_lines(tmp_path)
+    assert line in ur.on_page_markdown(_TABLE, _Page(), None, None).splitlines()
+
+
+def test_a_released_row_missing_in_deploying_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
     _row_file(rows_dir, "v0.2.0", "x", _GOOD)
     with pytest.raises(ur.UpgradeRowError, match=r"v0\.2\.0/x\.md.*--write"):
         ur.check_released_rows(tmp_path, rows_dir)
@@ -235,22 +267,96 @@ def test_a_released_row_missing_in_deploying_fails(tmp_path: Path) -> None:
     ur.check_released_rows(tmp_path, rows_dir)
 
 
-def test_an_unreleased_row_need_not_be_in_deploying(tmp_path: Path) -> None:
-    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n")
-    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
-    ur.check_released_rows(tmp_path, rows_dir)
-
-
-def test_a_linked_row_reaches_both_tables_with_the_same_full_link(
+def test_the_docs_build_fails_while_a_released_row_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n")
-    url = "https://evoila.github.io/meho/latest/install/keycloak-realm/#the-approval-level"
-    _row_file(rows_dir, "v0.2.0", "x", f"## Note\nA change.\n\n## Action\nSee [setup]({url}).\n")
-    line = f"| **v0.2.0** | A change. | See [setup]({url}). |"
-    monkeypatch.setattr(ur, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(ur, "ROWS_DIR", rows_dir)
+    from mkdocs.exceptions import PluginError
 
-    assert line in ur.on_page_markdown(_TABLE, _Page(), None, None).splitlines()
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    with pytest.raises(PluginError, match="--write"):
+        ur.on_page_markdown(_TABLE, _Page(), None, None)
+
+
+def test_an_unreleased_row_need_not_be_in_deploying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _UNRELEASED, monkeypatch)
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    ur.check_all(tmp_path, rows_dir)
+
+
+def test_a_new_row_of_an_older_release_fails_without_write_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
+    _row_file(rows_dir, "v0.1.0", "late", _GOOD)
+    for call in (ur.check_released_rows, ur.write_deploying):
+        with pytest.raises(ur.UpgradeRowError, match="already released") as err:
+            call(tmp_path, rows_dir)
+        assert "--write" not in str(err.value)
+    assert _LINE.replace("v0.2.0", "v0.1.0") not in _deploying_lines(tmp_path)
+
+
+def test_a_new_row_of_the_newest_release_after_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
+    _row_file(rows_dir, "v0.2.0", "x", _GOOD)
     ur.write_deploying(tmp_path, rows_dir)
-    assert line in (tmp_path / ur.DEPLOYING).read_text(encoding="utf-8").splitlines()
+    _row_file(rows_dir, "v0.2.0", "y", "## Note\nLate.\n\n## Action\nLate.\n")
+    with pytest.raises(ur.UpgradeRowError, match=r"v0\.2\.0/y\.md: v0\.2\.0 is already released"):
+        ur.check_released_rows(tmp_path, rows_dir)
+
+
+@pytest.mark.parametrize("rel", list(ur.TABLE_FILES))
+def test_a_row_added_by_hand_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rel: str
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _UNRELEASED, monkeypatch)
+    path = tmp_path / rel
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace("| An action. |\n", "| An action. |\n| **v0.2.0** | Hand. | Hand. |\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ur.UpgradeRowError, match=rf"{rel}:\d+: this row has no row file"):
+        ur.check_all(tmp_path, rows_dir)
+
+
+def test_a_removed_frozen_row_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows_dir = _repo_copy(tmp_path, _UNRELEASED, monkeypatch)
+    path = tmp_path / ur.DEPLOYING
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("| **v0.1.0** | A note. | An action. |\n", ""),
+        encoding="utf-8",
+    )
+    with pytest.raises(ur.UpgradeRowError, match="do not remove rows"):
+        ur.check_frozen_tables(tmp_path, rows_dir)
+
+
+def test_an_edited_row_file_after_write_needs_the_same_edit_in_deploying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, _RELEASED, monkeypatch)
+    row = _row_file(rows_dir, "v0.2.0", "x", _GOOD)
+    ur.write_deploying(tmp_path, rows_dir)
+    row.write_text(_GOOD.replace("What to do.", "What to do now."), encoding="utf-8")
+    with pytest.raises(ur.UpgradeRowError, match="this row has no row file"):
+        ur.check_all(tmp_path, rows_dir)
+
+    path = tmp_path / ur.DEPLOYING
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("What to do.", "What to do now."),
+        encoding="utf-8",
+    )
+    ur.check_all(tmp_path, rows_dir)
+
+
+def test_a_file_outside_a_version_folder_fails(tmp_path: Path) -> None:
+    (tmp_path / "rows").mkdir()
+    (tmp_path / "rows" / "README.md").write_text("# Rows\n", encoding="utf-8")
+    assert ur.collect_rows(tmp_path / "rows") == []
+    (tmp_path / "rows" / "my-row.md").write_text(_GOOD, encoding="utf-8")
+    with pytest.raises(ur.UpgradeRowError, match="belongs in a version folder"):
+        ur.collect_rows(tmp_path / "rows")

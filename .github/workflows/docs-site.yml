@@ -66,6 +66,7 @@ on:
       - 'mkdocs.yml'
       - 'docs-site/**'
       - 'docs/upgrade-rows/**'
+      - 'docs/deploying.md'
       - 'scripts/ci/upgrade_rows.py'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'

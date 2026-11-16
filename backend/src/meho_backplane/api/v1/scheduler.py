@@ -76,7 +76,7 @@ from meho_backplane.scheduler.service import (
     CheckSourceNotFoundError,
     SchedulerAdminService,
 )
-from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRefFilter
+from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -125,7 +125,7 @@ async def list_triggers(
     status: StatusFilter | None = Query(default=None),
     work_ref: Annotated[
         WorkRefFilter | None,
-        Query(description=WORK_REF_FIELD_DESCRIPTION),
+        Query(description=WORK_REF_FILTER_DESCRIPTION),
     ] = None,
     tenant_filter: UUID | None = Query(default=None),
 ) -> ScheduledTriggerListResponse:

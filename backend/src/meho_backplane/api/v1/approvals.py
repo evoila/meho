@@ -170,7 +170,7 @@ from meho_backplane.operations.operation_run_service import get_operation_run_se
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.settings import get_settings
 from meho_backplane.work_ref import (
-    WORK_REF_FIELD_DESCRIPTION,
+    WORK_REF_FILTER_DESCRIPTION,
     WorkRefFilter,
     work_ref_filter_values,
 )
@@ -906,9 +906,10 @@ async def list_approvals(
         WorkRefFilter | None,
         Query(
             description=(
-                "Filter by external change-ticket reference (exact match), e.g. "
+                "Filter by external change-ticket reference, e.g. "
                 "'gh:evoila/meho#1' — the requests authorised by change ticket X "
-                "(work_ref I2-T1 #1659). Omit for no work_ref filter. " + WORK_REF_FIELD_DESCRIPTION
+                "(work_ref I2-T1 #1659). Omit for no work_ref filter. "
+                + WORK_REF_FILTER_DESCRIPTION
             ),
         ),
     ] = None,

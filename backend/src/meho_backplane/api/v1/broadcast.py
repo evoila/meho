@@ -46,6 +46,7 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.work_ref import (
     WORK_REF_FIELD_DESCRIPTION,
+    WORK_REF_FILTER_DESCRIPTION,
     WorkRef,
     WorkRefFilter,
 )
@@ -132,7 +133,7 @@ async def recent_broadcast_events(
     actor_sub: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     work_ref: Annotated[
         WorkRefFilter | None,
-        Query(description=WORK_REF_FIELD_DESCRIPTION),
+        Query(description=WORK_REF_FILTER_DESCRIPTION),
     ] = None,
     active_only: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,

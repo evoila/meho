@@ -297,7 +297,7 @@ def test_header_door_refuses_a_blank_value(blank: str) -> None:
     ],
 )
 def test_refused_header_leaves_a_log_line_without_the_value(sent: bytes, rule: str) -> None:
-    """The log line has the request id, the route and the rule, never the value."""
+    """The log line has the request id, the URL path and the rule, never the value."""
 
     async def inner(scope: Scope, receive: Receive, send: Send) -> None:
         raise AssertionError("the request must not run")
@@ -311,7 +311,7 @@ def test_refused_header_leaves_a_log_line_without_the_value(sent: bytes, rule: s
     assert response.status_code == 400
     (line,) = [entry for entry in logs if entry["event"] == "work_ref_header_refused"]
     assert line["rule"] == rule
-    assert line["route"] == "/api/v1/thing"
+    assert line["path"] == "/api/v1/thing"
     assert line["method"] == "GET"
     assert uuid.UUID(line["request_id"]).hex == request_id
     assert "HIDDEN" not in str(logs)

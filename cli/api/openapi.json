@@ -4195,10 +4195,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
               "title": "Work Ref"
             },
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           {
             "name": "active_only",
@@ -7394,10 +7394,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
               "title": "Work Ref"
             },
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           {
             "name": "limit",
@@ -8225,10 +8225,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
               "title": "Ref"
             },
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           {
             "name": "since",
@@ -9460,10 +9460,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.",
+              "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
               "title": "Work Ref"
             },
-            "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           {
             "name": "status",
@@ -11495,10 +11495,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
               "title": "Work Ref"
             },
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           {
             "name": "tenant_filter",
@@ -12596,10 +12596,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.",
+              "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
               "title": "Work Ref"
             },
-            "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           {
             "name": "limit",
@@ -19820,7 +19820,6 @@
             "required": false,
             "schema": {
               "type": "string",
-              "maxLength": 256,
               "nullable": true,
               "title": "Work Ref"
             }
@@ -23422,7 +23421,6 @@
             "required": false,
             "schema": {
               "type": "string",
-              "maxLength": 256,
               "nullable": true,
               "title": "Work Ref"
             }
@@ -25066,7 +25064,6 @@
             "required": false,
             "schema": {
               "type": "string",
-              "maxLength": 256,
               "default": "",
               "title": "Work Ref"
             }
@@ -25352,7 +25349,6 @@
             "required": false,
             "schema": {
               "type": "string",
-              "maxLength": 256,
               "default": "",
               "title": "Work Ref"
             }
@@ -28126,7 +28122,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           "full_row_lost": {
             "type": "boolean",
@@ -28393,7 +28389,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
           },
           "full_row_lost": {
             "type": "boolean",

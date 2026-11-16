@@ -61,6 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.work_ref import (
     WORK_REF_FIELD_DESCRIPTION,
+    WORK_REF_FILTER_DESCRIPTION,
     WorkRef,
     WorkRefFilter,
 )
@@ -435,7 +436,7 @@ class ListRunsFilter(BaseModel):
     assignee: str | None = None
     status: Literal["in_progress", "completed", "abandoned"] | None = None
     template_slug: str | None = None
-    work_ref: WorkRefFilter | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
+    work_ref: WorkRefFilter | None = Field(default=None, description=WORK_REF_FILTER_DESCRIPTION)
 
 
 class RunSummary(BaseModel):

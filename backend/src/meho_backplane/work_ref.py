@@ -38,6 +38,7 @@ from pydantic import BeforeValidator
 
 __all__ = [
     "WORK_REF_FIELD_DESCRIPTION",
+    "WORK_REF_FILTER_DESCRIPTION",
     "WORK_REF_MAX_CHARS",
     "WorkRef",
     "WorkRefError",
@@ -55,6 +56,15 @@ WORK_REF_FIELD_DESCRIPTION: Final[str] = (
     "Ticket id. White space at both ends is removed; it must not be blank, "
     f"must not hold control or invisible characters, and is at most {WORK_REF_MAX_CHARS} "
     "characters."
+)
+
+#: The rule in one line, for the description of a ``work_ref`` search filter.
+WORK_REF_FILTER_DESCRIPTION: Final[str] = (
+    "Ticket id to search for. It finds the id with white space at both ends "
+    "removed and in Unicode form NFC, and also the text exactly as typed, so "
+    "rows stored before this rule are found too. A blank value, control or "
+    f"invisible characters, or more than {WORK_REF_MAX_CHARS} characters after "
+    "removing the white space are refused."
 )
 
 # Cc: control (NUL, tab, line break). Cf: format (zero-width, direction
@@ -126,8 +136,8 @@ def work_ref_filter_values(value: str) -> tuple[str, ...]:
     """Return the stored texts a ticket id search filter matches.
 
     The cleaned id, and the text as typed when it differs: a row stored
-    before the rule keeps its old text. A value that breaks the rule (a
-    console filter box does not check it) matches only its exact text.
+    before the rule keeps its old text. A value that breaks the rule
+    matches only its exact text; the callers check the value first.
     """
     try:
         cleaned = normalize_work_ref(value)

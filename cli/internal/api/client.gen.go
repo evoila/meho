@@ -2325,7 +2325,7 @@ type AuditClassCountsRequest struct {
 	TextChanged    *bool               `json:"text_changed"`
 	Until          *string             `json:"until"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -2485,7 +2485,7 @@ type AuditQueryRequest struct {
 	TextChanged   *bool               `json:"text_changed"`
 	Until         *string             `json:"until"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -13006,7 +13006,7 @@ type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
 
 // ListRunsApiV1AgentsRunsGetParams defines parameters for ListRunsApiV1AgentsRunsGet.
 type ListRunsApiV1AgentsRunsGetParams struct {
-	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
@@ -13065,7 +13065,7 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Status Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
-	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Limit Return at most this many requests (1..500). Omit for no limit.
@@ -13234,7 +13234,7 @@ type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
 	ActorSub  *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	ActiveOnly    *bool   `form:"active_only,omitempty" json:"active_only,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -13829,7 +13829,7 @@ type ListRunsApiV1RunbooksRunsGetParams struct {
 	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
 	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
@@ -13940,7 +13940,7 @@ type ListTriggersApiV1SchedulerTriggersGetParams struct {
 	Kind   *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
 	Status *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed, so rows stored before this rule are found too. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef       *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string             `json:"authorization,omitempty"`

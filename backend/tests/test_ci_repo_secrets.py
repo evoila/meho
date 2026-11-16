@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-"""The workflows read some values from repository variables.
+"""The workflows read some values from repository secrets.
 
-The variables (CI_IMAGE_PROXY, SPEC_SHELF_REPOSITORY, RKE2_OIDC_AUDIENCE,
-CI_PROXY_CA_NAME) hold internal names. These tests check what each workflow
-does when a variable is set and when it is not:
+The secrets (CI_IMAGE_PROXY, SPEC_SHELF_REPOSITORY, RKE2_OIDC_AUDIENCE,
+CI_PROXY_CA_NAME) hold internal names. They are secrets, not repository
+variables: GitHub prints a step's ``env:`` and inputs, and a job's container
+image, in the public log before anything runs, and only a secret shows as
+``***`` there. These tests check:
 
-* in this repository an empty variable fails the job with a message that
+* no workflow reads these names from ``vars``, and no container or service
+  image is built from them (the log prints those before any step);
+* in this repository an empty secret fails the job with a message that
   names it, so no test or check skips quietly;
 * in another repository (a fork that runs the workflows itself) the jobs
-  fall back to Docker Hub or skip;
-* only the step that needs a value gets it in its ``env:`` (GitHub prints a
-  job's ``env:`` in the log of every step), and that step hides the value
-  in the rest of the log with ``::add-mask::``.
+  fall back to Docker Hub;
+* only the step that needs a value gets it in its ``env:``, and that step
+  hides the parts of the value that GitHub does not hide on its own.
 
 They read the workflow files, work out the GitHub expressions, and run the
-real step scripts and ``scripts/ci/repo_variables.sh``.
+real step scripts and ``scripts/ci/repo_secrets.sh``.
 """
 
 from __future__ import annotations
@@ -33,12 +36,12 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
-_SCRIPT = _REPO_ROOT / "scripts" / "ci" / "repo_variables.sh"
+_SCRIPT = _REPO_ROOT / "scripts" / "ci" / "repo_secrets.sh"
 
 PROXY = "proxy.example.test/hub"
 THIS_REPO = "evoila/meho"
 FORK = "someone/meho"
-VARIABLES = ("CI_IMAGE_PROXY", "SPEC_SHELF_REPOSITORY", "RKE2_OIDC_AUDIENCE", "CI_PROXY_CA_NAME")
+SECRETS = ("CI_IMAGE_PROXY", "SPEC_SHELF_REPOSITORY", "RKE2_OIDC_AUDIENCE", "CI_PROXY_CA_NAME")
 
 requires_node = pytest.mark.skipif(
     shutil.which("node") is None and os.environ.get("MEHO_REQUIRE_NODE") != "1",
@@ -201,8 +204,8 @@ def test_evaluator_follows_github_rules() -> None:
 # --- running a step script ------------------------------------------------
 
 
-def _contexts(repo: str, variables: dict[str, str]) -> dict[str, dict[str, Any]]:
-    return {"vars": variables, "github": {"repository": repo}}
+def _contexts(repo: str, secrets: dict[str, str]) -> dict[str, dict[str, Any]]:
+    return {"secrets": secrets, "github": {"repository": repo}}
 
 
 def _run_step(
@@ -232,9 +235,9 @@ def _run_step(
     return result, exported, masks
 
 
-# --- ci.yml: the step that reads the variables ---------------------------
+# --- ci.yml: the step that reads the secrets -----------------------------
 
-_READ_STEP = "Read the CI repository variables"
+_READ_STEP = "Read the CI repository secrets"
 
 
 def _ci_jobs() -> dict[str, Any]:
@@ -255,7 +258,7 @@ def _read_step_ids() -> list[str]:
     return [job_id for job_id, _ in _read_steps()]
 
 
-def test_ci_reads_the_variables_in_each_job_that_uses_them() -> None:
+def test_ci_reads_the_secrets_in_each_job_that_uses_them() -> None:
     assert set(_read_step_ids()) == {
         "python-unit-shard",
         "python-coverage",
@@ -264,11 +267,11 @@ def test_ci_reads_the_variables_in_each_job_that_uses_them() -> None:
     }
     text = json.dumps(_ci_jobs())
     for job_id, job in _ci_jobs().items():
-        uses = "MEHO_TEST_" in json.dumps(job.get("steps", [])) or "vars.CI_IMAGE_PROXY" in (
+        uses = "MEHO_TEST_" in json.dumps(job.get("steps", [])) or "secrets.CI_IMAGE_PROXY" in (
             json.dumps(job)
         )
         assert uses is (job_id in _read_step_ids()), job_id
-    assert "vars.CI_IMAGE_PROXY ||" not in text
+    assert "secrets.CI_IMAGE_PROXY ||" not in text
 
 
 @pytest.mark.parametrize("job_id", _read_step_ids())
@@ -282,8 +285,8 @@ def _ci_step(job_id: str) -> dict[str, Any]:
     return next(step for jid, step in _read_steps() if jid == job_id)
 
 
-def _ci_step_env(job_id: str, repo: str, variables: dict[str, str]) -> dict[str, str]:
-    return _env(_ci_step(job_id)["env"], **_contexts(repo, variables))
+def _ci_step_env(job_id: str, repo: str, secrets: dict[str, str]) -> dict[str, str]:
+    return _env(_ci_step(job_id)["env"], **_contexts(repo, secrets))
 
 
 def _all_set(job_id: str) -> dict[str, str]:
@@ -294,9 +297,9 @@ def _all_set(job_id: str) -> dict[str, str]:
 
 @pytest.mark.parametrize("job_id", _read_step_ids())
 def test_ci_test_images_use_the_proxy_and_hide_it(job_id: str, tmp_path: Path) -> None:
-    variables = _all_set(job_id)
+    secrets = _all_set(job_id)
     result, exported, masks = _run_step(
-        _ci_step(job_id)["run"], _ci_step_env(job_id, THIS_REPO, variables), tmp_path
+        _ci_step(job_id)["run"], _ci_step_env(job_id, THIS_REPO, secrets), tmp_path
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert exported, job_id
@@ -305,26 +308,26 @@ def test_ci_test_images_use_the_proxy_and_hide_it(job_id: str, tmp_path: Path) -
         assert image.startswith(PROXY + "/"), (key, image)
     assert PROXY in masks
     assert "proxy.example.test" in masks
-    if "SPEC_SHELF_REPOSITORY" in variables:
+    if "SPEC_SHELF_REPOSITORY" in secrets:
         assert "example-owner/spec-shelf" in masks
         assert "spec-shelf" in masks
 
 
-def _job_variable_pairs() -> list[tuple[str, str]]:
+def _job_secret_pairs() -> list[tuple[str, str]]:
     return [(job_id, name) for job_id in _read_step_ids() for name in _all_set(job_id)]
 
 
-@pytest.mark.parametrize(("job_id", "empty"), _job_variable_pairs())
-def test_ci_empty_variable_fails_the_job_in_this_repository(
+@pytest.mark.parametrize(("job_id", "empty"), _job_secret_pairs())
+def test_ci_empty_secret_fails_the_job_in_this_repository(
     job_id: str, empty: str, tmp_path: Path
 ) -> None:
-    variables = _all_set(job_id)
-    del variables[empty]
+    secrets = _all_set(job_id)
+    del secrets[empty]
     result, exported, _ = _run_step(
-        _ci_step(job_id)["run"], _ci_step_env(job_id, THIS_REPO, variables), tmp_path
+        _ci_step(job_id)["run"], _ci_step_env(job_id, THIS_REPO, secrets), tmp_path
     )
     assert result.returncode != 0
-    assert f"::error title=Repository variable missing::The repository variable {empty}" in (
+    assert f"::error title=Repository secret missing::The repository secret {empty}" in (
         result.stdout
     )
     assert exported == {}
@@ -344,7 +347,7 @@ def test_ci_test_images_fall_back_to_docker_hub_in_another_repository(
             # No public fallback: an empty image makes the Keycloak test skip.
             assert image == ""
         else:
-            assert image.startswith("docker.io/"), (key, image)
+            assert image.split("/", 1)[0] == "docker.io", (key, image)
 
 
 def test_ci_keycloak_image_is_set_only_in_the_integration_shards(tmp_path: Path) -> None:
@@ -355,7 +358,7 @@ def test_ci_keycloak_image_is_set_only_in_the_integration_shards(tmp_path: Path)
     assert exported["MEHO_TEST_KEYCLOAK_IMAGE"] == f"{PROXY}/keycloak/keycloak:26.0"
 
 
-# --- scripts/ci/repo_variables.sh on its own ------------------------------
+# --- scripts/ci/repo_secrets.sh on its own --------------------------------
 
 
 def _script(
@@ -378,7 +381,7 @@ def _script(
 def test_script_refuses_a_proxy_without_host_and_project(proxy: str, tmp_path: Path) -> None:
     result, exported = _script(
         tmp_path,
-        {"CI_IMAGE_PROXY": proxy, "REQUIRE_VARIABLES": "true"},
+        {"CI_IMAGE_PROXY": proxy, "REQUIRE_SECRETS": "true"},
         "MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8\n",
         "CI_IMAGE_PROXY",
     )
@@ -387,13 +390,13 @@ def test_script_refuses_a_proxy_without_host_and_project(proxy: str, tmp_path: P
     assert exported == {}
 
 
-def test_script_names_every_missing_variable(tmp_path: Path) -> None:
+def test_script_names_every_missing_secret(tmp_path: Path) -> None:
     result, _ = _script(
-        tmp_path, {"REQUIRE_VARIABLES": "true"}, "", "CI_IMAGE_PROXY", "SPEC_SHELF_REPOSITORY"
+        tmp_path, {"REQUIRE_SECRETS": "true"}, "", "CI_IMAGE_PROXY", "SPEC_SHELF_REPOSITORY"
     )
     assert result.returncode != 0
-    assert "variable CI_IMAGE_PROXY is empty" in result.stdout
-    assert "variable SPEC_SHELF_REPOSITORY is empty" in result.stdout
+    assert "secret CI_IMAGE_PROXY is empty" in result.stdout
+    assert "secret SPEC_SHELF_REPOSITORY is empty" in result.stdout
 
 
 def test_script_refuses_a_bad_image_line(tmp_path: Path) -> None:
@@ -433,44 +436,83 @@ def test_ci_shelf_steps_run_only_when_token_and_repository_are_set(
     job_id: str, secret: str, repo: str, runs: bool
 ) -> None:
     job = _ci_jobs()[job_id]
-    secrets = {"SPEC_SHELF_TOKEN": secret} if secret else {}
-    variables = {"SPEC_SHELF_REPOSITORY": repo} if repo else {}
-    env = _env(job["env"], vars=variables, secrets=secrets)
+    secrets = {
+        **({"SPEC_SHELF_TOKEN": secret} if secret else {}),
+        **({"SPEC_SHELF_REPOSITORY": repo} if repo else {}),
+    }
+    env = _env(job["env"], secrets=secrets)
     shelf_steps = [
         step
         for step in job["steps"]
         if "SPEC_SHELF" in json.dumps(step) and "SPEC_SHELF_READY" in str(step.get("if"))
     ]
-    checkout = [s for s in shelf_steps if "vars.SPEC_SHELF_REPOSITORY" in json.dumps(s)]
+    checkout = [s for s in shelf_steps if "secrets.SPEC_SHELF_REPOSITORY" in json.dumps(s)]
     assert checkout, f"{job_id}: no shelf checkout step"
     for step in shelf_steps:
-        assert run_if(step["if"], env=env, vars=variables) is runs, (job_id, step.get("name"))
+        assert run_if(step["if"], env=env) is runs, (job_id, step.get("name"))
     if runs:
-        rendered = render(checkout[0]["with"]["repository"], vars=variables)
+        rendered = render(checkout[0]["with"]["repository"], secrets=secrets)
         assert rendered == repo
 
 
-# --- every workflow: values only in the steps that hide them -------------
+# --- every workflow: the values never show in clear in a log ------------
+#
+# GitHub prints a step's `env:` and `with:`, a job's `env:` and its container
+# and service images in the log before the step or job runs, so before any
+# `::add-mask::` can hide a value. Only a secret shows as `***` there.
 
-_SENTINELS = {name: f"value-of-{name.lower()}/x" for name in VARIABLES}
-_STEPS_THAT_HIDE = {_READ_STEP, "Derive the proxy values", "Configure kubectl (OIDC mode)"}
+_WORKFLOW_FILES = sorted(WORKFLOWS.glob("*.yml"))
+_EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 
 
 def _workflows() -> list[str]:
-    return sorted(p.name for p in WORKFLOWS.glob("*.yml"))
+    return [p.name for p in _WORKFLOW_FILES]
 
 
 @pytest.mark.parametrize("name", _workflows())
-def test_variable_values_reach_only_the_steps_that_hide_them(name: str) -> None:
+def test_no_workflow_reads_the_names_from_repository_variables(name: str) -> None:
+    text = (WORKFLOWS / name).read_text()
+    for secret in SECRETS:
+        assert f"vars.{secret}" not in text, (name, secret)
+        assert f"vars['{secret}']" not in text, (name, secret)
+
+
+def _images(job: dict[str, Any]) -> list[str]:
+    container = job.get("container")
+    images = [container if isinstance(container, str) else (container or {}).get("image", "")]
+    images += [(svc or {}).get("image", "") for svc in (job.get("services") or {}).values()]
+    return [str(image) for image in images if image]
+
+
+@pytest.mark.parametrize("name", _workflows())
+def test_no_container_or_service_image_is_built_from_the_secrets(name: str) -> None:
+    for job_id, job in (_load(name).get("jobs") or {}).items():
+        for image in _images(job):
+            assert not any(secret in image for secret in SECRETS), (name, job_id, image)
+
+
+@pytest.mark.parametrize("name", _workflows())
+def test_every_expression_with_the_names_reads_the_secrets_context(name: str) -> None:
+    for expr in _EXPRESSION.findall((WORKFLOWS / name).read_text()):
+        for secret in SECRETS:
+            for match in re.finditer(rf"([A-Za-z_]+)\.{secret}\b", expr):
+                assert match.group(1) == "secrets", (name, expr.strip())
+
+
+_SENTINELS = {name: f"value-of-{name.lower()}/x" for name in SECRETS}
+_STEPS_THAT_READ = {_READ_STEP, "Derive the proxy values", "Configure kubectl (OIDC mode)"}
+
+
+@pytest.mark.parametrize("name", _workflows())
+def test_secret_values_reach_only_the_steps_that_need_them(name: str) -> None:
     flow = _load(name)
     contexts = _contexts(THIS_REPO, dict(_SENTINELS))
 
     def shows_a_value(block: dict[str, Any] | None) -> bool:
         for value in (block or {}).values():
-            if any(f"vars.{n}" in str(value) for n in VARIABLES):
-                rendered = render(value, **contexts)
-                if any(v in rendered for v in _SENTINELS.values()):
-                    return True
+            rendered = render(value, **contexts) if "secrets." in str(value) else ""
+            if any(v in rendered for v in _SENTINELS.values()):
+                return True
         return False
 
     assert not shows_a_value(flow.get("env")), name
@@ -478,36 +520,61 @@ def test_variable_values_reach_only_the_steps_that_hide_them(name: str) -> None:
         assert not shows_a_value(job.get("env")), (name, job_id)
         for step in job.get("steps") or []:
             if shows_a_value(step.get("env")):
-                assert step.get("name") in _STEPS_THAT_HIDE, (name, job_id, step.get("name"))
+                assert step.get("name") in _STEPS_THAT_READ, (name, job_id, step.get("name"))
 
 
 # --- security-scan.yml: the scan image ----------------------------------
 
 
-def _semgrep_image() -> str:
-    for job in _load("security-scan.yml")["jobs"].values():
-        image = (job.get("container") or {}).get("image", "")
-        if "semgrep" in str(image):
-            return str(image)
-    raise AssertionError("no semgrep container image in security-scan.yml")
+def _semgrep_job() -> dict[str, Any]:
+    jobs: dict[str, dict[str, Any]] = _load("security-scan.yml")["jobs"]
+    return jobs["semgrep"]
 
 
-def test_security_scan_image_uses_the_proxy_when_set() -> None:
-    image = render(_semgrep_image(), **_contexts(THIS_REPO, {"CI_IMAGE_PROXY": PROXY}))
+def _semgrep_read_step() -> dict[str, Any]:
+    return next(s for s in _semgrep_job()["steps"] if s.get("name") == _READ_STEP)
+
+
+def test_security_scan_runs_semgrep_with_docker_run_not_a_job_container() -> None:
+    job = _semgrep_job()
+    assert "container" not in job
+    steps = job["steps"]
+    assert "actions/checkout" in steps[0]["uses"]
+    assert steps[1]["name"] == _READ_STEP
+    scans = [s for s in steps if "semgrep scan" in str(s.get("run"))]
+    assert len(scans) == 2
+    for step in scans:
+        assert '"${SEMGREP_IMAGE}"' in step["run"], step["name"]
+        assert str(step["run"]).startswith("docker run --rm"), step["name"]
+
+
+def _semgrep_image(tmp_path: Path, repo: str, secrets: dict[str, str]) -> tuple[Any, str]:
+    step = _semgrep_read_step()
+    result, exported, _ = _run_step(
+        step["run"], _env(step["env"], **_contexts(repo, secrets)), tmp_path
+    )
+    return result, exported.get("SEMGREP_IMAGE", "")
+
+
+def test_security_scan_image_uses_the_proxy_when_set(tmp_path: Path) -> None:
+    result, image = _semgrep_image(tmp_path, THIS_REPO, {"CI_IMAGE_PROXY": PROXY})
+    assert result.returncode == 0, result.stdout + result.stderr
     assert image == f"{PROXY}/semgrep/semgrep:1.160.0"
 
 
-def test_security_scan_image_fails_in_this_repository_when_unset() -> None:
-    image = render(_semgrep_image(), **_contexts(THIS_REPO, {}))
-    # Not a valid image name (Docker refuses capital letters), so nothing is
-    # pulled, and the error shows the name of the variable.
-    assert "CI_IMAGE_PROXY" in image
-    assert image != image.lower()
-    assert "semgrep" not in image
+def test_security_scan_fails_in_this_repository_when_unset(tmp_path: Path) -> None:
+    result, image = _semgrep_image(tmp_path, THIS_REPO, {})
+    assert result.returncode != 0
+    assert "The repository secret CI_IMAGE_PROXY is empty" in result.stdout
+    assert image == ""
 
 
-def test_security_scan_image_falls_back_to_docker_hub_in_another_repository() -> None:
-    assert render(_semgrep_image(), **_contexts(FORK, {})) == "semgrep/semgrep:1.160.0"
+def test_security_scan_image_falls_back_to_docker_hub_in_another_repository(
+    tmp_path: Path,
+) -> None:
+    result, image = _semgrep_image(tmp_path, FORK, {})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert image == "docker.io/semgrep/semgrep:1.160.0"
 
 
 # --- runner-smoke.yml: the whole check depends on the proxy -------------
@@ -521,54 +588,46 @@ def _smoke_step(name: str) -> dict[str, Any]:
     return next(s for s in _runner_smoke()["jobs"]["smoke"]["steps"] if s.get("name") == name)
 
 
-@pytest.mark.parametrize(
-    ("repo", "proxy", "runs"),
-    [(THIS_REPO, PROXY, True), (THIS_REPO, "", True), (FORK, PROXY, True), (FORK, "", False)],
-)
-def test_runner_smoke_skips_only_in_another_repository(repo: str, proxy: str, runs: bool) -> None:
-    variables = {"CI_IMAGE_PROXY": proxy} if proxy else {}
+@pytest.mark.parametrize(("repo", "runs"), [(THIS_REPO, True), (FORK, False)])
+def test_runner_smoke_runs_only_in_this_repository(repo: str, runs: bool) -> None:
     condition = _runner_smoke()["jobs"]["smoke"]["if"]
-    assert run_if(condition, **_contexts(repo, variables)) is runs
+    assert run_if(condition, **_contexts(repo, {})) is runs
 
 
-def test_runner_smoke_first_step_reads_the_variables() -> None:
+def test_runner_smoke_first_step_reads_the_secrets() -> None:
     steps = _runner_smoke()["jobs"]["smoke"]["steps"]
     assert steps[0]["name"] == "Derive the proxy values"
     assert "env" not in _runner_smoke()
 
 
-def _derive(
-    tmp_path: Path, repo: str, variables: dict[str, str]
-) -> tuple[Any, dict[str, str], list[str]]:
+def _derive(tmp_path: Path, secrets: dict[str, str]) -> tuple[Any, dict[str, str], list[str]]:
     step = _smoke_step("Derive the proxy values")
-    return _run_step(step["run"], _env(step["env"], **_contexts(repo, variables)), tmp_path)
+    return _run_step(step["run"], _env(step["env"], **_contexts(THIS_REPO, secrets)), tmp_path)
 
 
 @pytest.mark.parametrize("empty", ["CI_IMAGE_PROXY", "CI_PROXY_CA_NAME"])
-def test_runner_smoke_fails_in_this_repository_when_a_variable_is_empty(
-    empty: str, tmp_path: Path
-) -> None:
-    variables = {"CI_IMAGE_PROXY": PROXY, "CI_PROXY_CA_NAME": "Example Root CA"}
-    del variables[empty]
-    result, exported, _ = _derive(tmp_path, THIS_REPO, variables)
+def test_runner_smoke_fails_when_a_secret_is_empty(empty: str, tmp_path: Path) -> None:
+    secrets = {"CI_IMAGE_PROXY": PROXY, "CI_PROXY_CA_NAME": "Example Root CA"}
+    del secrets[empty]
+    result, exported, _ = _derive(tmp_path, secrets)
     assert result.returncode != 0
-    assert f"The repository variable {empty} is empty" in result.stdout
+    assert f"The repository secret {empty} is empty" in result.stdout
     assert exported == {}
 
 
 def test_runner_smoke_refuses_a_proxy_without_a_slash(tmp_path: Path) -> None:
-    variables = {"CI_IMAGE_PROXY": "proxy.example.test", "CI_PROXY_CA_NAME": "Example Root CA"}
-    result, exported, _ = _derive(tmp_path, THIS_REPO, variables)
+    secrets = {"CI_IMAGE_PROXY": "proxy.example.test", "CI_PROXY_CA_NAME": "Example Root CA"}
+    result, exported, _ = _derive(tmp_path, secrets)
     assert result.returncode != 0
     assert "CI_IMAGE_PROXY must have the form <host>/<project>" in result.stdout
     assert exported == {}
 
 
 def test_runner_smoke_derives_and_hides_the_proxy_values(tmp_path: Path) -> None:
-    variables = {"CI_IMAGE_PROXY": PROXY, "CI_PROXY_CA_NAME": "Example Root CA"}
-    result, exported, masks = _derive(tmp_path, THIS_REPO, variables)
+    secrets = {"CI_IMAGE_PROXY": PROXY, "CI_PROXY_CA_NAME": "Example Root CA"}
+    result, exported, masks = _derive(tmp_path, secrets)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert set(masks) == {PROXY, "proxy.example.test", "Example Root CA"}
+    assert set(masks) == {PROXY, "proxy.example.test"}
     assert exported == {
         "CI_PROXY_CA_NAME": "Example Root CA",
         "PROXY_HOST": "proxy.example.test",
@@ -578,21 +637,13 @@ def test_runner_smoke_derives_and_hides_the_proxy_values(tmp_path: Path) -> None
     }
 
 
-@pytest.mark.parametrize(("ca_name", "runs"), [("Example Root CA", True), ("", False)])
-def test_runner_smoke_ca_step_runs_only_when_ca_name_is_set(
-    ca_name: str, runs: bool, tmp_path: Path
-) -> None:
-    variables = {"CI_IMAGE_PROXY": PROXY, **({"CI_PROXY_CA_NAME": ca_name} if ca_name else {})}
-    result, exported, _ = _derive(tmp_path, FORK, variables)
-    assert result.returncode == 0, result.stdout + result.stderr
+def test_runner_smoke_ca_step_matches_the_name_as_text() -> None:
     ca_steps = [
         s
         for s in _runner_smoke()["jobs"]["smoke"]["steps"]
         if "CI_PROXY_CA_NAME" in str(s.get("run")) and s.get("name") != "Derive the proxy values"
     ]
     assert len(ca_steps) == 1
-    assert run_if(ca_steps[0]["if"], env=exported) is runs
-    # The name is text, not a pattern.
     assert 'grep -qF -- "$CI_PROXY_CA_NAME"' in ca_steps[0]["run"]
 
 
@@ -609,10 +660,10 @@ def _oidc_step() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("audience", ["example-audience", ""])
-def test_pr_smoke_audience_comes_only_from_the_variable(audience: str) -> None:
-    variables = {"RKE2_OIDC_AUDIENCE": audience} if audience else {}
+def test_pr_smoke_audience_comes_only_from_the_secret(audience: str) -> None:
+    secrets = {"RKE2_OIDC_AUDIENCE": audience} if audience else {}
     assert "OIDC_AUDIENCE" not in _pr_smoke_job()["env"]
-    env = _env(_oidc_step()["env"], vars=variables)
+    env = _env(_oidc_step()["env"], secrets=secrets)
     assert env["OIDC_AUDIENCE"] == audience
 
 

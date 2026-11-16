@@ -6,13 +6,14 @@ name: meho-runners smoke
 #      the pull pattern the proxy supports (it does not mirror docker.io
 #      transparently).
 #
-# The proxy address comes from the repository variable CI_IMAGE_PROXY, in
-# the form `<host>/<project>`. The variable CI_PROXY_CA_NAME holds the
-# common name of the private CA that signs the proxy certificate. In this
+# The proxy address comes from the repository secret CI_IMAGE_PROXY, in
+# the form `<host>/<project>`. The secret CI_PROXY_CA_NAME holds the
+# common name of the private CA that signs the proxy certificate. They are
+# secrets, not repository variables, so GitHub shows them as `***` in
+# every log line, also in the `env:` it prints before a step runs. In this
 # repository the first step fails when one of them is empty, so the check
-# never skips quietly. In another repository (a fork that runs the
-# workflows itself) the job skips without CI_IMAGE_PROXY, and the CA check
-# skips without CI_PROXY_CA_NAME.
+# never skips quietly. The check is about this repository's own runner
+# pool, so it runs only here.
 #
 # Runs on every push to main and on workflow_dispatch, on the
 # meho-runners-ci pool.
@@ -31,41 +32,38 @@ permissions: {}
 
 jobs:
   smoke:
-    # In another repository, skip when the proxy variable is not set.
-    if: github.repository == 'evoila/meho' || vars.CI_IMAGE_PROXY != ''
+    # Only this repository has the runner pool and the secrets. A job-level
+    # `if:` cannot read the `secrets` context.
+    if: github.repository == 'evoila/meho'
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Derive the proxy values
-        # Only this step gets the values of the repository variables:
-        # GitHub prints each step's `env:` in the public log. The step hides
-        # them in the rest of the log (`::add-mask::`) and passes them on
-        # through $GITHUB_ENV. The smoke pulls the pinned alpine image; bump
-        # it deliberately with an alpine upgrade, since the smoke checks the
-        # cache pipeline, not the image content.
+        # Only this step gets the values of the repository secrets. GitHub
+        # hides them in the log; the step also hides the proxy host
+        # (`::add-mask::`) and passes the values on through $GITHUB_ENV.
+        # The smoke pulls the pinned alpine image; bump it deliberately
+        # with an alpine upgrade, since the smoke checks the cache
+        # pipeline, not the image content.
         env:
-          CI_IMAGE_PROXY: ${{ vars.CI_IMAGE_PROXY }}
-          CI_PROXY_CA_NAME: ${{ vars.CI_PROXY_CA_NAME }}
-          REQUIRE_VARIABLES: ${{ github.repository == 'evoila/meho' }}
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          CI_PROXY_CA_NAME: ${{ secrets.CI_PROXY_CA_NAME }}
         run: |
           set -euo pipefail
           for name in CI_IMAGE_PROXY CI_PROXY_CA_NAME; do
-            if [ -z "${!name}" ] && [ "$REQUIRE_VARIABLES" = "true" ]; then
-              echo "::error title=Repository variable missing::The repository variable ${name} is empty. This check needs it. Set it under Settings > Secrets and variables > Actions > Variables."
+            if [ -z "${!name}" ]; then
+              echo "::error title=Repository secret missing::The repository secret ${name} is empty. This check needs it. Set it under Settings > Secrets and variables > Actions > Secrets."
               exit 1
             fi
           done
           PROXY_HOST="${CI_IMAGE_PROXY%%/*}"
           PROXY_PROJECT="${CI_IMAGE_PROXY#*/}"
           if [ "$CI_IMAGE_PROXY" = "$PROXY_HOST" ] || [ -z "$PROXY_HOST" ] || [ -z "$PROXY_PROJECT" ]; then
-            echo "::error title=Repository variable::CI_IMAGE_PROXY must have the form <host>/<project>."
+            echo "::error title=Repository secret::CI_IMAGE_PROXY must have the form <host>/<project>."
             exit 1
           fi
           echo "::add-mask::${CI_IMAGE_PROXY}"
           echo "::add-mask::${PROXY_HOST}"
-          if [ -n "$CI_PROXY_CA_NAME" ]; then
-            echo "::add-mask::${CI_PROXY_CA_NAME}"
-          fi
           {
             echo "CI_PROXY_CA_NAME=${CI_PROXY_CA_NAME}"
             echo "PROXY_HOST=${PROXY_HOST}"
@@ -99,8 +97,6 @@ jobs:
           docker info --format '{{.ServerVersion}}'
 
       - name: Assert private CA trust is wired (proves the OS-trust mount works)
-        # Skipped when CI_PROXY_CA_NAME is not set (only in another
-        # repository: here the first step fails instead).
         # The CA certificate is mounted into both the Docker daemon sidecar
         # and the runner container. Each one runs update-ca-certificates
         # before it starts, so the daemon can verify the proxy certificate
@@ -111,7 +107,6 @@ jobs:
         # Failure mode: a TLS error means the CA mount or the
         # update-ca-certificates step regressed (likely a chart upgrade
         # that overwrote the runner pod template).
-        if: env.CI_PROXY_CA_NAME != ''
         run: |
           set -euo pipefail
           # Look for the CA's common name in the bundle, as fixed text.

@@ -41,7 +41,7 @@
 # Option A (preferred, no long-lived secret): the consumer configures
 # the CI cluster's kube-apiserver to trust GitHub Actions' OIDC issuer. The
 # `permissions: id-token: write` block below lets this workflow mint an
-# OIDC ID token bound to the audience set in the repository variable `RKE2_OIDC_AUDIENCE`; the
+# OIDC ID token bound to the audience set in the repository secret `RKE2_OIDC_AUDIENCE`; the
 # `Configure kubectl (OIDC)` step exchanges that token for a kubeconfig
 # context. Selected when secret `RKE2_CA_CERT` is provisioned (the CA
 # bundle is the only consumer-side artefact OIDC mode needs).
@@ -249,12 +249,12 @@ jobs:
         if: env.RKE2_CA_CERT != '' && env.RKE2_API_SERVER != ''
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
-          # Repository variable RKE2_OIDC_AUDIENCE: the audience the cluster
+          # Repository secret RKE2_OIDC_AUDIENCE: the audience the cluster
           # API server trusts. No default: this step fails with a clear
-          # message when it is not set. Only this step gets the value
-          # (GitHub prints each step's `env:` in the log), and the script
-          # hides it in the rest of the log.
-          OIDC_AUDIENCE: ${{ vars.RKE2_OIDC_AUDIENCE }}
+          # message when it is not set. It is a secret, not a repository
+          # variable, so GitHub shows it as `***` in every log line, also
+          # in the `env:` it prints before this step runs.
+          OIDC_AUDIENCE: ${{ secrets.RKE2_OIDC_AUDIENCE }}
         with:
           script: |
             // Mint an OIDC ID token bound to the consumer-chosen audience.
@@ -265,7 +265,7 @@ jobs:
             // or AuthenticationConfiguration `audiences:` entry.
             const audience = process.env.OIDC_AUDIENCE;
             if (!audience) {
-              core.setFailed('Repository variable RKE2_OIDC_AUDIENCE is not set. Set it to the audience the cluster API server trusts.');
+              core.setFailed('Repository secret RKE2_OIDC_AUDIENCE is not set. Set it to the audience the cluster API server trusts.');
               return;
             }
             core.setSecret(audience);

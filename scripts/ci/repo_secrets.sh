@@ -2,35 +2,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 #
-# Checks the repository variables a CI job reads, hides their values in
-# the rest of the job log, and sets the test image names.
+# Checks the repository secrets a CI job reads, hides the parts of their
+# values in the rest of the job log, and sets the test image names.
 #
-# The variables hold internal names, and the run logs of a public
-# repository can be read by everyone. GitHub prints each step's `env:` in
-# the log, so the workflow passes the values only to the step that runs
-# this script. From here on `::add-mask::` shows them as `***`.
+# The secrets hold internal names, and the run logs of a public
+# repository can be read by everyone. They are secrets, not repository
+# variables, because GitHub shows a secret as `***` in every log line,
+# also in the `env:` it prints before a step runs. A variable shows in
+# clear there, before any `::add-mask::` can hide it. This script adds
+# masks only for the parts of a value (the proxy host, the shelf name
+# without its owner) that GitHub does not hide on its own.
 #
 # Usage:
-#   repo_variables.sh NAME... < image-lines
+#   repo_secrets.sh NAME... < image-lines
 #
-#   NAME        a variable this job needs (CI_IMAGE_PROXY,
+#   NAME        a secret this job needs (CI_IMAGE_PROXY,
 #               SPEC_SHELF_REPOSITORY). Its value is in the environment
 #               variable of the same name.
-#   image-lines one line per test image: `ENV_NAME: PROXY/<image>`. The
+#   image-lines one line per image: `ENV_NAME: PROXY/<image>`. The
 #               script writes ENV_NAME=<CI_IMAGE_PROXY>/<image> to
 #               $GITHUB_ENV. Without CI_IMAGE_PROXY it writes
 #               docker.io/<image>. A line with `PROXY_ONLY/<image>` gets an
 #               empty value instead (the test that reads it then skips).
 #
-# REQUIRE_VARIABLES=true (set in this repository) makes an empty variable
+# REQUIRE_SECRETS=true (set in this repository) makes an empty secret
 # fail the job, so no test skips quietly. In another repository (a fork
-# that runs the workflows itself) an empty variable is fine, and the
+# that runs the workflows itself) an empty secret is fine, and the
 # images come from Docker Hub.
 
 set -euo pipefail
 
 fail() {
-  echo "::error title=Repository variable::$*"
+  echo "::error title=Repository secret::$*"
   exit 1
 }
 
@@ -38,8 +41,8 @@ missing=0
 for name in "$@"; do
   value="${!name:-}"
   if [ -z "$value" ]; then
-    if [ "${REQUIRE_VARIABLES:-}" = "true" ]; then
-      echo "::error title=Repository variable missing::The repository variable ${name} is empty. CI in this repository needs it. Set it under Settings > Secrets and variables > Actions > Variables."
+    if [ "${REQUIRE_SECRETS:-}" = "true" ]; then
+      echo "::error title=Repository secret missing::The repository secret ${name} is empty. CI in this repository needs it. Set it under Settings > Secrets and variables > Actions > Secrets."
       missing=1
     fi
     continue

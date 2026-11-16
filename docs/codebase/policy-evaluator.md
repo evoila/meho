@@ -193,8 +193,9 @@ the answer is the one of a call without parameters.
 
 **What it answers.** The same steps as the preview, in the same order:
 target by name, descriptor and catalog choice (`_resolve_descriptor`),
-then `_governance_fields`, which calls `policy_gate(decide_only=True)` and
-the step checks of a multi-step operation. Then, only with
+then `governance_and_gate`, which calls `policy_gate(decide_only=True)` and
+the step checks of a multi-step operation. It also gives the gate's own
+answer, from before the step check of a multi-step operation. Then, only with
 `POLICY_ENGINE_SHADOW` on, `evaluate_call(decide_only=True)`. The gate's
 shadow keeps a rule; explain drops it (`forget_rule`).
 
@@ -204,7 +205,10 @@ Which checks after the gate a call is asked comes from one function,
 `checks_after_gate` (`operations/_after_gate.py`). The dispatcher reads
 it before it asks the announce rule and before it asks the ingested check
 of a call that waits. Explain reads it too and asks each check with the
-same code the call uses:
+same code the call uses. Both ask for the gate's own answer, from before
+the step check of a multi-step operation: the call checks the steps only
+when the operation runs. So a multi-step write that the gate lets run but
+whose step would wait is asked the announce rule.
 
 | Check | Code | Asked when the gate says |
 |---|---|---|
@@ -227,7 +231,7 @@ gate can refuse the call.
 |---|---|---|
 | `connector_resolution` | `no_connector`, `ambiguous_connector`, `target_required` | `run`, `wait` (asked when the call runs, also after the approval) |
 | `operation_param_check` | `refused_before_approval` (`operations/_park_check.py`) | `wait`, when the operation has such a check |
-| `destructive_preview_binding` | `preview_binding_required` | `wait`, for a `destructive` operation |
+| `destructive_preview_binding` | `preview_binding_required` | `run` (a delete grant in sandbox mode) or `wait`, for a `destructive` operation |
 | `permission_preflight` | `write_capability_denied` (asks the vendor) | `wait`, when the operation has a preflight |
 | `idempotency_key` | `idempotency_key_conflict` | `wait` |
 
@@ -244,7 +248,8 @@ would send the call replaced). It fails on any difference that
 
 - `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
   off or in shadow mode, today's checks decide (`decided_by: today`).
-- `today`: the gate's verdict and reason.
+- `today`: the gate's verdict and reason. When a check after the gate
+  refuses the call, `today` holds `deny` with that check's reason.
 - `evaluator` (null while the switch is off): its verdict, the rule that
   decided, the floor that decided (when the rule is a `floor` or
   `role_floor`), every step in order (`Decision.steps`), and

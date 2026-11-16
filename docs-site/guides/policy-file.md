@@ -305,8 +305,8 @@ Good to know:
   - `operation_param_check`: the operation's own check of its parameters
     before the call waits (for example, a user write that names two
     different users).
-  - `destructive_preview_binding`: a `destructive` call waits only with
-    the hash of a matching preview.
+  - `destructive_preview_binding`: a `destructive` call waits, or runs
+    at once with a delete grant, only with the hash of a matching preview.
   - `permission_preflight`: the operation asks the vendor whether its
     login may do the write.
   - `idempotency_key`: another waiting call holds the same idempotency

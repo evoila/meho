@@ -39,7 +39,7 @@ func newExplainCmd() *cobra.Command {
 	var opts explainOptions
 	cmd := &cobra.Command{
 		Use:   "explain [CONNECTOR_ID OP_ID]",
-		Short: "Say why a call runs, waits or is denied, and who may approve it: MEHO group kinds (MEHO-<kind>), not the names of the login groups of your install",
+		Short: "Say if a call runs, waits or is denied, and why.",
 		Long: "explain calls POST /api/v1/policy/explain. It says what MEHO does " +
 			"with one call (run, wait or deny), why, and who may approve it. " +
 			"Nothing runs and nothing is written.\n\n" +

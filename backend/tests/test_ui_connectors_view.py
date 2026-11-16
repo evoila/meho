@@ -1610,7 +1610,9 @@ def test_detail_fingerprint_slot_shows_reprobe_alerts() -> None:
         mock.stop()
     assert response.status_code == 200, response.text
     body = response.text
-    slot = re.search(r'<div\s+id="fingerprint-card-slot"[^>]*>\s*<article\s+id="fingerprint-card"', body)
+    slot = re.search(
+        r'<div\s+id="fingerprint-card-slot"[^>]*>\s*<article\s+id="fingerprint-card"', body
+    )
     assert slot is not None, body
     override = re.search(r'hx-on::before-swap="([^"]*)"', slot.group(0))
     assert override is not None, slot.group(0)
@@ -1627,8 +1629,8 @@ def test_detail_fingerprint_slot_shows_reprobe_alerts() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
-    for status in ("409", "422", "501"):
-        assert result[status] == {"shouldSwap": True, "isError": False}, status
+    for alert_status in ("409", "422", "501"):
+        assert result[alert_status] == {"shouldSwap": True, "isError": False}, alert_status
     # A success keeps htmx's default swap; another error stays an error.
     assert result["200"] == {"shouldSwap": True, "isError": False}
     assert result["500"] == {"shouldSwap": False, "isError": True}

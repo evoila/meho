@@ -466,7 +466,7 @@ def test_a_shipped_operator_group_and_the_self_approval_group_give_sa_operators(
     monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
     get_settings.cache_clear()
     claims = {"groups": ["/MEHO-Operators", "/Ops-Self-Approve"]}
-    after = bind(_operator(), claims, shipped_bindings(get_settings()))
+    after = bind(_operator(self_approver=True), claims, shipped_bindings(get_settings()))
     assert after.bound_kind is RoleGroup.SA_OPERATORS
     assert after.self_approver is True
     stored = [
@@ -561,7 +561,7 @@ async def test_the_stored_bindings_of_the_tenant_count() -> None:
 async def test_without_stored_bindings_the_shipped_ones_count() -> None:
     await _store(None)
     claims = {"groups": ["/MEHO-SA-Operators"]}
-    hit = await bind_current_tenant(_operator(), claims)
+    hit = await bind_current_tenant(_operator(self_approver=True), claims)
     assert hit.bound_kind is RoleGroup.SA_OPERATORS
     assert hit.bound_categories == frozenset({"*"})
     assert hit.self_approver is True

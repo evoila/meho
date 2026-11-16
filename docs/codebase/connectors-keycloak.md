@@ -721,7 +721,11 @@ in. For these three, the person the change is for never approves it. In
 MEHO's own login realm another admin must approve it; a person who may
 approve their own changes cannot approve these alone. In MEHO's own login
 realm, a role of the `realm-management` client (in any case) also needs a
-platform admin as approver: it decides who may manage the realm. In another
+platform admin as approver: it decides who may manage the realm. The same
+holds for `role_mapping.assign` and `client.assign` when a part of the
+named role, on any level, is such a role or a role that MEHO's login maps to
+platform admin rights. The card lists them as `effective_roles`, and the run
+is refused when the parts change before it (`ops_write_effective_roles.py`). In another
 realm these writes are not a change of rights: the normal approval rules of
 their risk level apply, and only the person the change is for is refused.
 
@@ -1300,7 +1304,7 @@ use:
 | `keycloak.realm.create` | `{resource, realm, representation}` |
 | `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
 | `keycloak.user.reset_password` | `{resource, username, id, realm, password_source, password_secret_ref, temporary[, password_secret_mount, password_secret_key]}` |
-| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles, effective_roles}` |
 | `keycloak.group.create` | `{resource, name, parent_id, realm, attribute_keys, attributes}` |
 | `keycloak.group.update_attributes` | `{resource, id, name, realm, replace, attribute_keys, attributes}` |
 | `keycloak.group.member.add` / `.member.remove` | `{resource, action, user_id, username, group_id, group_name, realm}` |

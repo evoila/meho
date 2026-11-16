@@ -1116,7 +1116,9 @@ preview of the waiting request:
   `_backplane_login_realms()`.
 - `platform_admin`: the group the handler will change is the platform
   admin group, the roles include the platform admin role, or the change
-  gives a role of the `realm-management` client (in any case).
+  gives a role of the `realm-management` client (in any case). For a role
+  change in the login realm, the parts of the role count too (see "A role
+  is judged by what it really gives" below).
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
@@ -1174,6 +1176,30 @@ same check refuses the run:
   removes only the credentials the approver saw. This check runs before the
   handler reads the system again, so the handler also compares its own
   read with the approved card (`approved_preview`) before it deletes.
+
+### A role is judged by what it really gives
+
+A role can be made of other roles, and those can be made of more roles.
+For `keycloak.role_mapping.assign` and `keycloak.role_mapping.client.assign`
+in the login realm, the connector reads the parts of every named role, on
+every level (`ops_write_effective_roles.py`), and puts them on the card as
+`effective_roles`. Each entry has `id`, `name`, `client_id` (`None` for a
+realm role), `realm_management` and `login_role`. `realm_management` marks
+a role of the `realm-management` client. `login_role` marks a realm role
+that MEHO's login turns into platform admin rights (the platform admin
+role names, and `JWT_PLATFORM_ADMIN_ROLE_NAME`).
+
+If any part has one of these marks, `platform_admin` is true, so a platform
+admin must approve. The name of the role that was asked for does not
+decide. If MEHO cannot read all the parts (a read fails, a role is
+missing, more than 500 roles, nesting deeper than 10 levels),
+`effective_roles` is `None` and `platform_admin` is the strict case.
+Outside the login realm the list is empty and nothing changes.
+
+The run is bound to the list. Both ops are registered with `bound_ids` on
+`effective_roles`: if the live list has other role ids than the approved
+one, the run is refused and a new request is needed. A request parked
+before this rule has no list, so it is refused at the run too.
 
 ## The rights-change mark: another admin must approve
 

@@ -123,6 +123,8 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_USER_CREDENTIAL_PATH": ("DELETE",),
     "_ROLES_PATH": ("GET",),
     "_ROLE_PATH": ("GET",),
+    # The parts of a composite role (the role approval card).
+    "_ROLE_BY_ID_COMPOSITES_PATH": ("GET",),
     "_ROLE_USERS_PATH": ("GET",),
     # Group-lifecycle ops (#3280). NB: the groups resource uses the
     # hyphenated ``{group-id}`` placeholder while the user-group membership
@@ -236,6 +238,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/groups/{group-id}/members",
         "GET:/admin/realms/{realm}/identity-provider/instances",
         "GET:/admin/realms/{realm}/roles",
+        "GET:/admin/realms/{realm}/roles-by-id/{role-id}/composites",
         "GET:/admin/realms/{realm}/roles/{role-name}",
         "GET:/admin/realms/{realm}/roles/{role-name}/users",
         "GET:/admin/realms/{realm}/users",

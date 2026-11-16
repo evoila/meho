@@ -59,6 +59,7 @@ __all__ = [
     "_EVENTS_CONFIG_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
+    "_ROLE_BY_ID_COMPOSITES_PATH",
     "_USER_BRUTE_FORCE_PATH",
     "_USER_CREDENTIALS_PATH",
     "_USER_CREDENTIAL_PATH",
@@ -100,6 +101,8 @@ _CLIENT_ROLE_USERS_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{ro
 _USER_CREDENTIAL_PATH = "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}"
 _ROLES_PATH = "/admin/realms/{realm}/roles"
 _ROLE_PATH = "/admin/realms/{realm}/roles/{role-name}"
+# The roles one role is made of (its direct parts), by the role's id.
+_ROLE_BY_ID_COMPOSITES_PATH = "/admin/realms/{realm}/roles-by-id/{role-id}/composites"
 _ROLE_USERS_PATH = "/admin/realms/{realm}/roles/{role-name}/users"
 _GROUPS_PATH = "/admin/realms/{realm}/groups"
 _GROUP_PATH = "/admin/realms/{realm}/groups/{group-id}"

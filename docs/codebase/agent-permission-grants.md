@@ -204,10 +204,17 @@ Rules:
 - The audit row of the creation carries `starting_grants` (the set, or
   `not-chosen` when no set was picked) and, for `read-targets`,
   `starting_grant_targets` (the names as sent). So does the audit row of
-  an edit that sends `identity_ref`. The console forms write the same
-  audit values as the API (`ui/routes/agents/form_saves.py`,
-  `principals_forms.py`); `test_ui_agent_starting_grants_audit.py`
-  checks the stored rows.
+  an edit that sends `identity_ref`; it also carries
+  `starting_grant_agent`, the agent that gets the grants. The console
+  forms write the same audit values as the API (`ui/routes/agents/forms.py`,
+  `principals_forms.py`). They bind the operation name before they read
+  the pick and before the person check, so the audit row of a form that
+  is refused early also names it. `test_ui_agent_starting_grants_audit.py`
+  and `test_agent_starting_grants_edit_audit.py` check the rows.
+- A target name that does not resolve gives
+  `starting_grants_target_unknown` (or `_ambiguous` when it matches more
+  than one target). The text ends with "Nothing was created." for a
+  register or create, and "Nothing was changed." for an edit.
 
 Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`,
 `PATCH /api/v1/agents/{name}`, the admin MCP tools
@@ -254,7 +261,12 @@ about it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
 (`mcp/tools/_starting_grants.py`, through the tool's `for_settings`). With
 the switch `off` (the default), an AI client sees the tools exactly as
 before, and a call that sends `starting_grants` is refused by the input
-check. REST takes the field in every state.
+check. REST and the console take the field in every state. The MCP tools
+refuse it on purpose: the `tools/call` input check uses the same input
+schema that `tools/list` shows (`ToolDefinition.for_settings` in
+`mcp/registry.py`). To accept the field with `off`, the tools would
+have to show it with `off` too, and then a switch that is off would
+change what an AI client sees.
 
 ## Elevation sweeper (`agents/grant_expiry.py`)
 

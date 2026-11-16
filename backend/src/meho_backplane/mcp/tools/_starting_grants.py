@@ -10,6 +10,12 @@ default. While it is ``off``, the tools show their
 registered text and input unchanged, so an AI client sees the same tools as
 before. While it is ``observe`` or ``on``, the tools get the
 ``starting_grants`` input and one more sentence that says when it is needed.
+
+So with ``off`` a call that sends ``starting_grants`` is refused, while
+REST and the console take it. This is on purpose: the ``tools/call``
+input check uses the same tool that ``tools/list`` shows
+(:attr:`~meho_backplane.mcp.registry.ToolDefinition.for_settings`), so
+accepting the field with ``off`` would mean showing it with ``off``.
 """
 
 from __future__ import annotations

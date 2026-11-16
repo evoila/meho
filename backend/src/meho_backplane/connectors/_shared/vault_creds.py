@@ -124,6 +124,7 @@ __all__ = [
     "OperatorTokenRequiredError",
     "SecretRefReadError",
     "SecretRefScopeError",
+    "TargetSecretForbiddenError",
     "TargetSecretNotFoundError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
@@ -582,6 +583,32 @@ class VaultCredentialBackend:
         return _structural_unwrap(payload, target_name=target_name)
 
 
+class TargetSecretForbiddenError(hvac.exceptions.Forbidden):  # type: ignore[misc]  # hvac has no type stubs
+    """Vault refuses to read the target's own ``secret_ref``.
+
+    Raised by the shared loader when the KV-v2 read of ``target.secret_ref``
+    answers "permission denied" (hvac ``Forbidden``). The dispatcher turns
+    it into the ``connector_vault_forbidden`` answer about the target's own
+    ref. A refusal of any other Vault path stays a plain hvac ``Forbidden``
+    and gets an answer that names that path. The message never carries the
+    Vault URL or the hvac text.
+
+    It is a subclass of hvac ``Forbidden``, so every handler that lets a
+    ``Forbidden`` pass, or catches one, does the same with this error.
+    """
+
+    def __init__(self, *, target_name: str, secret_ref: str) -> None:
+        self.target_name = target_name
+        self.secret_ref = secret_ref
+        super().__init__(
+            f"Vault refused to read secret_ref {secret_ref!r} of target {target_name!r}"
+        )
+
+    def __str__(self) -> str:
+        # hvac's ``VaultError.__str__`` appends ", on <method> <url>".
+        return str(self.args[0])
+
+
 #: The Vault backend is stateless, so a single shared instance serves every
 #: read. Registered at import time under ``"vault"``; ``vault_creds`` is
 #: imported by every connector session module, so the kind is always
@@ -640,6 +667,8 @@ async def _resolve_and_load(
         )
     except hvac.exceptions.InvalidPath as exc:
         raise TargetSecretNotFoundError(target_name=target.name, secret_ref=ref) from exc
+    except hvac.exceptions.Forbidden as exc:
+        raise TargetSecretForbiddenError(target_name=target.name, secret_ref=ref) from exc
     return store_ref, secret_data
 
 
@@ -909,7 +938,7 @@ async def load_param_secret_data(
     check_param_secret_ref(operator, target.secret_ref or "", param=param, mount=mount)
     try:
         return await load_vault_secret_data(target, operator, mount=mount)
-    except TargetSecretNotFoundError as exc:
+    except (TargetSecretNotFoundError, TargetSecretForbiddenError) as exc:
         # The ref came from a param, not from the target: report it as a
         # param read error, with the hvac class as its cause.
         cause = exc.__cause__ if exc.__cause__ is not None else exc

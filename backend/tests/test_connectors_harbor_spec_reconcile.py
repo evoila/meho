@@ -86,7 +86,7 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_PROJECT_SUMMARY_PATH": ("GET",),
     "_PROJECT_REPOSITORIES_PATH": ("GET",),
     "_REPOSITORY_PATH": ("GET",),
-    "_ARTIFACTS_PATH": ("GET",),
+    "_ARTIFACTS_PATH": ("GET", "POST"),
     "_ARTIFACT_PATH": ("GET",),
     "_ARTIFACT_VULNERABILITIES_PATH": ("GET",),
     "_ROBOTS_PATH": ("GET", "POST"),
@@ -152,6 +152,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/api/v2.0/robots/{robot_id}",
         "GET:/api/v2.0/systeminfo",
         "POST:/api/v2.0/projects",
+        "POST:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts",
         "POST:/api/v2.0/robots",
     ]
 

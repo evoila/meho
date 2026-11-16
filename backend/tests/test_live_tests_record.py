@@ -15,7 +15,12 @@ from typing import Any
 import pytest
 import yaml
 from scripts.generate_reference_docs import _ENTERPRISE_PACK, _eager_import_connectors
-from scripts.validate_live_tests import load_record, validate_live_tests
+from scripts.validate_live_tests import (
+    TagLookupError,
+    load_record,
+    release_tags,
+    validate_live_tests,
+)
 
 from meho_backplane.connectors.registry import all_connectors_v2
 
@@ -23,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RECORD = ROOT / "docs" / "compatibility" / "live-tests.yaml"
 SCRIPT = ROOT / "backend" / "scripts" / "validate_live_tests.py"
 TODAY = dt.date(2026, 11, 11)
+FAKE_TAGS = {"0.45.2", "0.45.0"}
 FAKE_CHANGELOG = "## [Unreleased]\n\n## [0.46.0] - 2026-11-09\n\n## [0.45.0] - 2026-11-06\n"
 
 GOOD: dict[str, Any] = {
@@ -47,7 +53,7 @@ GOOD: dict[str, Any] = {
 
 
 def _problems(data: dict[str, Any], raw: str = "") -> list[str]:
-    return validate_live_tests(data, raw, FAKE_CHANGELOG, TODAY)
+    return validate_live_tests(data, raw, FAKE_CHANGELOG, TODAY, lambda: FAKE_TAGS)
 
 
 def _with_test(**changes: object) -> dict[str, Any]:
@@ -88,8 +94,9 @@ def test_script_exits_non_zero_on_a_bad_file(tmp_path: Path) -> None:
         (_with_test(date="2026-11-07"), "date must be an ISO date"),
         (_with_test(date=None), "date must be an ISO date"),
         (_with_test(date=dt.date(2026, 11, 12)), "is in the future"),
-        (_with_test(meho_release="9.9.9"), "not a '## [X.Y.Z]' heading"),
+        (_with_test(meho_release="9.9.9"), "has no git tag v9.9.9"),
         (_with_test(meho_release="Unreleased"), "not a '## [X.Y.Z]' heading"),
+        (_with_test(meho_release=None), "must be a release"),
         (_with_test(product_version=8.0), "product_version must be quoted text"),
         (_with_test(product_version="2.7.2-lab.example.org"), "product_version must be quoted"),
         (_with_test(extra="x"), "unknown field"),
@@ -97,6 +104,38 @@ def test_script_exits_non_zero_on_a_bad_file(tmp_path: Path) -> None:
 )
 def test_bad_test_entry_is_refused(data: dict[str, Any], message: str) -> None:
     assert any(message in problem for problem in _problems(data))
+
+
+def test_release_with_a_tag_and_no_heading_passes() -> None:
+    assert _problems(_with_test(meho_release="0.45.2")) == []
+
+
+def test_release_with_neither_heading_nor_tag_names_both_places() -> None:
+    (problem,) = _problems(_with_test(meho_release="0.45.9"))
+    assert "'## [X.Y.Z]' heading in CHANGELOG.md" in problem
+    assert "no git tag v0.45.9" in problem
+
+
+def test_failed_tag_lookup_fails_closed() -> None:
+    def broken() -> set[str]:
+        raise TagLookupError("no network")
+
+    data = _with_test(meho_release="0.45.2")
+    problems = validate_live_tests(data, "", FAKE_CHANGELOG, TODAY, broken)
+    assert len(problems) == 1
+    assert "could not be checked (no network)" in problems[0]
+
+
+def test_tags_are_not_read_when_every_release_is_a_heading() -> None:
+    def never() -> set[str]:
+        raise AssertionError("git must not be called")
+
+    assert validate_live_tests(GOOD, "", FAKE_CHANGELOG, TODAY, never) == []
+
+
+def test_release_tags_fails_outside_a_repository_with_origin(tmp_path: Path) -> None:
+    with pytest.raises(TagLookupError):
+        release_tags(tmp_path)
 
 
 def test_duplicate_product_version_is_refused() -> None:

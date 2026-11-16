@@ -1424,6 +1424,14 @@ def _raise_target_secret_error(
     and the fix. It has no Vault text and no Vault address.
     """
     detail = target_secret_error_detail(exc, tenant_id=operator.tenant_id)
+    _log.warning(
+        "target_probe_secret_unreadable",
+        target_name=exc.target_name,
+        tenant_id=str(operator.tenant_id),
+        operator_sub=operator.sub,
+        error_code=detail["error"],
+        secret_ref=exc.secret_ref,
+    )
     raise HTTPException(status_code=422, detail=detail) from exc
 
 

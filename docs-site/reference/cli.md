@@ -4197,7 +4197,9 @@ meho policy diff FILE [flags]
 
 ### `meho policy explain`
 
-Say why a call runs, waits or is denied, and who may approve it
+Say if a call runs, waits or is denied, and why.
+
+Who may approve is a list of MEHO group kinds (MEHO-<kind>), not the names of the login groups of your install.
 
 ```
 meho policy explain [CONNECTOR_ID OP_ID] [flags]

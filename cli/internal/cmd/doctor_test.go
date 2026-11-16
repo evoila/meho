@@ -668,8 +668,8 @@ func TestDoctor_AuthenticatedLayer(t *testing.T) {
 		detail string
 	}{
 		{name: "MEHO down", drop: true, detail: "cannot check the Keycloak targets: "},
-		{name: "401", status: http.StatusUnauthorized, detail: "cannot check the Keycloak targets: HTTP 401"},
-		{name: "403", status: http.StatusForbidden, detail: "cannot check the Keycloak targets: HTTP 403"},
+		{name: "401", status: 401, detail: "cannot check the Keycloak targets: HTTP 401"},
+		{name: "403", status: 403, detail: "cannot check the Keycloak targets: HTTP 403"},
 	} {
 		t.Run("keycloak realm check route fails: "+tc.name, func(t *testing.T) {
 			xdg := withTempXDG(t)

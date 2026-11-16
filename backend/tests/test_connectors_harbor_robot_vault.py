@@ -383,6 +383,28 @@ async def test_denied_preflight_refuses_the_park(monkeypatch: pytest.MonkeyPatch
     assert "write_capability_denied" in (refusal.error or "")
 
 
+@pytest.mark.asyncio
+async def test_refused_vault_login_refuses_the_park(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Vault login that is refused counts as denied, so no approval request is made."""
+    from meho_backplane.operations.dispatcher import _preflight_denied_refusal
+
+    _install_vault(monkeypatch, login_exc=hvac.exceptions.Forbidden("role denied"))
+    with capture_logs() as logs:
+        preflight = await robot_vault_preflight(_ctx(dict(_PARAMS)))
+    assert [e["event"] for e in logs] == ["vault_capability_preflight_failed"]
+    assert preflight is not None
+    assert preflight["will_be_denied"] is True
+    assert preflight["reason"] == "probe_failed:VaultRoleDeniedError"
+    refusal = _preflight_denied_refusal(
+        op_id="harbor.robot.create",
+        proposed_effect={"permission_preflight": preflight},
+        duration_ms=1.0,
+    )
+    assert refusal is not None
+    assert refusal.status == "denied"
+    assert "write_capability_denied" in (refusal.error or "")
+
+
 def test_both_hooks_are_registered_for_the_op() -> None:
     from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
     from meho_backplane.operations._validate import params_check_errors

@@ -152,7 +152,9 @@ async def robot_vault_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
     Returns ``None`` without ``vault_target``. A path outside the tenant
     scope counts as denied. Otherwise asks Vault (``sys/capabilities-self``)
     for the same path and login the write uses (no Vault target: the default
-    role). The answer holds capability names only, never a secret.
+    role). A check that fails, for example a refused Vault login, also counts
+    as denied: the robot secret would be lost. The answer holds capability
+    names only, never a secret.
     """
     if ctx.params.get("vault_target") is None:
         return None
@@ -175,6 +177,7 @@ async def robot_vault_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
         ),
         _WRITE_CAPABILITIES,
         None,
+        report_probe_failure=True,
     )
 
 

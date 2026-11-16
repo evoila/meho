@@ -220,8 +220,9 @@ in `ops_robot_vault.py`:
   secret would be lost. The error names the exception class only.
 - Park time: a params check refuses a wrong form as `invalid_params`, and a
   permission preflight asks Vault (`sys/capabilities-self`) whether the write
-  will be denied. If so, the call is refused with `write_capability_denied`
-  and no approval card is made.
+  will be denied. A check that fails (for example, Vault refuses the login)
+  counts as denied too. Then the call is refused with
+  `write_capability_denied` and no approval card is made.
 - Without `vault_target` the answer holds the secret, as before (for a person
   at the CLI).
 

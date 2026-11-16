@@ -22,13 +22,15 @@ from structlog.testing import capture_logs
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.harbor import HarborConnector
 from meho_backplane.connectors.harbor.ops_robot_vault import (
+    ROBOT_SECRET_NOT_STORED,
     RobotVaultTargetError,
     check_robot_vault_target,
     parse_vault_target,
     robot_vault_preflight,
+    secret_destination,
 )
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.connectors.schemas import AuthModel, OperationResult
 from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.settings import get_settings
 
@@ -196,13 +198,16 @@ async def test_failed_vault_write_deletes_the_new_robot_and_hides_the_secret(
         mock.post(_ROBOTS_URL).mock(return_value=respx.MockResponse(201, json=_HARBOR_ANSWER))
         _robot_read(mock)
         delete_route = mock.delete(f"{_ROBOTS_URL}/42").mock(return_value=respx.MockResponse(200))
-        with pytest.raises(RuntimeError) as excinfo:
-            await connector.robot_create(_operator(), _TARGET, dict(_PARAMS))
+        result = await connector.robot_create(_operator(), _TARGET, dict(_PARAMS))
     assert delete_route.called
-    assert "was deleted" in str(excinfo.value)
-    assert "Forbidden" in str(excinfo.value)
-    assert _NEW_SECRET not in str(excinfo.value)
-    assert excinfo.value.__cause__ is None
+    assert isinstance(result, OperationResult)
+    assert result.status == "error"
+    assert result.extras["error_code"] == ROBOT_SECRET_NOT_STORED
+    assert result.extras["exception_class"] == "Forbidden"
+    assert result.extras["robot_id"] == 42
+    assert result.extras["robot_deleted"] is True
+    assert "was deleted" in (result.error or "")
+    assert _NEW_SECRET not in result.model_dump_json()
     await connector.aclose()
 
 
@@ -216,8 +221,50 @@ async def test_failed_vault_write_says_when_the_robot_could_not_be_deleted(
         mock.post(_ROBOTS_URL).mock(return_value=respx.MockResponse(201, json=_HARBOR_ANSWER))
         _robot_read(mock)
         mock.delete(f"{_ROBOTS_URL}/42").mock(return_value=respx.MockResponse(500))
-        with pytest.raises(RuntimeError, match="could not be deleted"):
-            await connector.robot_create(_operator(), _TARGET, dict(_PARAMS))
+        result = await connector.robot_create(_operator(), _TARGET, dict(_PARAMS))
+    assert isinstance(result, OperationResult)
+    assert result.extras["robot_deleted"] is False
+    assert "could not be deleted" in (result.error or "")
+    assert "harbor.robot.delete" in result.extras["remediation"]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_harbor_answer_without_a_secret_deletes_the_new_robot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _install_vault(monkeypatch)
+    connector = HarborConnector()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(_ROBOTS_URL).mock(
+            return_value=respx.MockResponse(201, json={"id": 42, "name": "robot$myproject+ci-push"})
+        )
+        _robot_read(mock)
+        delete_route = mock.delete(f"{_ROBOTS_URL}/42").mock(return_value=respx.MockResponse(200))
+        result = await connector.robot_create(_operator(), _TARGET, dict(_PARAMS))
+    assert delete_route.called
+    assert isinstance(result, OperationResult)
+    assert result.extras["error_code"] == ROBOT_SECRET_NOT_STORED
+    assert result.extras["robot_deleted"] is True
+    assert fake.secrets.kv.v2.patch_calls == []
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_harbor_answer_without_an_id_says_the_robot_was_not_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_vault(monkeypatch)
+    connector = HarborConnector()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(_ROBOTS_URL).mock(
+            return_value=respx.MockResponse(201, json={"secret": _NEW_SECRET})
+        )
+        result = await connector.robot_create(_operator(), _TARGET, dict(_PARAMS))
+    assert isinstance(result, OperationResult)
+    assert result.extras["robot_id"] is None
+    assert result.extras["robot_deleted"] is False
+    assert _NEW_SECRET not in result.model_dump_json()
     await connector.aclose()
 
 
@@ -303,6 +350,12 @@ def test_params_check_refuses_a_bad_form_before_the_call_can_park(target: str) -
 def test_params_check_accepts_a_good_form_and_a_missing_target() -> None:
     assert check_robot_vault_target(dict(_PARAMS)) is None
     assert check_robot_vault_target({"name": "x", "project": "p", "duration": 1}) is None
+
+
+def test_secret_destination_without_a_target_says_the_answer_has_it() -> None:
+    dest = secret_destination({"name": "x", "project": "p", "duration": 1})
+    assert dest["kind"] == "answer"
+    assert "returned in the answer" in dest["note"]
 
 
 def test_parse_returns_none_without_a_target() -> None:

@@ -160,7 +160,8 @@ _HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional. Where MEHO stores the new robot secret, as "
                 "'vault:<path>#<field>' (a Vault KV path and the field that gets "
-                "the secret). Other fields of that Vault item stay. When set, the "
+                "the secret). An existing value in that field is replaced; the "
+                "other fields of that Vault item stay. When set, the "
                 "secret is never returned: the answer has only its fingerprint "
                 "and length. Agents must set it, because an agent cannot see the "
                 "secret."
@@ -230,7 +231,7 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "so nobody sees the secret. Without it an agent cannot read the secret and "
         "the robot is useless. If the Vault write would be denied, the call is "
         "refused before it waits for approval. If the write fails, MEHO deletes "
-        "the new robot again."
+        "the new robot again. A person approves each call."
     ),
     "parameter_hints": {
         "name": (
@@ -252,8 +253,8 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
         "vault_target": (
             "Optional but required for an agent. 'vault:<path>#<field>', for example "
-            "'vault:ci/harbor#secret'. The field is added to that Vault item; other "
-            "fields stay."
+            "'vault:ci/harbor#secret'. The field is written to that Vault item: an "
+            "existing value in it is replaced, the other fields stay."
         ),
     },
     "output_shape": (
@@ -261,7 +262,9 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "The secret is a one-time value — save it immediately. "
         "With vault_target: {id, name, status: 'stored', stored_to: {kind, mount, path, "
         "field, version}, value_fingerprint, length} and no secret. "
-        "On failure: a connector_error OperationResult with "
+        "When the Vault write fails: error_code 'robot_secret_not_stored' with "
+        "robot_id and robot_deleted (true when MEHO deleted the new robot). "
+        "On another failure: a connector_error OperationResult with "
         "extras.exception_class naming the failure class."
     ),
 }

@@ -484,7 +484,7 @@ class HarborConnector(HttpConnector):
         operator: Operator,
         target: HarborTargetLike,
         params: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | OperationResult:
         """Create a project-scoped robot account via Harbor 2.x.
 
         Op-id: ``harbor.robot.create``. Classified ``credential_mint``:
@@ -527,12 +527,14 @@ class HarborConnector(HttpConnector):
 
         Returns
         -------
-        dict[str, Any]
+        dict[str, Any] | OperationResult
             ``{id: int, name: str, secret: str}`` — the secret is the
             minted credential, returned ONLY on creation by Harbor.
             With ``vault_target`` the secret is written to Vault and the
             answer holds a fingerprint and the length instead
             (:mod:`~meho_backplane.connectors.harbor.ops_robot_vault`).
+            When that write fails, an error result says whether the new
+            robot was deleted.
 
         Raises
         ------

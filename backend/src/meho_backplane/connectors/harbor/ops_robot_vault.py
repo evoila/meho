@@ -24,13 +24,16 @@ Order of work
    (:func:`robot_vault_preflight`). A write that would be denied is refused
    before an approval card exists.
 3. After the Harbor call: write the secret to Vault. When the write fails,
-   MEHO deletes the new robot, because its secret would be lost.
+   or Harbor's answer has no secret, MEHO deletes the new robot, because
+   its secret would be lost. The error result has the code
+   ``robot_secret_not_stored`` and says, with ``robot_id`` and
+   ``robot_deleted``, whether the robot was deleted.
 
 No secret in an error
 =====================
 
 Errors name the exception class only. The Vault client message is never
-passed on, and the exception chain is cut.
+passed on.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ import hvac.exceptions
 import structlog
 
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.secret.endpoints import SecretMaterial
 from meho_backplane.connectors.vault import ops as _kv_ops
 from meho_backplane.connectors.vault.tenant_scope import (
@@ -58,11 +62,13 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "ROBOT_SECRET_NOT_STORED",
     "RobotVaultTarget",
     "RobotVaultTargetError",
     "check_robot_vault_target",
     "parse_vault_target",
     "robot_vault_preflight",
+    "secret_destination",
     "store_new_robot_secret",
 ]
 
@@ -70,6 +76,9 @@ _log = structlog.get_logger(__name__)
 
 _CREATE_OP_ID = "harbor.robot.create"
 _FORM = "vault:<path>#<field>"
+
+#: Error code when the new robot secret did not reach Vault.
+ROBOT_SECRET_NOT_STORED = "robot_secret_not_stored"
 
 
 class RobotVaultTargetError(ValueError):
@@ -136,6 +145,25 @@ def check_robot_vault_target(params: dict[str, Any]) -> dict[str, Any] | None:
     except RobotVaultTargetError as exc:
         return params_problem("vault_target", _FORM, str(exc))
     return None
+
+
+def secret_destination(params: dict[str, Any]) -> dict[str, Any]:
+    """Where the new robot secret goes, for the approval request. Holds no secret."""
+    if params.get("vault_target") is None:
+        return {
+            "kind": "answer",
+            "note": "The new secret is returned in the answer to the caller.",
+        }
+    dest = _parse_form(params["vault_target"])
+    return {
+        "kind": "vault",
+        "mount": dest.mount,
+        "path": dest.path,
+        "field": dest.field,
+        "note": (
+            "An existing value in this field is replaced. The other fields of the Vault item stay."
+        ),
+    }
 
 
 #: What the write needs: ``vault.kv.patch`` for an item that exists, and
@@ -209,17 +237,56 @@ async def _undo(
     target: HarborTargetLike,
     project: str,
     robot_id: int,
-) -> str:
-    """Delete the new robot; say what happened, for the error text."""
+) -> bool:
+    """Delete the new robot. Return whether that worked."""
     try:
         await connector.robot_delete(operator, target, {"project": project, "id": robot_id})
     except Exception as exc:
         _log.warning("harbor_robot_undo_failed", robot_id=robot_id, error=type(exc).__name__)
-        return (
-            f"the new robot (id {robot_id}) could not be deleted ({type(exc).__name__}); "
-            f"delete it with harbor.robot.delete before you try again"
+        return False
+    _log.info("harbor_robot_undo_deleted", robot_id=robot_id)
+    return True
+
+
+def _not_stored(
+    dest: RobotVaultTarget,
+    exc: Exception,
+    robot_id: int | None,
+    robot_deleted: bool,
+) -> OperationResult:
+    """The error result when the secret did not reach Vault. It holds no secret.
+
+    The caller's answer and the audit row both get ``robot_id`` and
+    ``robot_deleted``, so they show whether the new robot is still there.
+    """
+    if robot_id is None:
+        outcome = "Harbor's answer had no robot id, so MEHO could not delete the robot"
+        remediation = "Find the new robot in the project and delete it with harbor.robot.delete."
+    elif robot_deleted:
+        outcome = f"the new robot (id {robot_id}) was deleted"
+        remediation = "Check that the Vault write is allowed there, then call the operation again."
+    else:
+        outcome = f"the new robot (id {robot_id}) could not be deleted"
+        remediation = (
+            f"Delete robot {robot_id} with harbor.robot.delete, then call the operation again."
         )
-    return f"the new robot (id {robot_id}) was deleted"
+    outcome_fields = {"robot_id": robot_id, "robot_deleted": robot_deleted}
+    return OperationResult(
+        status="error",
+        op_id=_CREATE_OP_ID,
+        error=(
+            f"{ROBOT_SECRET_NOT_STORED}: the new robot secret was not written to Vault at "
+            f"{dest.mount}/{dest.path} ({type(exc).__name__}); {outcome}."
+        ),
+        result=outcome_fields,
+        duration_ms=0.0,
+        extras={
+            "error_code": ROBOT_SECRET_NOT_STORED,
+            "exception_class": type(exc).__name__,
+            **outcome_fields,
+            "remediation": remediation,
+        },
+    )
 
 
 async def store_new_robot_secret(
@@ -228,29 +295,32 @@ async def store_new_robot_secret(
     target: HarborTargetLike,
     params: dict[str, Any],
     dest: RobotVaultTarget,
-    created: dict[str, Any],
-) -> dict[str, Any]:
+    created: Any,
+) -> dict[str, Any] | OperationResult:
     """Write the secret of the robot Harbor just made to *dest*; return no secret.
 
-    *created* is Harbor's answer to the create call. When the write fails
-    or is cancelled, the new robot is deleted (its secret would be lost) and
-    the error says whether that worked.
+    *created* is Harbor's answer to the create call. When the answer has no
+    secret, or the write fails or is cancelled, the new robot is deleted
+    (its secret would be lost) and an error result with the error code
+    :data:`ROBOT_SECRET_NOT_STORED` says whether that worked.
     """
-    material = SecretMaterial(str(created["secret"]))
-    robot_id = int(created["id"])
+    robot_id: int | None = None
     try:
-        stored_to = await _write(operator, dest, str(created["secret"]))
+        robot_id = int(created["id"])
+        secret = created["secret"]
+        if not isinstance(secret, str) or not secret:
+            raise KeyError("secret")
+        material = SecretMaterial(secret)
+        stored_to = await _write(operator, dest, secret)
     except BaseException as exc:
-        undone = await asyncio.shield(
-            _undo(connector, operator, target, str(params["project"]), robot_id)
-        )
+        robot_deleted = False
+        if robot_id is not None:
+            robot_deleted = await asyncio.shield(
+                _undo(connector, operator, target, str(params["project"]), robot_id)
+            )
         if not isinstance(exc, Exception):
             raise
-        raise RuntimeError(
-            f"{_CREATE_OP_ID}: the new robot secret could not be written to Vault at "
-            f"{dest.mount}/{dest.path} ({type(exc).__name__}); {undone}. Check that the "
-            "write is allowed there and call the operation again."
-        ) from None
+        return _not_stored(dest, exc, robot_id, robot_deleted)
     return {
         "id": robot_id,
         "name": created["name"],

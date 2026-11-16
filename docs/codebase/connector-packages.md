@@ -856,7 +856,9 @@ name: the dispatcher finds it by name, as it finds `invalidate_session`.
 What the method must return:
 
 - `True` only when the status and the body together say that the login
-  session ended. The dispatcher asks only for a 4xx answer.
+  session ended. The dispatcher asks only for a 4xx answer. Say yes only
+  when the product refused the call before it ran: a repeat of a call that
+  already ran could make the change twice.
 - `False` for a wrong password or a locked account. Those are not "the
   session ended": a new sign-in cannot fix them, and more tries can lock the
   account. Report them from the sign-in as a `ConnectorAuthError` instead.
@@ -870,6 +872,11 @@ What the dispatcher does on `True`:
   request. A typed write, a multi-step operation and a call that runs after
   a person's approval are not sent again. The caller then gets
   `connector_auth_failed` that says the change may or may not have been made.
+- The audit row of the call has `session_relogin` (true whenever MEHO dropped
+  the kept login), `session_resent` (true only when MEHO sent the operation
+  again) and `session_relogin_status`.
+- A method that answers something other than `True` or `False`, or that
+  raises, counts as "no". MEHO writes one warning log line for it.
 - It never repeats twice. If the sign-in is refused, the caller gets
   `connector_auth_failed` that says the product refused the sign-in. If the
   same answer comes back, the text says the product took the new sign-in and

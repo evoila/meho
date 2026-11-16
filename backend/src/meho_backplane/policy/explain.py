@@ -7,7 +7,7 @@ Nothing runs and nothing is written. The answer comes from the same code
 the call uses:
 
 * **Today's answer**: the preview's policy fields
-  (:func:`~meho_backplane.operations._request_preview._governance_fields`),
+  (:func:`~meho_backplane.operations._request_preview.governance_and_gate`),
   which call :func:`~meho_backplane.operations._validate.policy_gate` with
   ``decide_only=True``. No audit row, no approval request, no grant use.
 * **The evaluator's answer** (only with ``POLICY_ENGINE_SHADOW`` on):
@@ -393,21 +393,21 @@ async def _resolve(
 
 async def _today_and_evaluator(
     question: CallQuestion, descriptor: EndpointDescriptor, connector_id: str, target: Any
-) -> tuple[dict[str, Any], Decision | None]:
-    """Today's policy fields and the evaluator's decision.
+) -> tuple[dict[str, Any], PermissionVerdict, Decision | None]:
+    """Today's policy fields, the gate's own answer and the evaluator's decision.
 
     Today's fields come from ``policy_gate`` with ``decide_only=True``. A
     question with groups unbinds the hosted agent of the caller's run, so
     its grants are never read: the made-up login asks alone.
     """
     from meho_backplane.auth.permissions import agent_no_grant_log_scope
-    from meho_backplane.operations._request_preview import _governance_fields
+    from meho_backplane.operations._request_preview import governance_and_gate
 
     asker = question.asker
     actor = {} if question.me else {ACTOR_SUB_KEY: None}
     try:
         with agent_no_grant_log_scope(), structlog.contextvars.bound_contextvars(**actor):
-            governance = await _governance_fields(
+            governance, gate = await governance_and_gate(
                 operator=asker,
                 descriptor=descriptor,
                 target=target,
@@ -425,7 +425,7 @@ async def _today_and_evaluator(
                 )
     finally:
         forget_rule()  # the gate's shadow kept a rule; explain writes no row
-    return governance, decision
+    return governance, gate, decision
 
 
 async def _approvers(
@@ -461,14 +461,14 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         file_document=question.file_document,
         file_scope=question.file_scope,
     )
-    governance, decision = await _today_and_evaluator(question, descriptor, connector_id, target)
+    governance, gate, decision = await _today_and_evaluator(
+        question, descriptor, connector_id, target
+    )
     today_verdict = PermissionVerdict(governance["policy_verdict"])
     reason = governance.get("policy_reason")
+    # Asked for the gate's own answer, before the step check, as the call does.
     refusal = await refusal_after_gate(
-        operator=question.asker,
-        descriptor=descriptor,
-        target=target,
-        answer=_FROM_TODAY[today_verdict],
+        operator=question.asker, descriptor=descriptor, target=target, answer=_FROM_TODAY[gate]
     )
     if refusal is not None:
         today_verdict, reason = PermissionVerdict.DENY, refusal

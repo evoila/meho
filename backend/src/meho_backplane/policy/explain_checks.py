@@ -43,7 +43,7 @@ CONNECTOR_RESOLUTION: Final[str] = "connector_resolution"
 #: The operation's own check of its parameters before the call waits
 #: (``refused_before_approval``).
 OPERATION_PARAM_CHECK: Final[str] = "operation_param_check"
-#: A ``destructive`` call waits only with the hash of a matching preview
+#: A ``destructive`` call waits or runs only with the hash of a matching preview
 #: and a blast-radius statement (``preview_binding_required``).
 DESTRUCTIVE_PREVIEW_BINDING: Final[str] = "destructive_preview_binding"
 #: The operation asks the vendor whether its login may do the write
@@ -107,6 +107,9 @@ def not_checked(*, descriptor: EndpointDescriptor, answer: Answer) -> list[str]:
     """The checks after the gate that explain does not ask and that can refuse the call.
 
     Empty for ``deny``. For ``wait``, only the checks this operation has.
+    A ``destructive`` call that runs at once (a delete grant in sandbox
+    mode) runs only with the hash of a matching preview, so ``run`` names
+    that check too.
     """
     # Imported here: the dispatcher imports the policy modules.
     from meho_backplane.operations._park_check import park_check_registered
@@ -115,6 +118,8 @@ def not_checked(*, descriptor: EndpointDescriptor, answer: Answer) -> list[str]:
     if answer == "deny":
         return []
     if answer == "run":
+        if descriptor.safety_level == "destructive":
+            return [DESTRUCTIVE_PREVIEW_BINDING, CONNECTOR_RESOLUTION]
         return [CONNECTOR_RESOLUTION]
     names: list[str] = []
     if park_check_registered(descriptor.op_id):

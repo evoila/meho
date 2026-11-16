@@ -5,9 +5,14 @@
 
 A matrix of callers and operations runs through explain and through the
 real call. The vendor is never called: the step that would send the call
-is replaced, so a call that gets there counts as ``run``. Explain and the
-call must agree, except for a check that explain names in
+is replaced, so a call that gets there counts as ``run``. Only the
+multi-step operation really runs: its step check decides if it waits.
+Explain and the call must agree, except for a check that explain names in
 ``not_checked``.
+
+Sandbox mode is on, so the service login's delete grant lets the
+``destructive`` operation run at once. A call without a preview hash is
+then refused, and explain must name that check.
 """
 
 from __future__ import annotations
@@ -41,8 +46,15 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.operations import dispatcher as _dispatcher
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations.composite import enforce_subop_policy
+from meho_backplane.operations.governed_subops import (
+    register_governed_subops,
+    reset_governed_subop_registry,
+)
 from meho_backplane.operations.meta_tools import call_operation
+from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.policy.explain import CallQuestion, explain_call
 from meho_backplane.policy.explain_checks import (
     CONNECTOR_RESOLUTION,
@@ -52,6 +64,7 @@ from meho_backplane.policy.explain_checks import (
     PERMISSION_PREFLIGHT,
 )
 from meho_backplane.settings import get_settings
+from tests._sandbox_mode_helpers import seed_delete_grant, turn_sandbox_mode_on
 
 _TENANT = UUID("00000000-0000-0000-0000-000000006540")
 _CLAIM_LOOKUP = "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim"
@@ -81,9 +94,11 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_announce_gate_cache_for_testing()
     reset_dispatcher_caches()
     clear_registry()
+    reset_governed_subop_registry()
     yield
     reset_dispatcher_caches()
     clear_registry()
+    reset_governed_subop_registry()
     reset_broadcast_client_for_testing()
     reset_announce_gate_cache_for_testing()
     get_settings.cache_clear()
@@ -205,11 +220,32 @@ _OPS = (
     _Op("dangerous write", "vault-1.x", "vault.parity.delete"),
     _Op("ingested op, target accepts it", "widget-1.x", "POST:/items", "<widget-target>"),
     _Op("ingested op, target refuses it", _KC_CONNECTOR, "POST:/items", "<kc-target>"),
+    _Op("multi-step caution write", "vault-1.x", "vault.parity.multi"),
+    _Op("destructive delete", "vault-1.x", "vault.parity.destroy"),
 )
+_MULTI = _OPS[5]
+_DESTROY = _OPS[6]
+#: The write step of the multi-step operation. No caller has a grant on it.
+_STEP = "POST:/parity/steps"
 
 
 async def _handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {}
+
+
+async def _multi_handler(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: Any
+) -> Any:
+    gated = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_MULTI.connector_id,
+        op_id=_STEP,
+        safety_level="dangerous",
+        requires_approval=False,
+        target=target,
+        params={},
+    )
+    return gated if gated is not None else {"done": True}
 
 
 async def _seed(embedding: AsyncMock, *, announce_rule: bool) -> None:
@@ -235,6 +271,37 @@ async def _seed(embedding: AsyncMock, *, announce_rule: bool) -> None:
             embedding_service=embedding,
             safety_level=level,
         )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_DESTROY.op_id,
+        handler=_handler,
+        summary="Test op.",
+        description="Test op.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=embedding,
+        safety_level="destructive",
+        requires_approval=True,
+    )
+    await register_composite_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_MULTI.op_id,
+        handler=_multi_handler,
+        summary="Test op.",
+        description="Test op.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=embedding,
+        safety_level="caution",
+        requires_approval=False,
+    )
+    register_governed_subops(
+        composite_op_id=_MULTI.op_id, connector_id=_MULTI.connector_id, sub_op_ids=(_STEP,)
+    )
     now = datetime.now(UTC)
     async with get_sessionmaker()() as session:
         session.add(
@@ -294,7 +361,7 @@ async def _seed(embedding: AsyncMock, *, announce_rule: bool) -> None:
                 created_by_sub="seed-admin",
             )
         )
-        for op in _OPS[1:4]:
+        for op in (*_OPS[1:4], _MULTI):
             session.add(
                 ServicePrincipalGrant(
                     id=uuid.uuid4(),
@@ -308,6 +375,12 @@ async def _seed(embedding: AsyncMock, *, announce_rule: bool) -> None:
                 )
             )
         await session.commit()
+    await seed_delete_grant(
+        tenant_id=_TENANT,
+        principal_sub="svc-a",
+        op_id=_DESTROY.op_id,
+        connector_id=_DESTROY.connector_id,
+    )
     reset_announce_gate_cache_for_testing()
 
 
@@ -323,11 +396,11 @@ async def _real_call(caller: _Caller, op: _Op, send: AsyncMock) -> tuple[str, st
     if op.target is not None:
         body["target"] = op.target
     result = await call_operation(caller.operator, body)
-    if send.await_count:
-        return "run", None
     code = (result.get("extras") or {}).get("error_code")
     if code == "awaiting_approval":
         return "wait", None
+    if send.await_count and result.get("status") == "ok":
+        return "run", None
     return "deny", code if isinstance(code, str) else None
 
 
@@ -335,10 +408,17 @@ async def _mismatches(embedding: AsyncMock, *, announce_rule: bool) -> tuple[lis
     """The cases where explain and the call disagree, and every answer the calls gave."""
     await _seed(embedding, announce_rule=announce_rule)
     sent = OperationResult(status="ok", op_id="sent", duration_ms=0.0)
+    really_send = _dispatcher._execute_and_audit
+
+    async def _send(**kwargs: Any) -> OperationResult:
+        if kwargs["op_id"] == _MULTI.op_id:
+            return await really_send(**kwargs)
+        return sent
+
     found: list[str] = []
     answers: set[str] = set()
     with ExitStack() as stack:
-        send = stack.enter_context(patch(_SEND, new=AsyncMock(return_value=sent)))
+        send = stack.enter_context(patch(_SEND, new=AsyncMock(side_effect=_send)))
         stack.enter_context(patch(_CLAIM_LOOKUP, new=AsyncMock(return_value=False)))
         for caller in _CALLERS:
             for op in _OPS:
@@ -366,7 +446,10 @@ async def _mismatches(embedding: AsyncMock, *, announce_rule: bool) -> tuple[lis
 
 
 @pytest.mark.parametrize("announce_rule", [True, False], ids=["announce-on", "announce-off"])
-async def test_explain_agrees_with_the_real_call(embedding: AsyncMock, announce_rule: bool) -> None:
+async def test_explain_agrees_with_the_real_call(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, announce_rule: bool
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
     mismatches, answers = await _mismatches(embedding, announce_rule=announce_rule)
     assert mismatches == [], "\n".join(mismatches)
     # The matrix reaches every answer, so it checks each path of the call.

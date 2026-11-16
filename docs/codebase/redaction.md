@@ -546,6 +546,11 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   counts as a committed row: the call then returns its answer, also the
   hidden values of a reveal, and the short row holds the reveal choice but
   not the answer.
+  A short row has a small `error` object that MEHO builds itself. It holds
+  only `error_code` and, for a call that waits for approval or was refused,
+  `approval_request_id` (a UUID). It never holds an error text, so no text of
+  the target reaches it (`operations/audit_row_safe.py:236-252`; the full
+  list is in [audit_query.md](audit_query.md#text-the-table-cannot-store-and-the-short-row-6452)).
 - **Stored audit copy** (`fingerprint_hidden_values`). For **every** op,
   the dispatcher walks the raw answer and the default view side by side.
   Each leaf or subtree that the view hides (Tier-1 redaction, the name

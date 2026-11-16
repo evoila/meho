@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vault_creds import (
     SecretRefReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
     load_basic_credentials,
     load_param_secret_data,
@@ -168,6 +169,49 @@ async def test_param_ref_with_no_secret_stays_a_param_read_error(
     assert not isinstance(exc.value, TargetSecretNotFoundError)
     assert exc.value.param == "password_secret_ref"
     assert exc.value.cause_class == "InvalidPath"
+    assert ref not in str(exc.value)
+
+
+def _forbidden(ref: str) -> hvac.exceptions.Forbidden:
+    """The hvac error a refused KV-v2 read raises."""
+    return hvac.exceptions.Forbidden("permission denied", method="get", url=f"{_VAULT_URL}/{ref}")
+
+
+async def test_loader_marks_a_refused_read_of_the_own_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = f"tenants/{_TENANT}/linux-01"
+    install_fake_client(monkeypatch, read_exc=_forbidden(ref))
+
+    with pytest.raises(TargetSecretForbiddenError) as exc:
+        await load_basic_credentials(_Target(name="linux-01", secret_ref=ref), _operator())
+
+    # Still a Forbidden, so code that catches one keeps working.
+    assert isinstance(exc.value, hvac.exceptions.Forbidden)
+    assert isinstance(exc.value.__cause__, hvac.exceptions.Forbidden)
+    assert exc.value.target_name == "linux-01"
+    assert exc.value.secret_ref == ref
+    message = str(exc.value)
+    assert ref in message
+    assert "https://" not in message
+    assert "on get" not in message
+
+
+async def test_param_ref_vault_refuses_stays_a_param_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref = f"tenants/{_TENANT}/db-password"
+    install_fake_client(monkeypatch, read_exc=_forbidden(ref))
+
+    with pytest.raises(SecretRefReadError) as exc:
+        await load_param_secret_data(
+            _Target(name="param:password_secret_ref", secret_ref=ref),
+            _operator(),
+            param="password_secret_ref",
+        )
+
+    assert not isinstance(exc.value, TargetSecretForbiddenError)
+    assert exc.value.cause_class == "Forbidden"
     assert ref not in str(exc.value)
 
 

@@ -491,6 +491,9 @@ Keycloak write, with the reason:
 | `user.create` | yes | the new user can carry groups, roles and attributes that mappers read |
 | `user.reset_password` | yes | sets the password of any login, also of an admin, from a Vault path the requester names; whoever reads that path can sign in as that login |
 | `role_mapping.assign` | yes | gives a user realm roles |
+| `role_mapping.client.assign` | yes | gives a user roles of a client |
+| `user.update` | yes | changes a user's user name and email, which tokens carry and which a login or a password reset uses |
+| `user.credential.delete` | yes | removes a user's passkey or one-time code, so it changes how that login signs in |
 | `group.member.add` | yes | puts a user into a group and gives them its roles |
 | `group.update_attributes` | yes | group attributes fill the tenant claims of every member |
 | `authflow.ensure_approval_flow` | yes | maps the `acr` name `meho-approve` to a sign-in level; MEHO reads that `acr` claim of a token to accept an approval |
@@ -500,7 +503,7 @@ Keycloak write, with the reason:
 | `user.logout`, `user.disable`, `user.delete` | no | they only take away |
 | `user.enable` | no | turns a login back on with the roles it already has |
 | `group.create` | no | a new group has no members; adding one is `group.member.add` |
-| `group.member.remove`, `group.delete`, `client.delete`, `realm.delete` | no | they only take away |
+| `group.member.remove`, `role_mapping.client.remove`, `group.delete`, `client.delete`, `realm.delete` | no | they only take away |
 | `authflow.ensure_passkey_code_skip` | no | it adds a step to a copy of the browser sign-in flow; it writes no mapper and no `acr` name |
 
 The core has no ingested (spec-based) Keycloak operations, so the table
@@ -804,9 +807,10 @@ in. For these three, the person the change is for never approves it. In
 MEHO's own login realm another admin must approve it; a person who may
 approve their own changes cannot approve these alone. In MEHO's own login
 realm, a role of the `realm-management` client (in any case) also needs a
-platform admin as approver: it decides who may manage the realm. In another
-realm these writes are not a change of rights: the normal approval rules of
-their risk level apply, and only the person the change is for is refused.
+platform admin as approver: it decides who may manage the realm. They are also
+on the rights-change table (`rights_changes.py`, "Writes that are changes
+of rights"), so in every realm another admin must approve each call and
+the requester never approves their own request.
 
 - `keycloak.role_mapping.client.assign` and `.remove` (dangerous). Pass the
   user (`id`, or the exact `username`), `client_id` (the client's name, for

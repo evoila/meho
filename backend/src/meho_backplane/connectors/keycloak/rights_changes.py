@@ -19,10 +19,9 @@ Keycloak write is on neither table, so each new write gets this decision.
 :func:`register_rights_change_ops` registers every write of
 :data:`RIGHTS_CHANGE_OPS` with
 :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`,
-in every realm. That adds the per-call mark. The three writes of one login
-or one group (``keycloak.group.member.add``, ``keycloak.role_mapping.assign``
-and ``keycloak.group.update_attributes``) are also registered by
-:mod:`.ops_write_grant` with
+in every realm. That adds the per-call mark. The writes of one login or
+one group (``GRANT_OPS`` in :mod:`.ops_write_grant`) are also registered
+there with
 :func:`~meho_backplane.operations.grant_approval.register_grant_op`, which
 also checks who the change is for.
 """
@@ -64,6 +63,14 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
         "the new user can carry groups, roles and attributes that mappers put into tokens"
     ),
     "keycloak.role_mapping.assign": "gives a user realm roles",
+    "keycloak.role_mapping.client.assign": "gives a user roles of a client",
+    "keycloak.user.update": (
+        "changes a user's user name and email, which tokens carry and which a login "
+        "or a password reset uses"
+    ),
+    "keycloak.user.credential.delete": (
+        "removes a user's passkey or one-time code, so it changes how that login signs in"
+    ),
     "keycloak.group.member.add": "puts a user into a group and gives them its roles",
     "keycloak.group.update_attributes": ("group attributes fill the tenant claims of every member"),
     "keycloak.authflow.ensure_approval_flow": (
@@ -92,6 +99,7 @@ NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
         "a new group has no members; adding one is keycloak.group.member.add"
     ),
     "keycloak.group.member.remove": "takes a user out of a group; it only takes away",
+    "keycloak.role_mapping.client.remove": "takes client roles from a user; it only takes away",
     "keycloak.group.delete": "removes a group; it only takes away",
     "keycloak.client.delete": "removes a client; it only takes away",
     "keycloak.realm.delete": "removes a realm; it only takes away",

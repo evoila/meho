@@ -693,7 +693,7 @@ def test_page_deep_link_unknown_id_renders_page_without_drawer() -> None:
 def test_drawer_renders_resolved_substance() -> None:
     """A row's references resolve to named, linked substance, not raw GUIDs.
 
-    Principal display name (+ service marker for an agent session), target
+    Principal display name (+ service marker for a delegated actor), target
     name linked to its detail page, operation summary + group, and the
     plain-language "what happened" line -- resolved from the stores the
     backplane already has.
@@ -710,6 +710,7 @@ def test_drawer_renders_resolved_substance() -> None:
         payload_extra={"principal_name": "Ada Lovelace"},
         target_id=target_id,
         agent_session_id=uuid.uuid4(),
+        actor_sub="agent-sub-1",
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):

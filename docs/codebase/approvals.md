@@ -1186,12 +1186,13 @@ every level (`ops_write_effective_roles.py`), and puts them on the card as
 `effective_roles`. Each entry has `id`, `name`, `client_id` (`None` for a
 realm role), `realm_management` and `login_role`. `realm_management` marks
 a role of the `realm-management` client. `login_role` marks a realm role
-that MEHO's login turns into platform admin rights (the platform admin
-role names, and `JWT_PLATFORM_ADMIN_ROLE_NAME`).
+that MEHO's login turns into platform admin rights. As at login, that is
+only the realm role whose name is exactly `JWT_PLATFORM_ADMIN_ROLE_NAME`
+(same case). When the setting is unset, no role has this mark.
 
 If any part has one of these marks, `platform_admin` is true, so a platform
-admin must approve. The name of the role that was asked for does not
-decide. If MEHO cannot read all the parts (a read fails, a role is
+admin must approve. If no part has a mark, `platform_admin` is false. The
+name of the role that was asked for does not decide. If MEHO cannot read all the parts (a read fails, a role is
 missing, more than 500 roles, nesting deeper than 10 levels),
 `effective_roles` is `None` and `platform_admin` is the strict case.
 Outside the login realm the list is empty and nothing changes.

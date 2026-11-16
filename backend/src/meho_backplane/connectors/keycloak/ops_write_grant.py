@@ -48,13 +48,13 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import find_grou
 from meho_backplane.connectors.keycloak.ops_write_effective_roles import (
     ROLE_PARTS_CHANGED,
     effective_roles,
-    platform_role_names,
 )
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
 from meho_backplane.operations.grant_approval import register_grant_op
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
@@ -223,8 +223,15 @@ def _roles_include_platform_admin(ctx: PreviewContext) -> bool | None:
     """Whether the roles include the platform admin role; ``None`` when that cannot be read."""
     raw = ctx.params.get("roles")
     names = {str(r).strip().casefold() for r in raw} if isinstance(raw, list) else set()
-    wanted = platform_role_names()
-    return None if wanted is None else bool(names & wanted)
+    if names & {PLATFORM_ADMIN_GROUP.casefold(), "platform_admin"}:
+        return True
+    try:
+        configured = get_settings().jwt_platform_admin_role_name
+    except Exception:
+        return None
+    if not configured:
+        return False
+    return configured.casefold() in names
 
 
 async def _with_effective_roles(
@@ -232,9 +239,10 @@ async def _with_effective_roles(
 ) -> bool | None:
     """Put the effective roles on the card; return the platform admin fact they decide.
 
-    Outside MEHO's own login realm the list is empty and the fact is unchanged.
-    A list MEHO cannot read makes the fact strict (``None``) unless it was
-    already ``True``.
+    In MEHO's own login realm a list MEHO could read decides alone: the name of
+    the asked-for role does not count. A list MEHO cannot read makes the fact
+    strict (``None``) unless it was already ``True``. Outside the login realm
+    the list is empty and the fact is unchanged.
     """
     connector = _live_connector(ctx)
     roles: list[dict[str, Any]] | None = []
@@ -251,8 +259,7 @@ async def _with_effective_roles(
         preview["effective_roles"] = roles
         if roles is None:
             return True if platform else None
-        if any(r["realm_management"] or r["login_role"] for r in roles):
-            return True
+        return any(r["realm_management"] or r["login_role"] for r in roles)
     else:
         preview["effective_roles"] = roles
     return platform

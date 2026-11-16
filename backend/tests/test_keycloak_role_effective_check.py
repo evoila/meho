@@ -79,7 +79,12 @@ _PARTS: dict[str, list[dict[str, Any]]] = {
     "r-4": [_ROLES["platform_admin"]],
 }
 _CLIENTS = {"realm-management": _MGMT_UUID, "app": _APP_UUID}
-_CLIENT_ROLES = {_APP_UUID: {"editor": _role("a-1", "editor", client=_APP_UUID)}}
+_CLIENT_ROLES = {
+    _APP_UUID: {
+        "editor": _role("a-1", "editor", client=_APP_UUID),
+        "platform_admin": _role("a-2", "platform_admin", client=_APP_UUID),
+    }
+}
 
 
 def _connector(
@@ -171,7 +176,10 @@ async def test_a_plain_role_keeps_the_usual_rule() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_part_that_the_login_maps_to_platform_rights_is_marked() -> None:
+async def test_a_part_that_the_login_maps_to_platform_rights_is_marked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(f"{_EFFECTIVE}.get_settings", lambda: _Settings("platform_admin"))
     connector, _ = _connector()
 
     card = await _card(_realm_ctx("admin-realm", connector))
@@ -185,12 +193,55 @@ async def test_a_part_that_the_login_maps_to_platform_rights_is_marked() -> None
 async def test_the_configured_platform_role_name_is_marked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(f"{_EFFECTIVE}.get_settings", lambda: _Settings("VIEWER"))
+    monkeypatch.setattr(f"{_EFFECTIVE}.get_settings", lambda: _Settings("viewer"))
     connector, _ = _connector()
 
     card = await _card(_realm_ctx("reporting", connector))
 
+    assert {r["name"] for r in card["effective_roles"] if r["login_role"]} == {"viewer"}
     assert card["grant"]["platform_admin"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [None, "VIEWER", "Platform_Admin"])
+async def test_only_the_exact_configured_role_name_is_marked(
+    monkeypatch: pytest.MonkeyPatch, configured: str | None
+) -> None:
+    # The login matches only JWT_PLATFORM_ADMIN_ROLE_NAME, by exact name.
+    monkeypatch.setattr(f"{_EFFECTIVE}.get_settings", lambda: _Settings(configured))
+    connector, _ = _connector({"r-1": [_ROLES["viewer"]], "r-4": [_ROLES["platform_admin"]]})
+
+    for role in ("reporting", "admin-realm"):
+        card = await _card(_realm_ctx(role, connector))
+
+        assert not any(r["login_role"] for r in card["effective_roles"])
+        assert card["grant"]["platform_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_role_named_like_a_platform_role_without_rights_needs_no_platform_admin() -> None:
+    connector, _ = _connector()
+
+    card = await _card(_realm_ctx("platform_admin", connector))
+
+    assert [r["name"] for r in card["effective_roles"]] == ["platform_admin"]
+    assert card["grant"]["platform_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_client_role_named_like_a_platform_role_needs_no_platform_admin() -> None:
+    connector, _ = _connector()
+    ctx = _ctx(
+        _CLIENT_ROLE,
+        {"id": _OTHER_USER, "client_id": "app", "roles": ["platform_admin"]},
+        realm=_REALM,
+        connector=connector,
+    )
+
+    card = await _card(ctx)
+
+    assert card["effective_roles"][0]["login_role"] is False
+    assert card["grant"]["platform_admin"] is False
 
 
 @pytest.mark.asyncio

@@ -43,7 +43,6 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import (
     opt_str,
 )
 from meho_backplane.connectors.keycloak.session import quote_segment
-from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -72,18 +71,17 @@ ROLE_PARTS_CHANGED: Final[str] = (
 
 
 def platform_role_names() -> set[str] | None:
-    """The case-folded realm role names that MEHO's login turns into platform admin rights.
+    """The realm role names that MEHO's login turns into platform admin rights.
 
-    ``None`` when the settings cannot be read.
+    The login gives these rights for one realm role only: the exact name in
+    ``JWT_PLATFORM_ADMIN_ROLE_NAME``. Unset, no role gives them. ``None`` when
+    the settings cannot be read.
     """
-    names = {ADMIN_GROUPS[1].casefold(), "platform_admin"}
     try:
         configured = get_settings().jwt_platform_admin_role_name
     except Exception:
         return None
-    if configured:
-        names.add(configured.casefold())
-    return names
+    return {configured} if configured else set()
 
 
 def _sort_key(role: dict[str, Any]) -> tuple[str, str, str]:
@@ -178,7 +176,7 @@ async def _entry(
         "name": name,
         "client_id": owner,
         "realm_management": owner is not None and owner.casefold() == REALM_MANAGEMENT_CLIENT,
-        "login_role": owner is None and name.casefold() in platform,
+        "login_role": owner is None and name in platform,
     }
 
 

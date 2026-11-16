@@ -166,6 +166,13 @@ class Connector(ABC):
     #: site. ``None`` (the default) leaves the column empty for this row.
     summary: str | None = None
 
+    #: Other names people and models use for :attr:`product`, for example
+    #: ``("vcenter", "vsphere")`` for a VMware connector. With the switch
+    #: ``CONNECTOR_LIST_PRODUCT_ALIASES`` on, a ``product`` filter of
+    #: ``meho_connector_list`` also matches these names (case is ignored).
+    #: The connector declares them; the core only reads them.
+    product_aliases: tuple[str, ...] = ()
+
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it
     # explicitly opts into a shim tier: ``GenericRestConnector`` sets

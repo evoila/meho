@@ -3746,11 +3746,20 @@ definition, and drive the write through a <strong>scheduled</strong> run of
 that definition. Four steps:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># 1. Register the agent principal (mints its client_credentials client;</span>
 <span class="c1">#    the output includes the client id you pass to --identity-ref below).</span>
-meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>nightly-writer
+<span class="c1">#    --grants none: no starting grant. Then give it one grant for the</span>
+<span class="c1">#    write it makes, on the one target, with needs-approval. The target</span>
+<span class="c1">#    UUID is the id: line of `meho targets describe &lt;target-name&gt;`.</span>
+<span class="c1">#    With AGENT_GRANT_REQUIRED=on, an agent with no grant is refused, so</span>
+<span class="c1">#    the write would never wait for you. The grant never lets the write</span>
+<span class="c1">#    run alone: it still waits for a person's approval.</span>
+meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>nightly-writer<span class="w"> </span>--grants<span class="w"> </span>none
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:nightly-writer<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span>&lt;write-op-id&gt;<span class="w"> </span>--target<span class="w"> </span>&lt;target-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
 
 <span class="c1"># 2. Author an agent definition bound to that principal. Its toolset and</span>
 <span class="c1">#    prompt are what perform the write when the definition runs.</span>
-<span class="c1">#    All four flags are required.</span>
+<span class="c1">#    All four flags are required. It needs no --grants: the agent</span>
+<span class="c1">#    already has its grant from step 1.</span>
 meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>nightly-writer<span class="w"> </span>--identity-ref<span class="w"> </span>agent:nightly-writer<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"&lt;what the agent does&gt;"</span>
@@ -3768,9 +3777,12 @@ meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="
 meho<span class="w"> </span>approvals<span class="w"> </span>list
 meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;id&gt;
 </code></pre></div>
-<p>Every agent request above <code>safe</code> waits for a person. For a <code>dangerous</code>
-or <code>destructive</code> write, the person who approves must be a
-MEHO-SA-Operator or a MEHO-Admin.</p>
+<p>An agent request above <code>safe</code> waits for a person when a grant of the
+agent covers it (a <code>deny</code> grant refuses it). With no grant, it
+depends on the switch <code>AGENT_GRANT_REQUIRED</code>: with <code>off</code> (the default)
+or <code>observe</code> it waits for a person too, and with <code>on</code> it is refused
+(<code>agent_no_grant</code>). For a <code>dangerous</code> or <code>destructive</code> write, the
+person who approves must be a MEHO-SA-Operator or a MEHO-Admin.</p>
 <div class="admonition warning">
 <p class="admonition-title">It must be an <em>autonomous</em> run, not a <em>delegated</em> one</p>
 <p>Only an <strong>autonomous / scheduled</strong> agent run parks the request under

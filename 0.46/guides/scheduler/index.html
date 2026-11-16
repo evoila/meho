@@ -3694,8 +3694,11 @@ explanation is in the <a href="../sensors-quickstart/">Sensors quickstart</a>.</
 <span class="w">  </span>--severity<span class="w"> </span>critical
 </code></pre></div>
 <p><strong>2. Make a small agent that can only read.</strong> First give it a login. Then
-create it, and give it two grants: deny everything, then allow the pod list.</p>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>pod-reader
+create it, and give it two grants: deny everything, then allow the pod list.
+<code>--grants none</code> picks no starting grant, because the two grants come last.
+MEHO asks for this pick when the switch <code>AGENT_GRANT_REQUIRED</code> is <code>observe</code>
+or <code>on</code> (see <a href="../hosted-agents/#starting-grants-pick-them-when-you-create-the-agent">Hosted agents</a>).</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>pod-reader<span class="w"> </span>--grants<span class="w"> </span>none
 
 cat<span class="w"> </span>&gt;<span class="w"> </span>pod-reader-toolset.json<span class="w"> </span><span class="s">&lt;&lt;'JSON'</span>
 <span class="s">{</span>
@@ -3709,7 +3712,8 @@ meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> 
 <span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. If the answer is a link to a stored result, read all rows with result_query. Say in short plain sentences which pods are not running."</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--toolset<span class="w"> </span>@pod-reader-toolset.json
+<span class="w">  </span>--toolset<span class="w"> </span>@pod-reader-toolset.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grants<span class="w"> </span>none
 
 meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader<span class="w"> </span>--op<span class="w"> </span><span class="s1">'*'</span><span class="w"> </span>--verdict<span class="w"> </span>deny
 meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:pod-reader<span class="w"> </span><span class="se">\</span>

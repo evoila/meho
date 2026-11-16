@@ -3411,8 +3411,12 @@ cover the dangerous risk level.</p>
 <li><strong>An agent makes the requests</strong> and you approve them. This is the
   agent-requester pattern in
   <a href="../approvals-and-break-glass/#option-2-the-agent-requester-pattern">Approvals and break-glass</a>.
-  The agent needs no grant for this: an agent's <code>dangerous</code> request
-  waits for a person's approval by default.</li>
+  The agent needs a grant only when the switch
+  <code>AGENT_GRANT_REQUIRED</code> is <code>on</code>. With <code>off</code> (the default) or
+  <code>observe</code>, an agent's <code>dangerous</code> request waits for a person's
+  approval also with no grant. With <code>on</code>, a request with no grant
+  is refused. A grant never lets it run alone: it still waits for a
+  person's approval.</li>
 </ul>
 <p>The group operations stay at the dangerous risk level (decision
 record:
@@ -3689,14 +3693,37 @@ the new tenant, but its Vault identity is written through your current
 tenant's Vault target, like every identity in Step 6. So the Vault
 writes below wait for your current approver, as before.</p>
 <ol>
-<li><strong>Register the agent.</strong> The new <code>tenant_admin</code>, logged in to the new
+<li>
+<p><strong>Register the agent.</strong> The new <code>tenant_admin</code>, logged in to the new
    tenant, registers the agent principal. The test write
    (<code>vault.kv.put</code>, risk level <code>caution</code>) and the cleanup
-   (<code>vault.kv.delete</code>, risk level <code>dangerous</code>) both wait for approval
-   without a grant: an agent's request above <code>safe</code> always waits for a
-   person.</li>
+   (<code>vault.kv.delete</code>, risk level <code>dangerous</code>) must wait for a
+   person's approval. What the agent needs for that depends on the
+   switch <code>AGENT_GRANT_REQUIRED</code>:</p>
+</li>
+<li>
+<p><code>off</code> (the default) or <code>observe</code>: both wait for approval, also
+     with no grant.</p>
+</li>
+<li><code>on</code>: with no grant, both are refused (<code>agent_no_grant</code>). With a
+     grant, both wait for approval.</li>
 </ol>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>tenant-check
+<p>So register the agent with no starting grant (<code>--grants none</code>). The
+   new tenant has no target yet. After you add the Vault target below,
+   you give the agent two grants with <code>needs-approval</code>: one for
+   <code>vault.kv.put</code> and one for <code>vault.kv.delete</code>, both on that target
+   only. Then the write and the cleanup wait for a person in every
+   state of the switch. What else the agent may run also depends on
+   the switch:</p>
+<ul>
+<li><code>on</code>: nothing else. Every other call is refused
+     (<code>agent_no_grant</code>).</li>
+<li><code>off</code> or <code>observe</code>: the two grants do not limit the agent. A call
+     that no grant covers gets the default for its risk level: a
+     <code>safe</code> read runs at once, on any target of the tenant. A call
+     above <code>safe</code> waits for a person's approval.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>tenant-check<span class="w"> </span>--grants<span class="w"> </span>none
 </code></pre></div>
 <ol>
 <li><strong>Find the agent's login id.</strong> The agent logs in to Vault with its own
@@ -3722,18 +3749,33 @@ writes below wait for your current approver, as before.</p>
    the agent's entity id together.</p>
 </li>
 <li>
-<p><strong>Create the agent definition and schedule the run.</strong> Follow the
-   four steps of the agent-requester pattern. The run must be a
+<p><strong>Create the agent definition and schedule the run.</strong> Do this after
+   you added the Vault target and the agent's grants below. Follow
+   steps 2 to 4 of the agent-requester pattern (step 1 is the
+   registration above). The agent then has a grant, so
+   <code>meho agent create</code> needs no <code>--grants</code>. The run must be a
    scheduled one. An agent you start by hand acts for you, and the
    request then carries your <code>sub</code>, so you could not approve it.</p>
 </li>
 </ol>
 <p>The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
-with the person's own token. Then write one test secret, let the
-approver approve it, and read it back:</p>
+with the person's own token:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>vault-main<span class="w"> </span>--product<span class="w"> </span>vault<span class="w"> </span>--host<span class="w"> </span>vault.example.com<span class="w"> </span>--no-secret-ref
-meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test<span class="w"> </span>--data<span class="w"> </span><span class="s1">'{"ok": "yes"}'</span>
+</code></pre></div>
+<p><strong>With the agent requester:</strong> give the agent its two grants now. A grant
+names its target by UUID: it is the <code>id:</code> line of <code>meho targets describe</code>.
+Then do step 4 above.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>describe<span class="w"> </span>vault-main
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:tenant-check<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span>vault.kv.put<span class="w"> </span>--target<span class="w"> </span>&lt;vault-main-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:tenant-check<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span>vault.kv.delete<span class="w"> </span>--target<span class="w"> </span>&lt;vault-main-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
+</code></pre></div>
+<p>Then write one test secret, let the approver approve it, and read it
+back. With the agent requester, the scheduled run makes the write and
+the cleanup:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test<span class="w"> </span>--data<span class="w"> </span><span class="s1">'{"ok": "yes"}'</span>
 <span class="c1"># The approver, logged in to the new tenant:</span>
 meho<span class="w"> </span>approvals<span class="w"> </span>list
 meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;

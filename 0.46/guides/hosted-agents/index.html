@@ -4339,7 +4339,15 @@ let a <code>caution</code>, <code>dangerous</code> or <code>destructive</code> o
 these always wait for a person's approval. An agent never approves.</p>
 <p>Grants only check operations that run through <code>call_operation</code>. The
 discovery tools (<code>meho_connector_list</code>, <code>list_operation_groups</code>,
-<code>search_operations</code>, <code>list_targets</code>) are not affected by grants.</p>
+<code>search_operations</code>, <code>list_targets</code>) are not affected by grants.
+A docs lookup that names a target (<code>search_docs</code> or <code>ask_docs</code> with
+<code>target</code>) is checked like a <code>safe</code> call on that target. With <code>off</code> or
+<code>observe</code>, it runs when no grant covers it or when a grant with
+<code>auto-execute</code> covers it. With <code>on</code>, it runs only when a grant with
+<code>auto-execute</code> covers it. A <code>needs-approval</code> or <code>deny</code> grant refuses it
+in every state, because a docs lookup cannot wait for approval. The
+grants are matched on the operation <code>meho.docs.search</code> (for <code>search_docs</code>)
+and <code>meho.docs.ask</code> (for <code>ask_docs</code>).</p>
 <h3 id="recipe-a-read-only-agent-for-one-operation-on-one-target">Recipe: a read-only agent for one operation on one target<a class="headerlink" href="#recipe-a-read-only-agent-for-one-operation-on-one-target" title="Permanent link">&para;</a></h3>
 <p>Use this recipe to allow one operation only. Goal: <code>pod-reader</code> may run
 <code>k8s.pod.list</code> on <code>cluster-a</code>, without approval. Everything else is

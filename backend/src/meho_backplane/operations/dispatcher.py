@@ -2419,7 +2419,7 @@ async def _handle_http_status_error(
     typed handler or a multi-step operation may have sent a write first. So
     the repeat is gated by :func:`may_resend_after_session_end`, the same
     rule as the "session ended" hook below: only a ``safe`` operation, or an
-    ingested one that sent one request, and never a run after an approval.
+    ingested one that sent one request outside a run after an approval.
     Otherwise the session is dropped and the caller gets
     ``connector_auth_failed`` (:func:`_session_ended_not_resent`). The
     recovery is gated strictly on the auth-class set; a 5xx / timeout --

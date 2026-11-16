@@ -50,6 +50,8 @@ Almost every pull request that changes behaviour adds a row to the upgrade
 tables. Do not edit the tables. Add one file per row:
 `docs/upgrade-rows/<version>/<short-name>.md`, with a `## Note` and an
 `## Action` section of one line each (see `docs/upgrade-rows/README.md`).
+A link in a row must be a full `https://` address, because the same row
+goes into both tables.
 `mkdocs build` adds the rows to the end of the table in
 `docs-site/install/upgrades.md`. The release pull request runs
 `python3 scripts/ci/upgrade_rows.py --write`, which adds them to the end of

@@ -132,6 +132,12 @@ def test_two_rows_for_one_version_do_not_touch_the_same_file(tmp_path: Path) -> 
         ("## Note\nA\n\n## Other\nC\n", "unknown section"),
         ("Stray text\n## Note\nA\n\n## Action\nC\n", "before the first"),
         ("## Note\n<<<<<<< HEAD\n\n## Action\nC\n", "conflict marker"),
+        ("## Note\nA\n\n## Action\nSee [setup](keycloak-realm.md).\n", "keycloak-realm.md"),
+        ("## Note\nA\n\n## Action\nSee [it](../guides/x.md#a).\n", "full address"),
+        ("## Note\nSee [above](#upgrading).\n\n## Action\nC\n", "full address"),
+        ("## Note\nA\n\n## Action\nSee [it]( <docs/x.md> ).\n", "full address"),
+        ("## Note\nA\n\n## Action\nSee [it](http://x.example/a).\n", "full address"),
+        ("## Note\nA\n\n## Action\nSee [it][ref].\n", "reference link"),
     ],
 )
 def test_broken_row_file_fails(tmp_path: Path, body: str, match: str) -> None:
@@ -233,3 +239,18 @@ def test_an_unreleased_row_need_not_be_in_deploying(tmp_path: Path) -> None:
     rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n")
     _row_file(rows_dir, "v0.2.0", "x", _GOOD)
     ur.check_released_rows(tmp_path, rows_dir)
+
+
+def test_a_linked_row_reaches_both_tables_with_the_same_full_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows_dir = _repo_copy(tmp_path, "## [Unreleased]\n")
+    url = "https://evoila.github.io/meho/latest/install/keycloak-realm/#the-approval-level"
+    _row_file(rows_dir, "v0.2.0", "x", f"## Note\nA change.\n\n## Action\nSee [setup]({url}).\n")
+    line = f"| **v0.2.0** | A change. | See [setup]({url}). |"
+    monkeypatch.setattr(ur, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ur, "ROWS_DIR", rows_dir)
+
+    assert line in ur.on_page_markdown(_TABLE, _Page(), None, None).splitlines()
+    ur.write_deploying(tmp_path, rows_dir)
+    assert line in (tmp_path / ur.DEPLOYING).read_text(encoding="utf-8").splitlines()

@@ -18,7 +18,9 @@ row is its own file::
     What the operator does.
 
 Each section is one line of text. The version is the folder name, for
-example ``v0.48.0``.
+example ``v0.48.0``. A link in a row must be a full ``https://`` address:
+the same row goes into two tables in two folders, so a relative link would
+work in one of them only.
 
 This file does four things:
 
@@ -66,6 +68,13 @@ _MARKER_RE = re.compile(r"^(<{7}|={7}|>{7})(\s|$)")
 _SECTIONS = ("Note", "Action")
 _PIPE_RE = re.compile(r"(?<!\\)\|")
 _RELEASED_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
+# Inline link "](target" and reference link "][label]".
+_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]*)|\]\[")
+_LINK_HINT = (
+    "write the full address, for example https://evoila.github.io/meho/latest/install/upgrades/ "
+    "for a docs site page or https://github.com/evoila/meho/blob/main/docs/deploying.md "
+    "for a repo file"
+)
 
 
 class UpgradeRowError(Exception):
@@ -117,6 +126,14 @@ def _parse_row_file(path: Path, version: str, rows_dir: Path) -> Row:
             )
         if _PIPE_RE.search(lines[0]):
             raise UpgradeRowError(f"{where}: section '{name}' holds a '|'; write '\\|'")
+        for link in _LINK_RE.finditer(lines[0]):
+            target = link.group(1)
+            if target is None or not target.startswith("https://"):
+                shown = "a reference link" if target is None else repr(target)
+                raise UpgradeRowError(
+                    f"{where}: section '{name}' has {shown}; a row goes into two "
+                    f"tables in two folders, so {_LINK_HINT}"
+                )
         cells[name] = lines[0]
     return Row(version, path.stem, cells["Note"], cells["Action"])
 

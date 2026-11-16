@@ -73,6 +73,7 @@ type fakeFeedRecord struct {
 	Authorization string
 	LastEventID   string
 	WorkRef       string
+	SessionID     string
 	Query         string
 }
 
@@ -155,6 +156,7 @@ func newFakeFeed(t *testing.T, status int, frames [][]byte, dropMid bool) *fakeF
 			Authorization: r.Header.Get("Authorization"),
 			LastEventID:   r.Header.Get("Last-Event-Id"),
 			WorkRef:       r.Header.Get(api.WorkRefHeader),
+			SessionID:     r.Header.Get(api.SessionIDHeader),
 			Query:         r.URL.RawQuery,
 		})
 		if feed.status != http.StatusOK {
@@ -548,6 +550,62 @@ func TestRunWatch_WorkRefHeaderOnConnectAndReconnect(t *testing.T) {
 	for i, rec := range records[:2] {
 		if rec.WorkRef != ref {
 			t.Errorf("request %d: %s = %q; want %q", i, api.WorkRefHeader, rec.WorkRef, ref)
+		}
+	}
+}
+
+// TestRunWatch_SessionIDHeaderOnConnectAndReconnect — the login session
+// id of the stored token reaches the feed as the Meho-Session-Id header,
+// on the first connection and again on the reconnect after a drop.
+func TestRunWatch_SessionIDHeaderOnConnectAndReconnect(t *testing.T) {
+	xdg := withTempXDG(t)
+	target := "vcenter-a"
+	frames := [][]byte{
+		makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.list", "read", "ok", &target), "1715600000000-0"),
+		makeFrame("broadcast", canonicalEventJSON(t, "alice", "vsphere.vm.create", "write", "ok", &target), "1715600000001-0"),
+	}
+	feed := newFakeFeed(t, http.StatusOK, frames, true) // drop after first frame
+	seedWatchCreds(t, xdg, feed.URL, jwtMarker)
+	store, err := auth.NewFileStore()
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	sessionID := auth.NewSessionID()
+	service, user := auth.KeyForBackplane(feed.URL)
+	if err := store.Save(service, user, auth.StoredToken{
+		BackplaneURL: feed.URL,
+		AccessToken:  jwtMarker,
+		Expiry:       time.Now().Add(time.Hour),
+		SessionID:    sessionID,
+	}); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runWatch(ctx, watchOptions{
+			BackplaneURL: feed.URL,
+			Stdout:       &bytes.Buffer{},
+			Stderr:       &bytes.Buffer{},
+			HTTPClient:   feed.client(),
+			Backoff:      fastBackoff,
+		})
+	}()
+
+	feed.waitForRequests(t, 2, 2*time.Second)
+	cancel()
+	<-done
+
+	records := feed.Records()
+	if len(records) < 2 {
+		t.Fatalf("expected at least 2 requests (initial + reconnect); got %d", len(records))
+	}
+	for i, rec := range records[:2] {
+		if rec.SessionID != sessionID {
+			t.Errorf("request %d: %s = %q; want %q", i, api.SessionIDHeader, rec.SessionID, sessionID)
 		}
 	}
 }

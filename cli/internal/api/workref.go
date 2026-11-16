@@ -69,3 +69,13 @@ func SetWorkRefHeader(req *http.Request) {
 		req.Header.Set(WorkRefHeader, ref)
 	}
 }
+
+// SetSessionIDHeader sets the Meho-Session-Id header on req when
+// sessionID is not empty. The AuthedClient request editor calls it for
+// every generated-client call; hand-rolled backplane requests call it
+// next to their Authorization header, with AuthedClient.SessionID.
+func SetSessionIDHeader(req *http.Request, sessionID string) {
+	if sessionID != "" {
+		req.Header.Set(SessionIDHeader, sessionID)
+	}
+}

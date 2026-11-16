@@ -316,6 +316,7 @@ func runBroadcastWatch(cmd *cobra.Command, opts watchOptions) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
 	req.Header.Set("Accept", "text/event-stream")
+	api.SetSessionIDHeader(req, client.SessionID())
 	api.SetWorkRefHeader(req)
 	api.SetTenantHeader(req)
 	resp, err := client.HTTPClient().Do(req)

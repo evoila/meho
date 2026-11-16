@@ -45,7 +45,7 @@ versions that a person ran against a real system, are on the
 ### In evoila's enterprise pack
 
 The enterprise pack is a commercial add-on. It brings the VMware and
-VCF connectors, and connectors for Fortinet and CrowdStrike products,
+VCF connectors, and connectors for Fortinet, CrowdStrike and Dell NetWorker products,
 as a signed package on top of the public image. To get the pack,
 contact evoila.
 
@@ -74,6 +74,7 @@ contact evoila.
 | Fortinet FortiMail | 7.2 to 7.x | not yet recorded |
 | Fortinet FortiSIEM | 7.4 to 7.x | `fortisiem-rest-7.5`: not yet recorded. `fortisiem-rest-7.4`: not yet recorded. |
 | CrowdStrike Falcon | cloud service | not yet recorded |
+| Dell NetWorker | 19.x | not yet recorded |
 <!-- live-tests:end -->
 
 ## State

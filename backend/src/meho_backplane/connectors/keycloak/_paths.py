@@ -57,6 +57,9 @@ __all__ = [
     "_AUTH_FLOW_EXECUTIONS_PATH",
     "_CLIENT_ROLE_PATH",
     "_CLIENT_ROLE_USERS_PATH",
+    "_CLIENT_SCOPE_PATH",
+    "_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH",
+    "_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH",
     "_EVENTS_CONFIG_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
@@ -80,6 +83,13 @@ _CLIENT_PROTOCOL_MAPPERS_PATH = (
     "/admin/realms/{realm}/clients/{client-uuid}/protocol-mappers/models"
 )
 _CLIENT_SCOPES_PATH = "/admin/realms/{realm}/client-scopes"
+_CLIENT_SCOPE_PATH = "/admin/realms/{realm}/client-scopes/{client-scope-id}"
+_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH = (
+    "/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models"
+)
+_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH = (
+    "/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models/{id}"
+)
 _USERS_PATH = "/admin/realms/{realm}/users"
 _USER_PATH = "/admin/realms/{realm}/users/{user-id}"
 _USER_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings"

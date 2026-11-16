@@ -126,9 +126,8 @@ dispatcher's `connector_error` branch.
    backend; for the Vault backend:
 3. **Fail closed on empty JWT (Vault backend only, #2642).** If
    `operator.raw_jwt` is empty — a system-initiated call: topology
-   scheduler, readiness probe, the runbook verify dispatch's synthetic
-   operator (`runbooks/run_service.py::_build_operator_for_dispatch`), or
-   the sensor check-runner with no principal configured — raise
+   scheduler, readiness probe, or the sensor check-runner with no
+   principal configured — raise
    `VaultCredentialsReadError` before any Vault network round-trip. Vault's
    only auth model here is the operator's JWT, so such a call must error
    rather than silently fall back to a backplane identity (the decision's
@@ -391,9 +390,6 @@ per-target vendor credentials where it previously failed closed:
 - the sensor check-runner (`checks/runner.py`), the motivating case;
 - the topology-refresh scheduler's `_system_operator`
   (`topology/scheduler.py`);
-- `runbooks/run_service.py::_build_operator_for_dispatch`'s operator, which
-  is reconstructed from `operator_sub` and **not validated from a bearer
-  token**;
 - the legacy `execute()` shims in ~15 connectors (`postgres`, `keycloak`,
   `rabbitmq`, `loki`, `mongodb`, `mssql`, …), whose own docstrings still assert they
   "fail closed in the credential loader" — untrue on GSM since #2642.

@@ -513,6 +513,26 @@ async def test_rest_list_shows_the_taxonomy_and_entries() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("ops")
+async def test_rest_list_does_not_show_a_label_that_breaks_the_rule() -> None:
+    document = {
+        "classifications": [
+            {"match": {"group": "vm"}, "labels": {"team": "ops", "note": "x" * 256}},
+            {"match": {"op": "clsedit.vm.*"}, "labels": {"zone": "a", "note": "two\nlines"}},
+        ]
+    }
+    async with get_sessionmaker()() as session:
+        session.add(TenantPolicy(tenant_id=_TENANT, document=document, set_by_sub="fixture"))
+        await session.commit()
+    listing = _call("GET", "/api/v1/policy/classification", role=TenantRole.OPERATOR)
+    assert listing.status_code == 200, listing.text
+    assert [entry["labels"] for entry in listing.json()["entries"]] == [
+        {"team": "ops"},
+        {"zone": "a"},
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "body", "match"),
     [

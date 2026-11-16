@@ -28,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from meho_backplane import op_classes
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -44,6 +45,8 @@ from meho_backplane.db.models import (
     AgentPermission,
     ApprovalRequest,
     ApprovalRequestStatus,
+    EndpointDescriptor,
+    OperationPolicyOverride,
     PermissionVerdict,
     RunApproval,
     ServicePrincipalGrant,
@@ -62,6 +65,12 @@ from meho_backplane.operations.grant_approval import (
     is_rights_change_op,
     register_grant_op,
     register_rights_change_op,
+)
+from meho_backplane.operations.op_policy import (
+    EffectivePolicy,
+    OpPolicyEditError,
+    _with_floors,
+    apply_policy_edit,
 )
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
 from meho_backplane.operations.run_approvals import (
@@ -113,19 +122,49 @@ def _machine(kind: PrincipalKind, sub: str = _SERVICE_SUB) -> Operator:
     )
 
 
+def _is_write(kwargs: dict[str, Any]) -> bool:
+    """A write is any op that is not a ``safe`` read without approval tagged ``read-only``.
+
+    So a write registered as ``safe`` without approval still counts.
+    """
+    plain_read = (
+        kwargs["safety_level"] == "safe"
+        and not kwargs["requires_approval"]
+        and "read-only" in (kwargs.get("tags") or ())
+    )
+    return not plain_read
+
+
 async def _registered_writes(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     """Every Keycloak op the connector registers that is not a plain read."""
-    seen: dict[str, tuple[str, bool]] = {}
+    seen: dict[str, dict[str, Any]] = {}
 
     async def _capture(**kwargs: Any) -> None:
-        seen[kwargs["op_id"]] = (kwargs["safety_level"], kwargs["requires_approval"])
+        seen[kwargs["op_id"]] = kwargs
 
     monkeypatch.setattr(
         "meho_backplane.operations.typed_register.register_typed_operation", _capture
     )
     await KeycloakConnector.register_operations()
     assert seen, "the connector registered no operations"
-    return {op for op, (level, approval) in seen.items() if level != "safe" or approval}
+    return {op for op, kwargs in seen.items() if _is_write(kwargs)}
+
+
+@pytest.mark.parametrize(
+    ("level", "approval", "tags", "write"),
+    [
+        ("safe", False, ["read-only", "user", "keycloak"], False),
+        ("safe", False, ["user", "keycloak"], True),
+        ("safe", False, None, True),
+        ("caution", False, ["read-only"], True),
+        ("safe", True, ["read-only"], True),
+    ],
+)
+def test_the_guard_sees_a_write_registered_as_safe(
+    level: str, approval: bool, tags: list[str] | None, write: bool
+) -> None:
+    kwargs = {"safety_level": level, "requires_approval": approval, "tags": tags}
+    assert _is_write(kwargs) is write
 
 
 @pytest.mark.asyncio
@@ -370,3 +409,100 @@ async def test_an_agent_call_waits_even_with_a_grant_that_runs_it() -> None:
 
     waits = {op_id: await _gate(agent, op_id) for op_id in _RIGHTS}
     assert waits == dict.fromkeys(_RIGHTS, PermissionVerdict.NEEDS_APPROVAL)
+
+
+# -- approval stays on: no operation setting turns it off ---------------------
+
+
+def _platform_admin() -> Operator:
+    return Operator(
+        sub="person-platform-admin",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+
+
+async def _install_row(session: Any, op_id: str) -> EndpointDescriptor:
+    return (
+        await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.tenant_id.is_(None), EndpointDescriptor.op_id == op_id
+            )
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _RIGHTS)
+async def test_an_edit_that_turns_approval_off_is_refused(op_id: str) -> None:
+    await KeycloakConnector.register_operations()
+    async with get_sessionmaker()() as session:
+        with pytest.raises(OpPolicyEditError) as caught:
+            await apply_policy_edit(
+                session,
+                row=await _install_row(session, op_id),
+                scope_tenant_id=None,
+                operator=_platform_admin(),
+                safety_level=None,
+                requires_approval=False,
+                reason="fixture: try to turn approval off",
+                person_present=True,
+                tighten_only=False,
+                max_age_seconds=300,
+            )
+        overrides = (await session.execute(select(OperationPolicyOverride))).scalars().all()
+
+    assert caught.value.code == "approval_off_rights_change"
+    assert "another admin" in str(caught.value)
+    assert overrides == []
+
+
+@pytest.mark.asyncio
+async def test_an_older_override_with_approval_off_does_not_let_the_call_run() -> None:
+    await KeycloakConnector.register_operations()
+    # Written straight to the table, past the edit check.
+    async with get_sessionmaker()() as session:
+        for op_id in (*_RIGHTS, _CONTROL):
+            session.add(
+                OperationPolicyOverride(
+                    tenant_id=None,
+                    product="keycloak",
+                    version="26.x",
+                    impl_id="keycloak-admin",
+                    op_id=op_id,
+                    requires_approval=False,
+                    reason="fixture: stored before the floor",
+                    set_by_sub="person-platform-admin",
+                )
+            )
+        await session.commit()
+    person = Operator(
+        sub=_REQUESTER,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        web_session=True,
+    )
+
+    waits = {op_id: await _gate(person, op_id) for op_id in _RIGHTS}
+    assert waits == dict.fromkeys(_RIGHTS, PermissionVerdict.NEEDS_APPROVAL)
+    assert await _gate(person, _CONTROL) is PermissionVerdict.AUTO_EXECUTE
+
+
+def test_every_registered_change_of_rights_keeps_approval() -> None:
+    import meho_backplane.connectors.policy  # noqa: F401 -- registers its changes of rights
+
+    registered = set(grant_approval._GRANT_OPS) | set(grant_approval._RIGHTS_CHANGE_OPS)
+    assert set(RIGHTS_CHANGE_OPS) <= registered
+    assert len(registered) > len(RIGHTS_CHANGE_OPS)
+    off = EffectivePolicy(safety_level="safe", requires_approval=False)
+
+    kept = {
+        op_id: _with_floors(EndpointDescriptor(op_id=op_id, parameter_schema={}), off)
+        for op_id in sorted(registered)
+    }
+    assert {op_id: p.requires_approval for op_id, p in kept.items()} == dict.fromkeys(
+        sorted(registered), True
+    )

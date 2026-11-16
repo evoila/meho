@@ -34,13 +34,8 @@ declare_op_classes(
     ),
 )
 
-# These four change who can sign in to a realm and with what rights. No
-# standing grant and no run approval covers them: a person approves each call.
-declare_per_call_approval(
-    (
-        "keycloak.role_mapping.client.assign",
-        "keycloak.role_mapping.client.remove",
-        "keycloak.user.update",
-        "keycloak.user.credential.delete",
-    )
-)
+# Takes client roles away from a login. No standing grant and no run
+# approval covers it: a person approves each call. The writes that are
+# changes of rights get this mark when they are registered
+# (:mod:`.rights_changes`), so they are not listed here.
+declare_per_call_approval(("keycloak.role_mapping.client.remove",))

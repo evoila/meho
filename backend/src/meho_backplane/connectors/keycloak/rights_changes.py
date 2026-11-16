@@ -4,8 +4,9 @@
 """Which Keycloak writes are changes of rights.
 
 MEHO reads a person's rights from the login token, and Keycloak builds
-that token. So a Keycloak write that can change what a token says, or who
-has which role, is a change of rights. For each such write:
+that token. So a Keycloak write that can change what a token says, who
+has which role, who may sign in, or how strong a sign-in is, is a change
+of rights. For each such write:
 
 * the requester never approves their own request;
 * another admin (a tenant admin or a platform admin) must approve it;
@@ -34,7 +35,8 @@ from meho_backplane.operations.grant_approval import register_rights_change_op
 
 __all__ = ["NOT_RIGHTS_CHANGE_OPS", "RIGHTS_CHANGE_OPS", "register_rights_change_ops"]
 
-#: op_id -> how the write can change what a token says or who has a role.
+#: op_id -> how the write can change what a token says, who has a role,
+#: who may sign in, or how strong a sign-in is.
 RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     "keycloak.realm.create": (
         "the realm body can hold users, groups, roles, clients, mappers and default roles"
@@ -56,8 +58,7 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     ),
     "keycloak.protocol_mapper.create": "a protocol mapper decides which claims a token holds",
     "keycloak.user.reset_password": (
-        "sets the password of any login, also of an admin, from a Vault path the "
-        "requester names; whoever reads that path can sign in as that login"
+        "a new password for a login is a change of rights; another admin approves it"
     ),
     "keycloak.user.create": (
         "the new user can carry groups, roles and attributes that mappers put into tokens"
@@ -71,11 +72,20 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     "keycloak.user.credential.delete": (
         "removes a user's passkey or one-time code, so it changes how that login signs in"
     ),
+    "keycloak.user.enable": "turns a login on, so it decides who may sign in",
+    "keycloak.user.required_actions.update": (
+        "sets the steps a user must do at the next sign-in, such as setting up a "
+        "passkey or a one-time code, so it changes how strong that sign-in is"
+    ),
     "keycloak.group.member.add": "puts a user into a group and gives them its roles",
     "keycloak.group.update_attributes": ("group attributes fill the tenant claims of every member"),
     "keycloak.authflow.ensure_approval_flow": (
         "maps the acr name 'meho-approve' to a sign-in level in the realm; MEHO reads "
         "that acr claim of a token to accept an approval"
+    ),
+    "keycloak.authflow.ensure_passkey_code_skip": (
+        "binds MEHO's own copy of the browser sign-in flow, so it changes the steps "
+        "and the strength of every sign-in in the realm"
     ),
     "keycloak.authflow.ensure_approval_touch": (
         "adds or changes the client's 'amr' protocol mapper, which puts a claim into "
@@ -83,17 +93,12 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     ),
 }
 
-#: op_id -> why the write cannot change what a token says or who has a role.
+#: op_id -> why the write cannot change what a token says, who has a role,
+#: who may sign in, or how strong a sign-in is.
 NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
-    "keycloak.user.required_actions.update": (
-        "changes the steps a user must do at the next sign-in, not roles or claims"
-    ),
     "keycloak.user.check_login": "tests one sign-in and changes nothing",
     "keycloak.user.logout": "ends sessions; it only takes away",
     "keycloak.user.disable": "turns a login off; it only takes away",
-    "keycloak.user.enable": (
-        "turns a login back on with the roles it already has; it gives no role or claim"
-    ),
     "keycloak.user.delete": "removes a user; it only takes away",
     "keycloak.group.create": (
         "a new group has no members; adding one is keycloak.group.member.add"
@@ -103,10 +108,6 @@ NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     "keycloak.group.delete": "removes a group; it only takes away",
     "keycloak.client.delete": "removes a client; it only takes away",
     "keycloak.realm.delete": "removes a realm; it only takes away",
-    "keycloak.authflow.ensure_passkey_code_skip": (
-        "binds MEHO's own copy of the browser sign-in flow; it writes no mapper and "
-        "no acr name, so it changes sign-in steps, not roles or claims"
-    ),
 }
 
 

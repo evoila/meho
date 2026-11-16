@@ -858,8 +858,12 @@ Every Keycloak user write shares one helper,
 `connectors/keycloak/ops_write_user_identity.py`. It covers
 `user.disable`, `user.enable`, `user.logout`, `user.reset_password`,
 `user.delete`, `user.required_actions.update`, `role_mapping.assign`,
-`group.member.add` and `group.member.remove` (these two name the user as
-`user_id`).
+`role_mapping.client.assign`, `role_mapping.client.remove`, `user.update`,
+`user.credential.delete`, `group.member.add` and `group.member.remove`
+(these two name the user as `user_id`). That is 13 ops. A test
+(`test_every_keycloak_user_write_uses_the_shared_user_check`) finds every
+Keycloak write op that takes a user id and a `username`, and fails when one
+of them does not use this check.
 
 - A request with both an id and a `username` must name one user. The
   username stored in Keycloak for that id must match (case does not

@@ -172,9 +172,14 @@ _FAILING_READS = [httpx.Response(500, json={}) for _ in range(4)]
 
 
 def _mount_token(mock: respx.MockRouter) -> None:
+    """Mount the admin token and the user read of the shared user check.
+
+    A test that mounts its own user read replaces this one (same route).
+    """
     mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
         200, json={"access_token": "kc-admin-token", "expires_in": 300}
     )
+    mock.get(_USER_PATH).respond(200, json={"id": _USER_UUID, "username": "jane.example"})
 
 
 def _mount_client_and_roles(
@@ -465,7 +470,7 @@ async def test_update_changes_only_the_fields_that_were_sent(kc: KeycloakConnect
     assert result["status"] == "ok", result
     assert result["result"] == {
         "id": _USER_UUID,
-        "username": None,
+        "username": "jane.example",
         "requested_fields": ["email"],
         "applied_fields": ["email"],
         "not_applied": [],

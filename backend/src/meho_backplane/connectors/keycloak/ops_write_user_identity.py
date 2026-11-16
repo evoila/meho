@@ -9,7 +9,9 @@ user. This module is the one place that checks it, for these ops:
 ``keycloak.user.disable``, ``keycloak.user.enable``,
 ``keycloak.user.reset_password``, ``keycloak.user.logout``,
 ``keycloak.user.delete``, ``keycloak.user.required_actions.update``,
-``keycloak.role_mapping.assign``, ``keycloak.group.member.add`` and
+``keycloak.role_mapping.assign``, ``keycloak.role_mapping.client.assign``,
+``keycloak.role_mapping.client.remove``, ``keycloak.user.update``,
+``keycloak.user.credential.delete``, ``keycloak.group.member.add`` and
 ``keycloak.group.member.remove`` (these two name the user as ``user_id``).
 ``keycloak.user.delete`` keeps its own approval card and lookup, and uses
 :func:`card_user_id` and :func:`check_card_username` for its approved run.

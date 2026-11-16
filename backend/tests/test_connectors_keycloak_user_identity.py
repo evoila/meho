@@ -177,7 +177,13 @@ _USER_OP_PARAMS: dict[str, dict[str, Any]] = {
     "keycloak.user.logout": {},
     "keycloak.user.reset_password": {"password_secret_ref": "kv/made-up/password"},
     "keycloak.role_mapping.assign": {"roles": ["viewer"]},
+    "keycloak.role_mapping.client.assign": {"client_id": "event-app", "roles": ["viewer"]},
+    "keycloak.role_mapping.client.remove": {"client_id": "event-app", "roles": ["viewer"]},
+    "keycloak.user.update": {"changes": {"email": "new-guest@example.invalid"}},
+    "keycloak.user.credential.delete": {"credential_type": "otp"},
 }
+_CREDENTIALS_PATH = f"{_USER_PATH}/credentials"
+_OTP_CREDENTIAL = {"id": "cred-otp-1", "type": "otp", "userLabel": "phone", "createdDate": 1}
 _MEMBER_OPS = ("keycloak.group.member.add", "keycloak.group.member.remove")
 
 
@@ -462,6 +468,7 @@ async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
         mock.get(f"/admin/realms/{_REALM}/groups/{_GROUP_UUID}").respond(
             200, json={"id": _GROUP_UUID, "name": "event-guests", "path": "/event-guests"}
         )
+        mock.get(_CREDENTIALS_PATH).respond(200, json=[_OTP_CREDENTIAL])
         writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
         call = await call_operation(_operator(), _call_args(op_id, params))
         assert call["status"] == "awaiting_approval", call
@@ -469,8 +476,10 @@ async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
         user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
         resumed = await _approve_and_resume(request_id)
     assert resumed.status != "ok"
-    # Some ops withhold the error text, so the check is on the error class.
-    assert "ValueError" in str(resumed.model_dump(mode="json"))
+    # Some ops withhold the error text, so the check is on the error class. A
+    # rights change can stop one step earlier: its card cannot be checked again.
+    dumped = str(resumed.model_dump(mode="json"))
+    assert "ValueError" in dumped or "object_changed_since_approval" in dumped, dumped
     assert not writes.called
 
 
@@ -491,6 +500,31 @@ async def test_a_username_request_is_refused_when_the_user_is_renamed(
     assert not put.called
 
 
+async def test_a_client_role_remove_by_name_is_refused_when_the_name_moves_to_another_user(
+    kc: KeycloakConnector,
+) -> None:
+    other_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    params = {"username": "event-guest", "client_id": "event-app", "roles": ["viewer"]}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        lookup = mock.get(_USERS_PATH).respond(200, json=[_user(True)])
+        user_read = _mount_user(mock, _user(True))
+        mock.get(f"{_USERS_PATH}/{other_uuid}").respond(200, json={**_user(True), "id": other_uuid})
+        writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
+        call = await call_operation(
+            _operator(), _call_args("keycloak.role_mapping.client.remove", params)
+        )
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        # While the request waits, the user is renamed and another user takes the name.
+        user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
+        lookup.respond(200, json=[{**_user(True), "id": other_uuid}])
+        resumed = await _approve_and_resume(request_id)
+    assert resumed.status != "ok"
+    assert "ValueError" in str(resumed.model_dump(mode="json"))
+    assert not writes.called
+
+
 # ---------------------------------------------------------------------------
 # What the card shows
 # ---------------------------------------------------------------------------
@@ -507,13 +541,12 @@ async def _card(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
     return card
 
 
-@pytest.mark.parametrize(
-    "op_id", [_DISABLE, "keycloak.user.logout", "keycloak.role_mapping.assign"]
-)
+@pytest.mark.parametrize("op_id", [_DISABLE, "keycloak.user.logout", *sorted(_USER_OP_PARAMS)])
 async def test_card_shows_the_stored_name_for_an_id(kc: KeycloakConnector, op_id: str) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         _mount_user(mock, _user(True))
+        mock.get(_CREDENTIALS_PATH).respond(200, json=[_OTP_CREDENTIAL])
         card = await _card(op_id, {"id": _USER_UUID, **_USER_OP_PARAMS.get(op_id, {})})
     assert card["id"] == _USER_UUID
     assert card["username"] == "event-guest"

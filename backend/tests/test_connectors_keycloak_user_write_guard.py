@@ -24,7 +24,6 @@ import respx
 
 import meho_backplane.connectors.keycloak as keycloak_package
 import meho_backplane.operations.typed_register as typed_register
-from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.operations._park_check import _PARK_CHECKS
 from tests.test_connectors_keycloak_user_identity import (  # noqa: F401  (fixtures)
     _GROUP_UUID,
@@ -71,7 +70,7 @@ async def _user_writes(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
             found[kwargs["op_id"]] = "user_id" if "user_id" in id_keys else "id"
 
     monkeypatch.setattr(typed_register, "register_typed_operation", _capture)
-    await KeycloakConnector.register_operations()
+    await keycloak_package.KeycloakConnector.register_operations()
     return found
 
 
@@ -89,7 +88,7 @@ async def test_every_keycloak_user_write_uses_the_shared_user_check(
 
 
 async def test_every_keycloak_user_write_refuses_an_id_and_a_username_of_different_users(
-    kc: KeycloakConnector,  # noqa: F811
+    kc: keycloak_package.KeycloakConnector,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with monkeypatch.context() as patch:

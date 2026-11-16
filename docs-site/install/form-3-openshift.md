@@ -9,11 +9,14 @@ them from the cluster and keeps them in shell variables, and every later
 command uses those. Copy each block as it is.
 
 - **Tested with:** MEHO v0.45.0 (chart 0.45.0) on a single-node
-  OpenShift 4.22, online, in November 2026. Steps 0 to 7 were followed
-  as written: an admin of one project installed MEHO, every pod ran
-  under OpenShift's default security rule `restricted-v2` with no extra
-  rights, `install-verify.sh` and `check-openbao-unseal.sh` passed. The
-  offline part (Step 2) was not run on OpenShift yet.
+  OpenShift 4.22, online, in November 2026, with `REL=meho`. An admin
+  of one project installed MEHO, every pod ran under OpenShift's
+  default security rule `restricted-v2` with no extra rights, and
+  `install-verify.sh` and `check-openbao-unseal.sh` passed. That run
+  took the usual path: Steps 0, 1.1, 1.2 A, 1.3 (a default class
+  existed), 3.1, 3.4, 4, 5.1 to 5.4, 6 and 7. Not run on OpenShift
+  yet: Step 1.2 B, your own certificate (1.4), Step 2 (no internet),
+  the files of 3.2 and 3.3, Step 5.5 and Step 8.
 - **The general guide:** [Form 3: your Kubernetes](form-3-your-kubernetes.md)
   explains the same install for any Kubernetes. This page is the
   OpenShift version, with every command.
@@ -41,6 +44,8 @@ Two people take part. They can be the same person.
   everything `kubectl` does here, so `oc` alone is enough too.
 - [Helm](https://helm.sh/) 3.8 or newer.
 - `curl`, `jq` and `uuidgen`.
+- `skopeo`, only for Step 2 (no internet) and Step 3.3 (v0.46.0 or
+  newer).
 - The `meho` command line, the same version as the install. See
   [Tools for your laptop](laptop-tools.md#step-2-install-the-meho-command-line).
 
@@ -202,7 +207,7 @@ MEHO answers on HTTPS at `https://$HOST`, and HTTPS needs a certificate
 for that name. There are two ways to get one:
 
 - **Self-signed (a test).** You do nothing here. The install makes its
-  own certificate for `$HOST`, in the Secret `meho-core-tls`. No laptop
+  own certificate for `$HOST`, in the Secret `$REL-core-tls`. No laptop
   trusts it by itself, so [Step 5.2](#52-trust-the-certificate) saves it
   to a file and makes `curl` and your laptop trust it.
 - **Your company's certificate (a real install).** Your security or PKI
@@ -368,7 +373,8 @@ This file:
 - sets the ingress class `openshift-default`. OpenShift's router turns
   MEHO's Ingress into Routes, so you install no ingress controller;
 - names the Secret `meho-core-tls` for the certificate, the one the
-  install makes when you bring none;
+  install makes when you bring none. Your `values.yaml` below sets the
+  same name with your release name, `$REL-core-tls`;
 - turns the network rules off (#4050). In a data center the router runs
   on the host network, so the rules would block it. MEHO can then reach
   every network the cluster can reach.
@@ -383,20 +389,24 @@ image:
   tag: v$VER
 ingress:
   host: $HOST
+  tls:
+    secretName: $REL-core-tls
 coreKeycloak:
   hostname: $HOST
   firstTenantId: "$(uuidgen | tr A-Z a-z)"
 uiConsole:
   enabled: true
-  secretName: meho-core-ui-auth
+  secretName: $REL-core-ui-auth
 config:
   uiKeycloakClientId: meho-web
 EOF
 cat values.yaml
 ```
 
-You should see your host name twice and a UUID. The `uiConsole` and
-`config` lines turn on the web console at `/ui/`.
+You should see your host name twice, a UUID, and two Secret names that
+start with your release name. The chart makes those two Secrets itself
+only under these names. The `uiConsole` and `config` lines turn on the
+web console at `/ui/`.
 
 ### 3.2 The files you need only in some cases
 
@@ -516,8 +526,8 @@ kubectl -n $NS get pods -w
 What happens, in order:
 
 1. A setup Job makes every password and key, and keeps them in Secrets
-   named `meho-core-*`. Without your own certificate, it also makes the
-   self-signed one in `meho-core-tls`.
+   named `$REL-core-*`. Without your own certificate, it also makes the
+   self-signed one in `$REL-core-tls`.
 2. PostgreSQL, Keycloak, OpenBao, Valkey (the store of the live
    activity) and MEHO start. A second Job sets up OpenBao.
 3. MEHO's database migrations end, and MEHO starts.
@@ -549,7 +559,8 @@ kubectl -n $NS get pvc
 kubectl -n $NS get ingress,route
 ```
 
-You should see:
+You should see, with `REL=meho` (other release names change the start
+of each name):
 
 ```text
 NAME                       READY   STATUS      RESTARTS   AGE
@@ -584,7 +595,7 @@ pod (for example `1000750000`). It is never `999` or `1001`.
 **With the self-signed certificate**, save its authority:
 
 ```bash
-kubectl -n $NS get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > $W/meho-ca.crt
+kubectl -n $NS get secret $REL-core-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > $W/meho-ca.crt
 CA=(--cacert $W/meho-ca.crt)
 ```
 
@@ -645,12 +656,12 @@ bash install-verify.sh --host $HOST --namespace $NS --release $REL --expected-gi
 You should see six lines that start with `[ok]`, and at the end:
 
 ```text
-install-verify.sh: 6 passed, 0 failed, 0 warned
+install-verify.sh: 6 passed, 0 failed, 1 warned
 [ok]   MEHO is up
 ```
 
-A warning `wall-clock ... > budget 300s` is fine: it measures the time
-since Step 4. If the first two checks fail but the HTTP checks pass,
+The warning `wall-clock ... > budget 300s` is fine: it measures the time
+since Step 4, which is longer than 5 minutes when you install by hand. If the first two checks fail but the HTTP checks pass,
 your `oc login` has ended: see [Common problems](#common-problems).
 
 ### 5.5 The install check with a login
@@ -754,7 +765,7 @@ The install notes also name a third login, the **console admin**: a
 user of Keycloak's own realm `master`, for Keycloak's admin page (for
 example to connect a company directory). MEHO itself refuses this
 login. Its user name and temporary password are in the Secret
-`meho-core-console-admin`. You do not need it for this guide.
+`$REL-core-console-admin`. You do not need it for this guide.
 
 ### 6.3 Delete the login file
 
@@ -768,7 +779,7 @@ rm -P $W/first-login.txt 2>/dev/null || shred -u $W/first-login.txt
 
 OpenBao, MEHO's built-in password safe, needs its unseal key after
 every restart. The install keeps the key in the Secret
-`meho-core-vault-unseal`, so OpenBao unseals itself.
+`$REL-core-vault-unseal`, so OpenBao unseals itself.
 
 ### 7.1 Save the key
 
@@ -829,6 +840,10 @@ the Secrets with the passwords and keys, and the objects of the setup
 Jobs. Delete them together, or none of them. New passwords do not match
 old data, and old passwords do not match a new database.
 
+The Secrets go by the label of the setup Job, which every MEHO install
+uses. So with two installs in one project, this also deletes the other
+one's Secrets: remove the whole project instead (below).
+
 ```bash
 helm uninstall $REL -n $NS --wait
 kubectl -n $NS delete pvc -l app.kubernetes.io/instance=$REL
@@ -837,8 +852,9 @@ kubectl -n $NS delete configmap,serviceaccount,role,rolebinding -l app.kubernete
 kubectl -n $NS get all,pvc,secrets,configmaps,serviceaccounts,roles,rolebindings
 ```
 
-You should see `release "meho" uninstalled`, then the two disks, the
-`meho-core-*` Secrets and the objects of the setup Jobs deleted. The
+You should see `release "meho" uninstalled` (with your release name),
+then the two disks, the `$REL-core-*` Secrets and the objects of the
+setup Jobs deleted. The
 Routes go with the Ingress. The last command shows only:
 
 - what Step 1 and Step 2 made: the installer's RoleBinding (and
@@ -866,8 +882,8 @@ kubectl get pv | grep " $NS/" || echo "no disk left"
 | `install-verify.sh` fails `no Deployment matching ...` and `helm release status='unknown'`, but the HTTP checks pass | Your `oc login` has ended: an OpenShift login lasts 24 hours by default. `oc whoami` then says `Unauthorized`. Run `oc login $API -u <your user>` again, then the check again. |
 | `apps=` is empty in Step 0 | `oc` is not logged in. Run `oc login $API` (or the **Copy login command** of the web console), then Step 0 again. |
 | A pod never appears; an event says `unable to validate against any security context constraint` | A pod asks for a fixed user id. Check that you passed `values-openshift.yaml` first in Step 4 (`global.openshift: true`). Do not give the project `anyuid`. |
-| `meho-vault-0` does not start, or restarts again and again | With v0.46.0 or newer: the plain OpenBao image does not run with OpenShift's user ids. Make the file of Step 3.3. `kubectl -n $NS logs $REL-vault-0 -c bao --tail=20` shows the reason. |
-| `meho-vault-0` stops with `CPU does not support x86-64-v3` | The UBI OpenBao image needs a newer CPU. See [OpenBao unseal key](openbao-unseal-key.md#which-image-and-which-cpu). |
+| `$REL-vault-0` does not start, or restarts again and again | With v0.46.0 or newer: the plain OpenBao image does not run with OpenShift's user ids. Make the file of Step 3.3. `kubectl -n $NS logs $REL-vault-0 -c bao --tail=20` shows the reason. |
+| `$REL-vault-0` stops with `CPU does not support x86-64-v3` | The UBI OpenBao image needs a newer CPU. See [OpenBao unseal key](openbao-unseal-key.md#which-image-and-which-cpu). |
 | A pod stays in `ImagePullBackOff` | `kubectl -n $NS describe pod <pod> \| tail -5` shows the reason. `i/o timeout`: no internet, do Step 2. `unauthorized`: the pull login (Step 2.5). `not found`: an image is missing (Step 2.2). |
 | `x509: certificate signed by unknown authority` in a pull | The nodes do not trust your registry (Step 2.4). |
 | The copy of the MEHO image stops with `499` or `504` | A proxy in front of your registry cuts the long upload of its 240 MB layer. Run the copy close to the registry, or raise the proxy's timeout. |

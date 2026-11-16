@@ -614,7 +614,7 @@
         "knowledgeUpkeepEnabled": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "Start the weekly knowledge upkeep job: it merges duplicate entries, retires expired ones and writes one report per tenant. Rendered into `KNOWLEDGE_UPKEEP_ENABLED`. Default `\"true\"`. See `docs/codebase/kb.md`."
+          "description": "Start the weekly knowledge upkeep job: it merges duplicate entries, retires expired ones and writes one report per tenant. Rendered into `KNOWLEDGE_UPKEEP_ENABLED`. Default `\"false\"`: the job changes which entries knowledge search returns, so an operator turns it on. See `docs/codebase/kb.md`."
         },
         "knowledgeUpkeepIntervalSeconds": {
           "type": "integer",

@@ -22,15 +22,10 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, RunApproval
-from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
+from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import as_utc, target_kinds_enabled
-from meho_backplane.operations.service_grants import (
-    always_wait_grant_reason,
-    caller_address_grant_reason,
-    credential_read_grant_reason,
-    delete_grant_reason,
-)
+from meho_backplane.operations.service_grants import never_covered_reason
 
 __all__ = ["consult_and_record_run_approval"]
 
@@ -75,25 +70,22 @@ def _target_fields(target: Any) -> tuple[uuid.UUID | None, str | None]:
 
 
 def _never_covered(descriptor: EndpointDescriptor) -> bool:
-    from meho_backplane.settings import get_settings
+    """True when no run approval covers *descriptor*.
 
-    secret_reason = credential_read_grant_reason(
-        descriptor.op_id, getattr(descriptor, "op_class", None)
-    )
-    if secret_reason is not None:
+    The rule of a standing grant (:func:`never_covered_reason`), plus an
+    operation that runs a command as root on the host.
+    """
+    never = never_covered_reason(descriptor)
+    if never is not None and never[0] == "credential_read":
         _log.info(
-            "run_approval_refused_credential_read", op_id=descriptor.op_id, reason=secret_reason
+            "run_approval_refused_credential_read",
+            op_id=descriptor.op_id,
+            reason=(
+                f"A run approval cannot cover {descriptor.op_id}: it reads a credential, "
+                "so a person approves each call."
+            ),
         )
-        return True
-    if (
-        is_root_shell(descriptor.op_id)
-        or needs_per_call_approval(descriptor.op_id)
-        or caller_address_grant_reason(descriptor) is not None
-        or always_wait_grant_reason(descriptor) is not None
-    ):
-        return True
-    patterns = get_settings().service_grant_delete_shaped_patterns
-    return delete_grant_reason(descriptor.op_id, patterns, descriptor) is not None
+    return never is not None or is_root_shell(descriptor.op_id)
 
 
 async def _find_covering(

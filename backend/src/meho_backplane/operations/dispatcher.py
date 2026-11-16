@@ -3617,6 +3617,7 @@ async def _handle_needs_approval(
     preview_hash: str | None = None,
     idempotency_key: str | None = None,
     reveal_secret: bool = False,
+    wait_reason: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -3624,6 +3625,8 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+    *wait_reason* is the reason of the policy gate; the request audit row
+    keeps it.
 
     When the op's check before the wait for approval refuses the call
     (:func:`~meho_backplane.operations._park_check.park_check_refusal`), the
@@ -3800,6 +3803,7 @@ async def _handle_needs_approval(
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
                 category=descriptor.policy_category,
+                wait_reason=wait_reason,
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -4360,6 +4364,7 @@ async def _dispatch_now(
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
                     reveal_secret=reveal_secret,
+                    wait_reason=gate_reason,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds

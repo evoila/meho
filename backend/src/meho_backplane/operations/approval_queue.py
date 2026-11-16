@@ -1533,6 +1533,7 @@ async def create_pending_request(
     reveal_secret: bool = False,
     rights_change: bool = False,
     category: str | None = None,
+    wait_reason: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1615,6 +1616,8 @@ async def create_pending_request(
             (the looked-up row's ``policy_category``). Approver routing
             matches a ``category`` entry on it
             (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
+        wait_reason: Why the policy gate made the call wait. The
+            ``approval.request`` audit row keeps it as ``wait_reason``.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1780,6 +1783,7 @@ async def create_pending_request(
         path="approval.request",
         status_code=_APPROVAL_STATUS_CODE,
         duration_ms=0.0,
+        extra_payload={"wait_reason": wait_reason} if wait_reason else None,
     )
 
     _log().info(

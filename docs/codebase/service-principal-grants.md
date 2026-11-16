@@ -102,6 +102,12 @@ and grant create refuses such a grant — `caller_address_grant_reason`), and an
 op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
 `msad.group.add-member`, `msad.group.remove-member` and `secret.move`): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
+At call time one function gives these refusals: `never_covered_reason` in
+`service_grants.py`. It returns the kind and the reason of the first that
+holds: a credential read, per-call approval, a caller-address field,
+always wait, a delete sign. The run approval gate uses the same function
+([run-approvals.md](run-approvals.md)). Only a delete sign leaves room for
+a sandbox delete grant.
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).

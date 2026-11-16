@@ -89,13 +89,14 @@ When none covers the call, it calls `consult_and_record_run_approval`:
 
 - It reads the run reference from `work_ref_var` (bound from
   `Meho-Work-Ref`). No run reference: no cover.
-- It never covers an operation with a delete sign (the same rule as the
-  standing grants, `service_grants.delete_grant_reason`: the
+- It never covers an operation that `service_grants.never_covered_reason`
+  names: one that reads a credential (see below), one a connector marks
+  for per-call approval, one that connects to an address the caller
+  gives, one classified to always wait, or one with a delete sign (the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
-  delete name or pattern), an operation that connects to an address the
-  caller gives, an operation that runs a command as root on the host, an
-  operation a connector marks for per-call approval, or an operation that
-  reads a credential (see below). Those wait for a person on each call.
+  delete name or pattern). The standing grant check uses the same
+  function. On top of it, a run approval never covers an operation that
+  runs a command as root on the host. Those wait for a person on each call.
 - It looks for a live row: same tenant, same token subject (`sub`), same
   run reference, approved, not revoked, not ended, before `expires_at`.
   The key is the `sub`, never a client name.
@@ -177,11 +178,16 @@ operation. A run approval never covers such an operation, the same rule
 as for a standing grant (`service_grants.credential_read_grant_reason`):
 
 - At call time `_never_covered` in `run_approval_gate.py` refuses it, and
-  logs `run_approval_refused_credential_read` with the same reason text as
-  the standing grant path. The call gets the same answer as with no run
-  approval: a read that shows a secret waits for a person. The shadow
-  evaluator (`policy/floors.py::run_approval_may_clear`) gives the same
-  answer.
+  logs `run_approval_refused_credential_read` with the reason "A run
+  approval cannot cover OP: it reads a credential, so a person approves
+  each call." The call gets the same answer as with no run approval: a
+  read that shows a secret waits for a person. The shadow evaluator
+  (`policy/floors.py::run_approval_may_clear`) gives the same answer.
+- When such a service call waits, its reason ends with "the operation
+  reads a credential, so no standing grant and no run approval covers it;
+  a person approves each call" (`_validate.CREDENTIAL_READ_WAIT_NOTE`).
+  The `approval.request` audit row of the wait keeps the reason of the
+  policy gate in `payload.wait_reason`.
 - This also holds for a row that a person approved before the upgrade
   that brought the rule: the gate reads the class at call time, not from
   the row.

@@ -109,6 +109,7 @@ from meho_backplane.agents.grant_schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, AgentPrincipal
+from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 
 __all__ = ["AgentGrantService", "GrantValidationError"]
 
@@ -317,6 +318,8 @@ class AgentGrantService:
             names no registered, non-revoked agent principal in the
             tenant (the grant would be unenforceable).
         """
+        if payload.principal_sub == WHAT_IF_SUB:
+            raise GrantValidationError(WHAT_IF_SUB_REFUSAL)
         _validate_op_pattern(payload.op_pattern)
         _validate_target_scope(payload.target_scope)
         _validate_expires_at(payload.expires_at)

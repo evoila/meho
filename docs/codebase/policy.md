@@ -234,7 +234,7 @@ waiting with an unknown approver set.
 
 ## Endpoints and CLI
 
-Every route takes `scope` (`tenant`, the default, or `install`). Callers:
+Every file route takes `scope` (`tenant`, the default, or `install`). Callers:
 `tenant_admin` or platform admin; `install` needs a platform admin. The
 import is human-only.
 
@@ -245,6 +245,7 @@ import is human-only.
 | `POST /api/v1/policy/import` | `meho policy import FILE` | 202 with the approval request; 200 "No change."; 422 with mistakes; 409 with the switch off |
 | `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
 | `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
+| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
 
 Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `cli/internal/cmd/policy/`.

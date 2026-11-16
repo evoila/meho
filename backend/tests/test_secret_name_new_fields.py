@@ -284,3 +284,29 @@ async def test_keycloak_user_update_preview_hides_shared_names() -> None:
     card = await _user_update_preview(ctx)  # type: ignore[arg-type]
     assert card is not None
     assert card["changes"] == {"email": "j@example.com", "snmpAuthKey": REDACTED}
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"community_strings": [_VALUE]},
+        {"snmpAuthKey": {"inner": _VALUE}},
+        {"password": [{"note": f"see {_VALUE}"}]},
+        {"rows": [{"shared_secret": [[_VALUE]]}]},
+    ],
+)
+def test_uploaded_value_inside_a_list_or_object_goes_to_quarantine(node: Any) -> None:
+    """No plain string sits under a secret name here: only the inner value can trip the check."""
+    assert check_part(json.dumps(node).encode()).unclear is True
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"password": {"enabled": True, "length": 12}},
+        {"community_strings": []},
+        {"snmpAuthKey": ["[REDACTED:api_key]"]},
+    ],
+)
+def test_uploaded_list_or_object_without_a_value_stays_clear(node: Any) -> None:
+    assert check_part(json.dumps(node).encode()).unclear is False

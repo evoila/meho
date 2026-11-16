@@ -122,6 +122,17 @@ def _is_a_value(value: str) -> bool:
     return len(value) >= 6 and not _NOT_A_VALUE.match(value)
 
 
+def _holds_a_value(node: object) -> bool:
+    """Whether *node*, or any string inside a list or object of it, is a value."""
+    if isinstance(node, str):
+        return _is_a_value(node)
+    if isinstance(node, list):
+        return any(_holds_a_value(item) for item in node)
+    if isinstance(node, dict):
+        return any(_holds_a_value(item) for item in node.values())
+    return False
+
+
 def _has_unclear_secret(text: str) -> bool:
     """A ``name=value`` pair of :data:`_UNCLEAR_SECRET`, or a quoted pair whose
     name the shared name rule hides (:func:`iter_quoted_secret_fields`)."""
@@ -175,7 +186,7 @@ class _JsonWalk:
                     or is_snmp_community_key(node, key, in_snmp=in_snmp)
                     or (secret_pair and key == "value")
                 )
-                if secret_name and isinstance(checked, str) and _is_a_value(checked):
+                if secret_name and _holds_a_value(checked):
                     self.unclear = True
                 result[key] = checked
             return result

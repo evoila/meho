@@ -10,7 +10,8 @@ go through MEHO's own Keycloak admin client
 they always ask the realm MEHO uses for sign-in, never a Keycloak target.
 
 * :func:`find_realm_user` -- a person by Keycloak user id or by exact
-  username.
+  username. A user id is any string: a person from a linked user
+  directory can have an id that is not a UUID.
 * :func:`user_in_tenant` -- whether the person is in a role group of one
   tenant. A role group carries the tenant in its ``meho_tenant``
   attribute (``<tenant-uuid>:<tenant>:<Role>``) or its ``tenant_id``
@@ -105,23 +106,18 @@ async def _user_by_name(kc: KeycloakAdminClient, username: str) -> RealmUser | N
     return found[0] if found else None
 
 
-async def find_realm_user(kc: KeycloakAdminClient, user: str) -> RealmUser:
+async def find_realm_user(kc: KeycloakAdminClient, user: str, *, by_id: bool = False) -> RealmUser:
     """Return the person with Keycloak user id *user*, else with username *user*.
 
     The username must match exactly (upper and lower case do not count).
-    Raises :class:`RealmUserNotFoundError` when no person matches.
+    With *by_id*, only the user id counts. Raises
+    :class:`RealmUserNotFoundError` when no person matches.
     """
     wanted = user.strip()
     if not wanted:
         raise RealmUserNotFoundError("no person given")
-    found: RealmUser | None = None
-    try:
-        uuid.UUID(wanted)
-    except ValueError:
-        pass
-    else:
-        found = await _user_by_id(kc, wanted)
-    if found is None:
+    found = await _user_by_id(kc, wanted)
+    if found is None and not by_id:
         found = await _user_by_name(kc, wanted)
     if found is None:
         raise RealmUserNotFoundError(f"MEHO's sign-in realm has no person {wanted!r}")

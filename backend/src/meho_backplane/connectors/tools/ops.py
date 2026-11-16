@@ -272,9 +272,7 @@ async def _find_in_tenant(
 ) -> RealmUser:
     """Find *user* in MEHO's sign-in realm and in *tenant_id*, else raise."""
     async with KeycloakAdminClient.from_settings(settings) as kc:
-        found = await find_realm_user(kc, user)
-        if by_id and found.id != user:
-            raise RealmUserNotFoundError(f"no person with id {user!r}")
+        found = await find_realm_user(kc, user, by_id=by_id)
         if not await user_in_tenant(kc, found.id, tenant_id):
             raise RealmUserNotFoundError(f"{user!r} is not in the tenant")
     return found

@@ -68,6 +68,8 @@ _ADMIN_URL = "https://keycloak.test/admin/realms/meho"
 _ALICE = "5d0c1a52-0000-4000-8000-00000000aaaa"
 _BOB = "5d0c1a52-0000-4000-8000-00000000bbbb"
 _CAROL = "5d0c1a52-0000-4000-8000-00000000cccc"
+#: A person from a linked user directory: the id is not a UUID.
+_DORA = "f:3c5e7a90-directory:dora"
 _DESKTOP = "meho-mcp-desktop"
 _CODE = "meho-mcp-code"
 
@@ -109,12 +111,14 @@ class _FakeRealm:
             _ALICE: ("alice", _TENANT),
             _BOB: ("bob", _TENANT),
             _CAROL: ("carol", _OTHER_TENANT),
+            _DORA: ("dora", _TENANT),
         }
         self.offline: set[tuple[str, str]] = {
             (_ALICE, _DESKTOP),
             (_ALICE, _CODE),
             (_BOB, _DESKTOP),
             (_CAROL, _DESKTOP),
+            (_DORA, _DESKTOP),
         }
         router.post(url__regex=r".*/protocol/openid-connect/token$").mock(
             return_value=httpx.Response(200, json={"access_token": "admin-tok"})
@@ -303,8 +307,8 @@ async def test_an_agent_and_an_operator_are_refused(asker: Operator) -> None:
     assert (_BOB, _DESKTOP) in realm.offline
 
 
-async def _park() -> uuid.UUID:
-    call = await call_operation(_operator(), _args("bob"))
+async def _park(user: str = "bob") -> uuid.UUID:
+    call = await call_operation(_operator(), _args(user))
     assert call["status"] == "awaiting_approval", call
     return uuid.UUID(str(call["extras"]["approval_request_id"]))
 
@@ -336,6 +340,23 @@ async def test_a_tenant_admin_approves_and_only_that_tool_ends() -> None:
     assert result.result["user_id"] == _BOB
     assert result.result["outcome"] == "signed_out"
     assert (_BOB, _DESKTOP) not in realm.offline
+    assert (_ALICE, _DESKTOP) in realm.offline
+
+
+async def test_a_person_whose_id_is_not_a_uuid_is_approved_and_signed_out() -> None:
+    with respx.mock(assert_all_called=False) as router:
+        realm = _FakeRealm(router)
+        request_id = await _park("dora")
+        approver = _operator("p-second-admin", web_session=True)
+        async with get_sessionmaker()() as session:
+            request = await approve_request(session, request_id, operator=approver)
+            await session.commit()
+        result = await resume_dispatch_after_approval(operator=approver, request=request)
+
+    assert result.status == "ok", result
+    assert result.result["user_id"] == _DORA
+    assert result.result["outcome"] == "signed_out"
+    assert (_DORA, _DESKTOP) not in realm.offline
     assert (_ALICE, _DESKTOP) in realm.offline
 
 

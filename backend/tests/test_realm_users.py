@@ -7,7 +7,8 @@ A fake Keycloak admin API (respx) answers the reads of
 :mod:`meho_backplane.auth.realm_users`:
 
 * by id and by exact username; a name that is only part of another name
-  does not match; upper and lower case do not count;
+  does not match; upper and lower case do not count; an id need not be a
+  UUID; a lookup by id only never searches the usernames;
 * the tenant comes from a role group's ``meho_tenant`` or ``tenant_id``
   attribute, or from a parent group's;
 * every page of the person's groups is read;
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -43,6 +45,8 @@ _TOKEN_URL = "https://keycloak.test/realms/meho/protocol/openid-connect/token"
 _TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _OTHER_TENANT = uuid.UUID("22222222-2222-2222-2222-222222222222")
 _ALICE = "5d0c1a52-0000-4000-8000-00000000aaaa"
+#: The id of a person from a linked user directory: not a UUID.
+_DIRECTORY_ID = "f:3c5e7a90-directory:dora"
 
 
 def _kc() -> KeycloakAdminClient:
@@ -56,6 +60,10 @@ def _kc() -> KeycloakAdminClient:
 
 def _token(router: respx.MockRouter) -> None:
     router.post(_TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "t"}))
+
+
+def _no_id(router: respx.MockRouter, user: str) -> None:
+    router.get(f"{_ADMIN_URL}/users/{quote(user, safe='')}").mock(return_value=httpx.Response(404))
 
 
 def _group(name: str, **attributes: list[str]) -> dict[str, Any]:
@@ -81,6 +89,7 @@ async def test_a_person_is_found_by_id() -> None:
 async def test_a_person_is_found_by_exact_username_only() -> None:
     with respx.mock as router:
         _token(router)
+        _no_id(router, "alice")
         route = router.get(f"{_ADMIN_URL}/users").mock(
             return_value=httpx.Response(
                 200,
@@ -96,6 +105,46 @@ async def test_a_person_is_found_by_exact_username_only() -> None:
     params = route.calls.last.request.url.params
     assert params["username"] == "alice"
     assert params["exact"] == "true"
+
+
+async def test_an_id_that_is_not_a_uuid_is_found_by_id() -> None:
+    with respx.mock as router:
+        _token(router)
+        router.get(f"{_ADMIN_URL}/users/{quote(_DIRECTORY_ID, safe='')}").mock(
+            return_value=httpx.Response(200, json={"id": _DIRECTORY_ID, "username": "dora"})
+        )
+        async with _kc() as kc:
+            found = await find_realm_user(kc, _DIRECTORY_ID, by_id=True)
+    assert found == RealmUser(id=_DIRECTORY_ID, username="dora")
+
+
+async def test_a_lookup_by_id_only_never_searches_the_usernames() -> None:
+    with respx.mock as router:
+        _token(router)
+        _no_id(router, "alice")
+        search = router.get(f"{_ADMIN_URL}/users").mock(
+            return_value=httpx.Response(200, json=[{"id": _ALICE, "username": "alice"}])
+        )
+        async with _kc() as kc:
+            with pytest.raises(RealmUserNotFoundError):
+                await find_realm_user(kc, "alice", by_id=True)
+    assert not search.called
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(403, KeycloakForbiddenError), (500, KeycloakAdminError)],
+)
+async def test_a_failed_read_by_id_is_an_error_not_a_missing_person(
+    status: int, error: type[Exception]
+) -> None:
+    with respx.mock as router:
+        _token(router)
+        router.get(f"{_ADMIN_URL}/users/alice").mock(return_value=httpx.Response(status))
+        async with _kc() as kc:
+            with pytest.raises(error) as caught:
+                await find_realm_user(kc, "alice")
+    assert not isinstance(caught.value, RealmUserNotFoundError)
 
 
 async def test_an_unknown_id_is_looked_up_as_a_username_too() -> None:
@@ -120,6 +169,7 @@ async def test_an_empty_user_is_not_found(user: str) -> None:
 async def test_two_people_with_the_same_name_are_an_error() -> None:
     with respx.mock as router:
         _token(router)
+        _no_id(router, "bob")
         router.get(f"{_ADMIN_URL}/users").mock(
             return_value=httpx.Response(
                 200, json=[{"id": "a", "username": "bob"}, {"id": "b", "username": "BOB"}]
@@ -140,6 +190,7 @@ async def test_a_failed_read_is_an_error_not_a_missing_person(
 ) -> None:
     with respx.mock as router:
         _token(router)
+        _no_id(router, "alice")
         router.get(f"{_ADMIN_URL}/users").mock(return_value=httpx.Response(status))
         async with _kc() as kc:
             with pytest.raises(error) as caught:
@@ -150,6 +201,7 @@ async def test_a_failed_read_is_an_error_not_a_missing_person(
 async def test_an_answer_that_is_not_a_list_is_an_error() -> None:
     with respx.mock as router:
         _token(router)
+        _no_id(router, "alice")
         router.get(f"{_ADMIN_URL}/users").mock(return_value=httpx.Response(200, json={}))
         async with _kc() as kc:
             with pytest.raises(KeycloakAdminError):

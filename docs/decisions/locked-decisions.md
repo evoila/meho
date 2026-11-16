@@ -258,28 +258,40 @@ Two transport options were evaluated for the GCP REST connector (G3.7-T4, #845):
 
 ---
 
-### 13. Brand assets — **one shared package, and this repository stops building without credentials for it**
+### 13. Brand assets — **one shared package, published, so this repository still builds without credentials**
 
 The three MEHO web interfaces share one look. The design tokens, the light
 theme and the webfonts live in a single package rather than being copied into
 each app, so a colour or a radius is changed once.
 
-That package is **not published to a public index**. `meho-ui` is the first
-dependency of this repository that does not resolve from one. Until it is
-published, **a clone of `evoila/meho` builds only with credentials for the
-brand package's repository**, and so do CI and the image build.
+`meho-ui` resolves from **PyPI**, like every other dependency here. A clone of
+`evoila/meho` builds with no credentials, and so do CI and the image build.
+Its own repository stays private; only the wheel is public.
 
-This is the part worth stating plainly, because it changes what this
-repository *is*. Before this decision it had zero git-style dependencies and
-no private registry or token anywhere in its build: anyone could clone it and
-build it. That is no longer true. The code stays Apache-2.0 and stays
-readable; it is the *build* that now needs access.
+**This decision was taken the other way first, and reversed before it shipped.**
+The original entry recorded that the package would stay unpublished and that
+this repository would therefore stop building without credentials for it — a
+cost accepted deliberately, because it changed what this repository *is*.
 
-The alternative — publishing the brand package — was considered and remains
-open. Nothing in it is commercially sensitive: brand tokens whose palette is
+Taking the dependency proved the cost was higher than the entry assumed. A git
+dependency on a private repository failed **three** separate ways, and only one
+of them is about access:
+
+- `uv sync` on a CI runner has no credentials for another org's private repo.
+- `uv sync --no-build`, which the image build uses, refuses a git source **even
+  with** credentials: a checkout has no wheel and the flag forbids building one.
+- `pip` never reads `[tool.uv.sources]`, so the licence check looked for
+  `meho-ui` on the public index and found nothing.
+
+Credentials would have fixed the first only. Fourteen CI jobs, the image build
+and the licence check all went red at once. A published wheel satisfies all
+three with no token anywhere in the build.
+
+Nothing in the package is commercially sensitive — brand tokens whose palette is
 published on the evoila website, OFL-licensed fonts, generic Jinja macros and
-CSS. If this cost is judged too high, publishing the package reverses it
-without touching anything here beyond the dependency's source.
+CSS — so publishing costs nothing that was worth keeping. What stays private is
+the package repository's commit and issue history, which a published wheel does
+not expose. The brand package's own register records the same reversal as D5b.
 
 What this decision does **not** change: decisions #9 and #10 hold. The pages
 are still server-rendered from this backplane, there is still no SPA bundle
@@ -288,11 +300,23 @@ frontend framework; the theme is plain custom properties, linked after the
 compiled bundle, and needs no build step of its own.
 
 Recorded here rather than only in a commit message, because the first person
-to hit it will be someone outside evoila whose build fails, and this register
-is where they will look.
+to hit it would have been someone outside evoila whose build fails, and this
+register is where they would have looked.
 
 ## Reopening discussion
 
-(empty)
+**Decision #13 — 2026-11-16.**
+
+*What changed:* the brand package is published to PyPI, so this repository
+builds without credentials again. The decision originally accepted the
+opposite and said the alternative "remains open"; taking the dependency showed
+the cost was higher than recorded — a git source on a private repository fails
+three separate ways, and credentials fix only one of them. The entry above is
+rewritten to describe what is true now, with the reversal and its reasoning
+kept rather than erased.
+
+*Initiatives needing re-evaluation:* none. The reversal removes a constraint
+rather than adding one; no Initiative was planned around the build needing
+credentials. Decisions #9 and #10 are untouched.
 
 When reopening a locked decision, add an entry here with: (1) which decision number, (2) what changed, (3) which Initiatives need re-evaluation, (4) date.

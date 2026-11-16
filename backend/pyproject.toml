@@ -150,12 +150,11 @@ dependencies = [
     # The shared brand package: the evoila design tokens, the light theme
     # and the webfonts. One copy for all three MEHO web interfaces.
     #
-    # First dependency of this repository that does not resolve from a
-    # public index. Until it is published, a clone builds only with
-    # credentials for its repository, and so do CI and the image build.
-    # A recorded choice, not an accident -- decision #13 in
-    # ``docs/decisions/locked-decisions.md``.
-    "meho-ui",
+    # Resolves from PyPI like every other dependency here, so a clone of
+    # this repository still builds with no credentials. Its own
+    # repository stays private; only the wheel is public -- the reasoning
+    # is decision #13 in ``docs/decisions/locked-decisions.md``.
+    "meho-ui>=0.2.0",
 ]
 
 [dependency-groups]
@@ -207,6 +206,21 @@ build = [
 # the first square bracket, and the comment below has one.
 exclude-newer = "7 days"
 
+# The wait is lifted for meho-ui, and only for meho-ui, on the operator's
+# instruction. The wait exists because a third-party release can carry
+# harmful code when someone takes over a maintainer's account, and such
+# releases are usually found and removed within days. That threat does
+# not describe this package: it is evoila's own, built from a private
+# repository, uploaded by its release workflow through PyPI trusted
+# publishing with no token to steal, and its contents were reviewed
+# before release.
+#
+# Remove this line once 0.2.0 is seven days old (2026-11-23) and run
+# `uv lock` again; uv then keeps the version and drops the exception
+# from uv.lock. Removing it earlier drops the dependency back to a
+# version that does not exist on the index.
+exclude-newer-package = { meho-ui = false }
+
 # Transitive-version floors the resolver MUST honour without promoting the
 # packages to first-class runtime dependencies. ``constraint-dependencies``
 # bounds a version wherever it appears in the graph but — unlike a
@@ -221,9 +235,6 @@ constraint-dependencies = ["httpcore2>=2.10.0"]
 
 [tool.uv.sources]
 meho-connector-kit = { path = "connector-kit", editable = true }
-# Pinned to a commit, not a branch: a floating ref would let the console's
-# appearance change without a commit here saying so.
-meho-ui = { git = "https://github.com/evoila-bosnia/meho-ui.git", rev = "533243615aacafbddddb58708b903c79b5d7f55a" }
 
 [build-system]
 requires = ["hatchling"]

@@ -175,16 +175,24 @@ Rules:
   named twice gives one row.
 - While `AGENT_GRANT_REQUIRED` is `observe` or `on`, register refuses a
   request without the field: 422 `starting_grants_required`, with the
-  three choices in the text. With `off` the field may be left out.
+  three choices in the text. The text is true for the switch value: with
+  `observe` it says that MEHO refuses no call yet, so `none` and
+  `read-targets` limit the agent only once the switch is `on`. With `off`
+  the field may be left out.
 - For a definition the field is required only when the agent that
-  `identity_ref` names has no live (not expired) grant yet. The rows go
-  to that agent principal. A live row the agent already has is skipped,
+  `identity_ref` names has no live (not expired) grant yet. This holds at
+  create, and at edit (`PATCH /api/v1/agents/{name}`,
+  `meho_agents_edit`) when the new `identity_ref` names another agent
+  (#6389). An edit that sends the same `identity_ref` asks nothing. On an
+  edit the field is used only together with `identity_ref`; without it
+  the request gets 422. The rows go to that agent principal. A live row the agent already has is skipped,
   and so is a `deny` row. An expired row with the same pattern and
   target is renewed: it gets `auto-execute` and no end date.
 - Only a person may send a pick that adds rows (`read-everything` or
   `read-targets`), the same rule as the grant routes. Register is
-  person-only anyway. On `POST /api/v1/agents` and `meho_agents_create`
-  a service, agent or runner login gets `human_principal_required` and
+  person-only anyway. On `POST /api/v1/agents`, `PATCH
+  /api/v1/agents/{name}`, `meho_agents_create` and `meho_agents_edit` a
+  service, agent or runner login gets `human_principal_required` and
   nothing is written; `set: none` still works for it.
 - Register resolves the names before it creates the Keycloak client, so
   a bad pick creates nothing. The rows go in the same database
@@ -195,33 +203,42 @@ Rules:
   admin removes them like any other grant.
 - The audit row of the creation carries `starting_grants` (the set, or
   `not-chosen` when no set was picked) and, for `read-targets`,
-  `starting_grant_targets` (the names as sent).
+  `starting_grant_targets` (the names as sent). So does the audit row of
+  an edit that sends `identity_ref`.
 
-Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, the
-admin MCP tools `meho_agent_principals_register` and
-`meho_agents_create`, the CLI and the console.
+Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`,
+`PATCH /api/v1/agents/{name}`, the admin MCP tools
+`meho_agent_principals_register`, `meho_agents_create` and
+`meho_agents_edit`, the CLI and the console.
 
 CLI (`cli/internal/startinggrants/`, #6192): `meho agent-principal
-register` and `meho agent create` take `--grants
+register`, `meho agent create` and `meho agent edit` take `--grants
 none|read-everything|read-targets` and `--target <name>` (repeat it for
-more targets). The CLI refuses `--target` without `--grants
+more targets). `meho agent edit` takes `--grants` only together with
+`--identity-ref`. The CLI refuses `--target` without `--grants
 read-targets`, and `read-targets` without a `--target`. Without
 `--grants` it sends no pick; when MEHO then answers 422
-`starting_grants_required`, the CLI prints the three choices and stops.
-With `--grants`, it reads the agent's grants after the create (every
-page of `GET /api/v1/agents/grants?principal_sub=`) and shows them;
-`--json` adds them as `grants`. If that read fails, `grants` is `null`
-and `grants_error` says why. The CLI cannot see the server's
+`starting_grants_required`, the CLI prints the three choices and stops
+("Nothing was created." or, for an edit, "Nothing was changed.").
+With `--grants`, it reads the agent's grants after the create or edit
+(every page of `GET /api/v1/agents/grants?principal_sub=`) and shows
+them; `--json` adds them as `grants`. `meho agent-principal register
+--json` reads and adds them also without `--grants` (an empty list for a
+new agent with no grant), so scripts read one shape (#6389). If that
+read fails, `grants` is `null` and `grants_error` says why. The CLI cannot see the server's
 `AGENT_GRANT_REQUIRED`, so the `--grants` help and the printed choices
 say that `none` and `read-targets` limit the agent only with `on`.
 
 Console (`ui/routes/agents/starting_grants.py`, #6192): the register
-form and the create-agent form show the three choices as radio buttons,
-none selected at first, and the tenant's targets as checkboxes for
-`read-targets`. While the switch is not `off` the choice is required in
-the form. A missing or wrong pick, or a target name that does not
-resolve, shows the service's text next to the field. After a pick that
-writes grants, the console opens `/ui/agents/grants?principal_sub=<the
+form and the agent definition forms (create and edit) show the three
+choices as radio buttons, none selected at first, and the tenant's
+targets as checkboxes for `read-targets`. While the switch is not `off`
+the register form marks the choice required. The definition forms never
+do: the service asks for the pick only when the agent has no grant yet,
+the same rule as the API (#6389). A missing or wrong pick, or a target
+name that does not resolve, shows the service's text next to the field
+(`ui/routes/agents/form_saves.py` maps the service errors). After a pick
+that writes grants, the console opens `/ui/agents/grants?principal_sub=<the
 agent>`. The help text of each choice follows the current
 `AGENT_GRANT_REQUIRED`: with `off` or `observe`, "None" and "Read some
 targets" say that safe operations still run, and name the value. The
@@ -229,10 +246,10 @@ register modal's container on the principals page lets htmx swap the
 register and revoke error answers (404, 409, 422, 502, 503 to a POST), so
 the field error or banner shows in the open modal.
 
-The two MCP tools show the `starting_grants` input and the sentence about
-it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
+The three MCP tools show the `starting_grants` input and the sentence
+about it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
 (`mcp/tools/_starting_grants.py`, through the tool's `for_settings`). With
-the switch `off` (the default), an AI client sees both tools exactly as
+the switch `off` (the default), an AI client sees the tools exactly as
 before, and a call that sends `starting_grants` is refused by the input
 check. REST takes the field in every state.
 

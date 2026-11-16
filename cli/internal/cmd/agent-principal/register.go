@@ -40,7 +40,8 @@ func newRegisterCmd() *cobra.Command {
 			"approval. The CLI never picks for you: when MEHO needs a pick and " +
 			"--grants is missing, it prints the three choices and creates " +
 			"nothing. With --grants, the CLI shows the agent's grants after " +
-			"creation (--json adds them as \"grants\").",
+			"creation. --json always adds them as \"grants\" (an empty list " +
+			"when the agent has none).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -96,14 +97,12 @@ func runRegister(cmd *cobra.Command, opts registerOptions) error {
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	entry := resp.JSON201
-	if pick == nil {
-		if opts.JSONOut {
-			return output.PrintJSON(cmd.OutOrStdout(), entry)
-		}
+	if pick == nil && !opts.JSONOut {
 		fmt.Fprintf(cmd.OutOrStdout(), "registered agent principal %q\n", entry.Name)
 		printEntrySummary(cmd.OutOrStdout(), entry)
 		return nil
 	}
+	// --json always has "grants", also without --grants, so scripts read one shape.
 	grants, readErr := readGrants(cmd.Context(), backplaneURL, entry.KeycloakClientId)
 	if opts.JSONOut {
 		out, err := startinggrants.WithGrants(entry, grants, readErr)

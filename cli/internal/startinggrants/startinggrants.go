@@ -2,8 +2,9 @@
 // Copyright (c) 2026 evoila Group
 
 // Package startinggrants holds the --grants and --target flags that
-// `meho agent-principal register` and `meho agent create` share. With
-// them a person picks an agent's first grants when they create it:
+// `meho agent-principal register`, `meho agent create` and `meho agent
+// edit` share. With them a person picks an agent's first grants when
+// they create it, or when an edit points a definition at another agent:
 //
 //   - none: no grant is written.
 //   - read-everything: safe operations run at once on every target;
@@ -115,9 +116,19 @@ func (f Flags) Body() (*api.StartingGrants, error) {
 	}
 }
 
-// RequestError turns a 422 answer about the pick into a CLI error. It
-// returns nil for any other answer, so the caller's own mapping runs.
+// RequestError turns a 422 answer about the pick to a create into a CLI
+// error. It returns nil for any other answer, so the caller's own
+// mapping runs.
 func RequestError(statusCode int, body []byte) *output.StructuredError {
+	return requestError(statusCode, body, "Nothing was created.")
+}
+
+// EditRequestError is RequestError for `meho agent edit`.
+func EditRequestError(statusCode int, body []byte) *output.StructuredError {
+	return requestError(statusCode, body, "Nothing was changed.")
+}
+
+func requestError(statusCode int, body []byte, outcome string) *output.StructuredError {
 	if statusCode != http.StatusUnprocessableEntity {
 		return nil
 	}
@@ -133,7 +144,7 @@ func RequestError(statusCode int, body []byte) *output.StructuredError {
 	}
 	switch {
 	case strings.HasPrefix(detail, "starting_grants_required"):
-		return output.Usage("MEHO needs a starting grant pick for this agent. Nothing was created. " + Choices)
+		return output.Usage("MEHO needs a starting grant pick for this agent. " + outcome + " " + Choices)
 	case strings.HasPrefix(detail, "starting_grants_"):
 		return output.Usage(detail)
 	default:

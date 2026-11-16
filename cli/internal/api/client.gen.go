@@ -1433,9 +1433,12 @@ type AgentDefinitionUpdate struct {
 	// * ``deep`` -- a more capable tier for harder reasoning.
 	ModelTier    *AgentModelTier         `json:"model_tier,omitempty"`
 	OutputSchema *map[string]interface{} `json:"output_schema"`
-	SystemPrompt *string                 `json:"system_prompt"`
-	Toolset      *map[string]interface{} `json:"toolset"`
-	TurnBudget   *int                    `json:"turn_budget"`
+
+	// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+	StartingGrants *StartingGrants         `json:"starting_grants,omitempty"`
+	SystemPrompt   *string                 `json:"system_prompt"`
+	Toolset        *map[string]interface{} `json:"toolset"`
+	TurnBudget     *int                    `json:"turn_budget"`
 }
 
 // AgentElevationCreate Convenience alias for time-bounded elevations.
@@ -3261,9 +3264,11 @@ type BodyUiAgentsEditSubmitUiAgentsNamePatch struct {
 	// has not picked one; the middleware then lets the request reach only
 	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
 	// a switch.
-	SessionCtx   *UISessionContext `json:"session_ctx,omitempty"`
-	SystemPrompt *string           `json:"system_prompt,omitempty"`
-	TurnBudget   *string           `json:"turn_budget"`
+	SessionCtx           *UISessionContext `json:"session_ctx,omitempty"`
+	StartingGrantTargets *[]string         `json:"starting_grant_targets,omitempty"`
+	StartingGrants       *string           `json:"starting_grants,omitempty"`
+	SystemPrompt         *string           `json:"system_prompt,omitempty"`
+	TurnBudget           *string           `json:"turn_budget"`
 }
 
 // BodyUiAgentsRunSubmitUiAgentsNameRunPost defines model for Body_ui_agents_run_submit_ui_agents__name__run_post.

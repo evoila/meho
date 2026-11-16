@@ -22,7 +22,8 @@ means "``safe`` operations run at once". The rows are ordinary
 admin removes them like any other grant.
 
 The pick is required while ``AGENT_GRANT_REQUIRED`` is not ``off``. For a
-definition it is required only when its agent has no live grant yet.
+definition it is required only when its agent has no live grant yet: at
+create, and when an edit points ``identity_ref`` at another agent.
 """
 
 from __future__ import annotations
@@ -167,17 +168,41 @@ class StartingGrantsError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
+_READ_EVERYTHING_TEXT: Final[str] = (
+    "'read-everything' (safe operations run at once on every target; "
+    "everything else waits for a person's approval)"
+)
+
+
 def require_pick(starting: StartingGrants | None) -> None:
-    """Raise ``starting_grants_required`` when no set was picked and the switch is not off."""
-    if starting is not None or get_settings().agent_grant_required == "off":
+    """Raise ``starting_grants_required`` when no set was picked and the switch is not off.
+
+    The text is true for the current switch value: with ``observe``, no
+    call is refused yet, so ``none`` and ``read-targets`` do not limit
+    safe operations until the switch is ``on``.
+    """
+    mode = get_settings().agent_grant_required
+    if starting is not None or mode == "off":
         return
+    if mode == "on":
+        choices = (
+            "Choose 'none' (the agent runs nothing until an admin adds a grant), "
+            f"{_READ_EVERYTHING_TEXT}, or 'read-targets' with a list of target "
+            "names (the same, only on those targets)."
+        )
+    else:
+        choices = (
+            "AGENT_GRANT_REQUIRED is 'observe': MEHO refuses no call of the "
+            "agent yet, and logs each call that 'on' would refuse. Choose "
+            "'none' (no grant; the agent can still run safe operations at once, "
+            "and runs nothing once the switch is 'on'), "
+            f"{_READ_EVERYTHING_TEXT}, or 'read-targets' with a list of target "
+            "names (safe operations run at once on those targets; once the "
+            "switch is 'on', only there)."
+        )
     raise StartingGrantsError(
         "starting_grants_required",
-        "pick the agent's starting grants in 'starting_grants'. "
-        "Choose 'none' (the agent runs nothing until an admin adds a grant), "
-        "'read-everything' (safe operations run at once on every target; "
-        "everything else waits for a person's approval), or 'read-targets' "
-        "with a list of target names (the same, only on those targets).",
+        f"pick the agent's starting grants in 'starting_grants'. {choices}",
     )
 
 

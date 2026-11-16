@@ -3,9 +3,10 @@
 
 """Show the ``starting_grants`` input only while ``AGENT_GRANT_REQUIRED`` is not ``off``.
 
-``meho_agent_principals_register`` and ``meho_agents_create`` take the
-pick of an agent's first grants (:mod:`meho_backplane.agents.grant_sets`).
-The switch is ``off`` by default. While it is ``off``, both tools show their
+``meho_agent_principals_register``, ``meho_agents_create`` and
+``meho_agents_edit`` take the pick of an agent's first grants
+(:mod:`meho_backplane.agents.grant_sets`). The switch is ``off`` by
+default. While it is ``off``, the tools show their
 registered text and input unchanged, so an AI client sees the same tools as
 before. While it is ``observe`` or ``on``, the tools get the
 ``starting_grants`` input and one more sentence that says when it is needed.

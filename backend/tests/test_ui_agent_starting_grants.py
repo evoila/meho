@@ -177,14 +177,13 @@ def test_pick_has_three_options_and_none_is_selected(path: str) -> None:
     assert "(optional)" in body
 
 
-@pytest.mark.parametrize("path", [_REGISTER, _CREATE])
 def test_pick_is_required_while_the_switch_is_not_off(
-    monkeypatch: pytest.MonkeyPatch, path: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch(monkeypatch, "observe")
     client, mock, _csrf = _admin_client(with_csrf=False)
     try:
-        body = client.get(path).text
+        body = client.get(_REGISTER).text
     finally:
         mock.stop()
     radios = _radios(body)
@@ -266,17 +265,23 @@ def test_pick_says_when_the_tenant_has_no_targets() -> None:
     assert "data-no-targets" in body
 
 
-def test_edit_form_has_no_pick() -> None:
-    """The pick is only asked when a definition is created."""
+def test_edit_form_shows_the_pick_without_marking_it_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The edit form shows the pick; the service asks for it only when needed (#6389)."""
     client, mock, csrf = _admin_client()
     _seed_principal(tenant_id=_TENANT_A, keycloak_client_id="agent-triage")
     try:
         created = client.post(_CREATE, data=_create_form(), headers=_csrf_headers(csrf))
         assert created.status_code == 204, created.text
+        _switch(monkeypatch, "on")
         body = client.get("/ui/agents/triage/edit").text
     finally:
         mock.stop()
-    assert 'name="starting_grants"' not in body
+    radios = _radios(body)
+    assert len(radios) == 3
+    assert not any("required" in r for r in radios)
+    assert "change the identity reference to an agent that has no grants yet" in body
 
 
 # ---------------------------------------------------------------------------

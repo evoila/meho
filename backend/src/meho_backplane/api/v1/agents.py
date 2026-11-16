@@ -239,20 +239,31 @@ async def edit_agent(
     ``tenant_admin`` only. Only the fields the caller set are applied
     (``exclude_unset``), so a PATCH can change a single field. ``name``
     is not updatable -- renaming is a delete + recreate. A cross-tenant
-    / absent name returns 404 ``agent_not_found``.
+    / absent name returns 404 ``agent_not_found``. A new ``identity_ref``
+    that names an agent with no grant needs ``starting_grants`` while the
+    switch is not ``off``, the same rules and errors as a create (#6389).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["edit"],
         audit_op_class="write",
         audit_agent_name=name,
     )
+    if body.identity_ref is not None:
+        structlog.contextvars.bind_contextvars(**audit_fields(body.starting_grants))
+    if writes_rows(body.starting_grants):
+        ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
     service = AgentDefinitionService()
     try:
-        entry = await service.update(operator.tenant_id, name, body)
+        entry = await service.update(operator.tenant_id, name, body, updated_by_sub=operator.sub)
     except AgentIdentityRefInvalidError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="identity_ref_unknown",
+        ) from exc
+    except StartingGrantsError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         ) from exc
     if entry is None:
         raise HTTPException(

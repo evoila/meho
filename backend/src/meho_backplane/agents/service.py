@@ -76,6 +76,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agents.grant_sets import (
+    StartingGrants,
     StartingGrantsError,
     has_live_grant,
     require_pick,
@@ -208,7 +209,9 @@ class AgentDefinitionService:
             # authoritative runtime gate are explained in the new
             # :mod:`meho_backplane.agents.identity_ref` module docstring.
             await _validate_identity_ref(session, tenant_id, payload.identity_ref)
-            grant_scopes = await self._starting_grant_scopes(session, tenant_id, payload)
+            grant_scopes = await self._starting_grant_scopes(
+                session, tenant_id, payload.identity_ref, payload.starting_grants
+            )
             session.add(row)
             try:
                 await session.flush()
@@ -241,17 +244,16 @@ class AgentDefinitionService:
     async def _starting_grant_scopes(
         session: AsyncSession,
         tenant_id: uuid.UUID,
-        payload: AgentDefinitionCreate,
+        identity_ref: str,
+        starting: StartingGrants | None,
     ) -> list[str]:
         """Check the starting grant pick and return the scopes of its rows (#6191).
 
         The pick is required only when the agent has no live grant yet.
         """
-        if payload.starting_grants is None and not await has_live_grant(
-            session, tenant_id, payload.identity_ref
-        ):
+        if starting is None and not await has_live_grant(session, tenant_id, identity_ref):
             require_pick(None)
-        return await resolve_scopes(session, tenant_id, payload.starting_grants)
+        return await resolve_scopes(session, tenant_id, starting)
 
     async def list_(
         self,
@@ -321,6 +323,8 @@ class AgentDefinitionService:
         tenant_id: uuid.UUID,
         name: str,
         payload: AgentDefinitionUpdate,
+        *,
+        updated_by_sub: str | None = None,
     ) -> AgentDefinitionRead | None:
         """Apply a partial update to ``(tenant_id, name)``; ``None`` if absent.
 
@@ -343,8 +347,18 @@ class AgentDefinitionService:
         the definition was created or last identity-ref'd. The runtime
         check that the principal is still live at invocation time is
         G11.3's responsibility, not this validator's.
+
+        A new ``identity_ref`` that names another agent with no live grant
+        needs a starting grant pick while ``AGENT_GRANT_REQUIRED`` is not
+        ``off``, the same rule as :meth:`create` (#6389). A pick that adds
+        rows writes them to that agent, with ``created_by_sub`` =
+        *updated_by_sub*, in the same transaction. Raises
+        :class:`StartingGrantsError` and writes nothing when the pick is
+        missing or names a target that does not resolve.
         """
-        changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+        changes = payload.model_dump(
+            exclude_unset=True, exclude_none=True, exclude={"starting_grants"}
+        )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             await lock_connector_usage_shared(session)  # #5027, see create
@@ -359,10 +373,25 @@ class AgentDefinitionService:
                 return None
             # Re-validate identity_ref only when the PATCH body sets it.
             new_identity_ref = changes.get("identity_ref")
+            grant_scopes: list[str] = []
             if new_identity_ref is not None:
                 await _validate_identity_ref(session, tenant_id, new_identity_ref)
+                if new_identity_ref != row.identity_ref or payload.starting_grants is not None:
+                    grant_scopes = await self._starting_grant_scopes(
+                        session, tenant_id, new_identity_ref, payload.starting_grants
+                    )
             apply_changes(row, changes)
             await session.flush()
+            if grant_scopes and new_identity_ref is not None:
+                if updated_by_sub is None:
+                    raise ValueError("updated_by_sub is needed to write starting grants")
+                await write_starting_grants(
+                    session,
+                    tenant_id=tenant_id,
+                    principal_sub=new_identity_ref,
+                    created_by_sub=updated_by_sub,
+                    scopes=grant_scopes,
+                )
             await session.refresh(row)
             entry = AgentDefinitionRead.model_validate(row)
             await session.commit()

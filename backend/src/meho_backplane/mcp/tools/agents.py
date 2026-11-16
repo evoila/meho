@@ -347,11 +347,19 @@ async def _edit_handler(
         audit_op_class="write",
         audit_agent_name=name,
     )
+    if payload.identity_ref is not None:
+        structlog.contextvars.bind_contextvars(**audit_fields(payload.starting_grants))
+    if writes_rows(payload.starting_grants):
+        ensure_human_mcp_caller(
+            operator, "meho_agents_edit with starting_grants", PERSON_ONLY_REMEDIATION
+        )
     service = AgentDefinitionService()
     try:
-        entry = await service.update(operator.tenant_id, name, payload)
+        entry = await service.update(operator.tenant_id, name, payload, updated_by_sub=operator.sub)
     except AgentIdentityRefInvalidError as exc:
         raise McpInvalidParamsError("identity_ref_unknown") from exc
+    except StartingGrantsError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
     if entry is None:
         raise McpInvalidParamsError("agent_not_found")
     return {"name": entry.name, "agent": _row_to_dict(entry)}
@@ -402,6 +410,10 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the first grants of the agent a new "
+            "identity_ref names; it is required while that agent has no grant yet."
+        ),
     ),
     handler=_edit_handler,
 )

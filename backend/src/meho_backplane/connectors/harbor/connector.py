@@ -549,6 +549,19 @@ class HarborConnector(HttpConnector):
             "secret": result["secret"],
         }
 
+    async def project_create(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``harbor.project.create`` shim: create a project, a taken name is a no-op."""
+        from meho_backplane.connectors.harbor.ops_project_create import (
+            harbor_project_create_impl,
+        )
+
+        return await harbor_project_create_impl(self, operator, target, params)
+
     async def robot_delete(
         self,
         operator: Operator,

@@ -224,7 +224,9 @@ answer and then stores and mails the finding.
 **The trigger path** uses no special code. A person makes an ordinary event
 trigger (kind `event`) for any agent, with a filter on the
 `check.dashboard.changed` event. See `examples/checks-investigator/` for the
-agent, its grants and the trigger. The event drain starts the agent. The agent
+agent and the trigger. The agent's grant is the starting grant set
+`read-everything`, picked when its login is registered (see below). The
+event drain starts the agent. The agent
 needs no memory or mail rights, because MEHO stores and mails the finding:
 
 - `events/drain.py` `_dispatch_event`: after the triggers fire, when the event
@@ -269,7 +271,8 @@ trigger filters on `known_noise: false`, so it does not start.
 
 **Move from the old path to the trigger:**
 
-1. Create the agent, its grants and the trigger from `examples/checks-investigator/`.
+1. Register the agent's login with `--grants read-everything`, then create the
+   agent and the trigger from `examples/checks-investigator/`.
    Use the agent name from `CHECKS_INVESTIGATOR_AGENT`, or set the setting to
    your agent name.
 2. From then on the old path steps aside. To go back, pause or cancel the

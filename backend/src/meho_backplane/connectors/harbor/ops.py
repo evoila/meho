@@ -253,7 +253,8 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
         "vault_target": (
             "Optional but required for an agent. 'vault:<path>#<field>', for example "
-            "'vault:ci/harbor#secret'. The field is written to that Vault item: an "
+            "'vault:tenants/<tenant_id>/ci/harbor#secret'. The path must be inside "
+            "the tenant's Vault path. The field is written to that Vault item: an "
             "existing value in it is replaced, the other fields stay."
         ),
     },

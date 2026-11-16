@@ -71,7 +71,8 @@ create call. No standing grant or run approval covers it.
 Harbor shows a robot secret only once. There are two ways to keep it:
 
 - **With `vault_target`** (`vault:<path>#<field>`, for example
-  `vault:ci/harbor#secret`). An agent must use this way, because MEHO hides
+  `vault:tenants/<tenant_id>/ci/harbor#secret`). The path must be inside
+  the tenant's Vault path. An agent must use this way, because MEHO hides
   secret fields from an agent. MEHO writes the secret to that Vault item
   itself. An existing value in the field is replaced; the other fields of
   the item stay. The answer has the robot `id` and `name`, `stored_to`, a

@@ -316,6 +316,7 @@ from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, Permis
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
+from meho_backplane.operations._after_gate import AfterGateCheck, checks_after_gate
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
@@ -3691,7 +3692,9 @@ async def _handle_needs_approval(
         params=params,
         duration_ms=duration_ms,
     )
-    if refusal is None:
+    if refusal is None and AfterGateCheck.INGESTED_OPS in checks_after_gate(
+        PermissionVerdict.NEEDS_APPROVAL
+    ):
         refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
     if refusal is not None:
         return await _audit_denied_and_return(
@@ -4380,12 +4383,15 @@ async def _dispatch_now(
             # Not run on the ``_approved`` resume path -- an operator
             # already approved that exact call; re-gating it here would
             # strand an approved op behind an announce it can no longer add.
-            announce_block = await announce_gate_blocks(
-                operator,
-                op_class=descriptor_op_class(descriptor),
-                safety_level=descriptor.safety_level,
-                target_name=getattr(target, "name", None),
-            )
+            # ``checks_after_gate`` is shared with ``meho policy explain``.
+            announce_block = None
+            if AfterGateCheck.ANNOUNCE_RULE in checks_after_gate(verdict):
+                announce_block = await announce_gate_blocks(
+                    operator,
+                    op_class=descriptor_op_class(descriptor),
+                    safety_level=descriptor.safety_level,
+                    target_name=getattr(target, "name", None),
+                )
             if announce_block is not None:
                 duration_ms = _elapsed_ms(started)
                 receipt = await audit_safe(

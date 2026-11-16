@@ -242,13 +242,27 @@ Good to know:
 - explain also asks two checks that come after the policy rules, as the
   call does. When one of them refuses the call, the answer is **deny**
   with its reason:
-  - the announce rule of your tenant: an agent must announce a write of
-    risk level `caution` or higher before it runs;
+  - the announce rule of your tenant: an agent or a service login must
+    announce a write of risk level `caution` or higher before it runs
+    (asked only when the call would run at once);
   - an operation ingested from an API file, on a target whose connector
     runs only its own hand-written operations.
-- explain does **not** run the operation's own check of its parameters
-  (for example, a user write that names two different users). The last
-  line of the answer says so: `Not checked: ...`.
+- Some checks after the policy rules need the call's parameters, the
+  vendor, or a later step of the call. explain does **not** ask them. The
+  last line of the answer names each one that can still refuse the call
+  (`Not checked: ...`). When there is no such line, nothing after the
+  policy rules can refuse the call. The names:
+  - `connector_resolution`: MEHO finds the connector of the target, and
+    only one.
+  - `operation_param_check`: the operation's own check of its parameters
+    before the call waits (for example, a user write that names two
+    different users).
+  - `destructive_preview_binding`: a `destructive` call waits only with
+    the hash of a matching preview.
+  - `permission_preflight`: the operation asks the vendor whether its
+    login may do the write.
+  - `idempotency_key`: another waiting call holds the same idempotency
+    key.
 - Who may approve is a list of **MEHO group kinds** (`MEHO-Operators`,
   `MEHO-Admins`, ...). These are not the names of the login groups of
   your install. Each login group is bound to one of these kinds.
@@ -275,7 +289,7 @@ Rules in order:
 Risk level: caution, always waits: yes, category: compute
   matched file:classifications[0]
   matched file:classifications[1]
-Not checked: the operation's own check of its parameters. It runs only with the parameters of a real call.
+Not checked: idempotency_key, connector_resolution
 ```
 
 !!! note "The policy evaluator is off by default"

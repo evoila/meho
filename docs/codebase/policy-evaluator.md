@@ -200,13 +200,16 @@ shadow keeps a rule; explain drops it (`forget_rule`).
 
 **Checks after the gate** (`policy/explain_checks.py`,
 `refusal_after_gate`). The policy gate is not the last check of a call.
-Explain asks the two checks that can still refuse a call the gate lets
-run or wait, with the same code the call uses:
+Which checks after the gate a call is asked comes from one function,
+`checks_after_gate` (`operations/_after_gate.py`). The dispatcher reads
+it before it asks the announce rule and before it asks the ingested check
+of a call that waits. Explain reads it too and asks each check with the
+same code the call uses:
 
 | Check | Code | Asked when the gate says |
 |---|---|---|
-| The announce rule of the tenant (`announce_required`) | `announce_gate_blocks` (`broadcast/announce_gate.py`) | `run` only. A call that waits is not asked again after the approval. |
-| An ingested operation on a target whose connector does not take ingested operations (`ingested_ops_not_accepted`) | `_ingested_ops_refusal` (`operations/dispatcher.py`) | `run` or `wait` |
+| The announce rule of the tenant (`announce_required`): an agent or a service login, not a person | `announce_gate_blocks` (`broadcast/announce_gate.py`) | `run` only. A call that waits is not asked again after the approval. |
+| An ingested operation on a target whose connector does not take ingested operations (`ingested_ops_not_accepted`) | `_ingested_ops_refusal` (`operations/dispatcher.py`) | `run` (in the connector lookup) or `wait` |
 
 When one refuses, `answer` is `deny`, and `today` holds `deny` with the
 call's reason (`announce_required: ...` or
@@ -214,14 +217,30 @@ call's reason (`announce_required: ...` or
 checks, so its `same_as_today` is then `false`. A call the gate denies is
 not asked again.
 
-**What explain does not check.** The operation's own check before the
-wait for approval (`park_check_refusal`, `operations/_park_check.py`). For
-example, a Keycloak user write refuses an id and a name of two different
-users. This check needs the call's parameters, and explain asks without
-parameters. Every answer about a call says so in one line,
-`not_checked` (`NOT_CHECKED` in `policy/explain_checks.py`); the CLI
-prints it last. The answer for a stored approval request has no such
-line.
+**What explain does not check.** `not_checked` is a list of fixed names
+(`not_checked()` in `policy/explain_checks.py`). It names each check after
+the gate that explain does not ask and that can still refuse the call. A
+`run` or `wait` answer with an empty list would mean nothing after the
+gate can refuse the call.
+
+| Name | The call's refusal | Listed when the answer is |
+|---|---|---|
+| `connector_resolution` | `no_connector`, `ambiguous_connector`, `target_required` | `run`, `wait` (asked when the call runs, also after the approval) |
+| `operation_param_check` | `refused_before_approval` (`operations/_park_check.py`) | `wait`, when the operation has such a check |
+| `destructive_preview_binding` | `preview_binding_required` | `wait`, for a `destructive` operation |
+| `permission_preflight` | `write_capability_denied` (asks the vendor) | `wait`, when the operation has a preflight |
+| `idempotency_key` | `idempotency_key_conflict` | `wait` |
+
+`deny` gets an empty list. Not listed: a MEHO fault, such as a missing
+approval encryption key, and the checks done again after an approval with
+the same rules (the steps of a multi-step operation, the role of the
+person who runs it). The answer for a stored approval request has no
+list. The CLI prints the list last (`Not checked: a, b`).
+
+`tests/test_policy_explain_parity.py` runs a matrix of callers and
+operations through explain and through the real call (with the step that
+would send the call replaced). It fails on any difference that
+`not_checked` does not name.
 
 - `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
   off or in shadow mode, today's checks decide (`decided_by: today`).

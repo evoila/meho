@@ -34,12 +34,12 @@ While the evaluator is off or in shadow mode, today's checks decide, so
 ``answer`` is today's answer.
 
 The checks after the policy gate that can still refuse the call are asked
-too (:mod:`meho_backplane.policy.explain_checks`).
+too, the same ones the call asks (:mod:`meho_backplane.policy.explain_checks`).
 
 Explain asks about a call with no parameters. For an operation whose
 answer depends on its parameters, the answer is the one of a call
-without parameters. The operation's own check of its parameters is not
-asked; the answer says so (``not_checked``).
+without parameters. Each check after the gate that explain does not ask
+and that can still refuse the call is named in ``not_checked``.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ from meho_backplane.policy.classification import (
 )
 from meho_backplane.policy.evaluate import Decision, RuleRef, Verdict
 from meho_backplane.policy.explain_asker import ExplainInputError, asker_view
-from meho_backplane.policy.explain_checks import NOT_CHECKED, refusal_after_gate
+from meho_backplane.policy.explain_checks import not_checked, refusal_after_gate
 from meho_backplane.policy.explain_models import (
     Answer,
     ExplainApprovers,
@@ -495,7 +495,7 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         ),
         evaluator=_evaluator_view(decision, answer, wait_path) if decision is not None else None,
         classification=_classification_view(descriptor, matched),
-        not_checked=NOT_CHECKED,
+        not_checked=not_checked(descriptor=descriptor, answer=answer),
     )
 
 

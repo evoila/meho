@@ -8,7 +8,9 @@
   A person is never asked.
 * An ingested operation on a target whose connector does not take ingested
   operations is ``deny``, as the call is.
-* Every answer about a call names what explain does not check.
+* An ingested operation the gate lets run at once is asked too.
+* Every answer about a call names each check after the gate that explain
+  does not ask and that can still refuse the call.
 * A call the gate denies is not asked again.
 """
 
@@ -34,13 +36,23 @@ from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, Tenant
+from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, PermissionVerdict, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._after_gate import AfterGateCheck, checks_after_gate
 from meho_backplane.operations._ingested_owner import INGESTED_OPS_NOT_ACCEPTED
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.policy.explain import CallQuestion, explain_call, without_policy
-from meho_backplane.policy.explain_checks import NOT_CHECKED, refusal_after_gate
+from meho_backplane.policy.explain_checks import (
+    CONNECTOR_RESOLUTION,
+    DESTRUCTIVE_PREVIEW_BINDING,
+    IDEMPOTENCY_KEY,
+    NOT_CHECKED_NAMES,
+    OPERATION_PARAM_CHECK,
+    PERMISSION_PREFLIGHT,
+    not_checked,
+    refusal_after_gate,
+)
 from meho_backplane.settings import get_settings
 
 _TENANT = UUID("00000000-0000-0000-0000-000000006536")
@@ -48,6 +60,7 @@ _WRITE_CONNECTOR = "vault-1.x"
 _WRITE_OP = "vault.kv.delete"
 _KC_CONNECTOR = f"{KeycloakConnector.impl_id}-{KeycloakConnector.version}"
 _INGESTED_OP = "DELETE:/admin/items/{item}"
+_INGESTED_READ = "GET:/admin/items/{item}"
 _TARGET_NAME = "<kc-target>"
 _CLAIM_LOOKUP = "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim"
 
@@ -182,7 +195,7 @@ async def test_announce_rule_on_denies_an_agents_caution_write(embedding: AsyncM
     assert answer.today.reason.startswith("announce_required: ")
     assert "meho_broadcast_announce" in answer.today.reason
     assert answer.approvers is None
-    assert answer.not_checked == NOT_CHECKED
+    assert answer.not_checked == []
 
 
 async def test_announce_rule_off_the_agents_caution_write_runs(embedding: AsyncMock) -> None:
@@ -193,6 +206,7 @@ async def test_announce_rule_off_the_agents_caution_write_runs(embedding: AsyncM
     assert answer.answer == "run", answer
     assert answer.today is not None
     assert answer.today.reason is None
+    assert answer.not_checked == [CONNECTOR_RESOLUTION]
 
 
 async def test_announce_rule_never_asks_a_person(embedding: AsyncMock) -> None:
@@ -218,7 +232,9 @@ async def test_announce_rule_passes_an_agent_with_a_claim(embedding: AsyncMock) 
 # ---------------------------------------------------------------------------
 
 
-async def _seed_ingested_delete() -> None:
+async def _seed_ingested_delete(
+    *, op_id: str = _INGESTED_OP, method: str = "DELETE", safety_level: str = "dangerous"
+) -> None:
     register_connector_v2(
         product=KeycloakConnector.product,
         version=KeycloakConnector.version,
@@ -248,9 +264,9 @@ async def _seed_ingested_delete() -> None:
                 product=KeycloakConnector.product,
                 version=KeycloakConnector.version,
                 impl_id=KeycloakConnector.impl_id,
-                op_id=_INGESTED_OP,
+                op_id=op_id,
                 source_kind="ingested",
-                method="DELETE",
+                method=method,
                 path="/admin/items/{item}",
                 summary="Delete the item",
                 description="Ingested delete.",
@@ -260,8 +276,8 @@ async def _seed_ingested_delete() -> None:
                     "properties": {"item": {"type": "string", "x-meho-param-loc": "path"}},
                     "required": ["item"],
                 },
-                safety_level="dangerous",
-                requires_approval=True,
+                safety_level=safety_level,
+                requires_approval=safety_level != "safe",
                 is_enabled=True,
                 embedding=[0.1] * 384,
                 created_at=now,
@@ -299,7 +315,7 @@ async def test_an_ingested_op_on_a_connector_that_refuses_them_is_denied() -> No
     assert answer.today is not None
     assert answer.today.reason == call["error"]
     assert answer.approvers is None
-    assert answer.not_checked == NOT_CHECKED
+    assert answer.not_checked == []
     async with get_sessionmaker()() as session:
         count = (await session.execute(select(func.count()).select_from(ApprovalRequest))).scalar()
     assert count == 0
@@ -310,16 +326,77 @@ async def test_an_ingested_op_on_a_connector_that_refuses_them_is_denied() -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_the_not_checked_line_stays_for_a_caller_who_is_not_an_admin(
+async def test_an_ingested_op_that_runs_at_once_is_asked_too() -> None:
+    await _seed_ingested_delete(op_id=_INGESTED_READ, method="GET", safety_level="safe")
+    asker = _person(web=False)
+    answer = await explain_call(
+        CallQuestion(
+            asker=asker,
+            me=True,
+            connector_id=_KC_CONNECTOR,
+            op_id=_INGESTED_READ,
+            target=_TARGET_NAME,
+        )
+    )
+    call = await call_operation(
+        asker,
+        {
+            "connector_id": _KC_CONNECTOR,
+            "op_id": _INGESTED_READ,
+            "target": _TARGET_NAME,
+            "params": {"item": "<item-id>"},
+        },
+    )
+    # The gate lets a safe read run at once; the connector lookup refuses it.
+    assert call["extras"]["error_code"] == INGESTED_OPS_NOT_ACCEPTED, call
+    assert answer.answer == "deny", answer
+    assert answer.today is not None
+    assert answer.today.reason == call["error"]
+
+
+async def test_the_not_checked_list_stays_for_a_caller_who_is_not_an_admin(
     embedding: AsyncMock,
 ) -> None:
     await _seed_tenant(announce_rule=False)
     await _register_caution_write(embedding)
     answer = await explain_call(_write_question(_person()))
-    assert answer.not_checked == NOT_CHECKED
-    assert without_policy(answer).not_checked == NOT_CHECKED
-    assert NOT_CHECKED.startswith("Not checked: ")
-    assert "\n" not in NOT_CHECKED
+    assert answer.not_checked == [CONNECTOR_RESOLUTION]
+    assert without_policy(answer).not_checked == [CONNECTOR_RESOLUTION]
+
+
+def test_a_call_that_waits_names_only_the_checks_its_operation_has() -> None:
+    plain = EndpointDescriptor(op_id="x.plain", safety_level="caution", source_kind="typed")
+    assert not_checked(descriptor=plain, answer="wait") == [IDEMPOTENCY_KEY, CONNECTOR_RESOLUTION]
+    assert not_checked(descriptor=plain, answer="deny") == []
+
+
+def test_a_call_that_waits_names_every_check_its_operation_has() -> None:
+    op_id = "x.everything"
+    descriptor = EndpointDescriptor(op_id=op_id, safety_level="destructive", source_kind="typed")
+    with (
+        patch.dict("meho_backplane.operations._park_check._PARK_CHECKS", {op_id: AsyncMock()}),
+        patch.dict(
+            "meho_backplane.operations._preview._PERMISSION_PREFLIGHTS", {op_id: AsyncMock()}
+        ),
+    ):
+        names = not_checked(descriptor=descriptor, answer="wait")
+    assert names == [
+        OPERATION_PARAM_CHECK,
+        DESTRUCTIVE_PREVIEW_BINDING,
+        PERMISSION_PREFLIGHT,
+        IDEMPOTENCY_KEY,
+        CONNECTOR_RESOLUTION,
+    ]
+    assert tuple(names) == NOT_CHECKED_NAMES
+
+
+def test_explain_and_the_dispatcher_share_the_checks_after_the_gate() -> None:
+    assert checks_after_gate(PermissionVerdict.AUTO_EXECUTE) == (
+        AfterGateCheck.ANNOUNCE_RULE,
+        AfterGateCheck.INGESTED_OPS,
+    )
+    assert checks_after_gate(PermissionVerdict.NEEDS_APPROVAL) == (AfterGateCheck.INGESTED_OPS,)
+    assert checks_after_gate(PermissionVerdict.DENY) == ()
 
 
 async def test_a_call_the_gate_denies_is_not_asked_again() -> None:

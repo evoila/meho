@@ -11,10 +11,13 @@ With approver routing on, a request that starts to wait now also stores
 its category (``approver_category``). At the approve click MEHO routes the
 request again with the install's current routing and this category: the
 install's routing is a floor that a tenant can only narrow. This migration
-adds the one nullable column. Rows that exist already keep ``NULL``: the
-click checks them as a change without a category.
+adds the one nullable column. Rows that exist already and have stored
+approver groups (``approver_roles``) get the empty text: MEHO does not
+know their category. At the click such a request is refused when an
+install entry that matches on a category could fit it. The other rows
+keep ``NULL``: they were not routed and keep today's rule.
 
-Only adds a column. An older image never reads it, so a rollback is safe.
+An older image never reads the column, so a rollback is safe.
 ``downgrade()`` drops it.
 """
 
@@ -42,8 +45,13 @@ __all__ = [
 
 
 def upgrade() -> None:
-    """Add the nullable ``approver_category`` column."""
+    """Add the nullable ``approver_category`` column; routed rows get the empty text."""
     op.add_column("approval_request", sa.Column("approver_category", sa.Text(), nullable=True))
+    op.execute(
+        sa.text(
+            "UPDATE approval_request SET approver_category = '' WHERE approver_roles IS NOT NULL"
+        )
+    )
 
 
 def downgrade() -> None:

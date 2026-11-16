@@ -3,8 +3,10 @@
 
 """Behavioural tests for ``0171_add_approval_request_approver_category``.
 
-The migration only adds one nullable column to ``approval_request``;
-``downgrade()`` removes it again. Every step targets this migration's own
+The migration adds one nullable column to ``approval_request``. Rows that
+exist already and have stored approver groups get the empty text: MEHO
+does not know their category. The other rows keep ``NULL``.
+``downgrade()`` removes the column again. Every step targets this migration's own
 revision (``0171``) and its ``down_revision`` (``0170``), never ``head``.
 """
 
@@ -17,7 +19,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine as sa_create_engine
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
@@ -26,6 +28,9 @@ from meho_backplane.settings import get_settings
 _REVISION = "0171"
 _DOWN_REVISION = "0170"
 _NEW = {"approver_category"}
+_ROUTED_ID = "00000000-0000-0000-0000-000000000171"
+_UNROUTED_ID = "00000000-0000-0000-0000-000000000172"
+_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 @pytest.fixture
@@ -68,3 +73,38 @@ def test_up_adds_one_nullable_column_and_down_drops_it(
 
     command.downgrade(cfg, _DOWN_REVISION)
     assert not _NEW & set(_columns(sync_url))
+
+
+def _run(sync_url: str, sql: str, **params: str | None) -> list[tuple[object, ...]]:
+    engine = sa_create_engine(sync_url)
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql), params)
+            return [tuple(row) for row in result] if result.returns_rows else []
+    finally:
+        engine.dispose()
+
+
+def test_a_routed_row_from_before_gets_the_empty_text(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
+    cfg, sync_url = alembic_cfg
+    copy_migrated_db(cfg, _DOWN_REVISION)
+    for request_id, roles in ((_ROUTED_ID, '["Admins"]'), (_UNROUTED_ID, None)):
+        _run(
+            sync_url,
+            "INSERT INTO approval_request (id, tenant_id, principal_sub, op_id, connector_id, "
+            "params_hash, proposed_effect, status, created_at, approver_roles) "
+            "VALUES (:id, :tenant, 'fixture', 'x.y', 'x-1.x', 'h', '{}', 'pending', "
+            "'2026-11-16 00:00:00', :roles)",
+            id=request_id,
+            tenant=_TENANT_ID,
+            roles=roles,
+        )
+
+    command.upgrade(cfg, _REVISION)
+
+    assert _run(sync_url, "SELECT id, approver_category FROM approval_request ORDER BY id") == [
+        (_ROUTED_ID, ""),
+        (_UNROUTED_ID, None),
+    ]

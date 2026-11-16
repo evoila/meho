@@ -1315,7 +1315,9 @@ works out who may approve it and stores it on the request:
   install's first (`install:routing[2]`, `tenant:routing[0]`,
   `install:routing[0], tenant:routing[1]`), or `default`.
 - `approver_category` (text): the category the routing used. The click
-  routes the request again with it (below).
+  routes the request again with it (below). The empty text on a request
+  that had stored kinds before migration `0171`: MEHO does not know its
+  category.
 - Migration `0167` adds the first two columns, migration `0171` the third.
   All are nullable.
 
@@ -1356,8 +1358,14 @@ person's kind is not in it, `ApprovalRoutingError` with one sentence, for
 example "The install's routing (`install:routing[0]`) lets only
 MEHO-SA-Operators or MEHO-Admins approve this change. You are in
 MEHO-Operators. A tenant's routing can only narrow it." An install routing
-that is not valid refuses the click. A change of rights is not checked
-here. Then `_check_routed_approver`: the person's
+that is not valid refuses the click. A request whose category is the
+empty text (stored before migration `0171`) is refused when an install
+entry that matches on a `category` could fit it: MEHO cannot check who
+may approve it, so it must be rejected and started again. When no such
+entry could fit, the category does not change the answer. A change of
+rights is not checked here. `meho policy explain --request` uses the same
+install routing (`install_floor`), so it names the groups the click
+allows now. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
 Readers) must be in the stored kinds. If not, `ApprovalRoutingError` (a
 subclass of `ApprovalGroupForbiddenError`, so every approve route answers
@@ -1402,9 +1410,9 @@ warn for each such entry, and `/ready` shows the same sentence under
 **Old requests and the switch.** A request without stored kinds (made while
 the switch was off, or before migration `0167`) keeps today's rule, but
 the click still checks the install's current routing for it. Such a
-request has no stored category, so only install entries without
-`category` can fit it; the same holds for a request stored before
-migration `0171`. With
+request has no stored category (`NULL`), so only install entries without
+`category` can fit it. A request with stored kinds from before migration
+`0171` has the empty text as category (see the click above). With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail

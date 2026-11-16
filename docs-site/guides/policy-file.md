@@ -275,8 +275,9 @@ meho policy explain --request <request-id>
   the place of your stored policy. It needs `POLICY_CLASSIFICATION`.
 - `--request` shows the rule stored on an approval request, and the
   groups that may approve it. The groups stored on the request count only
-  while `POLICY_APPROVER_ROUTING` is on. With it off, explain shows
-  today's groups, the same groups the approve check uses.
+  while `POLICY_APPROVER_ROUTING` is on. With it on, the install's routing
+  as it is now narrows them, as at the approve click. With it off, explain
+  shows today's groups, the same groups the approve check uses.
 - With routing on, "Who may approve" names the routing entries that fit,
   the install's first. "Install's floor" names the install's entry: a
   tenant's routing can only narrow it.

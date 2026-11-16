@@ -192,7 +192,10 @@ migration `0171`), then checks the stored kinds. So a tenant entry stored
 before this rule, or an install file that changed later, never widens
 anything: where a tenant entry is wider, its extra groups do not count.
 Nothing fails open: an install routing that is not valid refuses the
-click.
+click. A request that waited with stored groups before migration `0171`
+has the empty text as category: MEHO does not know it. Such a request is
+refused when an install entry that matches on a `category` could fit it;
+reject it and start the call again.
 
 **A change of the install's file.** The preview of an install import
 (`meho policy diff --scope install`) lists the tenants whose stored
@@ -202,7 +205,11 @@ stay stored, but where they are wider they do not count.
 
 `meho policy explain` shows the routing entries that fit (`rule`) and the
 install's entry (`floor`): "Install's floor: install:routing[0] (a
-tenant's routing can only narrow it)".
+tenant's routing can only narrow it)". For a waiting request
+(`--request`) the groups and the floor come from the install's routing
+as it is now, as at the click (`install_floor`). A request that the click
+refuses for its unknown category shows no group and the rule
+`category_not_stored`.
 
 All of this runs only while `POLICY_APPROVER_ROUTING` is on.
 

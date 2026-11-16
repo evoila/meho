@@ -12,6 +12,10 @@
   approve, and an install file that changed later counts at the click.
 * Two tenants do not affect each other; the install's import diff names
   the tenant whose routing no longer fits.
+* A request that started to wait before MEHO stored its category is
+  refused when an install entry that matches on a category may fit it.
+* ``meho policy explain --request`` uses the install's routing as it is
+  now, as the click does.
 * With the switch off, nothing of this runs.
 """
 
@@ -272,6 +276,55 @@ async def test_with_the_switch_off_the_click_does_not_check_the_floor(
         assert await install_floor_refusal(session, _person(_OTHER), row) is None
 
 
+async def _from_before_the_category(request_id: uuid.UUID) -> None:
+    """Make the row look like one that started to wait before migration ``0171``."""
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        row.approver_roles = list(_ALL_APPROVING)
+        row.approver_rule = "tenant:routing[0]"
+        row.approver_category = ""
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_a_request_from_before_the_category_is_refused_when_a_category_entry_may_fit() -> (
+    None
+):
+    await _store_policy(_NETWORK_ONLY_SA)
+    request_id = await _park("caution")
+    await _from_before_the_category(request_id)
+
+    for person in (_person(_OTHER), _person(_OTHER, sa_operator=True)):
+        with pytest.raises(ApprovalRoutingError) as caught:
+            await _approve(request_id, person)
+        assert caught.value.reason_text.startswith(
+            "This request started to wait before MEHO stored the category of a change"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_a_request_from_before_the_category_is_routed_when_no_category_entry_fits() -> None:
+    await _store_policy(
+        {
+            "classifications": [],
+            "routing": [
+                {"match": {"category": "network", "connector": "other-*"}, "approvers": ["Admins"]},
+                {"match": {"risk": "caution"}, "approvers": ["SA-Operators", "Admins"]},
+            ],
+        }
+    )
+    request_id = await _park("caution")
+    await _from_before_the_category(request_id)
+
+    with pytest.raises(ApprovalRoutingError) as caught:
+        await _approve(request_id, _person(_OTHER))
+    assert "(`install:routing[1]`) lets only MEHO-SA-Operators" in caught.value.reason_text
+    assert (await _approve(request_id, _person(_OTHER, sa_operator=True))).status == "approved"
+
+
 # ---------------------------------------------------------------------------
 # Two tenants, and the install's import diff
 # ---------------------------------------------------------------------------
@@ -355,16 +408,67 @@ async def test_with_the_switch_off_the_install_diff_names_no_tenant(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("_routing_on")
-def test_explain_of_a_stored_request_names_the_installs_floor() -> None:
-    request = ApprovalRequest(
-        op_id="demo.change",
-        approver_roles=["Admins"],
-        approver_rule="install:routing[0], tenant:routing[1]",
-    )
+async def _explain(request_id: uuid.UUID) -> Any:
+    row = await _load(request_id)
+    async with get_sessionmaker()() as session:
+        return await _request_approvers(session, row, "caution")
 
-    found = _request_approvers(request, "caution")
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_explain_of_a_stored_request_names_the_installs_floor() -> None:
+    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(
+        _tenant_file({"match": {"category": "network"}, "approvers": ["Admins"]}),
+        tenant_id=_TENANT_A,
+    )
+    request_id = await _park("caution")
+
+    found = await _explain(request_id)
 
     assert found.groups == ("MEHO-Admins",)
-    assert found.rule == "install:routing[0], tenant:routing[1]"
+    assert found.rule == "install:routing[0], tenant:routing[0]"
     assert found.floor == "install:routing[0]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_explain_of_a_stored_request_uses_the_install_routing_as_it_is_now() -> None:
+    await _store_policy({"classifications": []})
+    request_id = await _park("caution")
+    before = await _explain(request_id)
+    assert "MEHO-Operators" in before.groups
+    assert before.floor is None
+
+    # The install adds routing after the request started to wait.
+    await _set_install(_NETWORK_ONLY_SA)
+    added = await _explain(request_id)
+    assert added.groups == ("MEHO-SA-Operators", "MEHO-Admins")
+    assert added.floor == "install:routing[0]"
+
+    # The install narrows its routing further.
+    await _set_install(
+        {
+            "classifications": [],
+            "routing": [{"match": {"category": "network"}, "approvers": ["Admins"]}],
+        }
+    )
+    narrowed = await _explain(request_id)
+    assert narrowed.groups == ("MEHO-Admins",)
+    assert narrowed.floor == "install:routing[0]"
+    with pytest.raises(ApprovalRoutingError):
+        await _approve(request_id, _person(_OTHER, sa_operator=True))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_routing_on")
+async def test_explain_of_a_request_from_before_the_category_names_no_group() -> None:
+    await _store_policy(_NETWORK_ONLY_SA)
+    request_id = await _park("caution")
+    await _from_before_the_category(request_id)
+
+    found = await _explain(request_id)
+
+    assert found.groups == ()
+    assert found.rule == "category_not_stored"
+    assert found.floor is None

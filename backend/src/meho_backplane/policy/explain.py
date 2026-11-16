@@ -76,8 +76,15 @@ from meho_backplane.policy.explain_models import (
     ExplainToday,
     PolicyExplainResponse,
 )
-from meho_backplane.policy.routing import RouteEntry, _routes, routing_enabled, stored_kinds
+from meho_backplane.policy.routing import (
+    DEFAULT_RULE,
+    RouteEntry,
+    _routes,
+    routing_enabled,
+    stored_kinds,
+)
 from meho_backplane.policy.routing import today_kinds as _today_kinds
+from meho_backplane.policy.routing_floor import CATEGORY_NOT_STORED, install_floor
 from meho_backplane.policy.shadow import evaluate_call, shadow_enabled
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.policy.store import (
@@ -534,28 +541,37 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
 # ---------------------------------------------------------------------------
 
 
-def _request_approvers(request: ApprovalRequest, level: str | None) -> Approvers:
+async def _request_approvers(
+    session: AsyncSession, request: ApprovalRequest, level: str | None
+) -> Approvers:
     """The groups that may approve *request*: the ones the approve check uses.
 
     The groups stored on the request count only while the
     ``POLICY_APPROVER_ROUTING`` switch is on, as in
     :func:`~meho_backplane.policy.routing.routing_refusal`. With the switch
-    off, or with no stored groups, today's rule. The floor is the
-    install's entry named in the stored rule; at the click MEHO also checks
-    the install's routing as it is then.
+    off, or with no stored groups, today's rule. With the switch on, the
+    install's routing as it is now narrows them, as at the approve click
+    (:func:`~meho_backplane.policy.routing_floor.install_floor`); ``floor``
+    is its entry that fits.
     """
     from meho_backplane.operations.grant_approval import is_rights_change
 
     if is_rights_change(request):
         return Approvers(("MEHO-Admins",), RIGHTS_CHANGE_RULE)
     kinds = stored_kinds(request.approver_roles) if routing_enabled() else None
-    if kinds is not None:
-        rule = request.approver_rule or ""
-        floor = next((p for p in rule.split(", ") if p.startswith("install:")), None)
-        return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), rule, floor)
-    return Approvers(
-        tuple(f"MEHO-{kind}" for kind in _today_kinds(level, request.op_id)), "default"
-    )
+    rule = (request.approver_rule or "") if kinds is not None else DEFAULT_RULE
+    if kinds is None:
+        kinds = _today_kinds(level, request.op_id)
+    try:
+        floor = await install_floor(session, request)
+    except ValueError as exc:
+        raise invalid_routing(exc) from exc
+    if floor is None or floor.rule == DEFAULT_RULE:
+        return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), rule)
+    if floor.rule == CATEGORY_NOT_STORED:
+        return Approvers((), CATEGORY_NOT_STORED)
+    narrowed = tuple(f"MEHO-{kind}" for kind in kinds if kind in floor.kinds)
+    return Approvers(narrowed, rule, floor.rule)
 
 
 async def explain_request(*, tenant_id: UUID, request_id: UUID) -> PolicyExplainResponse:
@@ -579,7 +595,7 @@ async def explain_request(*, tenant_id: UUID, request_id: UUID) -> PolicyExplain
             risk_level=level,
             policy_rule=dict(request.policy_rule) if request.policy_rule else None,
             policy_version=request.policy_version,
-            approvers=_approvers_view(_request_approvers(request, level)),
+            approvers=_approvers_view(await _request_approvers(session, request, level)),
         )
     return PolicyExplainResponse(
         status="ok",

@@ -355,6 +355,21 @@ async def test_a_stored_routing_that_is_not_valid_is_409(
 
 
 @pytest.mark.asyncio
+async def test_a_request_with_an_install_routing_that_is_not_valid_is_409(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id = await _waiting_request(embedding)
+    _switches(monkeypatch, "POLICY_APPROVER_ROUTING")
+    await _store_policy(_BAD_ROUTING, None)
+    key = make_rsa_keypair("kid-explacc-request-badroute")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _ask(client, _token(key), request_id=request_id)
+    assert resp.status_code == 409, resp.text
+    assert "`routing` must be a list" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_the_preview_still_answers_with_a_routing_that_is_not_valid(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:

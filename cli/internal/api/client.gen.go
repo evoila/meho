@@ -6651,11 +6651,11 @@ type EventSourceUpdate struct {
 
 // ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
 type ExplainApprovers struct {
-	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
+	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. For a waiting request it is the install's routing as it is now, as at the approve click. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
 	Floor  *string  `json:"floor"`
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. Null for a caller who is not a tenant admin or a platform admin.
+	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. For a waiting request: category_not_stored when it started to wait before MEHO stored its category and an install entry that matches on a category could fit it; then no group may approve it. Null for a caller who is not a tenant admin or a platform admin.
 	Rule *string `json:"rule"`
 }
 

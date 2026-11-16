@@ -30,6 +30,7 @@ from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
     consult_and_record_grant,
+    credential_read_grant_reason,
     find_live_grant,
     null_target_only_park_hint,
 )
@@ -454,6 +455,48 @@ async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
 
     assert grant_id is not None
     assert await _grant_use_audit_rows() == 1
+
+
+def test_a_stored_secret_read_class_cannot_be_granted() -> None:
+    """A class a connector's safety floor stored on the row counts like the op id."""
+    assert credential_read_grant_reason("GET:/clients") is None
+    assert credential_read_grant_reason("GET:/clients", "credential_read") is not None
+    assert credential_read_grant_reason("GET:/clients", "write") is None
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_row_never_clears_an_op_with_a_stored_secret_read_class() -> None:
+    """A grant row never runs an ingested op whose row stores ``credential_read``.
+
+    The op id alone says ``read``. The stored class makes a person approve
+    each call, also when a grant row for the op is already there.
+    """
+    op_id = "GET:/clients"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="ingested",
+        method="GET",
+        safety_level="caution",
+        requires_approval=True,
+        parameter_schema={},
+    )
+    operator = _service_operator()
+    control = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR, record=False
+    )
+    assert control is not None
+
+    descriptor.op_class = "credential_read"
+    grant_id = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
+    )
+
+    assert grant_id is None
+    assert await _grant_use_audit_rows() == 0
 
 
 @pytest.mark.asyncio

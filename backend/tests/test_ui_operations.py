@@ -100,6 +100,19 @@ _LLM_PROMPT_TEXT = "SECRET-AGENT-PROMPT-do-not-leak"
 
 
 @pytest.fixture(autouse=True)
+def _wait_for_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a Run call finish inside its own response, however slow the machine is.
+
+    The Run button answers "running" when the call is not done after
+    ``ANSWER_WAIT_SECONDS`` (1 s in production). A loaded CI machine can need
+    longer to reach the approval request, so a test that reads the final
+    answer from the same response would fail by chance. The wait ends as soon
+    as the run ends, so a high value costs nothing when the call is quick.
+    """
+    monkeypatch.setattr("meho_backplane.ui.routes.operations.routes.ANSWER_WAIT_SECONDS", 120.0)
+
+
+@pytest.fixture(autouse=True)
 def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin chassis + BFF env vars for every test (mirrors the UI suites)."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", _DEFAULT_ISSUER)

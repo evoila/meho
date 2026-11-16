@@ -43,7 +43,7 @@ from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations import _audit as audit_module
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
-from meho_backplane.operations._audit import write_audit_row
+from meho_backplane.operations._audit import audit_safe, policy_rule_var, write_audit_row
 from meho_backplane.operations._errors import result_awaiting_approval
 from meho_backplane.operations.audit_row_safe import (
     FULL_ROW_LOST,
@@ -56,6 +56,7 @@ from meho_backplane.operations.audit_row_safe import (
     short_row_payload,
     storable_and_changed,
 )
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
 
 TENANT_ID = UUID("00000000-0000-0000-0000-0000000064b1")
@@ -518,9 +519,84 @@ async def test_the_log_line_of_a_failed_audit_write_names_the_call(demo_op: None
     assert "target_id" in entry
 
 
+async def test_the_log_line_of_a_failed_audit_write_holds_the_target_name_and_id(
+    demo_op: None,
+) -> None:
+    target = SimpleNamespace(id=uuid.uuid4(), name="demo-target")
+    descriptor = SimpleNamespace(
+        op_id=OP_ID,
+        source_kind="typed",
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        safety_level="safe",
+        requires_approval=False,
+        method=None,
+        path=None,
+        tags=[],
+    )
+    listener = _refuse_audit_inserts(_data_error(), times=None)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            receipt = await audit_safe(
+                audit_id=uuid.uuid4(),
+                event_class=AuditEventClass.OPERATION_EXECUTION,
+                operator=_operator(),
+                descriptor=descriptor,  # type: ignore[arg-type]
+                target=target,
+                params_hash="ab",
+                result_status="ok",
+                duration_ms=1.0,
+            )
+    finally:
+        _stop_refusing(listener)
+    assert receipt is None
+    failed = [entry for entry in logs if entry["event"] == "dispatch_audit_failed"]
+    assert len(failed) == 1
+    assert failed[0]["target"] == "demo-target"
+    assert failed[0]["target_id"] == str(target.id)
+
+
 # ---------------------------------------------------------------------------
 # The short row keeps what MEHO builds itself
 # ---------------------------------------------------------------------------
+
+
+async def test_a_short_row_keeps_the_policy_rule_and_version(demo_op: None) -> None:
+    descriptor = SimpleNamespace(
+        op_id=OP_ID,
+        source_kind="typed",
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        safety_level="safe",
+        requires_approval=False,
+        method=None,
+        path=None,
+        tags=[],
+    )
+    stamp = RuleStamp(source="default", rule_id="person.write", text="a write", policy_version=7)
+    token = policy_rule_var.set(stamp)
+    listener = _refuse_audit_inserts(_data_error(), times=1)
+    try:
+        await write_audit_row(
+            audit_id=uuid.uuid4(),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+            operator=_operator(),
+            descriptor=descriptor,  # type: ignore[arg-type]
+            target=None,
+            params_hash="ab",
+            result_status="ok",
+            duration_ms=1.0,
+        )
+    finally:
+        _stop_refusing(listener)
+        policy_rule_var.reset(token)
+    rows = await _rows()
+    assert len(rows) == 1
+    assert FULL_ROW_LOST in rows[0].payload
+    assert rows[0].policy_rule == "default:person.write (shadow)"
+    assert rows[0].policy_version == 7
 
 
 async def test_a_short_row_keeps_the_reveal_choice(demo_op: None) -> None:

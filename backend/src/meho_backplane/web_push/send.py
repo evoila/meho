@@ -391,10 +391,12 @@ def reset_for_testing(*, window: float = RATE_LIMIT_SECONDS) -> None:
 
 
 async def wait_for_sends_for_testing() -> None:
-    """Wait until every background send (and summary) has finished."""
-    while _TASKS:
-        await asyncio.gather(*list(_TASKS), return_exceptions=True)
-        # A gather of tasks that are all done ends without giving the loop a
-        # turn, so their done callbacks (which drop them from _TASKS) would
-        # never run and this loop would spin.
-        await asyncio.sleep(0)
+    """Wait until every background send (and summary) has finished.
+
+    A task that ended stays in ``_TASKS`` until its done callback runs, one
+    loop turn later. Awaiting only ended tasks never gives the loop that
+    turn, so the check is on ``done()`` and not on the set: a loop on the
+    set would spin forever and never yield.
+    """
+    while pending := [task for task in _TASKS if not task.done()]:
+        await asyncio.gather(*pending, return_exceptions=True)

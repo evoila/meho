@@ -642,8 +642,6 @@ async def test_waiting_for_sends_ends_when_a_done_task_is_still_listed() -> None
 
     await asyncio.wait_for(send_module.wait_for_sends_for_testing(), timeout=5)
 
-    assert task not in send_module._TASKS
-
 
 def test_the_remembered_requests_stay_bounded() -> None:
     limit = send_module._RateLimit(30.0)
@@ -654,6 +652,26 @@ def test_the_remembered_requests_stay_bounded() -> None:
     assert not limit.take_shown("admin", ids[0])
     assert limit.take_shown("admin", ids[-1])
     assert not limit.take_shown("admin", ids[-1])
+
+
+@pytest.mark.timeout(10, func_only=True)
+async def test_waiting_for_sends_returns_when_a_send_has_just_ended() -> None:
+    """A task that ended but is still in the set must not make the wait spin.
+
+    A task leaves the set one loop turn after it ended. The wait helper once
+    looped on the set itself, so in that turn it never yielded and never
+    returned: a test hung until its time limit, only on a busy machine.
+    """
+
+    async def _nothing() -> None:
+        return None
+
+    task = send_module._spawn(_nothing(), name="web-push-ended")
+    await asyncio.sleep(0)  # the task ends now; its done callback has not run yet
+    assert task.done()
+    assert task in send_module._TASKS
+
+    await send_module.wait_for_sends_for_testing()
 
 
 def test_the_default_window_is_thirty_seconds() -> None:

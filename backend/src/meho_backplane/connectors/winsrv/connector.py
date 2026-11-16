@@ -45,7 +45,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
-from meho_backplane.connectors.adapters.ssh import SshConnector
+from meho_backplane.connectors.adapters.ssh import SshConnector, fingerprint_error_extras
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -167,7 +167,7 @@ class WinsrvConnector(SshConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=method,
-                extras={"error": str(exc)},
+                extras=fingerprint_error_extras(exc),
             )
 
         data = payload if isinstance(payload, dict) else {}

@@ -4,7 +4,8 @@
 
   Re-probe failure alert fragment (Task #873 work item #6). Returned
   in place of the fingerprint card when the resolver reports
-  ``no_connector`` (501) or ``ambiguous_connector`` (409). The HTMX
+  ``no_connector`` (501) or ``ambiguous_connector`` (409), or when MEHO
+  cannot read the target's secret (422). The HTMX
   swap drops this fragment into ``#fingerprint-card`` so the rest of
   the detail page stays intact.
 

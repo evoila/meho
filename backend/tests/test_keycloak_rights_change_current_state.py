@@ -34,7 +34,6 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
     KeycloakConnector,
 )
-from meho_backplane.connectors.keycloak.ops_write_current_state import PINNED_STATE_OPS
 from meho_backplane.connectors.keycloak.rights_changes import (
     CURRENT_STATE_ON_CARD,
     NEW_OBJECT_OPS,
@@ -359,9 +358,9 @@ async def test_a_client_with_no_flow_of_its_own_shows_none() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 async def test_a_failed_read_says_the_state_is_not_available(op_id: str) -> None:
-    key = PINNED_STATE_OPS[op_id]
+    key = current_state.PINNED_STATE_OPS[op_id]
 
     card = (await _effect(op_id, _connector(_state(), fails=True)))["preview"]
 
@@ -395,7 +394,7 @@ async def test_an_odd_answer_says_the_state_is_not_available(
 ) -> None:
     state = _state()
     state[f"{_BASE}{path}"] = answer
-    key = PINNED_STATE_OPS[op_id]
+    key = current_state.PINNED_STATE_OPS[op_id]
 
     card = await _card(op_id, state)
 
@@ -416,12 +415,12 @@ async def test_no_live_connection_says_the_state_is_not_available() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 async def test_switch_off_the_agent_preview_has_no_state(
     op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _switch_off(monkeypatch)
-    key = PINNED_STATE_OPS[op_id]
+    key = current_state.PINNED_STATE_OPS[op_id]
 
     effect = await _effect(op_id, _connector(_state()), for_agent=True)
 
@@ -430,12 +429,12 @@ async def test_switch_off_the_agent_preview_has_no_state(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 async def test_switch_off_the_person_still_sees_the_state_and_the_mcp_tools_do_not(
     op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _switch_off(monkeypatch)
-    key = PINNED_STATE_OPS[op_id]
+    key = current_state.PINNED_STATE_OPS[op_id]
 
     effect = await _effect(op_id, _connector(_state()))
     shown = proposed_effect_for_agent(
@@ -509,7 +508,7 @@ def _request(op_id: str, effect: dict[str, Any] | None) -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 async def test_the_run_goes_ahead_when_the_object_is_as_the_approver_saw_it(
     op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,7 +523,7 @@ async def test_the_run_goes_ahead_when_the_object_is_as_the_approver_saw_it(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 async def test_the_run_is_refused_when_the_object_changed_while_the_request_waited(
     op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -542,7 +541,7 @@ async def test_the_run_is_refused_when_the_object_changed_while_the_request_wait
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 async def test_the_run_is_refused_when_the_object_cannot_be_read_now(
     op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -661,6 +660,7 @@ def test_every_change_of_rights_shows_the_object_now_or_makes_a_new_one() -> Non
     assert shown | new == set(RIGHTS_CHANGE_OPS)
 
 
-@pytest.mark.parametrize("op_id", sorted(PINNED_STATE_OPS))
+@pytest.mark.parametrize("op_id", sorted(current_state.PINNED_STATE_OPS))
 def test_each_state_shown_by_this_change_is_checked_before_the_run(op_id: str) -> None:
-    assert state_pin_key(op_id) == PINNED_STATE_OPS[op_id] == CURRENT_STATE_ON_CARD[op_id]
+    pinned = current_state.PINNED_STATE_OPS[op_id]
+    assert state_pin_key(op_id) == pinned == CURRENT_STATE_ON_CARD[op_id]

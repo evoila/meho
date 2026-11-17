@@ -60,6 +60,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install gh and the SSH client
+        # The lab runner image has no `gh` (#3171), and the first run of
+        # this workflow stopped on that. build.sh also needs ssh, scp and
+        # ssh-keygen. Same `sudo -n apt-get` pattern as ci.yml.
+        run: |
+          set -euo pipefail
+          missing=()
+          command -v gh >/dev/null 2>&1 || missing+=(gh)
+          for tool in ssh scp ssh-keygen; do
+            command -v "${tool}" >/dev/null 2>&1 || { missing+=(openssh-client); break; }
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "gh and the SSH client are already installed"
+            exit 0
+          fi
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+          gh --version
+
       - name: Install govc
         # Pinned version and checksum: the sha256 from checksums.txt of the
         # govmomi release.

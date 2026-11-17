@@ -136,7 +136,7 @@ def _admin_headers(key: Any, *, extra: dict[str, str] | None = None) -> dict[str
 
 
 async def _rows_with_work_ref(ref: str) -> list[AuditLog]:
-    """Look rows up the way ``meho audit query --work-ref`` does: exact match."""
+    """Look rows up by the whole ticket id, the way ``meho audit query --work-ref`` does."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         stmt = select(AuditLog).where(AuditLog.work_ref == ref).order_by(AuditLog.occurred_at)

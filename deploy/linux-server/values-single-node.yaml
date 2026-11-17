@@ -16,6 +16,11 @@ ingress:
     secretName: meho-core-tls
 networkPolicy:
   ingressControllerNamespace: kube-system
+  # MEHO reaches its own console address through RKE2's Traefik. The host
+  # port 443 sends the connection to the Traefik pod on port 8443.
+  ingressControllerEgress:
+    podLabels:
+      app.kubernetes.io/name: rke2-traefik
 corePostgres:
   enabled: true
 coreKeycloak:

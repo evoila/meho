@@ -395,7 +395,7 @@ meho agent run-list [flags]
 
 - `--agent-name` — filter by agent definition name (exact match); an unknown name returns an empty list
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit the raw []AgentRunSummaryResponse JSON instead of the table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--offset` — rows to skip for paging into the result set (default 0)
@@ -500,7 +500,7 @@ meho approvals list [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference, exact match
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
@@ -859,7 +859,7 @@ meho audit count [flags]
 
 - `--audit-id` — count only this audit-id (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — count only the rows of one change-ticket reference
+- `--filter-work-ref` — count only the rows of one ticket id (whole id; white space at the ends is ignored)
 - `--json` — print the backplane's answer as it came instead of the summary
 - `--op-class` — count only one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — count only one op-id (glob with * wildcards)
@@ -895,7 +895,7 @@ meho audit query [flags]
 - `--audit-id` — exact audit-id lookup (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
-- `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored) — "show every write authorised by ticket X"
 - `--full-row-lost` — only the short rows: the database refused the full row, so MEHO stored the row without the target's answer and the error text
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
@@ -1288,7 +1288,7 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
-- `--filter-work-ref` — exact work-reference filter
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
@@ -4487,7 +4487,7 @@ meho runbook runs [flags]
 
 - `--assignee` — filter by assignee subject (tenant_admin only; operators see own regardless)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw RunbookListRunsResponse JSON instead of the human table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--status` — filter by run state: in_progress, completed, or abandoned
@@ -4629,7 +4629,7 @@ meho scheduler list [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw ListResponse JSON instead of the human table
 - `--kind` — filter by trigger kind: cron | one_off | event
 - `--limit` — max triggers per page (1..500, server default 100 when omitted)

@@ -222,7 +222,7 @@ one transaction):
 - `list_runs(session, *, tenant_id, work_ref=None, status=None,
   agent_definition_id=None, limit=100, offset=0) -> list[AgentRun]` — the
   agent-run list read substrate (work_ref I3-T2 #1662), newest-first,
-  tenant-isolated. `work_ref` narrows to one exact change ticket
+  tenant-isolated. `work_ref` narrows to one change ticket (whole id)
   (composite `(tenant_id, work_ref)` index); `status` narrows to one
   lifecycle state; `agent_definition_id` narrows to runs produced by one
   agent definition (the name→id resolution lives at the caller — #2472);

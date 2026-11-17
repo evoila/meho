@@ -1,0 +1,27 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The "Approve group in order" modal when its ticket id is refused.
+
+  ``GET`` / ``POST /ui/approvals/in-order`` answer with this modal and a 422
+  when ``work_ref`` is blank or breaks the ticket id rule. It shows the rule
+  text and lists no steps, so nothing can be approved from it. The 422
+  carries the ``Meho-Work-Ref-Refused`` header, so ``work-ref-refused.js``
+  swaps it in like a good answer.
+
+  Context:
+    work_ref_error -- str: why the ticket id was refused
+-#}
+<dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Approve change ticket in order">
+  <div class="modal-box max-w-2xl" data-approval-in-order-refused>
+    <h3 class="text-lg font-semibold">Approve in order</h3>
+    <div role="alert" class="alert alert-error mt-3 text-sm" data-work-ref-refused>{{ work_ref_error }}</div>
+    <div class="modal-action">
+      <button type="button" class="btn btn-sm" data-close-dialog>Close</button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit">close</button>
+  </form>
+</dialog>

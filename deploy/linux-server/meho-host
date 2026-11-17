@@ -88,6 +88,9 @@ readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_SUPPORT_DIR=/var/lib/meho/support
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
 readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
+# The CA of the console certificate, which install.sh writes at its end
+# (lib/common.sh) and certificate writes again. It is not secret.
+readonly MEHO_CONSOLE_CA_FILE=/var/lib/meho/console-ca.crt
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_ETC_DIR=/etc/meho
 # The two commands install.sh puts on the machine, and the folder of the
@@ -322,7 +325,8 @@ Commands:
                     checks that the key belongs to the certificate, that
                     the certificate names the host name of this install
                     and is valid now, and that the chain ends at your CA.
-                    When a check fails, nothing changes. At the end it
+                    When a check fails, nothing changes. It writes your
+                    CA to /var/lib/meho/console-ca.crt, and at the end it
                     prints the certificate line of check.
   keyholder on      OpenBao, the password safe of MEHO, stays sealed after
                     every restart, and MEHO waits, until a keyholder runs
@@ -1391,6 +1395,44 @@ remove_kernel_settings() {
     ok "removed RKE2's kernel settings file $CIS_SYSCTL_FILE"
 }
 
+# install_cluster_cidr: the pod range of the install, from the install record.
+install_cluster_cidr() {
+    awk -F'"' '$2 == "cluster_cidr" { print $4; exit }' "${HOST_ROOT}${MEHO_INSTALL_RECORD}" 2>/dev/null
+}
+
+# remove_pod_routes: the blackhole routes inside the pod range of the
+# install. Canal, the pod network of RKE2, adds one for the pod addresses of
+# the node, and RKE2's uninstall script leaves it. install.sh counts such a
+# route as a network of the machine (machine_networks in lib/checks.sh), so a
+# new install would stop until the machine restarts. A route outside the pod
+# range stays. A failed ip call is a [WARN] line, and uninstall goes on.
+remove_pod_routes() {
+    local cluster_cidr routes type destination range removed=() word=route
+    cluster_cidr=$(install_cluster_cidr) || true
+    [[ $cluster_cidr == */* ]] && is_ipv4_range "$cluster_cidr" || return 0
+    if ! routes=$(ip -4 route show); then
+        warn "ip could not list the routes of this machine, so a blackhole route of the pod range $cluster_cidr may be left. Read its message above. A new install refuses such a route; remove it with: ip route del blackhole <range>"
+        return 0
+    fi
+    while read -r type destination _; do
+        [[ $type == blackhole ]] || continue
+        range=$destination
+        [[ $range == */* ]] || range+=/32
+        is_ipv4_range "$range" || continue
+        if ((${range#*/} < ${cluster_cidr#*/})) || ! range_holds "$cluster_cidr" "${range%/*}"; then
+            continue
+        fi
+        if ip -4 route del blackhole "$destination"; then
+            removed+=("$destination")
+        else
+            warn "ip could not remove the route blackhole $destination of the pod range $cluster_cidr. A new install refuses it. Read its message above, then run: ip route del blackhole $destination"
+        fi
+    done <<<"$routes"
+    ((${#removed[@]} > 0)) || return 0
+    ((${#removed[@]} == 1)) || word=routes
+    ok "removed the blackhole $word $(join_by ', ' "${removed[@]}") of the pod range $cluster_cidr, which RKE2's uninstall script leaves"
+}
+
 # etcd_user_exists, etcd_group_exists and etcd_account_recorded come from
 # lib/cis.sh, sourced above.
 etcd_part_exists() {
@@ -1463,8 +1505,11 @@ command_uninstall() {
     else
         note "$RKE2_UNINSTALL is not on this machine, so RKE2 is already gone."
     fi
-    # RKE2 is stopped now, so no etcd process runs as the etcd user. The
-    # record is in /etc/meho, so the account goes before that folder.
+    # RKE2 is stopped now, so no etcd process runs as the etcd user, and
+    # Canal adds no route again. The records of the etcd account and of the
+    # pod range are in /etc/meho, so the account and the routes go before
+    # that folder.
+    remove_pod_routes
     remove_kernel_settings
     remove_etcd_account
     rm -rf "${HOST_ROOT}${MEHO_STATE_DIR}"
@@ -1538,6 +1583,24 @@ write_console_tls() {
     printf '{"data":{"tls.crt":"%s","tls.key":"%s","ca.crt":"%s"}}\n' "$tls_crt" "$tls_key" "$ca_crt" |
         rke2_kubectl -n "$MEHO_NAMESPACE" patch secret "$CONSOLE_TLS_SECRET" \
             --type=merge --patch-file=/dev/stdin >/dev/null 2>&1
+}
+
+# write_console_ca <CA certificate>: the CA of the new certificate goes to
+# MEHO_CONSOLE_CA_FILE, which install.sh writes at its end (write_console_ca
+# in lib/core.sh). So the file names the CA that the console's certificate
+# chains to without a new run of install.sh. The CA is not secret: mode
+# 0644, in the root-only folder /var/lib/meho. The file is written next to
+# its place and then moved, so nobody reads half a file. The Secret holds
+# the new certificate already, so a failure here only warns.
+write_console_ca() {
+    local file="${HOST_ROOT}${MEHO_CONSOLE_CA_FILE}"
+    if { printf '%s\n' "$1" >"$file.new"; } 2>/dev/null &&
+        chmod 0644 "$file.new" && mv -f "$file.new" "$file"; then
+        ok "wrote your CA to $MEHO_CONSOLE_CA_FILE"
+        return 0
+    fi
+    rm -f "$file.new"
+    warn "$MEHO_CONSOLE_CA_FILE could not be written, so it may still hold the old CA. Give your own CA file to the browsers and laptops that use MEHO."
 }
 
 # check_new_certificate <host> <file> <certificates>: stop with one [FAIL]
@@ -1619,10 +1682,12 @@ command_certificate() {
         fail "the Secret $CONSOLE_TLS_SECRET could not be changed, so the console keeps its certificate." \
             "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
     ok "installed the certificate for $host in the Secret $CONSOLE_TLS_SECRET: the console, the API and the login show it within a minute"
+    write_console_ca "$(pem_block "$chain" last)"
     note "browsers and the meho CLI trust it when the computer trusts your CA."
-    # shortcut: the first-start list (#4042) is not built yet. Until it is,
-    # this prints the certificate line of check, which reads the Secret
-    # again with the same rule. Print the first-start list when #4042 lands.
+    # The certificate line of check, not the first-start list: the list
+    # fetches the certificate through the console address, and Traefik
+    # shows the new Secret only within a minute. The check line reads the
+    # Secret again now, with the same rule.
     check_console_certificate
     print_checks
     if in_list fail "${CHECK_STATUSES[@]}"; then

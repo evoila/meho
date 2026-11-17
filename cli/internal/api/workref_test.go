@@ -23,7 +23,6 @@ type workRefCase struct {
 	Clean       string `json:"clean"`
 	CleanRepeat int    `json:"clean_repeat"`
 	Rule        string `json:"rule"`
-	CLIRefuses  bool   `json:"cli_refuses"`
 }
 
 func (c workRefCase) raw() string {
@@ -64,8 +63,8 @@ func loadWorkRefCases(t *testing.T) (valid, invalid []workRefCase) {
 func TestValidWorkRef_SharedCases(t *testing.T) {
 	valid, invalid := loadWorkRefCases(t)
 	for _, c := range valid {
-		if got := ValidWorkRef(c.raw()); got == c.CLIRefuses {
-			t.Errorf("%s: ValidWorkRef(%q) = %v; want %v", c.Name, c.raw(), got, !c.CLIRefuses)
+		if !ValidWorkRef(c.raw()) {
+			t.Errorf("%s: ValidWorkRef(%q) = false; want true", c.Name, c.raw())
 		}
 		if CleanWorkRef(c.raw()) != c.clean() {
 			t.Errorf("%s: CleanWorkRef(%q) = %q; want %q", c.Name, c.raw(), CleanWorkRef(c.raw()), c.clean())

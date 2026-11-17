@@ -22,6 +22,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -342,17 +343,60 @@ async def test_a_request_without_facts_gets_the_strict_rule() -> None:
         await _approve(request_id, _person("person-admin"), params)
 
 
-@pytest.mark.asyncio
-async def test_a_change_for_another_login_outside_the_login_realm_keeps_the_usual_rules() -> None:
-    params = {"group_id": _GROUP, "user_id": _OTHER_USER}
-    request_id = await _park(params, _grant(login_realm=False), requester_sa=True)
+_OUTSIDE_CASES = [
+    (_ADD, {"group_id": _GROUP, "user_id": _OTHER_USER}, {"user_id": _OTHER_USER}),
+    (_ROLES, {"id": _OTHER_USER, "roles": ["example-role"]}, {"user_id": _OTHER_USER}),
+    (_ATTRS, {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}, {"members": None}),
+]
 
-    await _approve(
-        request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_an_sa_operator_cannot_approve_their_own_change_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(
+        params, _grant(login_realm=False, **facts), op_id=op_id, requester_sa=True
     )
 
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(
+            request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
+        )
+
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
+    assert (await _row(request_id)).rights_change is True
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_an_sa_operator_who_is_not_an_admin_cannot_approve_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(params, _grant(login_realm=False, **facts), op_id=op_id)
+
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(
+            request_id, _person("person-sa", role=TenantRole.OPERATOR, sa_operator=True), params
+        )
+
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_another_admin_approves_a_change_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(params, _grant(login_realm=False, **facts), op_id=op_id)
+
+    await _approve(request_id, _person("person-admin"), params)
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     payload = await _decision_payload(request_id)
-    assert payload["approval_rule"] == ApprovalRule.SA_OPERATOR_SELF_APPROVAL.value
+    assert payload["grant_in_login_realm"] is False
     assert payload["grant_for_approver"] is False
 
 
@@ -693,8 +737,13 @@ def _connector_with(
     users: dict[str, str] | None = None,
     members: dict[str, list[dict[str, Any]]] | None = None,
     user_lookup_fails: bool = False,
+    realm_answer: str | None = None,
 ) -> tuple[KeycloakConnector, list[dict[str, Any]]]:
-    """A connector whose lookups answer from the given maps; records member reads."""
+    """A connector whose lookups answer from the given maps; records member reads.
+
+    A realm read answers with *realm_answer*, or else with the realm name in
+    the path.
+    """
     connector = KeycloakConnector()
     reads: list[dict[str, Any]] = []
 
@@ -725,6 +774,12 @@ def _connector_with(
         first = int(params["first"])
         return rows[first : first + int(params["max"])]
 
+    async def _get_admin_json(
+        _t: Any, path: str, *, operator: Any, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return {"realm": realm_answer or unquote(path.rsplit("/", 1)[-1])}
+
+    connector._get_admin_json = _get_admin_json  # type: ignore[method-assign]
     connector._find_group = _find_group  # type: ignore[method-assign]
     connector._find_user_uuid = _find_user  # type: ignore[method-assign]
     connector._get_admin_list = _get_admin_list  # type: ignore[method-assign]
@@ -865,12 +920,54 @@ async def test_the_connector_says_when_the_realm_is_not_the_login_realm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with()
 
     block = await _grant_block(
-        _ctx(_ADD, {"group_name": "g", "user_id": _USER}, realm="customer-realm")
+        _ctx(
+            _ADD, {"group_name": "g", "user_id": _USER}, realm="customer-realm", connector=connector
+        )
     )
 
     assert block["login_realm"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "answer"),
+    [("customer-realm", "MEHO"), ("Meho", None), ("meho ", None), (" MEHO ", "meho")],
+    ids=["keycloak-answers-own-realm", "other-case", "space-at-end", "both"],
+)
+async def test_the_own_realm_is_found_by_the_name_keycloak_answers_with(
+    monkeypatch: pytest.MonkeyPatch, stored: str, answer: str | None
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with(realm_answer=answer)
+
+    block = await _grant_block(
+        _ctx(_ADD, {"group_name": "g", "user_id": _USER}, realm=stored, connector=connector)
+    )
+
+    assert block["login_realm"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_realm_that_cannot_be_read_counts_as_the_own_realm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with()
+
+    async def _fails(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("read failed")
+
+    connector._get_admin_json = _fails  # type: ignore[method-assign]
+    params = {"group_name": "g", "user_id": _USER}
+
+    unreadable = await _grant_block(_ctx(_ADD, params, realm="customer-realm", connector=connector))
+    offline = await _grant_block(_ctx(_ADD, params, realm="customer-realm"))
+
+    assert unreadable["login_realm"] is True
+    assert offline["login_realm"] is True
 
 
 @pytest.mark.asyncio

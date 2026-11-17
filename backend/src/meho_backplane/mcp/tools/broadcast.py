@@ -298,12 +298,15 @@ register_mcp_tool(
                             "type": "string",
                             "minLength": 1,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It groups every "
+                                "event tied to one ticket -- an "
+                                "announcement's declared 'work_ref' OR an "
+                                "audit-driven operation's projected lineage "
+                                "'work_ref'."
                             ),
                         },
                         "active_only": {
@@ -319,7 +322,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "limit": {
@@ -973,12 +978,15 @@ register_mcp_tool(
                             "type": "string",
                             "minLength": 1,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It groups every "
+                                "event tied to one ticket -- an "
+                                "announcement's declared 'work_ref' OR an "
+                                "audit-driven operation's projected lineage "
+                                "'work_ref'."
                             ),
                         },
                         "active_only": {
@@ -994,7 +1002,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "timeout_ms": {

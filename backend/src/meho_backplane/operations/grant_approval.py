@@ -68,6 +68,16 @@ it: the requester never approves their own change of rights, whatever
 their group, at every risk level and with the break-glass switch on, and
 the approver is another admin
 (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
+
+A person approves each call
+---------------------------
+
+Both register functions also mark the operation with
+:func:`~meho_backplane.op_classes.declare_per_call_approval`. So a
+standing grant, a stored grant row and a run approval never cover a
+registered change of rights: making such a grant or such a run approval
+list is refused, and each call waits for its own approval. A connector
+needs no second mark for this.
 """
 
 from __future__ import annotations
@@ -79,6 +89,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.op_classes import declare_per_call_approval
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
@@ -168,9 +179,11 @@ def register_grant_op(
     of objects shown on the card: the run is refused with the refusal when
     the live card lists other ids than the approved card.
     *bound_ids_missing* is the refusal when the approved card has no list
-    under that key at all: the request is older than the list.
+    under that key at all: the request is older than the list. A person
+    approves each call of *op_id* (:func:`declare_per_call_approval`).
     """
     _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params, bound_ids, bound_ids_missing)
+    declare_per_call_approval((op_id,))
 
 
 #: Operations that are always a change of rights, but not of one login or
@@ -180,8 +193,12 @@ _RIGHTS_CHANGE_OPS: set[str] = set()
 
 
 def register_rights_change_op(op_id: str) -> None:
-    """Record that every request of *op_id* is a change of rights."""
+    """Record that every request of *op_id* is a change of rights.
+
+    A person approves each call of *op_id* (:func:`declare_per_call_approval`).
+    """
     _RIGHTS_CHANGE_OPS.add(op_id)
+    declare_per_call_approval((op_id,))
 
 
 @dataclass(frozen=True)

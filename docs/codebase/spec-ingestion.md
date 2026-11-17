@@ -1286,6 +1286,7 @@ review payload also carries `classified_safety_level` /
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
 | `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
+| `requires_approval=false` on an operation registered as a change of rights (`register_rights_change_op`, `register_grant_op`) | anyone | - | always refused, `approval_off_rights_change`; an older override row with approval off does not count either |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective

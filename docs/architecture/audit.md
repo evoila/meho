@@ -45,7 +45,7 @@ The substrate has three consumer-facing surfaces, all dispatching through `query
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration`. Client-supplied `tenant_id` (or any other unknown field) is rejected at 422 `extra_forbidden` — `AuditQueryRequest` sets `extra="forbid"` (G0.9-T2 #729). | Full-filter surface. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param → `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
-| `GET /api/v1/audit/by-work-ref/{ref}` | Path param → `filters.work_ref` (exact match). | Pre-canned shortcut: every write done under one change ticket. |
+| `GET /api/v1/audit/by-work-ref/{ref}` | Path param → `filters.work_ref` (whole ticket id). | Pre-canned shortcut: every write done under one change ticket. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match); `since` defaults to `"24h"`. Answers the `{items, next_cursor}` list envelope. | Pre-canned shortcut — operator can never see another operator's `my-recent` through this route. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Cross-tenant lookups → 404 (never 403, so existence never leaks). | Single-row fetch. |
 | `GET /api/v1/audit/traces` | Finds stored traces by request id, caller and time, without the audit row. | Read-only. |

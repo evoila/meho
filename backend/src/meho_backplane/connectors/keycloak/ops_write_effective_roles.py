@@ -44,7 +44,6 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import (
     REALM_MANAGEMENT_CLIENT,
     opt_str,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -106,7 +105,7 @@ async def _client_name(
     if client_uuid not in cache:
         row = await connector._get_admin_json(
             ctx.target,
-            fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": quote_segment(client_uuid)}),
+            fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid}),
             operator=ctx.operator,
         )
         name = opt_str(row.get("clientId"))
@@ -141,8 +140,8 @@ async def _start_roles(
                         _CLIENT_ROLE_PATH,
                         {
                             "realm": realm,
-                            "client-uuid": quote_segment(client_uuid),
-                            "role-name": quote_segment(name),
+                            "client-uuid": client_uuid,
+                            "role-name": name,
                         },
                     ),
                     operator=ctx.operator,
@@ -194,7 +193,7 @@ async def _parts(
     """The direct parts of one composite role."""
     parts = await connector._get_admin_list(
         ctx.target,
-        fill_path(_ROLE_BY_ID_COMPOSITES_PATH, {"realm": realm, "role-id": quote_segment(role_id)}),
+        fill_path(_ROLE_BY_ID_COMPOSITES_PATH, {"realm": realm, "role-id": role_id}),
         operator=ctx.operator,
         strict=True,
     )

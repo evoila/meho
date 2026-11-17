@@ -12,6 +12,7 @@
   swapping ``#connectors-modal-container`` (``hx-swap="innerHTML"``).
     * Success -> 204 + ``HX-Redirect: /ui/connectors`` (back to the
       list with the edited row).
+    * Success with a warning -> 200 + ``_saved_warning_modal.html``.
     * Validation failure -> 422 + this modal re-rendered with
       ``errors`` + echoed ``values``.
 

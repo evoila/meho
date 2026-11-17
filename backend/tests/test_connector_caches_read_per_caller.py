@@ -68,7 +68,9 @@ class _Target:
     port: int | None = 443
     secret_ref: str | None = _SECRET_REF
     auth_model: str | None = "shared_service_account"
-    extras: dict[str, Any] = field(default_factory=dict)
+    # The Keycloak connector refuses a target that names no managed realm;
+    # the other connectors ignore the key.
+    extras: dict[str, Any] = field(default_factory=lambda: {"managed_realm": "example"})
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     tenant_id: uuid.UUID = _TENANT_ID
     fqdn: str | None = None

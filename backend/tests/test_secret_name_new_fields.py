@@ -259,7 +259,8 @@ async def test_keycloak_read_hides_shared_names_by_default_and_reveal_returns_th
         "attributes": {"snmpAuthKey": _VALUE},
         "smtpServer": {"host": "smtp.example.invalid", "password": _VALUE},
     }
-    raw = await keycloak_realm_get(_RealmReader(realm), None, None, {})  # type: ignore[arg-type]
+    target = SimpleNamespace(name="kc", extras={"managed_realm": "demo"})
+    raw = await keycloak_realm_get(_RealmReader(realm), None, target, {})  # type: ignore[arg-type]
 
     # The Keycloak list hides the SMTP password at the source, for good.
     assert raw["realm"]["smtpServer"]["password"] == REDACTED

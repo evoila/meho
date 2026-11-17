@@ -1556,6 +1556,7 @@ async def create_pending_request(
     reveal_secret: bool = False,
     rights_change: bool = False,
     category: str | None = None,
+    wait_reason: str | None = None,
     install_category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
@@ -1639,6 +1640,8 @@ async def create_pending_request(
             (the looked-up row's ``policy_category``). Approver routing
             matches a tenant's ``category`` entry on it
             (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
+        wait_reason: Why the policy gate made the call wait. The
+            ``approval.request`` audit row keeps it as ``wait_reason``.
         install_category: The category the install's policy alone gives
             the operation (the looked-up row's
             ``policy_install_category``). The install's routing entries
@@ -1811,6 +1814,7 @@ async def create_pending_request(
         path="approval.request",
         status_code=_APPROVAL_STATUS_CODE,
         duration_ms=0.0,
+        extra_payload={"wait_reason": wait_reason} if wait_reason else None,
     )
 
     _log().info(

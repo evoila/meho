@@ -720,13 +720,21 @@ Other operations then use it by reference (path and field).
   (default 0), `special_chars` (default `!@#$%^&*-_=+`; an empty string means
   none), `max_repeat` (the longest run of one character) and `rotate`.
 - `PasswordRules` checks that the rules can be met (the minimums fit in the
-  length, `min_special` needs special characters). A bad rule set is
-  refused before any Vault call. The value comes from Python `secrets`.
+  length, `min_special` needs special characters, and with one allowed
+  special character the specials fit between the other characters under
+  `max_repeat`). A bad rule set is refused before any Vault call. The value
+  comes from Python `secrets`. It is built one character at a time: a
+  character that would make a run longer than `max_repeat` is left out of
+  the next pick, so every rule set that passes the check works at once,
+  without retries.
 - The read and the write are shared with the userpass password source
   (`userpass_password.py`): the write uses `cas`, so a second writer is not
   overwritten, and it keeps the other fields at the path.
-- Safe to run twice: a field that holds a value is left alone
-  (`generated: false`). `rotate: true` writes a new version.
+- Safe to run twice: a field that holds text is left alone
+  (`generated: false`). A field that holds a value that is not text (a
+  number, a list, an object) is also left alone: the op fails with an error
+  and writes nothing. An empty field counts as missing. `rotate: true`
+  writes a new version in every case.
 - The result is `{mount, path, field, version, generated}`. The params hold
   no value, so the op class is plain `write`. The approval preview shows the
   path, the field and the rules, never a value. The Vault rights it needs

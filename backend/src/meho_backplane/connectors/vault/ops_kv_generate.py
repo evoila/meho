@@ -14,8 +14,9 @@ and version. Other operations then read the password by reference.
   log line. The params hold no secret, so the audit row has none either.
 * Other fields at the path stay as they are (a ``username`` field can sit
   next to the password).
-* Safe to run twice: when the field already holds a value, nothing changes,
-  unless ``rotate`` is true. Then MEHO writes a new version.
+* Safe to run twice: when the field already holds text, nothing changes,
+  unless ``rotate`` is true. Then MEHO writes a new version. A value that
+  is not text is not replaced without ``rotate``: the op fails instead.
 * The write uses ``cas`` (the secret version), so a second writer is not
   overwritten.
 
@@ -48,8 +49,8 @@ from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.connectors.vault.userpass_password import (
     DEFAULT_PASSWORD_FIELD,
     PasswordPlan,
+    PasswordSecretError,
     _read_kv,
-    _stored_password,
     _write_kv,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -69,7 +70,6 @@ GENERATE_OP_ID = "vault.kv.generate"
 
 DEFAULT_LENGTH = 24
 DEFAULT_SPECIAL_CHARS = "!@#$%^&*-_=+"
-_MAX_TRIES = 2000
 
 
 class PasswordRuleError(ValueError):
@@ -106,7 +106,7 @@ class PasswordRules:
 
     def check(self) -> None:
         """Raise :class:`PasswordRuleError` when no password can meet the rules."""
-        minimums = (self.min_upper, self.min_lower, self.min_digits, self.min_special)
+        minimums = self.minimums()
         if self.length < 1 or any(m < 0 for m in minimums):
             raise PasswordRuleError("length must be at least 1 and the minimums cannot be negative")
         if sum(minimums) > self.length:
@@ -124,10 +124,15 @@ class PasswordRules:
         if self.max_repeat is not None:
             if self.max_repeat < 1:
                 raise PasswordRuleError("max_repeat must be at least 1")
-            if len(self._pool()) < 2:
+            if not _special_runs_fit(self):
                 raise PasswordRuleError(
-                    "max_repeat needs at least two different allowed characters"
+                    "the special characters cannot meet max_repeat: allow more "
+                    "special characters, lower min_special or raise length"
                 )
+
+    def minimums(self) -> tuple[int, int, int, int]:
+        """The smallest counts of upper, lower, digit and special characters."""
+        return (self.min_upper, self.min_lower, self.min_digits, self.min_special)
 
     def _pool(self) -> str:
         return string.ascii_letters + string.digits + "".join(sorted(set(self.special_chars)))
@@ -145,44 +150,113 @@ class PasswordRules:
         }
 
 
-def _longest_run(value: str) -> int:
-    longest = run = 0
-    previous = ""
-    for char in value:
-        run = run + 1 if char == previous else 1
-        previous = char
-        longest = max(longest, run)
-    return longest
+def _special_runs_fit(rules: PasswordRules) -> bool:
+    """Whether the required special characters fit between the other characters.
+
+    Only a single allowed special character is a problem: then every
+    required special is the same character, and the other characters must
+    split them into runs no longer than ``max_repeat``.
+    """
+    if rules.max_repeat is None or len(set(rules.special_chars)) != 1:
+        return True
+    gaps = rules.length - rules.min_special + 1
+    return rules.min_special <= rules.max_repeat * gaps
+
+
+def _slot_kinds(rules: PasswordRules) -> list[str]:
+    """One character kind per position, in a random order.
+
+    With a single special character and a repeat limit, the required
+    specials go into the gaps between the other positions, at most
+    ``max_repeat`` per gap, so they never form a run that is too long.
+    """
+    rng = secrets.SystemRandom()
+    others = (
+        ["upper"] * rules.min_upper
+        + ["lower"] * rules.min_lower
+        + ["digit"] * rules.min_digits
+        + ["any"] * (rules.length - sum(rules.minimums()))
+    )
+    rng.shuffle(others)
+    if rules.max_repeat is None or len(set(rules.special_chars)) != 1:
+        kinds = others + ["special"] * rules.min_special
+        rng.shuffle(kinds)
+        return kinds
+    per_gap = [0] * (len(others) + 1)
+    for _ in range(rules.min_special):
+        open_gaps = [i for i, n in enumerate(per_gap) if n < rules.max_repeat]
+        per_gap[secrets.choice(open_gaps)] += 1
+    kinds = ["special"] * per_gap[0]
+    for kind, count in zip(others, per_gap[1:], strict=True):
+        kinds += [kind] + ["special"] * count
+    return kinds
+
+
+def _run_ending_at(chars: list[str], char: str) -> int:
+    run = 0
+    for previous in reversed(chars):
+        if previous != char:
+            break
+        run += 1
+    return run
+
+
+def _forced_run_after(kinds: list[str], start: int) -> int:
+    run = 0
+    for kind in kinds[start:]:
+        if kind != "special":
+            break
+        run += 1
+    return run
 
 
 def generate_with_rules(rules: PasswordRules) -> str:
-    """Make a random password that meets *rules*, with a cryptographic random source."""
-    rng = secrets.SystemRandom()
-    pool = rules._pool()
-    for _ in range(_MAX_TRIES):
-        chars = (
-            [secrets.choice(string.ascii_uppercase) for _ in range(rules.min_upper)]
-            + [secrets.choice(string.ascii_lowercase) for _ in range(rules.min_lower)]
-            + [secrets.choice(string.digits) for _ in range(rules.min_digits)]
-            + [secrets.choice(rules.special_chars) for _ in range(rules.min_special)]
-        )
-        chars += [secrets.choice(pool) for _ in range(rules.length - len(chars))]
-        rng.shuffle(chars)
-        candidate = "".join(chars)
-        if rules.max_repeat is None or _longest_run(candidate) <= rules.max_repeat:
-            return candidate
-    raise PasswordRuleError(
-        "could not make a password that meets the repeat limit; relax the rules"
-    )
+    """Make a random password that meets *rules*, with a cryptographic random source.
+
+    The password is built one character at a time. When the last characters
+    already form a run of ``max_repeat``, the next pick leaves that character
+    out, so the repeat limit holds without retries.
+    """
+    alphabets = {
+        "upper": string.ascii_uppercase,
+        "lower": string.ascii_lowercase,
+        "digit": string.digits,
+        "special": "".join(sorted(set(rules.special_chars))),
+        "any": rules._pool(),
+    }
+    kinds = _slot_kinds(rules)
+    only_special = alphabets["special"] if len(alphabets["special"]) == 1 else None
+    chars: list[str] = []
+    for index, kind in enumerate(kinds):
+        choices = alphabets[kind]
+        if rules.max_repeat is not None:
+            blocked: set[str] = set()
+            if chars and _run_ending_at(chars, chars[-1]) >= rules.max_repeat:
+                blocked.add(chars[-1])
+            if only_special is not None and kind != "special":
+                # Do not join a run of the one special character that follows.
+                run = _run_ending_at(chars, only_special) + 1
+                if run + _forced_run_after(kinds, index + 1) > rules.max_repeat:
+                    blocked.add(only_special)
+            choices = "".join(c for c in choices if c not in blocked)
+        chars.append(secrets.choice(choices))
+    return "".join(chars)
 
 
 def _generate_sync(client: Any, plan: PasswordPlan, rules: PasswordRules) -> dict[str, Any]:
     """Read, maybe write, with the blocking hvac client (call in a thread)."""
     found = _read_kv(client, plan)
-    if _stored_password(found, plan) is not None and not plan.rotate:
+    current = found[0].get(plan.field) if found else None
+    if found is not None and current not in (None, "") and not plan.rotate:
+        if not isinstance(current, str):
+            # Leave a value that is not text alone; it is not a password MEHO made.
+            raise PasswordSecretError(
+                f"the field {plan.field!r} at KV {plan.mount!r} path {plan.path!r} "
+                "holds a value that is not text; nothing was changed. Set "
+                "rotate to true to replace it, or use another field"
+            )
         # Safe to run twice: the field already holds a value.
-        version = found[1] if found else 0
-        return {"version": version, "generated": False}
+        return {"version": found[1], "generated": False}
     version = _write_kv(client, plan, found, generate_with_rules(rules))
     return {"version": version, "generated": True}
 

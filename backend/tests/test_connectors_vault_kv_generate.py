@@ -166,6 +166,32 @@ def test_values_differ_between_runs() -> None:
     assert len({generate_with_rules(PasswordRules()) for _ in range(50)}) == 50
 
 
+def _longest_run(value: str) -> int:
+    return max(len(list(group)) for _, group in itertools.groupby(value))
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        {"length": 128, "min_upper": 0, "min_lower": 0, "min_digits": 128, "max_repeat": 1},
+        {"length": 64, "min_upper": 64, "min_lower": 0, "min_digits": 0, "max_repeat": 1},
+        {"length": 9, "min_special": 5, "special_chars": "!", "max_repeat": 1},
+        {"length": 12, "min_special": 8, "special_chars": "!", "max_repeat": 2},
+        {"length": 30, "min_special": 10, "special_chars": "#", "max_repeat": 1},
+        {"length": 2, "min_upper": 0, "min_lower": 0, "min_digits": 0, "max_repeat": 1},
+    ],
+)
+def test_strict_rules_that_can_be_met_always_work(rules: dict[str, Any]) -> None:
+    parsed = PasswordRules.from_params(rules)
+    for _ in range(300):
+        value = generate_with_rules(parsed)
+        assert len(value) == parsed.length
+        assert sum(c.isupper() for c in value) >= parsed.min_upper
+        assert sum(c.isdigit() for c in value) >= parsed.min_digits
+        assert sum(c in parsed.special_chars for c in value) >= parsed.min_special
+        assert _longest_run(value) <= parsed.max_repeat
+
+
 @pytest.mark.parametrize(
     "rules",
     [
@@ -175,6 +201,8 @@ def test_values_differ_between_runs() -> None:
         {"length": 10, "special_chars": "! "},
         {"length": 10, "min_upper": -1},
         {"length": 10, "max_repeat": 0},
+        {"length": 9, "min_special": 6, "special_chars": "!", "max_repeat": 1},
+        {"length": 12, "min_special": 9, "special_chars": "!", "max_repeat": 2},
     ],
 )
 def test_rules_that_cannot_be_met_are_refused(rules: dict[str, Any]) -> None:
@@ -225,6 +253,24 @@ async def test_an_existing_value_is_kept_and_not_echoed(kv: _Kv) -> None:
     assert _stored(kv) == SENTINEL
     assert result["generated"] is False
     assert SENTINEL not in json.dumps(result)
+
+
+@pytest.mark.parametrize("current", [12345, 0, False, {"nested": "x"}, ["a"]])
+async def test_a_value_that_is_not_text_is_left_alone(kv: _Kv, current: Any) -> None:
+    kv.versions[("secret", "labs/sso")] = [{"password": current, "username": "svc-user"}]
+    with pytest.raises(PasswordSecretError) as err:
+        await _run({"path": "labs/sso"})
+    assert kv.writes == []
+    assert kv.versions[("secret", "labs/sso")] == [{"password": current, "username": "svc-user"}]
+    assert "rotate" in str(err.value)
+    assert "12345" not in str(err.value)
+
+
+async def test_rotate_replaces_a_value_that_is_not_text(kv: _Kv) -> None:
+    kv.versions[("secret", "labs/sso")] = [{"password": 12345}]
+    result = await _run({"path": "labs/sso", "rotate": True})
+    assert result["generated"] is True
+    assert isinstance(kv.versions[("secret", "labs/sso")][-1]["password"], str)
 
 
 async def test_rotate_writes_a_new_version(kv: _Kv) -> None:

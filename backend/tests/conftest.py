@@ -26,9 +26,9 @@ The autouse sweep is deliberately conservative on its capture surface:
 it reads ``capfd`` (the file-descriptor-level stdout/stderr capture) and
 the stdlib ``caplog``. Under ``pytest-xdist`` the fd scan is off; there
 the lines a structlog ``PrintLogger`` writes are recorded per test (see
-:func:`_record_structlog_prints`) and scanned too. Tests that drive their own structlog capture into
-a private buffer (the ``test_observability.py`` / ``test_api_v1_health.py``
-pattern) are *also* expected to assert no leak on that buffer; the sweep
+:func:`_record_structlog_prints`) and scanned too. Tests that drive their
+own structlog capture into a private buffer (the ``test_observability.py`` /
+``test_api_v1_health.py`` pattern) are *also* expected to assert no leak on that buffer; the sweep
 here is the safety net under the targeted assertion, not its replacement.
 Documented in :data:`SECRET_LEAK_PATTERNS` so contributors can extend the
 denylist without re-deriving the test contract.
@@ -720,7 +720,8 @@ def _no_secret_leak_sweep(
     # ``PrintLogger`` writes to stdout (the production log path) are recorded
     # as they are written (#6608) and scanned like the ``caplog`` records.
     # What is still not seen under xdist: output that does not go through a
-    # ``PrintLogger`` or stdlib logging (a bare ``print``, a write to ``sys.stderr``, a subprocess).
+    # ``PrintLogger`` or stdlib logging (a bare ``print``, a write to
+    # ``sys.stderr``, a subprocess).
     under_xdist = os.environ.get("PYTEST_XDIST_WORKER") is not None
 
     captured_chunks: list[tuple[str, str]] = []

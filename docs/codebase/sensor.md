@@ -209,6 +209,10 @@ probe that changes the target's version shows in the next list.
 - The match is `connectors.resolver.connector_serves_target`: the
   resolver's own candidate filter (product equal, version inside the
   connector's `supported_version_range`). No second version check exists.
+- The connector also fits when the resolver picks a subclass of its class
+  for the target. The subclass runs the same operations, as the dispatcher
+  does (for example a Sensor on `vault-1.x` and an OpenBao 2.x target,
+  served by `OpenBaoConnector`).
 - The connector named in the warning is the one `resolve_connector_or_label`
   picks for the target, when it is another connector. The resolver returns
   a class, and a class can also be registered as a fallback that accepts

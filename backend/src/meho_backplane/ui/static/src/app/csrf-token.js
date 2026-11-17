@@ -36,7 +36,7 @@
 // once from ``_head_assets.html`` after ``htmx.min.js`` so the listener is
 // registered before the first htmx request can resolve. Plain first-party JS
 // (no Alpine, no inline script) to preserve the chassis "zero inline script"
-// CSP posture, mirroring ``theme.js`` / ``session-expiry.js``.
+// CSP posture, mirroring ``session-expiry.js``.
 
 (function () {
   "use strict";

@@ -484,7 +484,7 @@ class HarborConnector(HttpConnector):
         operator: Operator,
         target: HarborTargetLike,
         params: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | OperationResult:
         """Create a project-scoped robot account via Harbor 2.x.
 
         Op-id: ``harbor.robot.create``. Classified ``credential_mint``:
@@ -522,13 +522,19 @@ class HarborConnector(HttpConnector):
         params
             Schema-validated: ``name`` (str), ``project`` (str),
             ``duration`` (int, -1 for never-expire); optional ``access``
-            (list of ``push`` / ``pull``, default both).
+            (list of ``push`` / ``pull``, default both) and optional
+            ``vault_target`` (``vault:<path>#<field>``).
 
         Returns
         -------
-        dict[str, Any]
+        dict[str, Any] | OperationResult
             ``{id: int, name: str, secret: str}`` — the secret is the
             minted credential, returned ONLY on creation by Harbor.
+            With ``vault_target`` the secret is written to Vault and the
+            answer holds a fingerprint and the length instead
+            (:mod:`~meho_backplane.connectors.harbor.ops_robot_vault`).
+            When that write fails, an error result says whether the new
+            robot was deleted.
 
         Raises
         ------
@@ -538,10 +544,16 @@ class HarborConnector(HttpConnector):
             catches all exceptions and wraps them as ``connector_error``
             OperationResults.
         """
+        from meho_backplane.connectors.harbor.ops_robot_vault import (
+            parse_vault_target,
+            store_new_robot_secret,
+        )
+
         name = str(params["name"])
         project = str(params["project"])
         duration = int(params["duration"])
         actions = robot_access_actions(params)
+        vault_dest = parse_vault_target(operator, params)
 
         body: dict[str, Any] = {
             "name": name,
@@ -557,11 +569,26 @@ class HarborConnector(HttpConnector):
             ],
         }
         result = await self._post_json(target, _ROBOTS_PATH, operator=operator, json=body)
+        if vault_dest is not None:
+            return await store_new_robot_secret(self, operator, target, params, vault_dest, result)
         return {
             "id": result["id"],
             "name": result["name"],
             "secret": result["secret"],
         }
+
+    async def artifact_copy(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``harbor.artifact.copy`` shim: copy an image inside Harbor, a held image is a no-op."""
+        from meho_backplane.connectors.harbor.ops_artifact_copy import (
+            harbor_artifact_copy_impl,
+        )
+
+        return await harbor_artifact_copy_impl(self, operator, target, params)
 
     async def project_create(
         self,

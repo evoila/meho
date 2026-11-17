@@ -24,9 +24,10 @@ call once only when that cannot send a change twice
 (:func:`may_resend_after_session_end`): the operation's risk level is
 ``safe``, or it is an ingested operation that sent exactly one request
 (that request was refused, so nothing ran). A call that runs after a
-person's approval is never repeated: one approval is one run. In every
-other case the caller gets ``connector_auth_failed`` that says the session
-ended and the change may or may not have been made.
+person's approval is repeated only when it is ``safe``: one approval is
+one run of a change. In every other case the caller gets
+``connector_auth_failed`` that says the session ended and the change may
+or may not have been made.
 
 The repeat never loops. If the fresh sign-in is refused, the caller gets an
 error that says the product refused the sign-in (wrong password or locked
@@ -98,8 +99,9 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
     """Whether the connector says *response* means that its login session ended.
 
     ``False`` for a status that is not 4xx, when the connector has no
-    ``is_session_expired`` method, when
-    the method answers anything but ``True``, and when it raises. A broken
+    ``is_session_expired`` method, when the method answers anything but
+    ``True`` (a warning is logged when the answer is not a bool), and when it
+    raises (a warning is logged too). A broken
     hook must never turn a real 403 into a sign-in loop.
     """
     if not 400 <= response.status_code < 500:
@@ -109,7 +111,7 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
     if not callable(hook):
         return False
     try:
-        return hook(response) is True
+        answer = hook(response)
     except Exception:
         _log.warning(
             "session_expired_hook_failed",
@@ -117,6 +119,13 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
             exc_info=True,
         )
         return False
+    if not isinstance(answer, bool):
+        _log.warning(
+            "session_expired_hook_bad_answer",
+            connector=type(connector_instance).__name__,
+            answer_type=type(answer).__name__,
+        )
+    return answer is True
 
 
 def may_resend_after_session_end(
@@ -131,15 +140,17 @@ def may_resend_after_session_end(
       request was refused, so nothing ran. A write is always one request;
       a read sends more than one only when the connector follows pages.
 
-    Never for a call that runs after a person's approval: the approval was
+    A ``safe`` operation is repeated also in a run after a person's
+    approval (for example a read step of an approved multi-step operation).
+    Any other call after an approval is never repeated: the approval was
     spent on the first run. A typed handler or a multi-step operation may
     have sent a write before the refused request, so it is not repeated
     unless it is ``safe``.
     """
-    if approved_run_var.get():
-        return False
     if descriptor.safety_level == "safe":
         return True
+    if approved_run_var.get():
+        return False
     if descriptor.source_kind != "ingested":
         return False
     return rejected.method not in _READ_METHODS or _profile_pagination(connector_instance) is None
@@ -148,21 +159,25 @@ def may_resend_after_session_end(
 def mark_session_relogin(status_code: int, *, resent: bool) -> None:
     """Show on the audit row and in the trace what MEHO did after "session ended".
 
-    The audit row gets ``session_relogin`` (MEHO signed in again in this
-    call), ``session_resent`` (MEHO sent the operation again) and
-    ``session_relogin_status`` (the status that said the session ended), in
+    The audit row gets ``session_relogin`` (MEHO dropped the kept login, so
+    the next call signs in again; always true here, also when the operation
+    was not sent again), ``session_resent`` (MEHO sent the operation again),
+    ``result_unknown`` (true when MEHO did not send it again: the change may
+    or may not have been made) and ``session_relogin_status`` (the status
+    that said the session ended), in
     its payload (through the ``audit_*`` binds, which the dispatcher drops
     when the call ends). The trace gets one ``session_relogin`` span. Neither
     carries a vendor body or a credential.
     """
     structlog.contextvars.bind_contextvars(
-        audit_session_relogin=resent,
+        audit_session_relogin=True,
         audit_session_resent=resent,
+        audit_result_unknown=not resent,
         audit_session_relogin_status=status_code,
     )
     record_typed_call(
         typed_span_start("session_relogin"),
-        extra={"session_relogin": resent, "resent": resent, "rejected_status": status_code},
+        extra={"session_relogin": True, "resent": resent, "rejected_status": status_code},
     )
 
 

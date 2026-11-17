@@ -102,6 +102,12 @@ and grant create refuses such a grant — `caller_address_grant_reason`), and an
 op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
 `msad.group.add-member`, `msad.group.remove-member` and `secret.move`): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
+A call that sets a param a connector marks with `declare_wait_when_set`
+(`op_classes.py`; today `secret_field_map` and `flight_recorder_capture`
+of `targets.register`) waits for a person too: the dispatcher marks that
+call as always waiting (`operations/wait_when_set.py`), so no grant and
+no run approval clears it. A call without these params keeps the rules of
+the op.
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).

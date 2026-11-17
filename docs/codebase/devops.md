@@ -1866,12 +1866,20 @@ reaches `main` through the merge queue, except the advisory path in
 the full matrix on exactly that code. A run on every push would only
 repeat it, take heavy runners and be cancelled by the next merge. The nightly run on
 `main` keeps the caches on `main` warm.
+
 `backend/tests/test_ci_main_push.py` pins this. Branch protection consumes the
 required jobs' status per
 `branches/main/protection.required_status_checks.contexts` —
 re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697.
+
+A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
+in `ci.yml` has `continue-on-error: true`. The test images come through the
+Harbor image proxy (the `MEHO_TEST_*_IMAGE` job variables), so the login only
+adds pull headroom on Docker Hub. A short network problem on the way to Docker
+Hub then costs nothing, and cannot throw a pull request out of the merge queue.
+`backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
 
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
@@ -2511,7 +2519,13 @@ run, not a broken `main`.
   imports the changed file itself, all the shards run. Docs pick nothing.
   Every other file means all the shards: a migration, a template or data
   file, a `conftest.py` or test helper, `pyproject.toml`, `uv.lock`, a
-  workflow, the Go CLI, a source file the map does not know (a new one).
+  workflow, the Go CLI, a source file the map does not know that is gone
+  from the tree. A new source file (in the tree, not in the map) is
+  handled by import analysis like a file no test ran, and picks nothing
+  of its own: the tests come from the files that import it. A new file
+  that no file imports means all the shards, because it may be loaded by
+  name at run time (#6590: on 16 Nov 2026 about a third of the pull request
+  runs with a backend change ran all six shards only for this reason).
   No map, a map older than 7 days, 2,000 or more picked tests, or any
   error also means all the shards. Every selected run also runs
   `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.

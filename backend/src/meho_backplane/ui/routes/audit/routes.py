@@ -136,6 +136,7 @@ from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     is_aggregate_only,
     resolve_op_id,
 )
+from meho_backplane.ui.routes.work_ref_form import filter_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_audit_router"]
@@ -768,7 +769,7 @@ async def _results_handler(
     result_status: str = Query(default="", max_length=16),
     since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
     until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-    work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    work_ref: str = Query(default=""),
     cursor: str | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
     event_class: str = Query(default="", max_length=32),
@@ -801,7 +802,7 @@ async def _results_handler(
         result_status=result_status,
         since=since,
         until=until,
-        work_ref=work_ref,
+        work_ref=filter_work_ref(work_ref) or "",
         cursor=cursor,
         agent_session_id=agent_session_id,
         event_class=event_class,
@@ -824,7 +825,7 @@ async def _page_handler(
     result_status: str = Query(default="", max_length=16),
     since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
     until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-    work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    work_ref: str = Query(default=""),
     audit_id: uuid.UUID | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
     event_class: str = Query(default="", max_length=32),
@@ -860,7 +861,7 @@ async def _page_handler(
         result_status=result_status,
         since=since,
         until=until,
-        work_ref=work_ref,
+        work_ref=filter_work_ref(work_ref) or "",
         cursor=None,
         agent_session_id=agent_session_id,
         event_class=event_class,

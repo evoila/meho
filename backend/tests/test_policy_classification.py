@@ -610,6 +610,55 @@ async def test_install_and_tenant_override_rows_are_no_label_tie(
     policy = (await _policies(_TENANT))["clsfix.vm.list"]
     assert dict(policy.labels) == {"note": "short"}
     assert policy.rule_ref == "tenant:override"
+    # A tie with two values for "note" would be a conflict, and the call would wait.
+    assert policy.always_wait is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_note", "override_note"),
+    [
+        pytest.param("x" * 256, "short", id="file-label-not-shown"),
+        pytest.param("short", "two\nlines", id="override-label-not-shown"),
+    ],
+)
+async def test_tenant_override_and_file_entry_tie_on_a_label_that_is_not_shown(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, file_note: str, override_note: str
+) -> None:
+    """A tenant file entry for the exact op ties with the tenant's override row.
+
+    The two give "note" different values, and one value breaks the label
+    rule. The conflict is found on the labels as stored, so the call
+    waits. The shown value is the one that passes the rule.
+    """
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    await _store_policy(
+        _TENANT,
+        {
+            "classifications": [
+                {
+                    "match": {"connector": _CONNECTOR, "op": "clsfix.vm.list"},
+                    "labels": {"note": file_note},
+                }
+            ]
+        },
+    )
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=_TENANT,
+                **_FIX,
+                op_id="clsfix.vm.list",
+                labels={"note": override_note},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    policy = (await _policies(_TENANT))["clsfix.vm.list"]
+    assert policy.always_wait is True
+    assert policy.requires_approval is True
+    assert dict(policy.labels) == {"note": "short"}
 
 
 @pytest.mark.asyncio

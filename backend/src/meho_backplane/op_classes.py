@@ -31,8 +31,8 @@ Example::
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Final
+from collections.abc import Iterable, Mapping
+from typing import Any, Final
 
 __all__ = [
     "DECLARABLE_OP_CLASSES",
@@ -41,12 +41,14 @@ __all__ = [
     "declare_per_call_approval",
     "declare_root_shell",
     "declare_safe_writes",
+    "declare_wait_when_set",
     "declared_op_class",
     "declared_op_ids",
     "is_root_shell",
     "is_safe_write",
     "needs_per_call_approval",
     "returns_no_secret_value",
+    "waits_when_set",
 ]
 
 #: The classes a connector may declare. ``credential_read``: the answer
@@ -63,6 +65,7 @@ _SAFE_WRITES: set[str] = set()
 _ROOT_SHELL: set[str] = set()
 _PER_CALL_APPROVAL: set[str] = set()
 _NO_SECRET_VALUE: set[str] = set()
+_WAIT_WHEN_SET: dict[str, frozenset[str]] = {}
 
 
 def declare_op_classes(
@@ -171,6 +174,26 @@ def returns_no_secret_value(op_id: str) -> bool:
     return op_id in _NO_SECRET_VALUE
 
 
+def declare_wait_when_set(op_id: str, param_names: Iterable[str]) -> None:
+    """Mark params of *op_id* that make a call wait for a person when they are set.
+
+    A call of *op_id* that sets one of *param_names* waits for a person's
+    approval on every call: neither a standing grant nor a run approval
+    covers it. A call without them keeps the rules of the operation. A
+    param counts as set when its value is not ``None`` and not an empty
+    map or list. Safe to call twice; the names add up.
+    """
+    _WAIT_WHEN_SET[op_id] = _WAIT_WHEN_SET.get(op_id, frozenset()) | frozenset(param_names)
+
+
+def waits_when_set(op_id: str, params: Mapping[str, Any]) -> bool:
+    """Return ``True`` when *params* set a param marked with :func:`declare_wait_when_set`."""
+    return any(
+        params.get(name) is not None and params.get(name) not in ({}, [])
+        for name in _WAIT_WHEN_SET.get(op_id, ())
+    )
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -183,3 +206,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _ROOT_SHELL.clear()
     _PER_CALL_APPROVAL.clear()
     _NO_SECRET_VALUE.clear()
+    _WAIT_WHEN_SET.clear()

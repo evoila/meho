@@ -10,8 +10,9 @@ ask for a one-time code setup).
 
 How a call runs:
 
-1. Find the user (``id``, or the exact current ``username``).
-2. Read the user, put ``changes`` on top and write the whole user back
+1. Find and read the user with the shared user check (``id``, or the exact
+   current ``username``; an ``id`` and a ``username`` must name one user).
+2. Put ``changes`` on top of the user and write the whole user back
    (the same read, merge and write as ``keycloak.client.update``, see
    :mod:`~meho_backplane.connectors.keycloak.ops_write_merge`).
 3. Read the user again and compare it with what was sent.
@@ -35,16 +36,16 @@ import httpx
 
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.http import ResponseTooLargeError
-from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 from meho_backplane.connectors.keycloak.connector import KeycloakAdminTokenError
 from meho_backplane.connectors.keycloak.ops_write_account_common import (
     raise_user_not_found_on_404,
-    resolve_user,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import (
     merge_representation,
     unrequested_changes,
 )
+from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -106,11 +107,12 @@ async def keycloak_user_update(
     """
     op_id = "keycloak.user.update"
     changes = _requested_changes(params)
-    uuid, username, realm = await resolve_user(self, operator, target, params, op_id=op_id)
-    path = fill_path(_USER_PATH, {"realm": realm, "user-id": uuid})
+    user = await read_user_for_write(self, operator, target, params, op_id=op_id)
+    uuid, username, path = user.uuid, user.username, user.path
+    realm = resolve_realm_config(target).managed_realm
+    before = user.user
+    merged = merge_representation(before, changes)
     try:
-        before = await self._get_admin_json(target, path, operator=operator)
-        merged = merge_representation(before, changes)
         await self._write_admin(
             target, "PUT", path, operator=operator, json=merged, idempotent_conflict=False
         )

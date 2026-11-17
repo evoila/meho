@@ -186,6 +186,7 @@ async def test_wait_names_who_may_approve(client: TestClient, embedding: AsyncMo
     assert token_call["approvers"] == {
         "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
         "rule": "default",
+        "floor": None,
     }
     assert token_call["evaluator"]["verdict"] == "wait"
     assert token_call["evaluator"]["floor"]["rule_id"] == "token_runs_only_safe"
@@ -359,6 +360,34 @@ def test_an_entry_does_not_show_a_label_that_breaks_the_rule() -> None:
         labels={"team": "ops", "note": "x" * 256, "line": "two\nlines", "k" * 64: "x"},
     )
     assert _entry_view(entry).labels == {"team": "ops"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("shadow", "classification")
+async def test_the_answer_does_not_show_a_stored_label_that_breaks_the_rule(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    """A label stored before the rule (or written around it) stays out of the answer."""
+    await _setup(embedding)
+    labels = {"team": "ops", "note": "x" * 256, "line": "two\nlines", "k" * 64: "x"}
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=_TENANT,
+                document={"classifications": [{"match": {"op": _SAFE}, "labels": labels}]},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    key = make_rsa_keypair("kid-expl-labels")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = _ask(client, _token(key), **_groups(_SAFE, "Operators")).json()
+    assert body["status"] == "ok", body
+    classification = body["classification"]
+    assert [entry["path"] for entry in classification["entries"]] == ["tenant:classifications[0]"]
+    assert classification["entries"][0]["labels"] == {"team": "ops"}
+    assert classification["labels"] == {"team": "ops"}
 
 
 @pytest.mark.asyncio

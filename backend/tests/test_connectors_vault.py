@@ -1342,8 +1342,13 @@ def test_write_target_path_renders_authorization_path(
 
 
 def test_write_capabilities_cover_every_write_op() -> None:
-    """Every ``requires_approval`` KV write op has a capability requirement."""
+    """Every ``requires_approval`` KV write op has a capability requirement.
+
+    ``vault.kv.generate`` is registered from its own module, not from
+    ``_KV_OP_SPECS``, and it needs approval too, so it is added by name.
+    """
     write_ops = {spec["op_id"] for spec in _KV_OP_SPECS if spec.get("requires_approval") is True}
+    write_ops.add("vault.kv.generate")
     assert write_ops == set(VAULT_KV_WRITE_CAPABILITIES)
 
 

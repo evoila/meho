@@ -68,6 +68,13 @@ gets 403 ``insufficient_role``. A machine login writes the graph with
 the ``topology.*`` operations of ``topology-graph-1.x``, which go
 through the approval check (:mod:`meho_backplane.connectors.topology.ops`).
 
+A person's graph write runs at once only in the web interface. A person's
+call made with a token (the ``meho`` CLI, scripts) goes to the matching
+``topology.*`` operation through the dispatcher and waits for approval: the
+route answers 202 with the approval request id
+(:mod:`meho_backplane.api.v1._wait_for_approval`). A bulk dry run changes
+nothing and runs at once.
+
 Tenant scoping
 --------------
 
@@ -112,16 +119,29 @@ from typing import Annotated, Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
+from meho_backplane.api.v1._wait_for_approval import (
+    AWAITING_APPROVAL_RESPONSES,
+    dispatch_rest_write,
+    runs_at_once,
+)
 from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors import (
     AmbiguousConnectorResolution,
     NoMatchingConnector,
+)
+from meho_backplane.connectors.topology.ops import (
+    TOPOLOGY_ANNOTATE_OP_ID,
+    TOPOLOGY_BULK_IMPORT_OP_ID,
+    TOPOLOGY_DELETE_NODE_OP_ID,
+    TOPOLOGY_GRAPH_CONNECTOR_ID,
+    TOPOLOGY_UNANNOTATE_OP_ID,
 )
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import (
@@ -142,6 +162,7 @@ from meho_backplane.topology.annotate import (
     unannotate_edge,
 )
 from meho_backplane.topology.bulk_import import (
+    BulkImportResult,
     BulkImportRow,
     BulkImportValidationError,
     bulk_import_edges,
@@ -164,7 +185,7 @@ from meho_backplane.topology.query import (
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.refresh_read_scope import RefreshReadScopeDeniedError
-from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.resolvers import NodeNotFoundError, resolve_node
 from meho_backplane.topology.schemas import (
     TopologyDiffResult,
     TopologyEdge,
@@ -216,6 +237,51 @@ def _require_admin_person(operator: Operator = _require_admin) -> Operator:
 
 
 _require_admin_person_dep = Depends(_require_admin_person)
+
+
+async def _dispatch_graph_write(
+    operator: Operator, op_id: str, params: dict[str, Any]
+) -> JSONResponse:
+    """Send a person's token call to the matching ``topology.*`` operation."""
+    return await dispatch_rest_write(
+        operator, connector_id=TOPOLOGY_GRAPH_CONNECTOR_ID, op_id=op_id, params=params
+    )
+
+
+async def _raise_if_edge_unknown(
+    session: AsyncSession, tenant_id: uuid.UUID, edge_id: uuid.UUID
+) -> None:
+    """Answer 404 ``edge_not_found`` now when the tenant has no edge with *edge_id*.
+
+    A token call then makes no approval request that can only fail.
+    """
+    edge = await session.get(GraphEdge, edge_id)
+    if edge is None or edge.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "edge_not_found",
+                "edge_id": str(edge_id),
+                "message": f"graph_edge {edge_id} not found in this tenant",
+            },
+        )
+
+
+async def _raise_if_node_unknown(
+    session: AsyncSession, tenant_id: uuid.UUID, node_id: uuid.UUID
+) -> None:
+    """Answer 404 ``node_not_found`` now when the tenant has no node with *node_id*."""
+    node = await session.get(GraphNode, node_id)
+    if node is None or node.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "node_not_found",
+                "node_id": str(node_id),
+                "message": str(NodeNotFoundForDeleteError(node_id)),
+            },
+        )
+
 
 #: Canonical op identifiers bound into ``audit_op_id`` per route.
 #: Pinned as module constants so the contract is greppable from tests +
@@ -862,16 +928,31 @@ class _AnnotateEdgeRequest(BaseModel):
     evidence_url: str | None = Field(default=None, max_length=2000)
 
 
+def _edge_params(edge: _AnnotateEdgeRequest | _BulkImportEdge) -> dict[str, Any]:
+    """The ``topology.annotate`` params (also one bulk row) for one REST edge."""
+    params: dict[str, Any] = {
+        "from_name": edge.from_endpoint.name,
+        "kind": edge.kind,
+        "to_name": edge.to_endpoint.name,
+        "from_node_kind": edge.from_endpoint.kind,
+        "to_node_kind": edge.to_endpoint.kind,
+        "note": edge.note,
+        "evidence_url": edge.evidence_url,
+    }
+    return {key: value for key, value in params.items() if value is not None}
+
+
 @router.post(
     "/edges",
     response_model=TopologyEdge,
     status_code=status.HTTP_201_CREATED,
+    responses=AWAITING_APPROVAL_RESPONSES,
 )
 async def annotate_edge_route(
     body: _AnnotateEdgeRequest,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
-) -> TopologyEdge:
+) -> TopologyEdge | JSONResponse:
     """Create or upsert a curated edge.
 
     Wraps :func:`~meho_backplane.topology.annotate.annotate_edge`
@@ -899,6 +980,17 @@ async def annotate_edge_route(
       to multiple kinds in the tenant — pass ``kind`` on the
       endpoint to disambiguate.
     """
+    # A call made with a token waits for approval (module docstring). Both
+    # endpoints are resolved first, so an unknown node answers at once.
+    if not runs_at_once(operator):
+        try:
+            for endpoint in (body.from_endpoint, body.to_endpoint):
+                await resolve_node(session, operator.tenant_id, endpoint.name, endpoint.kind)
+        except AmbiguousNodeError as exc:
+            raise _ambiguous_node_http(exc) from exc
+        except NodeNotFoundError as exc:
+            raise _node_not_found_http(exc) from exc
+        return await _dispatch_graph_write(operator, TOPOLOGY_ANNOTATE_OP_ID, _edge_params(body))
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_ANNOTATE,
         audit_op_class="write",
@@ -939,12 +1031,14 @@ async def annotate_edge_route(
 @router.delete(
     "/edges/{edge_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+    responses=AWAITING_APPROVAL_RESPONSES,
 )
 async def unannotate_edge_route(
     edge_id: uuid.UUID,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
-) -> None:
+) -> JSONResponse | None:
     """Hard-delete a curated edge by id and clear its reciprocal markers.
 
     Wraps :func:`~meho_backplane.topology.annotate.unannotate_edge`
@@ -962,6 +1056,12 @@ async def unannotate_edge_route(
       (the service treats cross-tenant ids and missing ids identically
       — the tenant boundary is opaque to the caller).
     """
+    # A call made with a token waits for approval (module docstring).
+    if not runs_at_once(operator):
+        await _raise_if_edge_unknown(session, operator.tenant_id, edge_id)
+        return await _dispatch_graph_write(
+            operator, TOPOLOGY_UNANNOTATE_OP_ID, {"edge_id": str(edge_id)}
+        )
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_UNANNOTATE,
         audit_op_class="write",
@@ -1006,17 +1106,20 @@ async def unannotate_edge_route(
                 "message": str(exc),
             },
         ) from exc
+    return None
 
 
 @router.delete(
     "/nodes/{node_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+    responses=AWAITING_APPROVAL_RESPONSES,
 )
 async def delete_node_route(
     node_id: uuid.UUID,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
-) -> None:
+) -> JSONResponse | None:
     """Hard-delete a manually-seeded ``graph_node`` by id.
 
     Wraps :func:`~meho_backplane.topology.node_delete.delete_node`
@@ -1042,6 +1145,12 @@ async def delete_node_route(
       (cross-tenant ids and missing ids are indistinguishable — the
       tenant boundary is opaque to the caller).
     """
+    # A call made with a token waits for approval (module docstring).
+    if not runs_at_once(operator):
+        await _raise_if_node_unknown(session, operator.tenant_id, node_id)
+        return await _dispatch_graph_write(
+            operator, TOPOLOGY_DELETE_NODE_OP_ID, {"node_id": str(node_id)}
+        )
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_DELETE_NODE,
         audit_op_class="write",
@@ -1078,6 +1187,7 @@ async def delete_node_route(
                 "message": str(exc),
             },
         ) from exc
+    return None
 
 
 @router.get("/edges", response_model=list[TopologyEdge])
@@ -1237,16 +1347,42 @@ class _BulkImportResponse(BaseModel):
     rows: list[_BulkImportRowResponse]
 
 
+def _bulk_import_response(result: BulkImportResult) -> _BulkImportResponse:
+    """Map the service result of a bulk import to the wire model."""
+    return _BulkImportResponse(
+        dry_run=result.dry_run,
+        created=result.created,
+        updated=result.updated,
+        conflicts=result.conflicts,
+        rows=[
+            _BulkImportRowResponse(
+                index=row.index,
+                action=row.action,
+                edge_id=row.edge_id,
+                from_name=row.from_name,
+                from_kind=row.from_kind,
+                to_name=row.to_name,
+                to_kind=row.to_kind,
+                kind=row.kind,
+                superseded=row.superseded,
+                conflicts=row.conflicts,
+            )
+            for row in result.rows
+        ],
+    )
+
+
 @router.post(
     "/edges/bulk",
     response_model=_BulkImportResponse,
     status_code=status.HTTP_200_OK,
+    responses=AWAITING_APPROVAL_RESPONSES,
 )
 async def bulk_import_edges_route(
     body: _BulkImportRequest,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_raw_session),
-) -> _BulkImportResponse:
+) -> _BulkImportResponse | JSONResponse:
     """Batch-annotate edges from a single body in one transaction.
 
     Wraps
@@ -1277,10 +1413,6 @@ async def bulk_import_edges_route(
     request is fundamentally a list mutation (create + update mix)
     where 201 is misleading for the update / dry-run path.
     """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_BULK_IMPORT,
-        audit_op_class="write",
-    )
     rows = [
         BulkImportRow(
             from_ref=edge.from_endpoint.to_ref(),
@@ -1291,11 +1423,32 @@ async def bulk_import_edges_route(
         )
         for edge in body.edges
     ]
+    # A call made with a token waits for approval; a dry run changes nothing.
+    # The rows are checked with a dry run first, so a bad row answers at once.
+    if not body.dry_run and not runs_at_once(operator):
+        await _bulk_import_or_422(session, operator, rows, dry_run=True)
+        return await _dispatch_graph_write(
+            operator,
+            TOPOLOGY_BULK_IMPORT_OP_ID,
+            {"rows": [_edge_params(edge) for edge in body.edges]},
+        )
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_BULK_IMPORT,
+        audit_op_class="write",
+    )
     if body.dry_run:
         # A dry run changes nothing, so the request needs no audit row (#3757).
         note_preview()
+    result = await _bulk_import_or_422(session, operator, rows, dry_run=body.dry_run)
+    return _bulk_import_response(result)
+
+
+async def _bulk_import_or_422(
+    session: AsyncSession, operator: Operator, rows: list[BulkImportRow], *, dry_run: bool
+) -> BulkImportResult:
+    """Run :func:`bulk_import_edges`; a row that fails its check answers 422 ``invalid_bulk``."""
     try:
-        result = await bulk_import_edges(session, operator, rows, dry_run=body.dry_run)
+        return await bulk_import_edges(session, operator, rows, dry_run=dry_run)
     except BulkImportValidationError as exc:
         # Surface every row's failure together. The operator's source
         # YAML / JSON is authoritative; a single 422 with the structured
@@ -1318,27 +1471,6 @@ async def bulk_import_edges_route(
                 ],
             },
         ) from exc
-    return _BulkImportResponse(
-        dry_run=result.dry_run,
-        created=result.created,
-        updated=result.updated,
-        conflicts=result.conflicts,
-        rows=[
-            _BulkImportRowResponse(
-                index=row.index,
-                action=row.action,
-                edge_id=row.edge_id,
-                from_name=row.from_name,
-                from_kind=row.from_kind,
-                to_name=row.to_name,
-                to_kind=row.to_kind,
-                kind=row.kind,
-                superseded=row.superseded,
-                conflicts=row.conflicts,
-            )
-            for row in result.rows
-        ],
-    )
 
 
 def _node_not_found_http(exc: NodeNotFoundError) -> HTTPException:

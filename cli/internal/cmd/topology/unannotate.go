@@ -16,6 +16,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -53,6 +54,7 @@ func newUnannotateCmd() *cobra.Command {
 			"directly. The tuple form is resolved client-side: a GET " +
 			"locates the unique curated edge matching the triple, then " +
 			"a DELETE removes it by id. Requires tenant_admin.\n\n" +
+			dispatch.RESTWriteApprovalNote +
 			"Auto edges (source='auto') cannot be deleted — they " +
 			"resurrect on the next refresh, so the server returns 409 " +
 			"with the annotate-over-auto remediation hint. The CLI " +
@@ -146,9 +148,12 @@ func runUnannotate(cmd *cobra.Command, opts unannotateOptions) error {
 			opts.JSONOut)
 	}
 
-	auditID, err := deleteEdge(cmd.Context(), backplaneURL, edgeUUID)
+	auditID, parked, err := deleteEdge(cmd.Context(), backplaneURL, edgeUUID)
 	if err != nil {
 		return renderUnannotateDeleteError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if done, err := dispatch.RenderRESTParked(cmd.OutOrStdout(), parked, opts.JSONOut); done {
+		return err
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(),
@@ -343,11 +348,12 @@ func formatAutoEdgeConflict(body string) string {
 // detail for an auto-row delete attempt. The caller forwards the
 // returned error to renderUnannotateDeleteError for category mapping.
 // On success it returns the audit id from the Meho-Audit-Id header
-// (nil when the backplane sent none).
-func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) (*string, error) {
+// (nil when the backplane sent none). A call made with a token waits for
+// approval: the route answers 202, and deleteEdge returns that body.
+func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) (*string, []byte, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error) {
@@ -356,10 +362,13 @@ func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) (*st
 		func(r *api.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) int { return r.StatusCode() },
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if resp.StatusCode() == http.StatusNoContent {
-		return output.AuditIDFromResponse(resp.HTTPResponse), nil
+	switch resp.StatusCode() {
+	case http.StatusNoContent:
+		return output.AuditIDFromResponse(resp.HTTPResponse), nil, nil
+	case http.StatusAccepted:
+		return nil, resp.Body, nil
 	}
-	return nil, &httpStatusError{StatusCode: resp.StatusCode(), Body: resp.Body}
+	return nil, nil, &httpStatusError{StatusCode: resp.StatusCode(), Body: resp.Body}
 }

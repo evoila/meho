@@ -39,7 +39,7 @@ from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -105,17 +105,16 @@ async def keycloak_auth_flow_step_list(
 ) -> dict[str, Any]:
     """Return the steps of one login flow, with no step setting."""
     realm = resolve_realm_config(target).managed_realm
-    realm_segment = quote_segment(realm)
     flow = params.get("flow")
     if not isinstance(flow, str) or not flow:
-        flow = await _browser_flow_alias(self, operator, target, realm_segment)
+        flow = await _browser_flow_alias(self, operator, target, realm)
     try:
         rows = await get_admin_list_strict(
             self,
             target,
             fill_path(
                 _AUTH_FLOW_EXECUTIONS_PATH,
-                {"realm": realm_segment, "flowAlias": quote_segment(flow)},
+                {"realm": realm, "flowAlias": flow},
             ),
             operator=operator,
         )
@@ -148,7 +147,7 @@ async def keycloak_required_action_list(
     rows = await get_admin_list_strict(
         self,
         target,
-        fill_path(_REQUIRED_ACTIONS_PATH, {"realm": quote_segment(realm)}),
+        fill_path(_REQUIRED_ACTIONS_PATH, {"realm": realm}),
         operator=operator,
     )
     actions = [_pick(row, _REQUIRED_ACTION_FIELDS, "a required action") for row in rows]
@@ -167,7 +166,7 @@ async def keycloak_events_config_get(
     realm = resolve_realm_config(target).managed_realm
     body = await self._get_admin_json(
         target,
-        fill_path(_EVENTS_CONFIG_PATH, {"realm": quote_segment(realm)}),
+        fill_path(_EVENTS_CONFIG_PATH, {"realm": realm}),
         operator=operator,
     )
     picked = _pick(body, _EVENT_FIELDS, "the events config")

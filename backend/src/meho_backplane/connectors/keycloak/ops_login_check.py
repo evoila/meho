@@ -56,7 +56,8 @@ from meho_backplane.connectors.keycloak.connector import _OAUTH2_TOKEN_ERROR_COD
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write import _read_password_from_vault
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm, _opt_str
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.realm_params import realm_param
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -293,15 +294,15 @@ async def keycloak_user_check_login(
     goes only into the token request body. The answer never carries the
     password or a token.
     """
-    realm = _opt_str(params.get("realm")) or resolve_realm_config(target).managed_realm
+    managed_realm = resolve_realm_config(target).managed_realm
+    realm = realm_param(params, "realm", CHECK_LOGIN_OP_ID) or managed_realm
     username = str(params["username"]).strip()
     client_id = _opt_str(params.get("client_id")) or _DEFAULT_CLIENT_ID
     password = await _read_password_from_vault(operator, target, params)
 
-    realm_segment = quote_segment(realm)
     client = await self._http_client(target)
     resp = await client.post(
-        fill_path(_TOKEN_PATH, {"realm": realm_segment}),
+        fill_path(_TOKEN_PATH, {"realm": realm}),
         data={
             "grant_type": "password",
             "client_id": client_id,
@@ -331,7 +332,7 @@ async def keycloak_user_check_login(
             answer["session_ended"] = await _end_session(
                 self,
                 target,
-                logout_path=fill_path(_LOGOUT_PATH, {"realm": realm_segment}),
+                logout_path=fill_path(_LOGOUT_PATH, {"realm": realm}),
                 client_id=client_id,
                 payload=payload,
             )

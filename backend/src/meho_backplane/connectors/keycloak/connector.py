@@ -117,10 +117,10 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
     KeycloakClientCredentials,
+    KeycloakManagedRealmMissingError,
     KeycloakTargetLike,
     RealmConfig,
     load_admin_credentials_from_vault,
-    quote_segment,
     resolve_realm_config,
 )
 from meho_backplane.connectors.schemas import (
@@ -388,8 +388,13 @@ class KeycloakConnector(HttpConnector):
 
         Raises :exc:`NotImplementedError` (naming the target + requested
         mode) when ``target.auth_model`` is anything other than
-        ``shared_service_account`` or ``None``.
+        ``shared_service_account`` or ``None``. Every admin request passes
+        here, so the target's realms are checked first
+        (:func:`resolve_realm_config`): a target without a managed realm,
+        or with a realm that is not a plain name, gets no secret read and
+        no request, also when a token is still cached.
         """
+        resolve_realm_config(target)
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -536,7 +541,17 @@ class KeycloakConnector(HttpConnector):
         )
 
         probed_at = datetime.now(UTC)
-        realms = resolve_realm_config(target)
+        try:
+            realms = resolve_realm_config(target)
+        except KeycloakManagedRealmMissingError as exc:
+            return FingerprintResult(
+                vendor="keycloak",
+                product="keycloak",
+                reachable=False,
+                probed_at=probed_at,
+                probe_method="check managed realm",
+                extras={"error": f"{type(exc).__name__}: {exc}"},
+            )
         realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realms.managed_realm})
         probe_method = f"GET {realm_path}"
         effective_operator = operator if operator is not None else synthesise_system_operator()
@@ -841,9 +856,7 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                fill_path(
-                    _ROLE_PATH, {"realm": managed_realm, "role-name": quote_segment(role_name)}
-                ),
+                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:
@@ -877,7 +890,7 @@ class KeycloakConnector(HttpConnector):
         if parent_id:
             path = fill_path(
                 _GROUP_CHILDREN_PATH,
-                {"realm": managed_realm, "group-id": quote_segment(parent_id)},
+                {"realm": managed_realm, "group-id": parent_id},
             )
         else:
             path = fill_path(_GROUPS_PATH, {"realm": managed_realm})
@@ -908,9 +921,7 @@ class KeycloakConnector(HttpConnector):
         the membership in its default first page (100 groups); a user in more
         groups than that is an unrealistic edge for role-group membership.
         """
-        path = fill_path(
-            _USER_GROUPS_PATH, {"realm": managed_realm, "user-id": quote_segment(user_id)}
-        )
+        path = fill_path(_USER_GROUPS_PATH, {"realm": managed_realm, "user-id": user_id})
         rows = await self._get_admin_list(target, path, operator=operator)
         return any(isinstance(row, dict) and row.get("id") == group_id for row in rows)
 

@@ -146,15 +146,13 @@ from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     realm_blast_radius,
     realm_name_param,
 )
+from meho_backplane.connectors.keycloak.ops_write_realm_smtp import show_password_policy
 from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     refuse_other_user_check,
     register_user_write,
     with_stored_user,
 )
-from meho_backplane.connectors.keycloak.redaction import (
-    PASSWORD_POLICY_FIELD,
-    redact_preview_fields,
-)
+from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
@@ -219,8 +217,8 @@ async def _realm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "resource": "realm",
         "realm": realm_name or None,
-        "representation": redact_preview_fields(
-            representation, show=frozenset({PASSWORD_POLICY_FIELD})
+        "representation": show_password_policy(
+            redact_preview_fields(representation), representation, ctx
         ),
     }
 

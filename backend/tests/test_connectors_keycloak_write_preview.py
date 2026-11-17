@@ -244,6 +244,49 @@ async def test_realm_create_preview_shows_password_policy_and_hides_the_rest() -
 
 
 @pytest.mark.asyncio
+async def test_realm_create_preview_shows_only_the_top_level_password_policy() -> None:
+    """A ``passwordPolicy`` inside the realm (here an identity provider config) stays hidden."""
+    policy = "length(8) and digits(1)"
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {
+            "representation": {
+                "realm": "meho",
+                "passwordPolicy": policy,
+                "identityProviders": [
+                    {"alias": "corp-idp", "config": {"passwordPolicy": "made-up-8"}},
+                ],
+            }
+        },
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    shown = effect["preview"]["representation"]
+    assert shown["passwordPolicy"] == policy
+    assert shown["identityProviders"] == [
+        {"alias": "corp-idp", "config": {"passwordPolicy": REDACTED}}
+    ]
+    _no_secret_anywhere(effect, "made-up-8")
+
+
+@pytest.mark.asyncio
+async def test_realm_create_preview_checks_the_password_policy_text_for_secrets() -> None:
+    """The shown policy text goes through the value-shape pass, as on the update card."""
+    token = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiJtYWRlLXVwLXN1YmplY3QiLCJuYW1lIjoibWFkZS11cCJ9"
+        ".bWFkZS11cC1zaWduYXR1cmUtdmFsdWUtMDkzNQ"
+    )
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {"representation": {"realm": "meho", "passwordPolicy": token}},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    _no_secret_anywhere(effect, token)
+
+
+@pytest.mark.asyncio
 async def test_realm_create_preview_redacts_generic_credential_keys() -> None:
     """`password`-class keys land anywhere in the additionalProperties body.
 

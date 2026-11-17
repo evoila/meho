@@ -607,6 +607,25 @@ async def test_approval_card_hides_secret_shaped_text_under_plain_keys() -> None
 
 
 @pytest.mark.asyncio
+async def test_approval_card_checks_the_password_policy_text_for_secrets() -> None:
+    params = _ref_params()
+    params["representation"] = {
+        "passwordPolicy": _JWT,
+        "identityProviders": [{"alias": "corp-idp", "config": {"passwordPolicy": _TOKEN}}],
+    }
+    card = await _realm_update_preview(_card_ctx(params))
+
+    assert card is not None
+    shown = card["representation"]
+    assert shown["identityProviders"] == [
+        {"alias": "corp-idp", "config": {"passwordPolicy": "***REDACTED***"}}
+    ]
+    text = json.dumps(card)
+    for value in (_JWT, _TOKEN):
+        assert value not in text
+
+
+@pytest.mark.asyncio
 async def test_waiting_request_card_holds_no_secret_shaped_text(operator: Operator) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _, put_route = _mount_keycloak(mock, _REALM_BEFORE)

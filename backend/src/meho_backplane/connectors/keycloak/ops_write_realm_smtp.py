@@ -28,6 +28,11 @@ the Keycloak list of secret fields and then by the same two passes as the
 generic params echo: secret-named keys (``clientSecret``,
 ``authTokenClientSecret``, ``someApiKey`` at any depth) and secret-shaped
 text in any value (for example a token) show as hidden.
+
+The text of the realm's password rules (``passwordPolicy`` at the top of
+the realm) holds no password, so both realm cards show it
+(:func:`show_password_policy`). It still goes through the value-shape
+pass first. The same name deeper in the realm stays hidden.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from meho_backplane.operations._preview import (
     _redact_echoed_params,
     register_preview_builder,
 )
+from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
@@ -55,6 +61,7 @@ __all__ = [
     "SMTP_PASSWORD_SECRET_PROPS",
     "has_inline_smtp_password",
     "inline_smtp_password_reason",
+    "show_password_policy",
     "with_smtp_password",
 ]
 
@@ -142,6 +149,26 @@ def _realm_label(ctx: PreviewContext) -> str | None:
         return None
 
 
+def show_password_policy(
+    hidden: dict[str, Any], representation: Any, ctx: PreviewContext
+) -> dict[str, Any]:
+    """Put the realm's password rules text back on a realm approval card.
+
+    *hidden* is the card's scrubbed realm, *representation* the realm as
+    sent. Only a text ``passwordPolicy`` at the top level comes back, and
+    only after the value-shape pass of the generic echo has checked it.
+    The same name deeper in the realm stays hidden.
+    """
+    policy = representation.get(PASSWORD_POLICY_FIELD) if isinstance(representation, dict) else None
+    if not isinstance(policy, str) or PASSWORD_POLICY_FIELD not in hidden:
+        return hidden
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+    checked = apply_connector_boundary_redaction(
+        policy, connector_id=ctx.connector_id, tenant=tenant, op=ctx.descriptor.op_id
+    ).redacted
+    return {**hidden, PASSWORD_POLICY_FIELD: checked}
+
+
 async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Approval card for ``keycloak.realm.update``: realm, fields, password source."""
     representation = ctx.params.get("representation")
@@ -160,11 +187,7 @@ async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         tenant=tenant,
         op_id=ctx.descriptor.op_id,
     )
-    hidden = redacted.get("representation", {})
-    # The password rules text holds no password: the approver reads it as sent.
-    policy = representation.get(PASSWORD_POLICY_FIELD) if isinstance(representation, dict) else None
-    if isinstance(policy, str) and PASSWORD_POLICY_FIELD in hidden:
-        hidden[PASSWORD_POLICY_FIELD] = policy
+    hidden = show_password_policy(redacted.get("representation", {}), representation, ctx)
     preview: dict[str, Any] = {
         "resource": "realm",
         "realm": _realm_label(ctx),

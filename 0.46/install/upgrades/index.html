@@ -3839,6 +3839,11 @@ Rows of the next release are in this table at once.</p>
 <td>A person's REST write of a target or of the topology graph made with a token (the <code>meho</code> CLI, scripts) waits for approval. <code>POST</code>, <code>PATCH</code> and <code>DELETE /api/v1/targets</code>, <code>POST /api/v1/topology/edges</code>, <code>POST /api/v1/topology/edges/bulk</code>, <code>DELETE /api/v1/topology/edges/{edge_id}</code> and <code>DELETE /api/v1/topology/nodes/{node_id}</code> answer 202 with the id of the approval request. Nothing is written until a person approves it. Only a person in the web console writes at once.</td>
 <td><strong>Upgrade the <code>meho</code> CLI together with the backplane.</strong> An older CLI reads the 202 answer as done and reports the write, but nothing is written yet. Tell CLI and script users that target and topology writes wait for approval: they approve them in the web interface or with <code>meho approvals approve</code>. <code>meho targets import</code> makes one approval request per row.</td>
 </tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A run approval never covers an operation that reads a credential (the <code>credential_read</code> class, for example <code>k8s.secret.read_to_ref</code>). Each call of such an operation waits for a person, the same as under a standing grant. This holds also for a run approval that a person approved before the upgrade: the entry stays on the list, and each of its calls waits. A new request that lists such an operation is accepted. The answer of the request, <code>meho approvals runs show</code> and <code>meho approvals runs approve</code> name the entry under <code>entries_that_wait</code> ("each call waits for a person"; for <code>vault.kv.read</code>, "each call with reveal_secret waits for a person"). A read that returns no secret value runs at once and gets no note.</td>
+<td>An automation run that reads credentials waits for a person on each such call. Approve each call in the console or the CLI, or leave the operation out of the run. No schema action.</td>
+</tr>
 </tbody>
 </table>
 <p>New rows come from one small file per row in

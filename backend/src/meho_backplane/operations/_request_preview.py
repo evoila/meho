@@ -121,6 +121,7 @@ from meho_backplane.settings import get_settings
 __all__ = [
     "PARAMS_DIGEST_KEY",
     "compute_preview_hash",
+    "governance_and_gate",
     "is_credential_builder_op",
     "preview_dispatch",
 ]
@@ -572,6 +573,25 @@ async def _governance_fields(
     connector_id: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    """The governance fields of :func:`governance_and_gate`, without the gate's answer."""
+    fields, _ = await governance_and_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
+    )
+    return fields
+
+
+async def governance_and_gate(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], PermissionVerdict]:
     """The risk level and the policy verdict for this caller and target (#4923).
 
     ``safety_level`` and ``requires_approval`` come off the descriptor.
@@ -597,6 +617,12 @@ async def _governance_fields(
     approve when the call waits). With the switch off they are absent.
     All are advisory: none is in :data:`_PREVIEW_HASH_KEYS`, so
     the hash does not change.
+
+    The second value is the gate's own answer, after the up-front step
+    check of an agent call but before the step check of a multi-step
+    operation. The dispatcher asks the checks after the gate for this
+    answer (``meho policy explain`` does too): the steps are checked only
+    when the operation runs.
     """
     verdict, reason = await policy_gate(
         operator=operator,
@@ -617,7 +643,8 @@ async def _governance_fields(
         )
     if step_refusal is not None:
         verdict, reason = PermissionVerdict.DENY, step_refusal
-    elif verdict is PermissionVerdict.AUTO_EXECUTE:
+    gate_verdict = verdict
+    if verdict is PermissionVerdict.AUTO_EXECUTE:
         steps = await preview_step_verdict(
             operator=operator, op_id=descriptor.op_id, connector_id=connector_id, target=target
         )
@@ -634,13 +661,14 @@ async def _governance_fields(
         verdict=verdict,
         stamp=stamp,
     )
-    return {
+    fields = {
         "safety_level": descriptor.safety_level,
         "requires_approval": descriptor.requires_approval,
         "policy_verdict": verdict.value,
         "policy_reason": reason,
         **shadow_fields,
     }
+    return fields, gate_verdict
 
 
 def _invalid_params_envelope(

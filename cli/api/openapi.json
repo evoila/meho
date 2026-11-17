@@ -39409,6 +39409,15 @@
             "$ref": "#/components/schemas/ExplainStoredRequest",
             "nullable": true
           },
+          "not_checked": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Not Checked",
+            "description": "Each check after the policy gate that explain does not ask and that can still refuse the call, by a fixed name. Empty for deny. Null for a stored approval request and for an error."
+          },
           "error": {
             "type": "string",
             "nullable": true,

@@ -236,7 +236,8 @@ groups and clients.
 
 ## Version-specific notes
 
-Read these when your upgrade crosses the version in question:
+Read these when your upgrade crosses the version in question.
+Rows of the next release are in this table at once.
 
 | Crossing | What changes | Action |
 |---|---|---|
@@ -277,7 +278,9 @@ Read these when your upgrade crosses the version in question:
 | **v0.47.0** | With `MCP_CLIENT_PER_TOOL_KIND` on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role `manage-users`. Migration `0172` adds one index on `audit_log` (person and time); it changes no row, and on a large audit log it takes a while. | **Built-in Keycloak:** nothing to do; `meho-admin` already has `manage-users`. **Your own Keycloak:** give MEHO's Keycloak admin client `manage-users` before you turn the switch on. Without the role, the button shows an error that names it. See [The MCP clients of the AI tools](keycloak-realm.md#the-mcp-clients-of-the-ai-tools). |
 | **v0.47.0** | With approval notifications on (`webPush.enabled: true`), MEHO now sends them. A browser that a person switched on before the upgrade gets its first message only after that person's next sign-in to the web console, or the next time they open the account page. Until then MEHO does not know their login groups for it. After that, a person whose last sign-in is more than 7 days old gets no message until they sign in again. | Ask the people who use notifications to sign in to the web console once after the upgrade. Allow MEHO to reach the push services of the browser makers: see [Push services for approval notifications](index.md#push-services-for-approval-notifications). |
 
-The authoritative, always-current version of this table lives in
+New rows come from one small file per row in
+[`docs/upgrade-rows/`](https://github.com/evoila/meho/tree/main/docs/upgrade-rows).
+Each release also adds the rows of that release to
 [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes);
 release notes for each version are on the
 [releases page](https://github.com/evoila/meho/releases) with the full

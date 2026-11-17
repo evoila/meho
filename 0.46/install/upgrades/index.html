@@ -3816,6 +3816,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td><strong>Action needed.</strong> The Keycloak connector has no built-in managed realm any more. A Keycloak target must name its realm in <code>extras.managed_realm</code>. Without it, MEHO refuses every operation on that target before any call to Keycloak, <code>meho targets probe</code> reports it, and a create or update of the target is refused with HTTP 422. The admin realm still defaults to <code>master</code>.</td>
+<td>Before the upgrade, set the managed realm on every Keycloak target that names none: <code>meho targets update &lt;name&gt; --extra admin_realm=master --extra managed_realm=&lt;realm&gt;</code>. <code>--extra</code> replaces the whole <code>extras</code> map, so repeat every key you keep. Or set it in the console edit form ("Managed realm"). To find these targets, run <code>meho doctor</code>: it lists every Keycloak target MEHO refuses, in your tenant, or in every tenant for a platform admin. The same list is <code>GET /api/v1/targets/checks/keycloak-realm</code>. A realm is one plain name: no <code>/</code>, <code>\</code>, <code>?</code>, <code>#</code> or <code>%</code>, and no spaces around it. See <a href="https://evoila.github.io/meho/latest/guides/targets-and-secrets/#keycloak-targets-need-a-managed-realm">Keycloak targets need a managed realm</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td>A request for <code>keycloak.role_mapping.assign</code> or <code>keycloak.role_mapping.client.assign</code> that already waited for approval before this version does not run, in every realm. Its card holds no list of what the role gives. The refusal says: "This request was made before MEHO read what a role gives. Send it again."</td>
 <td>Send such a request again after the upgrade.</td>
 </tr>

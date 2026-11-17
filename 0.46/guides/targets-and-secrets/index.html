@@ -2217,6 +2217,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#keycloak-targets-need-a-managed-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keycloak targets need a managed realm
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3356,6 +3367,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#keycloak-targets-need-a-managed-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keycloak targets need a managed realm
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3701,6 +3723,29 @@ meho<span class="w"> </span>targets<span class="w"> </span>update<span class="w"
 <p><code>--extra</code> on <code>update</code> replaces the whole <code>extras</code> map, so pass every key
 you want to keep. <code>--clear extra</code> removes every extra, and <code>--clear alias</code>
 removes every alias. In YAML, write <code>secret_ref: null</code>.</p>
+<h3 id="keycloak-targets-need-a-managed-realm">Keycloak targets need a managed realm<a class="headerlink" href="#keycloak-targets-need-a-managed-realm" title="Permanent link">&para;</a></h3>
+<p>A Keycloak target must name the realm MEHO manages, in
+<code>extras.managed_realm</code>. MEHO has no built-in realm. Without it, MEHO
+refuses to create or update the target, and refuses every operation on
+it.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>lab-sso<span class="w"> </span>--product<span class="w"> </span>keycloak<span class="w"> </span>--host<span class="w"> </span>sso.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--extra<span class="w"> </span><span class="nv">managed_realm</span><span class="o">=</span>example
+</code></pre></div>
+<p>In YAML, put it under <code>extras:</code> (<code>managed_realm: example</code>). The optional
+<code>extras.admin_realm</code> is the realm the target logs in to; it is <code>master</code>
+when you leave it out.</p>
+<ul>
+<li>A realm is one plain name: no <code>/</code>, <code>\</code>, <code>?</code>, <code>#</code> or <code>%</code>, no spaces at
+  the start or the end, not only dots, and at most 255 characters. MEHO
+  does not trim a value; it refuses it.</li>
+<li>MEHO allows a managed realm that is the admin realm, or the realm MEHO
+  itself signs in with, but it warns you: at create, at update (REST,
+  CLI and the console forms), and on the approval card of each write on
+  that target.</li>
+<li><code>meho doctor</code> lists the Keycloak targets MEHO refuses. A platform
+  admin sees the targets of every tenant. You can fix one with
+  <code>meho targets update</code>, or in the console edit form ("Managed realm").</li>
+</ul>
 <h2 id="change-a-secret">Change a secret<a class="headerlink" href="#change-a-secret" title="Permanent link">&para;</a></h2>
 <p>MEHO keeps a login for each target for a while, so it does not have to
 log in on every call. When you change a secret only in Vault (or your

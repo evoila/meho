@@ -462,3 +462,47 @@ def test_handlers_pass_raw_values_and_fill_path_encodes_them() -> None:
         fill_path(_USER_PATH, {"realm": "a.b", "user-id": "../x"})
         == "/admin/realms/a%2Eb/users/%2E%2E%2Fx"
     )
+
+
+@pytest.mark.asyncio
+async def test_shared_user_check_sends_a_user_id_encoded_once() -> None:
+    """A user id with a ``/`` reaches Keycloak as ``%2F``, never as ``%252F``.
+
+    Every Keycloak user write reads its user through ``read_user_for_write``,
+    so this one call covers the path of all of them.
+    """
+    from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
+
+    async def _stub_loader(
+        _target: KeycloakTargetLike, _operator: Operator
+    ) -> KeycloakAdminCredentials:
+        return KeycloakClientCredentials(client_id="meho-admin", client_secret="stub-secret")
+
+    connector = KeycloakConnector(credentials_loader=_stub_loader)
+    target_stub = MagicMock(spec=KeycloakTargetLike)
+    target_stub.name = "encoding-test-target"
+    target_stub.host = _KC_HOST
+    target_stub.port = 443
+    target_stub.secret_ref = "stub/secret"
+    target_stub.auth_model = "shared_service_account"
+    target_stub.extras = {"managed_realm": "example"}
+    target_stub.id = uuid.UUID(int=0xCF)
+    target_stub.tenant_id = uuid.UUID(int=0)
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
+        )
+        route = mock.get("/admin/realms/example/users/a%2Fb").respond(
+            200, json={"id": "a/b", "username": "alice"}
+        )
+        found = await read_user_for_write(
+            connector, _OPERATOR, target_stub, {"id": "a/b"}, op_id="keycloak.user.update"
+        )
+
+    assert route.call_count == 1
+    assert route.calls.last.request.url.raw_path == b"/admin/realms/example/users/a%2Fb"
+    assert found.path == "/admin/realms/example/users/a%2Fb"
+    assert found.user["username"] == "alice"
+
+    await connector.aclose()

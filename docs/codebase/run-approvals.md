@@ -167,6 +167,11 @@ Marked today:
   membership gives rights in the domain.
 - `secret.move`. A move writes a secret into a store or into a file on a
   host, so a person checks each place and owner.
+- Every operation registered as a change of rights
+  (`register_grant_op`, `register_rights_change_op` in
+  `operations/grant_approval.py`). The register functions set the mark
+  themselves. Examples: `policy.classify` and the Keycloak writes that
+  change what a token says or who has a role.
 
 ## Never covered: an operation that reads, writes or makes a credential
 

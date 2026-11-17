@@ -320,7 +320,6 @@ async def test_user_delete_by_id_reports_deleted_only_after_404(kc: KeycloakConn
         result = await _run("keycloak.user.delete", {"id": _USER_UUID})
     assert result["status"] == "ok", result
     assert result["result"] == {
-        "managed_realm": _REALM,
         "realm": _REALM,
         "id": _USER_UUID,
         "username": "event-guest",
@@ -368,7 +367,6 @@ async def test_user_delete_already_gone_by_name(kc: KeycloakConnector) -> None:
         result = await _run("keycloak.user.delete", {"username": "event-guest"})
     assert result["status"] == "ok", result
     assert result["result"] == {
-        "managed_realm": _REALM,
         "realm": _REALM,
         "id": None,
         "requested_username": "event-guest",
@@ -527,7 +525,6 @@ async def test_client_delete_by_client_id_deletes_and_verifies(kc: KeycloakConne
         result = await _run("keycloak.client.delete", {"client_id": "event-app"})
     assert result["status"] == "ok", result
     assert result["result"] == {
-        "managed_realm": _REALM,
         "realm": _REALM,
         "id": _CLIENT_UUID,
         "client_id": "event-app",
@@ -850,7 +847,6 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
             )
     assert resumed.status == "ok", resumed
     assert resumed.result == {
-        "managed_realm": _REALM,
         "realm": _REALM,
         "id": _USER_UUID,
         "username": "event-guest",

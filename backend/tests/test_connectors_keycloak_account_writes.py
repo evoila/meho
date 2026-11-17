@@ -247,7 +247,6 @@ async def test_assign_sends_the_role_representations_and_reads_back(kc: Keycloak
         )
     assert result["status"] == "ok", result
     assert result["result"] == {
-        "managed_realm": _REALM,
         "id": _USER_UUID,
         "username": "jane.example",
         "client_id": "realm-management",
@@ -470,7 +469,6 @@ async def test_update_changes_only_the_fields_that_were_sent(kc: KeycloakConnect
         )
     assert result["status"] == "ok", result
     assert result["result"] == {
-        "managed_realm": _REALM,
         "id": _USER_UUID,
         "username": "jane.example",
         "requested_fields": ["email"],
@@ -685,7 +683,6 @@ async def test_delete_by_type_removes_every_match_and_lists_removed_and_remainin
         )
     assert result["status"] == "ok", result
     assert result["result"] == {
-        "managed_realm": _REALM,
         "id": _USER_UUID,
         "username": "jane.example",
         "removed": _clean("cred-otp-1", "cred-otp-2"),

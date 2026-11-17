@@ -3,12 +3,15 @@
 
 """A Keycloak target works on one realm only, and every answer names it.
 
-* The three ops that take a realm value (``keycloak.realm.update``,
-  ``keycloak.realm.create``, ``keycloak.user.check_login``) refuse another
-  realm than the managed realm before the call waits for approval. Nothing
-  is stored and nothing is sent to Keycloak. The managed realm works.
+* The four ops that take a realm value (``keycloak.realm.update``,
+  ``keycloak.realm.create``, ``keycloak.realm.delete``,
+  ``keycloak.user.check_login``) refuse another realm than the managed realm
+  before the call waits for approval. Nothing is stored and nothing is sent
+  to Keycloak. The managed realm works.
 * The handler refuses it too, for a call that is already approved.
-* Each read and write answer has a ``managed_realm`` field.
+* With the switch ``KEYCLOAK_ANSWER_REALM`` on, each answer of every
+  registered read, and of a write, has a ``managed_realm`` field. With it
+  off (the default), the answers are as before.
 * The approval card of a write shows the realm.
 """
 
@@ -24,7 +27,15 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector  # also loads the registry
+from meho_backplane.connectors.keycloak import (  # also loads the registry
+    KeycloakConnector,
+    ops_flow_reads,
+    ops_identity_provider,
+    ops_lock_status,
+    ops_read,
+    ops_user_required_actions,
+    ops_user_state,
+)
 from meho_backplane.connectors.keycloak.answer_realm import REALM_FIELD
 from meho_backplane.connectors.keycloak.realm_params import (
     FENCED_OPS,
@@ -55,7 +66,33 @@ _REALM_PATH = f"/admin/realms/{_REALM}"
 
 _UPDATE = "keycloak.realm.update"
 _CREATE = "keycloak.realm.create"
+_DELETE = "keycloak.realm.delete"
 _CHECK_LOGIN = "keycloak.user.check_login"
+_FENCED = [_UPDATE, _CREATE, _DELETE, _CHECK_LOGIN]
+
+#: Every registered Keycloak op that runs without approval: the reads.
+_READS = [
+    op.op_id
+    for op in (
+        *ops_read.READ_OPS,
+        *ops_identity_provider.IDENTITY_PROVIDER_OPS,
+        *ops_user_required_actions.USER_REQUIRED_ACTION_OPS,
+        *ops_user_state.USER_STATE_OPS,
+        *ops_lock_status.LOCK_STATUS_OPS,
+        *ops_flow_reads.FLOW_READ_OPS,
+    )
+    if not op.requires_approval
+]
+_ID = "0a0b0c0d-0000-0000-0000-000000000001"
+_READ_PARAMS: dict[str, dict[str, Any]] = {
+    "keycloak.client.get": {"id": _ID},
+    "keycloak.role_mapping.get": {"id": _ID},
+    "keycloak.role.users": {"name": "example-role"},
+    "keycloak.group.member.list": {"id": _ID},
+    "keycloak.user.get": {"id": _ID},
+    "keycloak.user.sessions": {"id": _ID},
+    "keycloak.user.lock_status": {"id": _ID},
+}
 
 
 def _fenced_params(op_id: str, realm: str) -> dict[str, Any]:
@@ -64,6 +101,8 @@ def _fenced_params(op_id: str, realm: str) -> dict[str, Any]:
         return {"realm": realm, "representation": {"enabled": True}}
     if op_id == _CREATE:
         return {"representation": {"realm": realm}}
+    if op_id == _DELETE:
+        return {"realm": realm}
     return {"realm": realm, "username": "someone", "password_secret_ref": "example/ref"}
 
 
@@ -76,6 +115,7 @@ def _stub_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
 
 @pytest.fixture(autouse=True)
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true")
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
@@ -168,12 +208,12 @@ def _mount_token(mock: respx.MockRouter) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def test_the_fenced_ops_are_the_three_that_work_on_the_managed_realm() -> None:
-    assert {_UPDATE, _CREATE, _CHECK_LOGIN} == FENCED_OPS
+def test_every_op_that_takes_a_realm_is_fenced() -> None:
+    assert set(_FENCED) == FENCED_OPS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", [_UPDATE, _CREATE, _CHECK_LOGIN])
+@pytest.mark.parametrize("op_id", _FENCED)
 async def test_another_realm_is_refused_before_approval(operator: Operator, op_id: str) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         token_route = _mount_token(mock)
@@ -191,7 +231,7 @@ async def test_another_realm_is_refused_before_approval(operator: Operator, op_i
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", [_UPDATE, _CREATE, _CHECK_LOGIN])
+@pytest.mark.parametrize("op_id", _FENCED)
 async def test_preview_gives_the_same_refusal(operator: Operator, op_id: str) -> None:
     envelope = await preview_dispatch(
         operator=operator,
@@ -212,7 +252,7 @@ async def test_a_rename_in_the_representation_is_refused_too(operator: Operator)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", [_UPDATE, _CREATE, _CHECK_LOGIN])
+@pytest.mark.parametrize("op_id", _FENCED)
 async def test_the_handler_refuses_another_realm_too(operator: Operator, op_id: str) -> None:
     """A call that is already approved still sends nothing to Keycloak."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -228,13 +268,13 @@ async def test_fence_problem_text_for_the_managed_realm_and_for_other_ops(
     operator: Operator,
 ) -> None:
     target = await _target(operator)
-    for op_id in (_UPDATE, _CREATE, _CHECK_LOGIN):
+    for op_id in _FENCED:
         assert realm_fence_problem(op_id, _fenced_params(op_id, _REALM), target) is None
         assert realm_fence_problem(op_id, _fenced_params(op_id, _OTHER), target) is not None
     # A call that names no realm uses the managed realm.
     assert realm_fence_problem(_UPDATE, {"representation": {}}, target) is None
-    # The delete is not fenced: its realm is the realm to remove.
-    assert realm_fence_problem("keycloak.realm.delete", {"realm": _OTHER}, target) is None
+    # An op that takes no realm value is not fenced.
+    assert realm_fence_problem("keycloak.user.list", {"realm": _OTHER}, target) is None
 
 
 # ---------------------------------------------------------------------------
@@ -270,29 +310,83 @@ async def test_create_of_the_managed_realm_works(operator: Operator) -> None:
     assert result.result[REALM_FIELD] == _REALM
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("op_id", "path", "body"),
-    [
-        ("keycloak.realm.get", _REALM_PATH, {"realm": _REALM}),
-        ("keycloak.user.list", f"{_REALM_PATH}/users", []),
-        ("keycloak.client.list", f"{_REALM_PATH}/clients", []),
-        ("keycloak.role.list", f"{_REALM_PATH}/roles", []),
-        ("keycloak.group.list", f"{_REALM_PATH}/groups", []),
-    ],
-)
-async def test_each_read_answer_names_the_realm(
-    operator: Operator, op_id: str, path: str, body: Any
-) -> None:
+_EVENTS_CONFIG = {
+    "eventsEnabled": False,
+    "eventsExpiration": 0,
+    "eventsListeners": [],
+    "enabledEventTypes": [],
+    "adminEventsEnabled": False,
+    "adminEventsDetailsEnabled": False,
+}
+
+
+def _keycloak_answer(request: httpx.Request) -> httpx.Response:
+    """A small Keycloak: the realm, a count, one object by id, else an empty list."""
+    path = request.url.path
+    if path == _REALM_PATH:
+        realm = {"realm": _REALM, "browserFlow": "browser", "bruteForceProtected": False}
+        return httpx.Response(200, json=realm)
+    if path.endswith("/count"):
+        return httpx.Response(200, json=0)
+    if path.endswith("/events/config"):
+        return httpx.Response(200, json=_EVENTS_CONFIG)
+    if "/brute-force/users/" in path:
+        return httpx.Response(200, json={"disabled": False, "numFailures": 0})
+    if path.endswith((f"/{_ID}", "/role-mappings")):
+        return httpx.Response(200, json={"id": _ID, "username": "someone", "enabled": True})
+    return httpx.Response(200, json=[])
+
+
+async def _read(operator: Operator, op_id: str) -> Any:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get(path).respond(200, json=body)
-        result = await _dispatch(operator, op_id, {}, approved=False)
-
+        get_route = mock.get(url__regex=r"/admin/realms/.*").mock(side_effect=_keycloak_answer)
+        result = await _dispatch(operator, op_id, _READ_PARAMS.get(op_id, {}), approved=False)
     assert result.status == "ok", result.error
-    assert isinstance(result.result, dict)
-    assert result.result[REALM_FIELD] == _REALM
-    assert next(iter(result.result)) == REALM_FIELD
+    assert get_route.called
+    assert all(f"/admin/realms/{_REALM}" in str(c.request.url) for c in get_route.calls)
+    return result.result
+
+
+def test_the_read_list_has_every_read() -> None:
+    assert len(_READS) == 19
+    assert set(_READ_PARAMS) <= set(_READS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _READS)
+async def test_each_read_answer_names_the_realm(operator: Operator, op_id: str) -> None:
+    answer = await _read(operator, op_id)
+    assert isinstance(answer, dict)
+    assert answer[REALM_FIELD] == _REALM
+    assert next(iter(answer)) == REALM_FIELD
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _READS)
+async def test_with_the_switch_off_each_read_answer_is_as_before(
+    operator: Operator, op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_field = await _read(operator, op_id)
+    monkeypatch.delenv("KEYCLOAK_ANSWER_REALM")
+    get_settings.cache_clear()
+    assert get_settings().keycloak_answer_realm is False
+    without_field = await _read(operator, op_id)
+    assert REALM_FIELD not in without_field
+    assert {**without_field, REALM_FIELD: _REALM} == with_field
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_a_write_answer_is_as_before(
+    operator: Operator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "false")
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.post("/admin/realms").respond(201)
+        result = await _dispatch(operator, _CREATE, _fenced_params(_CREATE, _REALM), approved=True)
+    assert result.status == "ok", result.error
+    assert REALM_FIELD not in result.result
 
 
 # ---------------------------------------------------------------------------

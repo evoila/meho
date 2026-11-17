@@ -28,10 +28,12 @@ works only with a Keycloak that serves at the root path, such as your
 own Keycloak with no `http-relative-path` set.
 
 **One target, one realm.** A Keycloak target works on the managed realm it
-names, and on no other. Every answer has a `managed_realm` field with that
-realm, and the approval card of a write shows it first. A call that names
+names, and on no other. The approval card of a write shows that realm
+first. With the switch `KEYCLOAK_ANSWER_REALM` on (off by default), every
+answer also has a `managed_realm` field with that realm. A call that names
 another realm in its `realm` value (`keycloak.realm.update`,
-`keycloak.realm.create`, `keycloak.user.check_login`) is refused before it
+`keycloak.realm.create`, `keycloak.realm.delete`,
+`keycloak.user.check_login`) is refused before it
 waits for approval. To work on another realm, register a second target
 that names it. The `realm` value stays for now, and it will be removed:
 leave it out.

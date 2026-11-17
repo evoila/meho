@@ -291,7 +291,6 @@ async def test_accepted_login_ends_the_session_at_once(
         result = await _run(_PARAMS)
     assert result.status == "ok", result.error
     assert result.result == {
-        "managed_realm": _REALM,
         "result": "accepted",
         "http_status": 200,
         "error": None,

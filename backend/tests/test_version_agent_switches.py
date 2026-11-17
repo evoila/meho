@@ -42,6 +42,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "connector_list_product_aliases",
         "jsonflux_answer_ready",
         "k8s_node_list_resources",
+        "keycloak_answer_realm",
         "kb_similar_check",
         "knowledge_upkeep_enabled",
         "mcp_approval_exit_code",

@@ -3553,7 +3553,8 @@ change. It saves nothing.</p>
   appears twice in the same block.</li>
 <li>Anything that looks like a secret: a private key, a token, or a
   field in a target's <code>extras</code> named like a password or a key, whatever
-  its value.</li>
+  its value. The check uses the same list of secret names that MEHO
+  hides in results.</li>
 <li>A mask such as <code>********</code> or <code>&lt;keep&gt;</code>. A mask never means "keep the
   stored value": leave the field out instead.</li>
 <li>An <code>apiVersion</code> other than <code>meho.evoila.com/v1</code>.</li>

@@ -4102,6 +4102,11 @@ async def pending_chain_positions(
     returned; a lone request has no order to show. The numbers count
     pending requests only, so step 1 is always the oldest request that
     still waits. Tenant-isolated by the WHERE clause.
+
+    With *work_ref*, every row the filter matches is one group, keyed by
+    *work_ref*. The filter matches the cleaned id and the text as typed
+    (:func:`work_ref_filter_values`), so rows of one ticket stored in two
+    forms get one numbering, the same rows the filtered list shows.
     """
     stmt = (
         select(ApprovalRequest.id, ApprovalRequest.work_ref)
@@ -4116,7 +4121,7 @@ async def pending_chain_positions(
         stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     groups: dict[str, list[uuid.UUID]] = {}
     for request_id, ref in (await session.execute(stmt)).all():
-        groups.setdefault(ref, []).append(request_id)
+        groups.setdefault(ref if work_ref is None else work_ref, []).append(request_id)
     positions: dict[uuid.UUID, ChainPosition] = {}
     for ref, ids in groups.items():
         if len(ids) < 2:

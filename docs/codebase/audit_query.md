@@ -357,7 +357,7 @@ take `event_class` as a required argument.
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
 | `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
-| `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
+| `work_ref` | `str \| None` | `audit_log.work_ref IN (cleaned id, text as typed)` — the **whole id**, see "Search filters" below (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
 | `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
 | `has_trace` | `bool \| None` | `True` keeps only the rows the trace route returns a trace for: `event_class = operation_execution` AND `EXISTS` a `dispatch_trace` row with the same `audit_id` and the caller's `tenant_id` (#4855). `False` keeps the other rows. `None` applies no filter. The unique index `dispatch_trace_audit_id_idx` makes the check cheap. On the REST body (`AuditQueryRequest`) and used by `meho audit trace list`; not on the MCP input schema. |
 | `limit` | `int` (1-1000) | Default 100. |
@@ -466,7 +466,7 @@ query_audit(filters, tenant_id, session)
   │       [+ audit_id = :audit_id]
   │       [+ parent_audit_id = :parent_audit_id]                ← exact match
   │       [+ agent_session_id = :agent_session_id]
-  │       [+ work_ref = :work_ref]                              ← exact match
+  │       [+ work_ref IN (:cleaned, :typed)]                    ← whole id
   │       [+ event_class = :event_class]                        ← exact match
   │       [+ operator_sub ILIKE :principal OR payload->>'principal_name' ILIKE :principal]
   │       [+ operator_sub = :principal_sub]                     ← exact match
@@ -601,9 +601,24 @@ The console search boxes of the agent runs, the scheduler, the audit
 and the approvals pages, and the approvals "in order" page, check the
 value with the same rule (`filter_work_ref` in
 `ui/routes/work_ref_form.py`): they clean first and then count the
-length, and a bad value is a 422 that names the rule. A blank box means
-no filter. The "in order" page needs a ticket, so there a blank value is
-a 422 too.
+length. A blank box means no filter. The "in order" page needs a ticket,
+so there a blank value is refused too.
+
+A refused value still gets its page, list or window, with no rows and
+the rule text in it (`refused_filter_text`). The answer is a 422 with the
+header `Meho-Work-Ref-Refused` (`mark_work_ref_refused`). htmx does not
+swap an error answer by itself, so the console script
+`static/src/app/work-ref-refused.js` swaps in a 422 HTML answer with
+that header. So a bookmarked page and a search-as-you-type box both show
+why the value was refused.
+
+The "in order" window lists the same requests as the Pending tab
+filtered with the same text: the cleaned id and the text as typed. The
+step numbers on the Pending tab count the same rows. With a filter,
+`pending_chain_positions` numbers all the rows it matched as one change
+ticket, also when they are stored in two forms (for example `CHG1` and,
+from before the rule, `CHG1 ` with a space at the end). So the numbers in
+the list and in the window agree.
 
 ### How a new door is found
 
@@ -750,7 +765,7 @@ tenant-scoping invariant is enforced one layer up.
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
 | `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `has_trace`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. CLI: `meho audit count` (#4983). |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
-| `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
+| `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (whole ticket id); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
 | `GET /api/v1/audit/traces` | Finds stored traces by `request_id`, `caller` and the window `since` / `until`, without the audit row (#6452). See "Find a trace without its audit row". 200 body is `{items: [TraceView]}`. | Flight-recorder trace search. |

@@ -300,11 +300,13 @@ def keep_allowed_connectors(
     the agent is shown only the connectors it may call (#4233). When a
     ``target_fit`` summary had rows and none of them is allowed, the summary
     says ``no_connector``: no connector this agent may use fits the target.
+    A ``product_filter`` block keeps only the products of the allowed rows
+    (:func:`~meho_backplane.mcp.tools._connector_product_filter.keep_allowed_product_filter`).
     The filter itself is shared with the MCP tool profiles
     (:func:`~meho_backplane.mcp.tools.connector_admin.keep_connector_rows`).
     """
     return keep_connector_rows(
-        result, allowed_connectors.__contains__, no_connector_hint=_NO_ALLOWED_CONNECTOR_HINT
+        result, allowed_connectors, no_connector_hint=_NO_ALLOWED_CONNECTOR_HINT
     )
 
 

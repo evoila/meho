@@ -504,6 +504,7 @@ from meho_backplane.operations.shutdown_drain import (
     track_operation,
 )
 from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
@@ -4283,6 +4284,8 @@ async def _dispatch_now(
         # A credential read that shows the hidden values only on request
         # (vault.kv.read) waits for approval when the call asks for them.
         raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+        # Some params make a call wait for a person on every call.
+        raise_descriptor_for_params(descriptor, params)
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now

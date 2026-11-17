@@ -774,6 +774,61 @@ Code: `connectors_for_target` in `mcp/tools/connector_admin.py`. Tests:
 `tests/test_mcp_tools_connector_admin.py` (`target_fit`) and
 `tests/test_agent_toolset_discovery.py`.
 
+### The `product` filter and other product names (#6560)
+
+`meho_connector_list` takes an optional `product`. How it filters
+depends on the switch `CONNECTOR_LIST_PRODUCT_ALIASES` (an env setting,
+off by default).
+
+- **Switch off (default).** The filter keeps only the rows whose
+  `product` is exactly the given text. Case counts. A filter that matches
+  nothing returns an empty `connectors` list and nothing else. This is
+  the answer MEHO always gave.
+- **Switch on.** The filter ignores case, and it also matches other
+  names of a product. A connector class declares these names in
+  `product_aliases` (for example `("vcenter", "vsphere")` on a VMware
+  connector). The names of every class registered for a product count
+  for that product, so one class can name them for all connectors of
+  the product. The core has no vendor name of its own.
+- **A wrong value never breaks the list.** A plain string in
+  `product_aliases` is one name. Any other value that is not a list or
+  tuple is skipped, with a warning in the log that names the class. An
+  alias that is the real product name of another connector is skipped
+  too, with the same kind of warning, so it never adds rows to that
+  product.
+- **The answer says what matched.** With the switch on, a call with a
+  `product` has a `product_filter` block next to `connectors`:
+  - `query`: the text that was passed;
+  - `matches`: one `{product, matched_name}` per product that matched,
+    for example `{"product": "vmware", "matched_name": "vcenter"}`;
+  - when nothing matched, also `known_products` (the products of the
+    connectors the `status` filter leaves) and a `hint` that says to ask
+    again with one of them, or without `product`.
+- `status`, `target` and `detail` still apply. A long list still comes
+  back as a handle; `product_filter` stays next to it, like `target_fit`.
+- **Long lists in the block.** `matches` and `known_products` have the
+  same limits as the rows (more than 50 entries or 4 KB). A longer one
+  is stored behind its own handle: the block then holds the reducer's
+  summary with a `handle`, and `result_query` reads the rows
+  (`known_products` rows are `{"product": name}`). See
+  `reduce_product_filter`.
+- **Hosted agent.** The agent's connector allow-list also narrows the
+  block: `matches` keeps only products of rows the agent may use. When
+  none is left, `known_products` names only the products of the
+  connectors the agent may use, so the agent can ask again
+  (`keep_allowed_product_filter`). When rows the agent may use match the
+  product but none fits the `target`, `matches` names those products and
+  the hint says that none fits the target. The rows not yet reduced carry
+  `{connector_id: product}` of every listed row under
+  `_listed_products` for this; `reduce_connector_list` drops it, so no
+  answer shows it.
+- **Why a switch.** Small models filtered by "vcenter" and gave up when
+  the list came back empty. The switch goes on by default only after a
+  benchmark run with it off and on, on the same build and models.
+
+Code: `mcp/tools/_connector_product_filter.py`. Tests:
+`tests/test_connector_list_product_aliases.py`.
+
 ### Close ids for an unknown connector (#4136)
 
 Every unknown-connector error names up to 5 close connector ids, so a

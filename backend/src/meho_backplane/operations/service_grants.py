@@ -105,6 +105,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.op_classes import needs_per_call_approval
+from meho_backplane.operations._target_connector_limit import target_picks_other_connector
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
@@ -1397,6 +1398,10 @@ async def consult_and_record_grant(
     declared level only — no method, no tags — so for it the op id is the
     only sign, and both id signs are checked.
 
+    A grant names one connector. When the target picks another connector
+    (:func:`~meho_backplane.operations._target_connector_limit.target_picks_other_connector`),
+    no grant is looked up and the call waits for a person.
+
     An op that shows a secret (``credential_read``) is refused first, before
     any lookup: a grant row never clears it, so a person always approves it.
 
@@ -1434,6 +1439,18 @@ async def consult_and_record_grant(
     real call sends, and the real call checks the hash and the blast
     radius before it uses the grant.
     """
+    other_connector = await target_picks_other_connector(descriptor, target, connector_id)
+    if other_connector is not None:
+        _log.info(
+            "service_grant_refused_other_connector",
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            target_connector_id=other_connector,
+            principal_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        return None
+
     secret_reason = credential_read_grant_reason(
         descriptor.op_id, getattr(descriptor, "op_class", None)
     )

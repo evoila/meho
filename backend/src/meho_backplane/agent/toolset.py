@@ -137,6 +137,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -167,6 +168,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
 from meho_backplane.operation_picks.recorder import recorded_meta_tool
+from meho_backplane.operations._target_connector_limit import connector_limit
 from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED, ROLE_INSUFFICIENT
 from meho_backplane.operations.meta_tools import (
     call_operation,
@@ -566,6 +568,26 @@ def _refuse_disallowed_connector(
     )
 
 
+def _refuse_role_below_floor(meta: MetaToolSpec, operator: Operator) -> None:
+    """Raise :class:`ToolRefusedRetry` when *operator*'s role is below *meta*'s floor."""
+    if role_at_least(operator.tenant_role, meta.required_role):
+        return
+    _log.warning(
+        "agent_tool_role_denied",
+        meta_tool=meta.name,
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+    )
+    raise ToolRefusedRetry(
+        f"forbidden: {meta.name!r} requires a higher role. Do not retry it.",
+        reason_code=ROLE_INSUFFICIENT,
+        reason=(
+            f"{meta.name} needs the {meta.required_role.value} role; "
+            f"the role in this run is {operator.tenant_role.value}"
+        ),
+    )
+
+
 async def _finish_connector_list(
     operator: Operator,
     result: dict[str, Any],
@@ -605,7 +627,10 @@ def _make_meta_tool(
     allow-list, the wrapper performs a pre-dispatch connector check and
     raises :class:`ModelRetry` — an agent-reasonable structured error, not a
     crash — when the requested connector is outside the spec's
-    ``connectors`` list.
+    ``connectors`` list. It also binds the list for the dispatcher
+    (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`),
+    which refuses a target whose connector is outside the list with
+    ``connector_not_allowed``.
 
     An unknown or not-yet-ingested ``connector_id`` from the handler goes
     back to the model as a failed tool result (#4232), so the model can pick
@@ -635,45 +660,35 @@ def _make_meta_tool(
     is_connector_list = meta.name == CONNECTOR_LIST
 
     async def _tool(ctx: RunContext[Operator], **arguments: Any) -> dict[str, Any]:
-        if not role_at_least(ctx.deps.tenant_role, meta.required_role):
-            _log.warning(
-                "agent_tool_role_denied",
-                meta_tool=meta.name,
-                operator_sub=ctx.deps.sub,
-                tenant_id=str(ctx.deps.tenant_id),
-            )
-            raise ToolRefusedRetry(
-                f"forbidden: {meta.name!r} requires a higher role. Do not retry it.",
-                reason_code=ROLE_INSUFFICIENT,
-                reason=(
-                    f"{meta.name} needs the {meta.required_role.value} role; "
-                    f"the role in this run is {ctx.deps.tenant_role.value}"
-                ),
-            )
+        _refuse_role_below_floor(meta, ctx.deps)
         if is_connector_scoped and allowed_connectors is not None:
             _refuse_disallowed_connector(
                 meta.name, arguments.get(_CONNECTOR_ID_ARG), allowed_connectors, ctx.deps
             )
         call_arguments = dict(arguments)
-        with connector_errors_reach_model():
-            # #4750: a search or call writes its record; other tools do not.
-            result = await recorded_meta_tool(
-                meta.name,
-                ctx.deps,
-                call_arguments,
-                run=lambda: handler(ctx.deps, call_arguments),
-            )
-        if is_connector_list:
-            result = await _finish_connector_list(ctx.deps, result, allowed_connectors)
-        if is_call_operation and result.get("status") == "awaiting_approval":
-            settings = get_settings()
-            return await resume_or_surface_awaiting_approval(
-                operator=ctx.deps,
-                call_arguments=call_arguments,
-                awaiting_envelope=result,
-                timeout_seconds=settings.agent_approval_wait_timeout_seconds,
-            )
-        return result
+        # The dispatcher checks the connector the target picks against the
+        # same list, for the call, its preview and the steps it runs.
+        limit = connector_limit(allowed_connectors) if is_connector_scoped else nullcontext()
+        with limit:
+            with connector_errors_reach_model():
+                # A search or call writes its record; other tools do not.
+                result = await recorded_meta_tool(
+                    meta.name,
+                    ctx.deps,
+                    call_arguments,
+                    run=lambda: handler(ctx.deps, call_arguments),
+                )
+            if is_connector_list:
+                result = await _finish_connector_list(ctx.deps, result, allowed_connectors)
+            if is_call_operation and result.get("status") == "awaiting_approval":
+                settings = get_settings()
+                return await resume_or_surface_awaiting_approval(
+                    operator=ctx.deps,
+                    call_arguments=call_arguments,
+                    awaiting_envelope=result,
+                    timeout_seconds=settings.agent_approval_wait_timeout_seconds,
+                )
+            return result
 
     return Tool.from_schema(
         _tool,

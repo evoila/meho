@@ -4896,6 +4896,10 @@ class OperationRun(Base):
       lock-step by the lifecycle service.
     * ``created_at`` / ``started_at`` / ``ended_at`` -- lifecycle
       timestamps.
+    * ``mcp_profile`` -- the MCP tool profile of the session that started
+      the run, when that profile has a connector list (#6099, migration
+      ``0174``); NULL otherwise. Only a session of the same profile reads
+      the run over MCP.
     """
 
     __tablename__ = "operation_run"
@@ -4923,6 +4927,7 @@ class OperationRun(Base):
         nullable=True,
         default=None,
     )
+    mcp_profile: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,

@@ -2076,6 +2076,26 @@ repo, #761). The set depends on the event:
 - Every other event (pull requests and the nightly run):
   `meho-runners-ci-heavy`.
 
+Measured wait for a heavy runner, 16 Nov 2026, 16:32 to 18:32 UTC
+(#6590). The data is from the Actions jobs API, one row per job:
+
+- Merge-queue runs: 42 jobs on `meho-runners-ci-heavy-queue`, none on
+  `meho-runners-ci-heavy`. Middle wait 7.3 min, longest 14.7 min. The
+  `test_no_merge_group_job_uses_the_shared_heavy_pool` test keeps it so.
+- Pull request runs: 127 jobs on `meho-runners-ci-heavy`. Middle wait
+  45 min, 90th percentile 91 min, longest 118 min. 21 of 22 runs
+  started six heavy jobs. The test map gave a narrow run for none of
+  them. Reasons seen: a migration changed (6 runs), a new source file
+  the map did not know (11, fixed by #6597 after the window), the map
+  picked 2,000 tests or more (2), a workflow or test helper changed (3).
+- No heavy job of a replaced pull request run kept a runner: no
+  cancelled job had started.
+- Pool size, from replaying the same jobs through a first-come queue
+  (the fit to the 45 min middle wait is a pool of about 11 runners):
+  +2 runners give a middle wait of about 24 min, +4 give about 19 min.
+  Under 20 min needs about 4 more runners. A pool change is for the
+  owner to decide.
+
 Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
 their shards filled the heavy runners and the merge queue's shards

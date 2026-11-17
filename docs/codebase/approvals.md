@@ -778,6 +778,21 @@ boundary (`except McpInvalidParamsError` in both `handle_tools_call` and
 branches that already set `400`/`403`/`404` pass through untouched, and a
 genuine handler fault still records `500`.
 
+## A credential call always waits for a person
+
+A call that reads, writes or makes a credential (the classes
+`credential_read`, `credential_write` and `credential_mint`) always waits
+for a person. No standing grant, no agent grant and no run approval covers
+it. One rule says so: `service_grants.never_covered_reason`, with
+`credential_grant_reason` for these classes. Grant create, run approval
+create and agent grant create (an exact op id with `auto-execute`) refuse
+such an operation with the reason "A standing grant, an agent grant or a
+run approval never covers OP: it reads, writes or makes a credential, so a
+person approves each call. Leave it out." Details:
+[service-principal-grants.md](service-principal-grants.md#credential-calls),
+[run-approvals.md](run-approvals.md),
+[agent-permission-grants.md](agent-permission-grants.md).
+
 ## G11.7-T1 policy hardening (#1401)
 
 Phase C of the wrapper-retirement effort moves connector **writes**

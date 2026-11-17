@@ -216,7 +216,7 @@ def test_standing_grant_then_run_approval_clear_a_service_wait() -> None:
     "asked",
     [
         _asked("dangerous", caller_address=True),
-        _asked("dangerous", op_class=frozenset({"credential_read"})),
+        _asked("dangerous", op_class=frozenset({"credential"})),
         _asked("dangerous", op_class=frozenset({"classified_always_wait"})),
         _asked("dangerous", op_class=frozenset({"per_call_approval"})),
     ],

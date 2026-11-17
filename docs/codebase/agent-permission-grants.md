@@ -128,6 +128,28 @@ For time-bounded elevations: same path, plus `expires_at` set on the row. The gr
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
 
+A call that reads, writes or makes a credential always waits for a
+person. No standing grant, no agent grant and no run approval covers it
+(the one rule: `service_grants.never_covered_reason`, see
+[service-principal-grants.md](service-principal-grants.md#credential-calls)).
+For an agent:
+
+- `_agent_verdict` (`operations/_validate.py`) makes such a call at least
+  `needs-approval`, also at level `safe`, whatever the grant rows say
+  (`service_grants.credential_call_waits`). The check sits there and not
+  in `resolve_verdict`, because only the row there carries the class a
+  connector's floor stored on an ingested operation. A credential read
+  marked in code as one that returns no secret value still runs at once.
+- `AgentGrantService.grant` (create and elevate) refuses an
+  `auto-execute` row whose `op_pattern` is exactly the op id of such a
+  call, with the reason "A standing grant, an agent grant or a run
+  approval never covers OP: it reads, writes or makes a credential, so a
+  person approves each call. Leave it out." A pattern with `*`, `?` or
+  `[` is not refused: the gate keeps the credential calls it matches
+  waiting. A `needs-approval` or `deny` row is not refused either, because
+  it never runs a call at once, and with `AGENT_GRANT_REQUIRED=on` an
+  agent needs a row to call the operation at all.
+
 A call with no target (for example a `net.*` operation) matches only a grant for every target (`target_scope` `*` or empty), never a grant for named targets, so with `AGENT_GRANT_REQUIRED=on` a `read-targets` agent cannot run it.
 
 ### The upgrade row (migration `0155`)

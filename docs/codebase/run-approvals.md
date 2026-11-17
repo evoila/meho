@@ -90,7 +90,7 @@ When none covers the call, it calls `consult_and_record_run_approval`:
 - It reads the run reference from `work_ref_var` (bound from
   `Meho-Work-Ref`). No run reference: no cover.
 - It never covers an operation that `service_grants.never_covered_reason`
-  names: one that reads a credential (see below), one a connector marks
+  names: one that reads, writes or makes a credential (see below), one a connector marks
   for per-call approval, one that connects to an address the caller
   gives, one classified to always wait, or one with a delete sign (the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
@@ -168,46 +168,49 @@ Marked today:
 - `secret.move`. A move writes a secret into a store or into a file on a
   host, so a person checks each place and owner.
 
-## Never covered: an operation that reads a credential
+## Never covered: an operation that reads, writes or makes a credential
 
-An operation of the `credential_read` class reads a credential, for
-example `k8s.secret.read_to_ref` or `vault.kv.read`. The class comes from
-the op id (a connector's `declare_op_classes`, or the name rules of
-`broadcast/events.py`), or from the class stored on the row of an ingested
-operation. A run approval never covers such an operation, the same rule
-as for a standing grant (`service_grants.credential_read_grant_reason`):
+A call that reads, writes or makes a credential always waits for a
+person. No standing grant, no agent grant and no run approval covers it.
+The classes are `credential_read` (for example `k8s.secret.read_to_ref`
+or `vault.kv.read`), `credential_write` (for example `vault.kv.put`) and
+`credential_mint` (for example `vault.token.create`). The class comes from
+the class stored on the row of an ingested operation, or from the op id (a
+connector's `declare_op_classes`, or the core lists of
+`broadcast/events.py`). The rule is the one of the standing grants
+(`service_grants.credential_grant_reason`,
+[service-principal-grants.md](service-principal-grants.md#credential-calls)):
 
 - At call time `_never_covered` in `run_approval_gate.py` refuses it, and
-  logs `run_approval_refused_credential_read` with the reason "A run
-  approval cannot cover OP: it reads a credential, so a person approves
-  each call." The call gets the same answer as with no run approval: a
-  read that shows a secret waits for a person. The shadow evaluator
+  logs `run_approval_refused_credential` with the reason "A standing
+  grant, an agent grant or a run approval never covers OP: it reads,
+  writes or makes a credential, so a person approves each call." The call
+  gets the same answer as with no run approval. The shadow evaluator
   (`policy/floors.py::run_approval_may_clear`) gives the same answer.
 - When such a service call waits, its reason ends with "the operation
-  reads a credential, so no standing grant and no run approval covers it;
-  a person approves each call" (`_validate.CREDENTIAL_READ_WAIT_NOTE`).
-  The `approval.request` audit row of the wait keeps the reason of the
-  policy gate in `payload.wait_reason`.
+  reads, writes or makes a credential, so no standing grant, no agent
+  grant and no run approval covers it; a person approves each call"
+  (`_validate.CREDENTIAL_WAIT_NOTE`). The `approval.request` audit row of
+  the wait keeps the reason of the policy gate in `payload.wait_reason`.
 - This also holds for a row that a person approved before the upgrade
   that brought the rule: the gate reads the class at call time, not from
   the row.
-- `RunApprovalService.request` does **not** refuse such an entry. The
-  answer of request, show and approve has `entries_that_wait`: one note
-  per such entry whose calls wait (`has_credential_read_floor` with
-  `reveal_secret`), with its position (`entry`), `connector_id`, `op_id`
-  and the reason "reads a credential. A run approval never covers it: each
-  call waits for a person" (`operations/run_approval_notes.py`). For
-  `vault.kv.read` the reason ends "each call with reveal_secret waits for
-  a person". A read that returns no secret value gets no note. The list,
-  revoke and end routes leave the field `null`, because they look up no
-  operation.
+- `RunApprovalService.request` refuses such an entry (`_entry_refusal`):
+  by op id before the lookup, and by the stored class after it. The
+  answer is "entries[N]: " plus the reason and "Leave it out."
+- A request made before this rule can still list such an entry. The
+  answer of show and approve has `entries_that_wait`: one note per such
+  entry whose calls wait (`service_grants.credential_call_waits`), with
+  its position (`entry`), `connector_id`, `op_id` and the reason "reads,
+  writes or makes a credential. A run approval never covers it: each call
+  waits for a person" (`operations/run_approval_notes.py`). For
+  `vault.kv.read` the reason is "reads a credential. A run approval never
+  covers it: each call with reveal_secret waits for a person". A read
+  that returns no secret value gets no note. Request answers have an empty
+  list. The list, revoke and end routes leave the field `null`, because
+  they look up no operation.
   `meho approvals runs show` and `approve` print the reason under the
   entry.
-- A read that a connector marks as one that returns no secret value
-  (`declare_no_secret_value`), for example `k8s.secret.compare_to_ref`,
-  runs at once for everyone, so a run approval does not matter for it.
-  The same holds for `vault.kv.read` without `reveal_secret`; with it, the
-  call waits.
 
 ## Approver routing
 
@@ -226,7 +229,7 @@ approve. With the switch off, nothing changes.
 
 | Verb | Path | Who |
 |---|---|---|
-| `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, an entry that runs a command as root on the host, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request. An entry that reads a credential is accepted and named in `entries_that_wait` |
+| `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, an entry that runs a command as root on the host, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request. 422 also for an entry that reads, writes or makes a credential |
 | `GET` | `/api/v1/service-principals/run-approvals` | approvals access (`operator` role or `approver`); filters `principal_sub`, `status` |
 | `GET` | `.../{id}` | approvals access; 404 across tenants |
 | `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a MEHO-SA-Operator or a tenant admin, the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
@@ -249,6 +252,8 @@ There is no MCP tool. Approving is a person's decision (v0.1-spec §7).
 destructive, root commands, tenants, target kinds),
 `tests/test_run_approval_credential_reads.py` (every registered credential
 read, from the registry; the gate and the shadow evaluator agree; the
-notes of request, show and approve), `tests/test_api_v1_run_approvals.py`
+notes of show and approve), `tests/test_credential_calls_always_wait.py`
+(every registered credential read, write and mint, from the registry;
+refusals at create time), `tests/test_api_v1_run_approvals.py`
 (REST rules), `tests/test_run_approvals_routing.py` (approver routing), `tests/migrations/test_migration_0143_add_run_approval.py`,
 `cli/internal/cmd/approvals/runs_test.go`.

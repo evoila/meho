@@ -1653,7 +1653,7 @@ web interface runs it at once (a call made with a token waits, #3980).
 `safety_level="dangerous"`. For an agent, `dangerous` waits for approval
 just like `caution` (#3980); it is not refused.
 
-Five synthetic connectors follow this mould (natural key
+These synthetic connectors follow this mould (natural key
 `(product, "1.x", impl_id)` → wire `connector_id`):
 
 | Wire `connector_id` | Op | MCP front | Since |
@@ -1668,10 +1668,12 @@ Five synthetic connectors follow this mould (natural key
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
 | `spaces-records-1.x` | `spaces.assign`, `spaces.unassign`, `spaces.reassign`, `spaces.member.disable`, `spaces.overview`, `spaces.drift` | (dispatch-only; the four writes are `caution` + `requires_approval` and need `tenant_admin`; the overview and the drift check are `safe` reads) | #4933 |
 | `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
+| `tools-admin-1.x` | `tools.sign_out` | (dispatch-only; `caution` + `requires_approval`, every call waits for approval, needs `tenant_admin`; a tenant admin signs out one tool of another person, `meho admin tools sign-out`) | #6303 |
 
-**Per-op role floor.** `targets.register`, `targets.update`, the four `spaces.*` writes and the five `topology.*`
-writes need the `tenant_admin` role from a person, the same as their
-REST routes and `meho_*` tools. Those fronts check the role at the door,
+**Per-op role floor.** `targets.register`, `targets.update`, the four `spaces.*` writes, the five `topology.*`
+writes and `tools.sign_out` (`tools-admin-1.x`) need the `tenant_admin` role from a person, the same as their
+REST routes and `meho_*` tools (`tools.sign_out` has no front of its own:
+the floor is its only role check). Those fronts check the role at the door,
 but `call_operation` (and the REST dispatch route and the CLI) needs only
 `operator`, so the operations carry a role floor of their own
 (`operations/role_floors.py`, registered at import by the connector

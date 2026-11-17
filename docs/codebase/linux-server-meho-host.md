@@ -248,6 +248,17 @@ too. Output that is not this JSON gives one red doctor line. See
      the name or when a digit, `_`, `.` or `-` follows it (`api_key`,
      `apiKey`, `unseal-key`, `KEY_ID`), so `keycloak` is not a key name and
      Keycloak's addresses and image names stay readable.
+   - Three more forms, in any case:
+     - `Authorization: Bearer <token>` and `Authorization: Basic <token>`,
+       also in the JSON form `"Authorization": "Bearer <token>"`, become
+       `Authorization: Bearer [removed]`.
+     - The password in an address, `://user:password@host`, becomes
+       `://user:[removed]@host`. The user and the host stay, so support can
+       still read the address. The password runs to the last `@` before the
+       path, so a password with an `@` in it goes as a whole.
+     - SQL's `PASSWORD '<value>'` and `PASSWORD "<value>"` become
+       `PASSWORD '[removed]'`. A quote mark written twice inside the value
+       (`'it''s'`) stays part of the value.
    - Every known secret value becomes `[removed]` wherever it appears, for
      example in a log line. The values come from the core's Secrets in
      namespace `meho`: `kubectl get secrets -o go-template=...` decodes
@@ -815,10 +826,9 @@ packages later.
   space in it is removed only up to the space, unless it is in quotes. The
   two one-time files hold no spaces, and their values are removed as a
   whole.
-- **Text the scrub misses.** `Authorization: Bearer <token>`, a password
-  inside a database address, written as `user:password@host`, and SQL
-  `PASSWORD '<value>'` are not removed. They are rare in MEHO's logs; #5012
-  adds them.
+- **Text the scrub misses.** A secret in a shape the rules do not know is
+  not removed, for example a private key in PEM form or a session cookie.
+  Nothing in the bundle holds one today: Secret data is never read.
 - **No size limit on the logs.** A pod with a very large log makes a large
   bundle. `kubectl logs --tail` can be added when that happens.
 - **Not root is a `[FAIL]` line, not JSON.** `meho doctor` (#4740) runs

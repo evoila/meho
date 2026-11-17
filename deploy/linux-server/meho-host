@@ -967,20 +967,34 @@ secret_values() {
 # PASSWORD, TOKEN, SECRET or KEY, written as NAME=value, NAME: value (with
 # or without the space) or as the JSON pair "name": "value" (MEHO's own
 # logs are JSON lines), and every value of secret_values, wherever it
-# appears. The rules go into a sed script file for root only, never on
-# sed's command line: every user on the machine can read the arguments of
-# a running process.
+# appears. Three more forms lose their secret: the token of an
+# "Authorization: Bearer" or "Basic" header, the password of an address
+# such as ://user:password@host (the user and the host stay), and
+# the value of SQL's PASSWORD 'value'. The rules go into a sed script file
+# for root only, never on sed's command line: every user on the machine
+# can read the arguments of a running process.
 scrub_bundle() {
-    local work=$1 secrets_file=$2 script=$3 names key name value
+    local work=$1 secrets_file=$2 script=$3 names key name auth password value
     names="$(any_case password)|$(any_case token)|$(any_case secret)"
     # "key" counts when it ends the name or when a digit, "_", "." or "-"
     # follows it (api_key, apiKey, unseal-key, KEY_ID), so that keycloak is
     # not a key name: support needs Keycloak's addresses.
     key=$(any_case key)
     name="([A-Za-z0-9_.-]*(${names})[A-Za-z0-9_.-]*|[A-Za-z0-9_.-]*${key}([0-9_.-][A-Za-z0-9_.-]*)?)"
+    # The header also counts in its JSON form, "Authorization": "Bearer x",
+    # and in JSON inside a JSON string, where each quote mark is \".
+    auth="$(any_case authorization)[\\\"]*[[:space:]]*:[[:space:]]*[\\\"]*($(any_case bearer)|$(any_case basic))[[:space:]]+"
+    password=$(any_case password)
     {
         printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
         printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
+        printf '%s\n' "s/(${auth})[^[:space:]\\\",]+/\\1[removed]/g"
+        # The password runs to the last "@" before the path, so a password
+        # with an "@" in it goes as a whole.
+        printf '%s\n' "s#(://[^/:@[:space:]\"]*:)[^/[:space:]\"]+@#\\1[removed]@#g"
+        # SQL writes a quote mark inside a value twice: 'it''s'.
+        printf '%s\n' "s/(${password}[[:space:]]+')([^']|'')*'/\\1[removed]'/g"
+        printf '%s\n' "s/(${password}[[:space:]]+\")([^\"]|\"\")*\"/\\1[removed]\"/g"
         while IFS= read -r value; do
             [[ -n $value ]] || continue
             printf 's/%s/[removed]/g\n' "$(regex_literal "$value")"

@@ -55,9 +55,9 @@ The design is in the
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- A MEHO-SA-Operator who approves their own changes, a second person
-  who can approve, or the agent setup from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+- A MEHO-SA-Operator or a MEHO-Admin who approves their own changes,
+  or a second person who can approve (see
+  [Approvals and break-glass](approvals-and-break-glass.md#who-may-approve)).
 
 ## Step 1: Add the tenant in Keycloak
 

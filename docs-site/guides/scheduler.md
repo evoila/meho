@@ -5,9 +5,10 @@ runs** on durable triggers — a cron expression, a one-off instant, or an
 event — with no operator at the keyboard. An operator (or agent author)
 creates a trigger row; a background loop scans for what is due and
 launches the bound agent definition when its time comes. This is what
-runs your nightly reconciliation, your scheduled remediation, and the
-autonomous writes behind the [agent-requester approval
-pattern](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+runs your nightly reconciliation, your scheduled remediation, and other
+writes that run on a schedule. A write of a scheduled run still waits
+for approval like any other (see
+[Approvals and break-glass](approvals-and-break-glass.md)).
 
 The hard part of unattended execution is not the timer — it is *credentials*:
 a scheduled run days later still needs a live identity to reach Vault.

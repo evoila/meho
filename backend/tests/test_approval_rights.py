@@ -27,6 +27,7 @@ from structlog.testing import capture_logs
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations import approval_queue
 from meho_backplane.operations.approval_queue import (
     ApprovalError,
     ApprovalGroupForbiddenError,
@@ -238,13 +239,42 @@ def test_a_refusal_shows_the_text_of_the_approve() -> None:
     assert right.message == expected
 
 
-def test_an_own_lower_risk_change_names_the_break_glass_switch() -> None:
-    low = approve_right(_person(_REQUESTER), _row("caution"))
-    high = approve_right(_person(_REQUESTER), _row("destructive"))
+@pytest.mark.parametrize(
+    ("level", "groups"),
+    [
+        ("caution", "MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or MEHO-Approvers"),
+        ("destructive", "MEHO-SA-Operators or MEHO-Admins"),
+    ],
+)
+def test_an_own_change_names_only_who_may_approve_and_where(level: str, groups: str) -> None:
+    right = approve_right(_person(_REQUESTER), _row(level))
 
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in low.message
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" not in high.message
-    assert "MEHO-SA-Operator or a MEHO-Admin" in high.message
+    assert right.may_approve is False
+    assert f"Ask another person in {groups} to approve it." in right.message
+    assert "Approvals page" in right.message
+    for word in ("APPROVAL_ALLOW_SELF_APPROVAL", "agent-requester", "break-glass", "re-park"):
+        assert word.lower() not in right.message.lower()
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (["Admins", "Readers"], "Ask another person in MEHO-Admins to approve it."),
+        ([], "No group may approve this change, so it waits until it expires."),
+    ],
+)
+def test_an_own_change_names_the_routed_groups(
+    stored: list[str], expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With approver routing on, the refusal names the groups the request stored."""
+    monkeypatch.setattr(approval_queue, "routing_enabled", lambda: True)
+    row = _row("caution")
+    row.approver_roles = stored
+
+    right = approve_right(_person(_REQUESTER), row)
+
+    assert right.may_approve is False
+    assert expected in right.message
 
 
 def _token_call_row() -> ApprovalRequest:

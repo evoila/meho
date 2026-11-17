@@ -127,8 +127,7 @@ class ApproveRight:
     ``rule`` is the :class:`ApprovalRule` that would allow the approval,
     or ``None`` when the person may not approve. ``message`` is plain text
     for the web interface. For a refusal it is the text the approve shows
-    when it refuses; for an own lower-risk change it also names the
-    break-glass switch, as the REST refusal does.
+    when it refuses: for an own change, who may approve it and where to ask.
     """
 
     may_approve: bool
@@ -255,14 +254,7 @@ def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool)
         rule = _check_approver_group(operator, request, log_break_glass=False)
         _check_approver_role_floor(operator, request)
     except SelfApprovalForbiddenError as exc:
-        message = exc.reason_text
-        if not exc.high_risk:
-            # The break-glass switch can still allow a lower-risk own change.
-            message += (
-                " Or a deployment admin turns on APPROVAL_ALLOW_SELF_APPROVAL "
-                "for an audited break-glass."
-            )
-        return _refused(ApproveRightReason.OWN_CHANGE, message)
+        return _refused(ApproveRightReason.OWN_CHANGE, exc.reason_text)
     except ApprovalGroupForbiddenError as exc:
         return _refused(ApproveRightReason.WRONG_GROUP, exc.reason_text)
     except RightsChangeApprovalError as exc:

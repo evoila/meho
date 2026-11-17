@@ -656,6 +656,14 @@ copy and the check. `meho approvals show` and the `meho approvals approve`
 prompt print the same block, one line per script line
 (`cli/internal/cmd/approvals/script.go`).
 
+`meho approvals approve <id>` with one id shows a short block first: the
+size, the SHA-256, the reviewed copy, the check, and where to read the
+script. It then asks "Type yes, or the script's SHA-256, to approve."
+`yes` approves from a terminal only; on a pipe only the matching SHA-256
+approves. A wrapper script of a person can pass the reviewed copy's
+SHA-256: `printf '%s\n' "$REVIEWED_SHA256" | meho approvals approve <id>`.
+There is no `--yes` flag (`approve_script_check.go`).
+
 ### Approval + secret hygiene
 
 No approval logic lives in any handler: the dispatcher parks a `dangerous`

@@ -23,6 +23,9 @@ import (
 func runDecisionWithMock(t *testing.T, decideHandler mockHandler, verb, reason string) (*bytes.Buffer, error) {
 	t.Helper()
 	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/approvals/" + stubID: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, newApprovalView(t, "pending", ""))
+		},
 		"POST /api/v1/approvals/" + stubID + "/decide": decideHandler,
 	})
 	t.Cleanup(srv.Close)

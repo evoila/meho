@@ -40,8 +40,19 @@ echo "$*" >>"$GCLOUD_LOG"
 shift
 case $1 in
     ls)
+        [[ -z ${GCLOUD_FAIL:-} ]] || {
+            echo "ERROR: (gcloud.storage.ls) [sa@example.invalid] does not have permission" >&2
+            exit 1
+        }
         path=${2#gs://}
-        [[ -e $STORE/$path ]] || { echo "ERROR: not found" >&2; exit 1; }
+        [[ -d $STORE/${path%%/*} ]] || {
+            echo "ERROR: (gcloud.storage.ls) gs://${path%%/*} not found: 404." >&2
+            exit 1
+        }
+        [[ -e $STORE/$path ]] || {
+            echo "ERROR: (gcloud.storage.ls) One or more URLs matched no objects." >&2
+            exit 1
+        }
         echo "$2" ;;
     cp)
         shift
@@ -53,7 +64,10 @@ case $1 in
         else
             target=$STORE/${dst#gs://}
             mkdir -p "$(dirname "$target")"
-            if [[ -e $target && $clobber == 0 ]]; then exit 0; fi
+            if [[ ( -e $target || -n ${GCLOUD_SKIP:-} ) && $clobber == 0 ]]; then
+                echo "Skipping existing destination item (no-clobber): $dst" >&2
+                exit 0
+            fi
             cp "$src" "$target"
         fi ;;
     *) exit 2 ;;
@@ -103,6 +117,12 @@ class Gpg:
             timeout=60,
         )
         return result.stdout
+
+    def fingerprint(self, name: str) -> str:
+        lines = self.run(name, "--list-secret-keys", "--with-colons").decode()
+        return next(
+            line.split(":")[9] for line in lines.splitlines() if line.startswith("fpr:")
+        )
 
     def make_key(self, name: str, uid: str) -> tuple[str, bytes]:
         self.run(name, "--quick-generate-key", uid, "ed25519")
@@ -169,11 +189,14 @@ class OsPackagesTests(ReleaseFilesCase):
     def run_script(
         self, key: str | None, release: bool = False, **extra: str
     ) -> subprocess.CompletedProcess[str]:
+        """A release run gets the fingerprint of the "real" key, unless the
+        test gives MEHO_OS_PACKAGES_KEY_FINGERPRINT itself."""
         env = {k: v for k, v in os.environ.items() if not k.startswith("MEHO_")}
         if key is not None:
             env["MEHO_OS_PACKAGES_SIGNING_KEY"] = key
         if release:
             env["MEHO_RELEASE"] = "1"
+            env["MEHO_OS_PACKAGES_KEY_FINGERPRINT"] = self.gpg.fingerprint("real")
         env.update(extra)
         return subprocess.run(
             [str(OS_PACKAGES), VERSION, str(self.debs), str(self.out)],
@@ -347,7 +370,12 @@ class OsPackagesTests(ReleaseFilesCase):
     def test_a_release_with_the_test_key_stops(self) -> None:
         self.make_deb()
 
-        result = self.run_script(self.keys["test"][0], release=True)
+        # Even when the fingerprint variable names the test key.
+        result = self.run_script(
+            self.keys["test"][0],
+            release=True,
+            MEHO_OS_PACKAGES_KEY_FINGERPRINT=self.gpg.fingerprint("test"),
+        )
 
         self.assertEqual(1, result.returncode)
         self.assertIn("This is a test key", result.stderr)
@@ -362,6 +390,63 @@ class OsPackagesTests(ReleaseFilesCase):
         self.assertEqual(0, result.returncode, result.stderr)
         repo = self.unpack(self.root / "repo")
         self.assertEqual(0, self.apt_update(repo, public).returncode)
+
+    def test_a_release_with_the_fingerprint_in_another_form_is_signed(
+        self,
+    ) -> None:
+        self.make_deb()
+        fingerprint = self.gpg.fingerprint("real").lower()
+        spaced = " ".join(fingerprint[i : i + 4] for i in range(0, 40, 4))
+
+        result = self.run_script(
+            self.keys["real"][0], release=True, MEHO_OS_PACKAGES_KEY_FINGERPRINT=spaced
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_release_with_a_key_of_another_fingerprint_stops(self) -> None:
+        self.make_deb()
+        (self.root / "gpg").mkdir()
+        other = Gpg(self.root / "gpg")
+        self.addCleanup(other.stop)
+        key, _ = other.make_key("other", OTHER_UID)
+
+        result = self.run_script(key, release=True)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("The signing key is not the real key", result.stderr)
+        self.assertFalse(self.package_file.exists())
+
+    def test_a_release_without_the_fingerprint_stops(self) -> None:
+        self.make_deb()
+
+        for value in ("", "not a fingerprint"):
+            with self.subTest(value=value):
+                result = self.run_script(
+                    self.keys["real"][0],
+                    release=True,
+                    MEHO_OS_PACKAGES_KEY_FINGERPRINT=value,
+                )
+
+                self.assertEqual(1, result.returncode)
+                self.assertIn(
+                    "The fingerprint of the real signing key is not set up",
+                    result.stderr,
+                )
+        self.assertFalse(self.package_file.exists())
+
+    def test_a_release_never_reads_the_key_file(self) -> None:
+        self.make_deb()
+        key_file = self.root / "key.asc"
+        key_file.write_text(self.keys["real"][0])
+
+        result = self.run_script(
+            None, release=True, MEHO_OS_PACKAGES_SIGNING_KEY_FILE=str(key_file)
+        )
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("The signing key is not set up", result.stderr)
+        self.assertFalse(self.package_file.exists())
 
     def test_a_release_without_the_key_stops_with_a_plain_message(self) -> None:
         self.make_deb()
@@ -413,7 +498,7 @@ class UploadTests(ReleaseFilesCase):
         (self.bin / "gcloud").write_text(STUB_GCLOUD)
         (self.bin / "gcloud").chmod(0o755)
         self.store = self.root / "store"
-        self.store.mkdir()
+        (self.store / "release-files").mkdir(parents=True)
         self.log = self.root / "gcloud.log"
         self.release = self.root / "release"
         self.release.mkdir()
@@ -436,13 +521,16 @@ class UploadTests(ReleaseFilesCase):
             f"bundle for {len(ova)}\n"
         )
 
-    def upload(self, bucket: str = "release-files") -> subprocess.CompletedProcess[str]:
+    def upload(
+        self, bucket: str = "release-files", **extra: str
+    ) -> subprocess.CompletedProcess[str]:
         env = {
             **os.environ,
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "STORE": str(self.store),
             "GCLOUD_LOG": str(self.log),
             "MEHO_RELEASE_BUCKET": bucket,
+            **extra,
         }
         return subprocess.run(
             [str(UPLOAD), VERSION, str(self.release)],
@@ -517,6 +605,34 @@ class UploadTests(ReleaseFilesCase):
             "The bucket is not set up. The project owner creates it.", result.stderr
         )
         self.assertFalse(self.log.exists())
+
+    def test_a_bucket_that_does_not_exist_stops_with_a_plain_message(
+        self,
+    ) -> None:
+        result = self.upload(bucket="no-such-bucket")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("The bucket gs://no-such-bucket does not exist", result.stderr)
+        self.assertNotIn("[ok]", result.stdout)
+        self.assertEqual([], [p for p in self.store.rglob("*") if p.is_file()])
+
+    def test_another_gcloud_error_stops_without_its_text(self) -> None:
+        result = self.upload(GCLOUD_FAIL="1")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("[FAIL] gcloud could not read", result.stderr)
+        self.assertNotIn("sa@example.invalid", result.stderr + result.stdout)
+        self.assertNotIn("[ok]", result.stdout)
+        self.assertEqual([], list(self.store.rglob("*.ova")))
+
+    def test_a_file_skipped_by_no_clobber_is_not_reported_as_uploaded(
+        self,
+    ) -> None:
+        result = self.upload(GCLOUD_SKIP="1")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("was already there and was not replaced", result.stderr)
+        self.assertNotIn("[ok]", result.stdout)
 
     def test_a_file_that_does_not_match_the_checksums_is_not_uploaded(self) -> None:
         (self.release / f"meho-appliance-{VERSION}.ova").write_bytes(b"changed\n")

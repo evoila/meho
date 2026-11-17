@@ -20,11 +20,15 @@
 # The key comes from one of these (the key text is never printed):
 #   MEHO_OS_PACKAGES_SIGNING_KEY       the secret key, armored text
 #   MEHO_OS_PACKAGES_SIGNING_KEY_FILE  the path of a file with the secret key
+#                                      (not in a release run)
 # The key must have no passphrase.
 #
-# MEHO_RELEASE=1 marks a release run. A release run needs a key, and it
-# refuses a test key: a key whose user id holds "TEST KEY". The release
-# workflow sets MEHO_RELEASE=1 when it publishes.
+# MEHO_RELEASE=1 marks a release run. The release workflow sets it when it
+# publishes. A release run:
+#   - reads the key only from MEHO_OS_PACKAGES_SIGNING_KEY, never from a file;
+#   - refuses a test key: a key whose user id holds "TEST KEY";
+#   - needs MEHO_OS_PACKAGES_KEY_FINGERPRINT, the fingerprint of the real
+#     key, and refuses any key with another fingerprint.
 #
 # Exit codes:
 #   0  the file is made
@@ -72,18 +76,30 @@ main() {
         command -v "$tool" >/dev/null || fail "$tool is not installed." "install it (apt-utils has apt-ftparchive)."
     done
 
-    local key=${MEHO_OS_PACKAGES_SIGNING_KEY:-}
-    if [[ -z $key && -n ${MEHO_OS_PACKAGES_SIGNING_KEY_FILE:-} ]]; then
+    local key=${MEHO_OS_PACKAGES_SIGNING_KEY:-} release=
+    [[ ${MEHO_RELEASE:-} != 1 ]] || release=1
+    local want_fingerprint=
+    if [[ -n $release ]]; then
+        want_fingerprint=${MEHO_OS_PACKAGES_KEY_FINGERPRINT:-}
+        want_fingerprint=${want_fingerprint// /}
+        want_fingerprint=${want_fingerprint^^}
+    fi
+    if [[ -z $key && -z $release && -n ${MEHO_OS_PACKAGES_SIGNING_KEY_FILE:-} ]]; then
         [[ -r $MEHO_OS_PACKAGES_SIGNING_KEY_FILE ]] ||
             fail "The key file $MEHO_OS_PACKAGES_SIGNING_KEY_FILE cannot be read." "check the path."
         key=$(<"$MEHO_OS_PACKAGES_SIGNING_KEY_FILE")
     fi
     if [[ -z $key ]]; then
-        if [[ ${MEHO_RELEASE:-} == 1 ]]; then
+        if [[ -n $release ]]; then
             fail "The signing key is not set up. The project owner adds it." \
-                "ask the project owner to add the secret MEHO_OS_PACKAGES_SIGNING_KEY to the release workflow."
+                "ask the release owner to add the secret MEHO_OS_PACKAGES_SIGNING_KEY to the environment \"release\"."
         fi
         usage_error "give a signing key in MEHO_OS_PACKAGES_SIGNING_KEY or MEHO_OS_PACKAGES_SIGNING_KEY_FILE."
+    fi
+
+    if [[ -n $release && ! $want_fingerprint =~ ^[0-9A-F]{40}$ ]]; then
+        fail "The fingerprint of the real signing key is not set up." \
+            "ask the release owner to set the variable MEHO_OS_PACKAGES_KEY_FINGERPRINT (40 hex digits)."
     fi
 
     local debs=("$deb_dir"/*.deb)
@@ -102,9 +118,19 @@ main() {
     local uids
     uids=$(gpg --batch --list-secret-keys --with-colons | awk -F: '$1 == "uid" { print $10 }')
     [[ -n $uids ]] || fail "The signing key has no secret part." "give the secret key, not the public key."
-    if [[ ${MEHO_RELEASE:-} == 1 ]] && grep -qi 'TEST KEY' <<<"$uids"; then
+    if [[ -n $release ]] && grep -qi 'TEST KEY' <<<"$uids"; then
         fail "This is a test key. A release is never signed with a test key." \
             "put the real signing key into the secret MEHO_OS_PACKAGES_SIGNING_KEY."
+    fi
+    if [[ -n $release ]]; then
+        local fingerprints
+        # The fingerprint of each primary key (the "fpr" line right after
+        # "sec"), not of its subkeys.
+        fingerprints=$(gpg --batch --list-secret-keys --with-colons |
+            awk -F: '$1 == "sec" { primary = 1; next } primary && $1 == "fpr" { print $10; primary = 0 }')
+        [[ $fingerprints == "$want_fingerprint" ]] ||
+            fail "The signing key is not the real key: its fingerprint is not MEHO_OS_PACKAGES_KEY_FINGERPRINT." \
+                "put the real signing key, and only that key, into the secret MEHO_OS_PACKAGES_SIGNING_KEY."
     fi
 
     local repo=$work/repo

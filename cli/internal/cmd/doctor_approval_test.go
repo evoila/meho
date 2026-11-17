@@ -129,3 +129,47 @@ func TestDoctor_ReportsAnUnboundApprovalSignIn(t *testing.T) {
 		t.Errorf("unbound approval sign-in not reported with the fix: %+v", c)
 	}
 }
+
+func TestSecondAdminCheck(t *testing.T) {
+	count := func(n int) *api.HealthResponse {
+		return &api.HealthResponse{Approvals: &api.ApprovalsStatus{RightsChangeAdmins: &n}}
+	}
+	t.Run("one admin warns with the sentence and the link", func(t *testing.T) {
+		r := &doctorReport{}
+		addSecondAdminCheck(r, count(1))
+		c := findCheck(t, r, secondAdminCheckName)
+		if c.Layer != layerAuthed || c.Status != doctorWarn {
+			t.Errorf("layer/status = %s/%s, want %s/%s", c.Layer, c.Status, layerAuthed, doctorWarn)
+		}
+		want := "This change needs a second admin to approve it. This tenant has only one admin."
+		if c.Detail != want {
+			t.Errorf("detail = %q, want %q", c.Detail, want)
+		}
+		if !strings.Contains(c.Hint, rightsChangeGuide) {
+			t.Errorf("hint %q does not link %s", c.Hint, rightsChangeGuide)
+		}
+		if doctorExitCode(r) != 0 {
+			t.Errorf("exit code = %d, want 0: the line is a warning", doctorExitCode(r))
+		}
+	})
+	t.Run("two admins is ok", func(t *testing.T) {
+		r := &doctorReport{}
+		addSecondAdminCheck(r, count(2))
+		c := findCheck(t, r, secondAdminCheckName)
+		if c.Status != doctorOK || !strings.Contains(c.Detail, "2 admins") {
+			t.Errorf("status/detail = %s/%q, want ok with 2 admins", c.Status, c.Detail)
+		}
+	})
+	for name, h := range map[string]*api.HealthResponse{
+		"older backplane":       {},
+		"no count in the block": {Approvals: &api.ApprovalsStatus{}},
+	} {
+		t.Run(name+" gives no line", func(t *testing.T) {
+			r := &doctorReport{}
+			addSecondAdminCheck(r, h)
+			if len(r.Checks) != 0 {
+				t.Errorf("got a line: %v", r.Checks)
+			}
+		})
+	}
+}

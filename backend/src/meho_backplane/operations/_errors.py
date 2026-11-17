@@ -1189,6 +1189,7 @@ def result_awaiting_approval(
     *,
     reused: bool = False,
     audit_id: uuid.UUID | None = None,
+    note: str | None = None,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1216,6 +1217,12 @@ def result_awaiting_approval(
     *audit_id* is the id of the committed ``approval.request`` audit row
     of the pending request (its ``request_audit_id``). It becomes the
     result's ``audit_id`` receipt. ``None`` when the caller has no row id.
+
+    *note* (#6641) is a sentence the person must read about the wait, for
+    example that no other admin of the tenant could approve a change of
+    rights (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). It
+    is added to ``error`` and kept in ``extras["approval_note"]``; the key is
+    absent without a note.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1223,10 +1230,14 @@ def result_awaiting_approval(
     }
     if reused:
         extras["approval_request_reused"] = True
+    error = f"awaiting_approval: {op_id!r} requires approval before execution"
+    if note:
+        extras["approval_note"] = note
+        error = f"{error}. {note}"
     return OperationResult(
         status="awaiting_approval",
         op_id=op_id,
-        error=f"awaiting_approval: {op_id!r} requires approval before execution",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
         audit_id=audit_id,

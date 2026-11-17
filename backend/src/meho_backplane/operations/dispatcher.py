@@ -3693,6 +3693,7 @@ async def _handle_needs_approval(
         IdempotencyKeyConflictError,
         create_pending_request,
         record_approval_step_event,
+        rights_change_note,
     )
 
     run_id = current_agent_run_id_var.get()
@@ -3820,6 +3821,7 @@ async def _handle_needs_approval(
                 install_category=descriptor.policy_install_category,
             )
             await session.commit()
+        note = await rights_change_note(request)
         if getattr(request, "_reused", False):
             return result_awaiting_approval(
                 op_id,
@@ -3827,6 +3829,7 @@ async def _handle_needs_approval(
                 duration_ms,
                 reused=True,
                 audit_id=request.request_audit_id,
+                note=note,
             )
         # Record the add-on step events AFTER commit so a phantom event
         # cannot outlive a failed transaction (the helper is fail-open).
@@ -3845,7 +3848,7 @@ async def _handle_needs_approval(
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
         return result_awaiting_approval(
-            op_id, request.id, duration_ms, audit_id=request.request_audit_id
+            op_id, request.id, duration_ms, audit_id=request.request_audit_id, note=note
         )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(

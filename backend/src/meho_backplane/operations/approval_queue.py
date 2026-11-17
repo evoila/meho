@@ -104,6 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     classify_op,
     holds_hidden_param_values,
@@ -247,6 +248,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "rights_change_note",
     "take_approval_lock",
     "withdraw_request",
 ]
@@ -1832,6 +1834,19 @@ async def create_pending_request(
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def rights_change_note(request: ApprovalRequest) -> str | None:
+    """The note for a change of rights that no other admin could approve (#6641).
+
+    The request is stored all the same, so an admin added later can still
+    approve it. ``None`` for any other request, when another admin could
+    approve, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+    """
+    if not is_rights_change(request):
+        return None
+    return await only_admin_note(request.tenant_id, request.principal_sub)
 
 
 async def _audit_routing_refusal(

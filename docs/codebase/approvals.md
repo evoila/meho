@@ -3853,12 +3853,13 @@ matches the script's SHA-256 (any case, spaces around it ignored). When
 input is not a terminal, only the matching SHA-256 approves; `yes` from a
 pipe does not. A wrong SHA-256, any other answer, or no answer approves
 nothing: no decision call is sent and the command ends with a usage error
-(exit 2). When there is no SHA-256, only `yes` from a terminal approves.
+(exit 1). When there is no SHA-256, only `yes` from a terminal approves.
 There is no `--yes` flag. A person's own wrapper script passes the SHA-256
 of the copy it reviewed: `printf '%s\n' "$REVIEWED_SHA256" | meho approvals
 approve <id>`. The browser sign-in still asks the person. A request
 without a script, and `reject`, ask nothing. If the read of the request
-fails, the command stops with that error and sends no decision.
+fails, or MEHO answers with something that is not a request (for example
+an HTML page), the command stops with an error and sends no decision.
 
 The Keycloak side — the public client `meho-cli-approve` with standard
 flow, PKCE and `http://127.0.0.1:*` only, no device flow, no

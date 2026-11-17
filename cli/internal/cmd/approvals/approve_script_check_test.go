@@ -252,3 +252,37 @@ func TestApproveHelpDescribesTheScriptStep(t *testing.T) {
 		}
 	}
 }
+
+func TestOneIDApproveFailsWhenTheRequestIsNotJSON(t *testing.T) {
+	decides := 0
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/approvals/" + stubID: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html><body>sign in</body></html>"))
+		},
+		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, _ *http.Request) {
+			decides++
+			writeJSON(t, w, http.StatusOK, api.DecideResponseBody{ApprovalRequestId: mustUUID(t, stubID), Decision: "approved"})
+		},
+	})
+	t.Cleanup(srv.Close)
+	stubSignIn(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	store, _ := auth.NewTokenStore()
+	service, user := auth.KeyForBackplane(srv.URL)
+	if err := store.Save(service, user, auth.StoredToken{AccessToken: "test-bearer", BackplaneURL: srv.URL}); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+	cmd := &cobra.Command{Use: "approve"}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetIn(strings.NewReader("yes\n"))
+	cmd.SetContext(context.Background())
+	if err := runDecision(cmd, stubID, "approve", "", decisionOpts{BackplaneOverride: srv.URL}); err == nil {
+		t.Fatal("want an error when the request is not JSON")
+	}
+	if decides != 0 {
+		t.Fatalf("decides = %d; want no decision when the request could not be shown", decides)
+	}
+}

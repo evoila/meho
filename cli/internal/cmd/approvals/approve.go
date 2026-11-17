@@ -221,7 +221,13 @@ func runDecision(
 		if ferr != nil {
 			return routeRequestError(cmd, backplaneURL, ferr, jsonOut)
 		}
-		if before != nil && before.Status == api.ApprovalRequestStatusPending {
+		if before == nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("backplane returned 200 OK but no JSON body decoded against ApprovalRequestView, so the request was not shown and nothing was approved"),
+				jsonOut,
+			)
+		}
+		if before.Status == api.ApprovalRequestStatusPending {
 			if why := confirmScript(cmd, idArg, before); why != "" {
 				return output.RenderError(cmd.ErrOrStderr(), output.Usage(why), jsonOut)
 			}

@@ -86,7 +86,7 @@ from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     UserOfWrite,
     read_user_for_write,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -228,7 +228,7 @@ async def keycloak_group_create(
     if parent_id:
         path = fill_path(
             _GROUP_CHILDREN_PATH,
-            {"realm": realms.managed_realm, "group-id": quote_segment(parent_id)},
+            {"realm": realms.managed_realm, "group-id": parent_id},
         )
     else:
         path = fill_path(_GROUPS_PATH, {"realm": realms.managed_realm})
@@ -280,10 +280,9 @@ async def keycloak_group_update_attributes(
     )
     attributes = _normalise_attributes(params.get("attributes"))
     replace = bool(params.get("replace", False))
-    quoted = quote_segment(group_id)
     current = await self._get_admin_json(
         target,
-        fill_path(_GROUP_PATH, {"realm": realms.managed_realm, "group-id": quoted}),
+        fill_path(_GROUP_PATH, {"realm": realms.managed_realm, "group-id": group_id}),
         operator=operator,
     )
     current_attrs = current.get("attributes")
@@ -293,7 +292,7 @@ async def keycloak_group_update_attributes(
     await self._write_admin(
         target,
         "PUT",
-        fill_path(_GROUP_PATH, {"realm": realms.managed_realm, "group-id": quoted}),
+        fill_path(_GROUP_PATH, {"realm": realms.managed_realm, "group-id": group_id}),
         operator=operator,
         json={"id": group_id, "name": group_name, "attributes": merged},
         idempotent_conflict=False,
@@ -342,8 +341,8 @@ async def keycloak_group_member_add(
             _USER_GROUP_PATH,
             {
                 "realm": realms.managed_realm,
-                "user-id": quote_segment(user_id),
-                "groupId": quote_segment(group_id),
+                "user-id": user_id,
+                "groupId": group_id,
             },
         ),
         operator=operator,
@@ -392,8 +391,8 @@ async def keycloak_group_member_remove(
             _USER_GROUP_PATH,
             {
                 "realm": realms.managed_realm,
-                "user-id": quote_segment(user_id),
-                "groupId": quote_segment(group_id),
+                "user-id": user_id,
+                "groupId": group_id,
             },
         ),
         operator=operator,

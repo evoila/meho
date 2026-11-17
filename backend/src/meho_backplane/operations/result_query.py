@@ -201,7 +201,12 @@ async def read_result_window(
 
     def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
         window = store.decode_window(
-            raw, operator_sub=operator.sub, handle_id=handle_id, offset=offset, limit=page_limit
+            raw,
+            operator_sub=operator.sub,
+            handle_id=handle_id,
+            offset=offset,
+            limit=page_limit,
+            mcp_profile=operator.mcp_tool_profile,
         )
         if window is None:
             raise ResultHandleNotFoundError(handle_id)
@@ -611,7 +616,12 @@ async def run_result_query(
     max_bytes = settings.result_query_max_output_bytes
 
     def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
-        row_set = store.decode_rows(raw, operator_sub=operator.sub, handle_id=handle_id)
+        row_set = store.decode_rows(
+            raw,
+            operator_sub=operator.sub,
+            handle_id=handle_id,
+            mcp_profile=operator.mcp_tool_profile,
+        )
         if row_set is None:
             raise ResultHandleNotFoundError(handle_id)
         guard.check()
@@ -703,7 +713,12 @@ async def _read_document_path(
     max_bytes = get_settings().result_query_max_output_bytes
 
     def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
-        stored = store.decode_document(raw, operator_sub=operator.sub, handle_id=handle_id)
+        stored = store.decode_document(
+            raw,
+            operator_sub=operator.sub,
+            handle_id=handle_id,
+            mcp_profile=operator.mcp_tool_profile,
+        )
         if stored is None:
             raise ResultHandleNotFoundError(handle_id)
         try:

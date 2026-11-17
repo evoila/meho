@@ -364,7 +364,10 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     """MCP-layer runtime visibility for ``/ready``.
 
     ``short_tool_texts`` is the ``MCP_SHORT_TOOL_TEXTS`` switch (#4172), so
-    a benchmark knows its state. ``client_per_tool_kind`` is the
+    a benchmark knows its state. ``profile_connector_lists`` is the
+    ``MCP_PROFILE_CONNECTOR_LISTS`` switch (#6099), and ``connector_profiles``
+    names the profiles of ``MCP_CONNECTOR_PROFILES`` that count (none while
+    the switch is off). ``client_per_tool_kind`` is the
     ``MCP_CLIENT_PER_TOOL_KIND`` switch: when on, Claude Code and Claude
     Desktop sign in with their own login client, and ``/ready`` adds
     ``tool_clients`` (:func:`~meho_backplane.auth.tool_clients.tool_clients_report`:
@@ -405,6 +408,10 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
         "configured": True,
         "protocol_version": PROTOCOL_VERSION,
         "short_tool_texts": settings.mcp_short_tool_texts,
+        "profile_connector_lists": settings.mcp_profile_connector_lists,
+        "connector_profiles": (
+            sorted(settings.mcp_connector_profiles) if settings.mcp_profile_connector_lists else []
+        ),
         "client_per_tool_kind": settings.mcp_client_per_tool_kind,
         "missing_env": [],
     }
@@ -629,7 +636,9 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                                  "docs": "docs/codebase/connectors-vault-tenant-scope.md",
                                  "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...",
-                             "short_tool_texts": <bool>, "missing_env": []},
+                             "short_tool_texts": <bool>,
+                             "profile_connector_lists": <bool>,
+                             "connector_profiles": [<name>], "missing_env": []},
           "policy":         {"configured": true, "classification": <bool>,
                              "engine_shadow": <bool>, "approver_routing": <bool>,
                              "notes": [<text>], "missing_env": []}

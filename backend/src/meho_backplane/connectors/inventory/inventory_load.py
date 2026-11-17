@@ -150,11 +150,18 @@ def _validation_summary(exc: ValidationError) -> str:
 
 
 def _decode_envelope(
-    store: ResultHandleStore, raw: bytes, *, operator_sub: str, handle_id: UUID
+    store: ResultHandleStore,
+    raw: bytes,
+    *,
+    operator_sub: str,
+    handle_id: UUID,
+    mcp_profile: str | None,
 ) -> InventoryEnvelope:
     """Decode and check one stored record (sync, runs in a worker thread)."""
     try:
-        stored = store.decode_document(raw, operator_sub=operator_sub, handle_id=handle_id)
+        stored = store.decode_document(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
     except ResultRecordKindError:
         raise InventoryLoadError(
             f"handle {handle_id} holds rows, not one inventory. Pass the handle that "
@@ -245,7 +252,12 @@ async def load_inventories(
             raise _not_found(handle_id)
         envelopes.append(
             await asyncio.to_thread(
-                _decode_envelope, resolved, raw, operator_sub=operator.sub, handle_id=handle_id
+                _decode_envelope,
+                resolved,
+                raw,
+                operator_sub=operator.sub,
+                handle_id=handle_id,
+                mcp_profile=operator.mcp_tool_profile,
             )
         )
     for number, document in enumerate(inventories, start=1):

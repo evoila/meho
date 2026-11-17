@@ -86,6 +86,37 @@ Example URL: `https://<meho-host>/mcp?profile=investigate`.
   still runs under the person's role, and changes still wait for
   approval when the rules say so.
 
+### Profiles that limit the connectors
+
+An admin can add profiles that also limit what the session may do. They
+are set on the backplane with `MCP_CONNECTOR_PROFILES` and count only
+while `MCP_PROFILE_CONNECTOR_LISTS` is on (both off by default). Example:
+
+```json
+{"k8s": {"tools": "investigate", "connectors": ["kubernetes"]}}
+```
+
+A session at `https://<meho-host>/mcp?profile=k8s` then:
+
+- may use only the connectors of the profile. Each name counts for every
+  version of that connector. Any other `connector_id` in `call_operation`,
+  `preview_operation`, `search_operations` or `list_operation_groups` is
+  refused with "not in your profile".
+- sees only those connectors in `meho_connector_list`.
+- in a read-only profile (the default), cannot change anything: MEHO
+  refuses every operation that changes something, and the profile has
+  none of MEHO's own write tools.
+- reads back only the stored results it made itself, under this profile.
+
+MEHO applies the stricter of the person's rules and the profile's rules.
+Every audit row names the profile in its `mcp_profile` field.
+
+A login client can be tied to one profile, so its token works only at
+that profile's URL. See "A login client for one tool profile" on the
+Keycloak realm setup page. The MCP resources (`resources/list`,
+`resources/read`) are not limited by a profile; they hold no connector
+data.
+
 A small model also gains from shorter tool texts. Add `texts=short` to
 the URL, for example `https://<meho-host>/mcp?texts=short`, or together
 with a profile: `https://<meho-host>/mcp?profile=investigate&texts=short`.

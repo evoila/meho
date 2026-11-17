@@ -97,6 +97,7 @@ tenant-curated connectors.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Final
 
 import structlog
@@ -110,6 +111,7 @@ from meho_backplane.connectors.resolver import (
     resolve_connector,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.mcp.profiles import profile_admits_connector, profile_connectors
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -161,6 +163,7 @@ from meho_backplane.targets.resolver import (
 
 __all__ = [
     "CONNECTOR_LIST_NAME",
+    "keep_connector_rows",
     "list_connector_rows",
     "reduce_connector_list",
 ]
@@ -444,6 +447,52 @@ async def _load_target(operator: Operator, name: str) -> Any:
                 ) from exc
 
 
+def keep_connector_rows(
+    result: dict[str, Any],
+    admits: Callable[[str], bool],
+    *,
+    no_connector_hint: str,
+) -> dict[str, Any]:
+    """Return a :func:`list_connector_rows` *result* with only the admitted rows.
+
+    Shared by the hosted agents' connector allow-list (#4233) and the MCP
+    tool profiles with a connector list (#6099). When a ``target_fit``
+    summary had rows and none of them is admitted, the summary says
+    ``no_connector`` with *no_connector_hint*.
+    """
+    rows = result.get("connectors", [])
+    kept = [row for row in rows if admits(row.get("connector_id") or "")]
+    narrowed = {**result, "connectors": kept}
+    target_fit = result.get("target_fit")
+    if target_fit is not None and rows and not kept:
+        narrowed["target_fit"] = {
+            **target_fit,
+            "result": "no_connector",
+            "hint": no_connector_hint,
+        }
+    return narrowed
+
+
+#: The ``target_fit`` hint when connectors fit the target but the session's
+#: profile allows none of them (#6099).
+_NO_PROFILE_CONNECTOR_HINT: Final[str] = (
+    "Connectors in MEHO fit the target, but your tool profile allows none of them. "
+    "Connect with a profile that has one of them."
+)
+
+
+def _keep_profile_connectors(operator: Operator, result: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the rows of the session's profile; no profile keeps all (#6099)."""
+    profile = operator.mcp_tool_profile
+    if profile_connectors(profile) is None:
+        return result
+    return keep_connector_rows(
+        result,
+        lambda connector_id: profile_admits_connector(profile, connector_id),
+        no_connector_hint=_NO_PROFILE_CONNECTOR_HINT,
+    )
+
+
 async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> dict[str, Any]:
     """Return *result* unchanged, or a JSONFlux summary + ``handle`` above the threshold.
 
@@ -473,8 +522,13 @@ async def _list_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """List the connectors; a long list comes back as a handle (#4121)."""
-    return await reduce_connector_list(operator, await list_connector_rows(operator, arguments))
+    """List the connectors; a long list comes back as a handle (#4121).
+
+    A session whose tool profile has a connector list sees only those
+    connectors (#6099). The filter runs first, so a handle holds only them.
+    """
+    rows = _keep_profile_connectors(operator, await list_connector_rows(operator, arguments))
+    return await reduce_connector_list(operator, rows)
 
 
 async def _review_handler(

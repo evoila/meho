@@ -1149,10 +1149,100 @@ same token works with and without a profile. Whether each client's
 login flow accepts a server URL with a query has not been tried in a
 lab yet.
 
-A profile does not change what the person may do. `call_operation` in
-the `investigate` profile can still run a change, under the person's
-role, the operation's risk level and the approval rules. The profile
-only makes the tool list shorter.
+A built-in profile does not change what the person may do.
+`call_operation` in the `investigate` profile can still run a change,
+under the person's role, the operation's risk level and the approval
+rules. The built-in profile only makes the tool list shorter.
+
+### Profiles with a connector list (#6099)
+
+An admin can add profiles that also limit what a session may do, on the
+server. Two settings, both off by default:
+
+- `MCP_PROFILE_CONNECTOR_LISTS` (`true` / `false`, default `false`) is
+  the switch. When it is off, MEHO does not know the extra profile names.
+  It stays off until a model test and a sandbox run show it helps.
+- `MCP_CONNECTOR_PROFILES` is one JSON object of profiles. A bad value
+  stops the start (`mcp_profile_config.py`):
+
+  ```json
+  {
+    "k8s": {"tools": "investigate", "connectors": ["kubernetes"]},
+    "k8s-ops": {"tools": "operate", "connectors": ["kubernetes"], "read_only": false}
+  }
+  ```
+
+  - `tools`: the built-in list the profile starts from.
+  - `connectors`: one or more connector families. A name counts for the
+    connector with exactly that id and for every connector whose id
+    starts with the name and a dash. So `kubernetes` counts for every
+    version of every Kubernetes connector.
+  - `read_only`: `true` when left out.
+  - A name is lower-case letters, digits and dashes, and not
+    `investigate` or `operate`.
+
+What such a profile does (`mcp/profiles.py`):
+
+- Every tool that takes a `connector_id` (`call_operation`,
+  `preview_operation`, `search_operations`, `list_operation_groups`)
+  refuses a connector outside the profile before the handler runs
+  (`_refuse_connector_outside_profile` in `mcp/handlers.py`). The answer
+  says "is not in your profile", with `reason: connector_not_in_profile`.
+  The check compares the `connector_id` argument, so it also covers a
+  raw `METHOD:/path` operation. A value that is not text is refused too.
+- `meho_connector_list` shows only the profile's connectors. The filter
+  runs before the list becomes a result handle. It is the same filter the
+  hosted agents use for their connector list (`keep_connector_rows` in
+  `mcp/tools/connector_admin.py`).
+- MEHO applies the stricter of the person's rules and the profile's
+  rules. The policy gate (`policy_gate` in `operations/_validate.py`)
+  denies a connector outside the profile, and in a read-only profile
+  every operation that changes something (a method other than `GET` or
+  `HEAD`, or a typed operation that is not `safe`). The deny comes before
+  the person's grants are read.
+- A read-only profile also has no MEHO write tools (`add_to_memory`,
+  `add_to_knowledge`, `meho_broadcast_announce`, the runbook run tools),
+  because they do not check grants.
+- Every audit row of a session with a profile names it in the
+  `mcp_profile` payload field (`apply_client_block`). It is never put
+  into `actor_sub`, which names an agent.
+- A stored result keeps the profile of the session that made it
+  (`result_profile_var` in `connectors/result_handle_store.py`, set by
+  `handle_tools_call`). A read under another profile, or without a
+  profile, is "not found".
+
+Not filtered: the MCP resources (`resources/list`, `resources/read`).
+They hold tenant info, conventions, knowledge and memory, and no
+connector data.
+
+### A login token for one profile
+
+A login client can be made for one profile:
+`meho admin keycloak bootstrap-clients --mcp-profile <name>` makes
+`meho-mcp-profile-<name>`. It has the settings of `meho-mcp`, plus a
+fixed claim mapper that writes `mcp_profile: <name>` into every token.
+The mapper is on the client, so a session cannot get a token without it.
+
+- MEHO reads the claim when it checks the token
+  (`auth/mcp_profile_claim.py`). A value it cannot read gives 403
+  `malformed_mcp_profile_claim`; a profile it does not know gives 403
+  `unknown_mcp_profile_claim`, at every entrance.
+- `verify_jwt_for_audience` refuses such a token with 403
+  `mcp_profile_scope_violation` unless the caller allows it. Only the MCP
+  route allows it (`verify_mcp_jwt`). So a new entrance refuses a profile
+  token by default.
+- The MCP route takes it only when `?profile=` names the same profile
+  (`_apply_url_options`). `/mcp` without a profile, or another profile,
+  gives 403. It is 403, not 401, so the client does not start a new login.
+- A token without the claim works as before, with or without
+  `?profile=`. This check needs no switch: no token has the claim today.
+
+Limit: this stops the reuse of the profile's token at another address.
+It does not stop the same person from signing in again through another
+login client.
+
+Tests: `tests/test_mcp_profile_connectors.py`,
+`tests/test_mcp_profile_token.py`.
 
 ## The current tenant of a session (#5239)
 

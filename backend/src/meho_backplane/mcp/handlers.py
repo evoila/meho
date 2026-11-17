@@ -95,10 +95,15 @@ from meho_backplane.audit_cutover import (
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import compute_effective_broadcast_detail
 from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.connectors.result_handle_store import result_profile_var
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
-from meho_backplane.mcp.profiles import profile_admits
+from meho_backplane.mcp.profiles import (
+    profile_admits,
+    profile_admits_connector,
+    profile_connectors,
+)
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
@@ -538,6 +543,7 @@ async def handle_tools_call(
                 "without the profile to get the full list.",
                 data={"reason": "not_in_profile", "profile": operator.mcp_tool_profile},
             )
+        _refuse_connector_outside_profile(operator, name, arguments)
 
         # Add-on family gate (Initiative #2900, Task #3029): a tool bound to a
         # paired add-on's meta-tool family gates invocation too, not just
@@ -616,7 +622,13 @@ async def handle_tools_call(
                 f"tools/call {name!r}: arguments failed inputSchema: {_schema_error_text(exc)}",
             ) from exc
 
-        result = await handler(operator, arguments)
+        # #6099: a stored result keeps the session's profile, so only a
+        # session of the same profile can read it back.
+        profile_token = result_profile_var.set(operator.mcp_tool_profile)
+        try:
+            result = await handler(operator, arguments)
+        finally:
+            result_profile_var.reset(profile_token)
         status_code, result_fields = _operation_result_audit(name, result)
         audit_payload.update(result_fields)
 
@@ -692,6 +704,35 @@ async def handle_tools_call(
                 )
         finally:
             close_classified_record_scope(record_scope)
+
+
+def _refuse_connector_outside_profile(
+    operator: Operator, name: str, arguments: dict[str, Any]
+) -> None:
+    """Refuse a ``connector_id`` argument outside the session's profile (#6099).
+
+    Every tool that takes a ``connector_id`` is checked here, before the
+    input check, so a wrong type is refused too. A session without a
+    profile, or with a profile without a connector list, passes.
+    """
+    if "connector_id" not in arguments:
+        return
+    connector_id = arguments["connector_id"]
+    if profile_admits_connector(operator.mcp_tool_profile, connector_id):
+        return
+    profile = operator.mcp_tool_profile
+    families = ", ".join(profile_connectors(profile) or ())
+    _log.warning(
+        "mcp_tool_call_connector_not_in_profile",
+        tool=name,
+        profile=profile,
+        connector_id=str(connector_id)[:128],
+    )
+    raise McpPermissionDeniedError(
+        f"forbidden: connector {str(connector_id)[:128]!r} is not in your {profile!r} "
+        f"profile. Use a connector of: {families or 'none'}.",
+        data={"reason": "connector_not_in_profile", "profile": profile},
+    )
 
 
 # code-quality-allow: the ``tools/call`` audit tail moved here

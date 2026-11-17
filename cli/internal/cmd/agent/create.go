@@ -184,31 +184,44 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 		}
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	entry := resp.JSON201
-	if pick == nil {
-		if opts.JSONOut {
+	return printSaved(cmd, backplaneURL, "created", resp.JSON201, pick != nil, opts.JSONOut)
+}
+
+// printSaved prints the created or edited definition. After a starting
+// grant pick it also reads and shows the grants of the definition's
+// agent, so the person sees what the pick wrote (--json adds them as
+// "grants").
+func printSaved(
+	cmd *cobra.Command, backplaneURL, verb string, entry *api.AgentDefinitionRead, picked, jsonOut bool,
+) error {
+	if !picked {
+		if jsonOut {
 			return output.PrintJSON(cmd.OutOrStdout(), entry)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "created agent definition %q\n", entry.Name)
+		fmt.Fprintf(cmd.OutOrStdout(), "%s agent definition %q\n", verb, entry.Name)
 		printDefinitionSummary(cmd.OutOrStdout(), entry)
 		return nil
 	}
 	grants, readErr := readAgentGrants(cmd.Context(), backplaneURL, entry.IdentityRef)
-	if opts.JSONOut {
+	if jsonOut {
 		out, err := startinggrants.WithGrants(entry, grants, readErr)
 		if err != nil {
-			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
+			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 		}
 		return output.PrintJSON(cmd.OutOrStdout(), out)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "created agent definition %q\n", entry.Name)
+	fmt.Fprintf(cmd.OutOrStdout(), "%s agent definition %q\n", verb, entry.Name)
 	printDefinitionSummary(cmd.OutOrStdout(), entry)
-	startinggrants.PrintGrants(cmd.OutOrStdout(), entry.IdentityRef, grants, readErr)
+	outcome := "created"
+	if verb != "created" {
+		outcome = "changed"
+	}
+	startinggrants.PrintGrants(cmd.OutOrStdout(), outcome, entry.IdentityRef, grants, readErr)
 	return nil
 }
 
 // readAgentGrants reads the grants of the definition's agent after the
-// create, so the person sees what the pick wrote.
+// create or edit, so the person sees what the pick wrote.
 func readAgentGrants(ctx context.Context, backplaneURL, principalSub string) ([]api.AgentGrantRead, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {

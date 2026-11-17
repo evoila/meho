@@ -30,10 +30,10 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.agents.grant_sets import StartingGrants
 
@@ -175,6 +175,17 @@ class AgentDefinitionUpdate(BaseModel):
     turn_budget: int | None = Field(default=None, ge=1, le=_MAX_TURN_BUDGET)
     output_schema: dict[str, Any] | None = None
     enabled: bool | None = None
+    #: The first grants of the agent a new ``identity_ref`` names (#6389).
+    #: Required while ``AGENT_GRANT_REQUIRED`` is not ``off`` and the edit
+    #: points the definition at another agent with no live grant. Only
+    #: with ``identity_ref``. Not stored on the definition row.
+    starting_grants: StartingGrants | None = None
+
+    @model_validator(mode="after")
+    def _starting_grants_need_identity_ref(self) -> Self:
+        if self.starting_grants is not None and self.identity_ref is None:
+            raise ValueError("'starting_grants' is only used together with 'identity_ref'")
+        return self
 
 
 class AgentDefinitionRead(BaseModel):

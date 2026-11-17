@@ -225,11 +225,13 @@ meho agent edit <name> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--disabled` — disable (park) the definition
 - `--enabled` — enable the definition
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target
 - `--identity-ref` — new identity reference
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — new model tier: standard | fast | deep
 - `--output-schema` — new output schema as a JSON object: inline JSON, @<path>, or @-
 - `--system-prompt` — new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--target` — a target name for --grants read-targets; repeat the flag for more targets
 - `--toolset` — new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — new turn budget (1..1000)
 
@@ -4197,7 +4199,9 @@ meho policy diff FILE [flags]
 
 ### `meho policy explain`
 
-Say why a call runs, waits or is denied, and who may approve it
+Say if a call runs, waits or is denied, and why.
+
+Who may approve is a list of MEHO group kinds (MEHO-<kind>), not the names of the login groups of your install.
 
 ```
 meho policy explain [CONNECTOR_ID OP_ID] [flags]

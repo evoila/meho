@@ -70,6 +70,9 @@ func TestRegisterWithoutGrantsFlagSendsNoPick(t *testing.T) {
 			raw = readJSONBody[map[string]any](t, r)
 			writeJSON(t, w, http.StatusCreated, newPrincipalRead(t, "bot", false))
 		},
+		"GET /api/v1/agents/grants": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, api.AgentGrantListResponse{Grants: []api.AgentGrantRead{}})
+		},
 	})
 	defer srv.Close()
 
@@ -82,10 +85,58 @@ func TestRegisterWithoutGrantsFlagSendsNoPick(t *testing.T) {
 	if _, ok := raw["starting_grants"]; ok {
 		t.Errorf("starting_grants must be left off the wire: %+v", raw)
 	}
+	// --json has the same shape with or without --grants: "grants" is an empty list.
 	var out map[string]any
-	_ = json.Unmarshal(stdout.Bytes(), &out)
-	if _, ok := out["grants"]; ok {
-		t.Errorf("no grants key without --grants: %s", stdout.String())
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode %q: %v", stdout.String(), err)
+	}
+	grants, ok := out["grants"].([]any)
+	if !ok || len(grants) != 0 {
+		t.Errorf("want \"grants\": [] without --grants: %s", stdout.String())
+	}
+	if _, ok := out["grants_error"]; ok {
+		t.Errorf("no grants_error when the read worked: %s", stdout.String())
+	}
+}
+
+func TestRegisterJSONWithoutGrantsFlagMarksAFailedGrantReadAsUnknown(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/agent-principals": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusCreated, newPrincipalRead(t, "bot", false))
+		},
+		"GET /api/v1/agents/grants": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusInternalServerError, map[string]string{"detail": "boom"})
+		},
+	})
+	defer srv.Close()
+
+	stdout, _, err := runVerbWithMock(t, srv, func(cmd *cobra.Command) error {
+		return runRegister(cmd, registerOptions{Name: "bot", JSONOut: true, BackplaneOverride: srv.URL})
+	})
+	if err != nil {
+		t.Fatalf("the agent was created, so the command succeeds: %v", err)
+	}
+	if !strings.Contains(stdout.String(), `"grants": null`) || !strings.Contains(stdout.String(), `"grants_error"`) {
+		t.Errorf("stdout: %s", stdout.String())
+	}
+}
+
+func TestRegisterHumanOutputWithoutGrantsFlagReadsNoGrants(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/agent-principals": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusCreated, newPrincipalRead(t, "bot", false))
+		},
+	})
+	defer srv.Close()
+
+	stdout, _, err := runVerbWithMock(t, srv, func(cmd *cobra.Command) error {
+		return runRegister(cmd, registerOptions{Name: "bot", BackplaneOverride: srv.URL})
+	})
+	if err != nil {
+		t.Fatalf("runRegister: %v", err)
+	}
+	if strings.Contains(stdout.String(), "grants of") {
+		t.Errorf("the human summary is unchanged without --grants:\n%s", stdout.String())
 	}
 }
 

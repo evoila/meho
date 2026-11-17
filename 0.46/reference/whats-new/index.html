@@ -2937,6 +2937,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0470-2026-11-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.47.0 — 2026-11-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0460-2026-11-09" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3646,6 +3657,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0470-2026-11-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.47.0 — 2026-11-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0460-2026-11-09" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4206,6 +4228,40 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v0470-2026-11-17"><a href="https://github.com/evoila/meho/releases/tag/v0.47.0">v0.47.0</a> — 2026-11-17<a class="headerlink" href="#v0470-2026-11-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Keycloak writes that change rights need another admin.</strong> Giving a
+  role, adding a group member, changing a client or resetting a
+  password waits for a second admin on every call, in every realm.</li>
+<li><strong>More changes wait for a person.</strong> A run approval never covers a
+  credential read or a command as root on a host. Every <code>secret.move</code>,
+  every <code>harbor.robot.create</code> and every AD group member change waits
+  for its own approval.</li>
+<li><strong>Target writes with a token wait for approval.</strong> Upgrade the <code>meho</code>
+  command line together with the server.</li>
+<li><strong>Secret values go only to the person who asked.</strong> After the
+  approval, that person fetches the value once, within 15 minutes.
+  MEHO stores no value.</li>
+<li><strong>Connectors say which versions they serve.</strong> A target whose version
+  is outside its connector's range is refused. Check your Kubernetes,
+  RKE2, PostgreSQL, MongoDB, Argo CD and Vault targets before the
+  upgrade.</li>
+<li><strong>Keycloak targets name their realm.</strong> Set <code>managed_realm</code> on each
+  Keycloak target before the upgrade.</li>
+<li><strong>A policy file for each install and tenant</strong>, and <code>meho policy
+  explain</code> says why a call runs, waits or is refused. Most policy
+  features are behind switches that are off by default.</li>
+<li><strong>Sign in and approve with a passkey</strong>, and get a push message on
+  your phone or laptop when an approval waits.</li>
+<li><strong>Command line.</strong> Named login profiles, a Windows build, and
+  <code>meho docs ask</code> for a docs answer with sources.</li>
+<li><strong>More operations.</strong> Keycloak, Harbor, Azure, pfSense, FreeIPA,
+  Vault and Linux operations, and a <code>spaces</code> connector behind a switch.</li>
+<li><strong>MEHO on a plain Linux server</strong> has its own chapter in the install
+  guide.</li>
+<li><strong>Many security fixes.</strong> They are listed under "Security" in the
+  release notes.</li>
+</ul>
 <h2 id="v0460-2026-11-09"><a href="https://github.com/evoila/meho/releases/tag/v0.46.0">v0.46.0</a> — 2026-11-09<a class="headerlink" href="#v0460-2026-11-09" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Approved changes with hidden values run.</strong> A request whose settings

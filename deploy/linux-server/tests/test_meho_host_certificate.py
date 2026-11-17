@@ -4,11 +4,14 @@
 """Tests of meho-host certificate (#4738): the customer's certificate and key
 go into the console's TLS Secret only when every check passes, the key is
 never on a command line or in the output, and the certificate line of the
-check is printed at the end."""
+check is printed at the end. The CA of the new certificate goes to the CA
+file that install.sh writes."""
 
 from __future__ import annotations
 
 import base64
+import os
+import stat
 import subprocess
 import unittest
 from pathlib import Path
@@ -28,9 +31,13 @@ NAME_FIX = (
 GREEN_LINE = (
     "[ok]   console-certificate: valid for meho.example.com until 2027-10-23 (365 days left)"
 )
+CA_FILE = "/var/lib/meho/console-ca.crt"
+# What install.sh wrote to the CA file: the CA of the install's certificate.
+INSTALL_CA = "-----BEGIN CERTIFICATE-----\nMIIBfakeInstallCA\n-----END CERTIFICATE-----\n"
 INSTALLED = (
     "[ok]   installed the certificate for meho.example.com in the Secret meho-core-tls: the "
     "console, the API and the login show it within a minute\n"
+    f"[ok]   wrote your CA to {CA_FILE}\n"
     "[note] browsers and the meho CLI trust it when the computer trusts your CA.\n"
 )
 
@@ -53,6 +60,8 @@ class CertificateTestCase(ClusterTestCase):
         super().setUp()
         self.before = self.host.secret(TLS_SECRET)
         self.chain, self.root, self.key = customer_certificate()
+        self.ca_file = self.host.host_path(CA_FILE)
+        self.ca_file.write_text(INSTALL_CA)
 
     def files(self, chain: str, key: str) -> tuple[str, str]:
         """Write the two files the admin gives, and return their paths."""
@@ -72,6 +81,7 @@ class CertificateTestCase(ClusterTestCase):
         self.assertEqual("", result.stdout)
         self.assertEqual(self.before, self.host.secret(TLS_SECRET))
         self.assertEqual([], self.kubectl_calls(" patch "))
+        self.assertEqual(INSTALL_CA, self.ca_file.read_text())
 
 
 class CertificateTests(CertificateTestCase):
@@ -105,6 +115,44 @@ class CertificateTests(CertificateTestCase):
         secret = self.host.secret(TLS_SECRET)
         assert secret is not None
         self.assertEqual(ca, secret["data"]["ca.crt"])
+        self.assertEqual(ca, self.ca_file.read_text())
+
+    def test_the_ca_of_the_new_certificate_replaces_the_ca_file_of_the_install(self) -> None:
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(self.root, self.ca_file.read_text())
+        self.assertEqual(0o644, stat.S_IMODE(self.ca_file.stat().st_mode))
+        self.assertFalse(self.host.host_path(CA_FILE + ".new").exists())
+
+    def test_without_a_ca_file_of_the_install_the_ca_file_is_written(self) -> None:
+        self.ca_file.unlink()
+
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(self.root, self.ca_file.read_text())
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into a folder without write permission")
+    def test_a_ca_file_that_cannot_be_written_only_warns(self) -> None:
+        folder = self.ca_file.parent
+        folder.chmod(0o500)
+        self.addCleanup(folder.chmod, 0o700)
+
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            f"[WARN] {CA_FILE} could not be written, so it may still hold the old CA. Give your "
+            "own CA file to the browsers and laptops that use MEHO.\n",
+            result.stderr,
+        )
+        self.assertNotIn("wrote your CA", result.stdout)
+        self.assertTrue(result.stdout.endswith(GREEN_LINE + "\n"), result.stdout)
+        self.assertEqual(INSTALL_CA, self.ca_file.read_text())
+        secret = self.host.secret(TLS_SECRET)
+        assert secret is not None
+        self.assertEqual(self.root, secret["data"]["ca.crt"])
 
     def test_other_text_and_windows_line_ends_are_left_out_of_tls_crt(self) -> None:
         dirty = "subject=CN = meho.example.com\n" + self.chain + self.key + self.root
@@ -299,6 +347,7 @@ class RefusedCertificateTests(CertificateTestCase):
             f"{SUPPORT_HINT}",
         )
         self.assertEqual(self.before, self.host.secret(TLS_SECRET))
+        self.assertEqual(INSTALL_CA, self.ca_file.read_text())
 
     def test_not_root_changes_nothing(self) -> None:
         self.host.answer("uid", "1000")

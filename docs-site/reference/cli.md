@@ -1288,7 +1288,7 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
-- `--filter-work-ref` — exact work-reference filter
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter

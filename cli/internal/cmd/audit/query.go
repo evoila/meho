@@ -36,7 +36,7 @@ import (
 //	  [--audit-id ID]              # exact-id lookup
 //	  [--parent-audit-id ID]       # rows whose parent is this audit-id
 //	  [--session-id ID]            # narrow to one agent session (UUID)
-//	  [--filter-work-ref REF]      # exact change-ticket ref: gh:evoila/meho#1
+//	  [--filter-work-ref REF]      # ticket id, whole id: gh:evoila/meho#1
 //	  [--full-row-lost]            # only short rows: the full row was refused
 //	  [--text-changed]             # only rows where text was replaced to be stored
 //	  [--json]                     # raw AuditQueryResult JSON

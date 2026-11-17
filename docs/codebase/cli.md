@@ -1155,10 +1155,14 @@ that header from one place, so every verb gets it without its own flag.
   Tulu-Tigalari (U+11382, U+11384, U+1138B, U+11390, U+113C2), Gurung
   Khema (U+1611E to U+16129) and Kirat Rai (U+16D63, U+16D67, U+16D69).
   The CLI sends such an id in the form it was typed, and the backplane
-  makes it NFC when it arrives. So the stored value is the same, and
-  accept and refuse are the same. Only the value that the CLI cleans
-  before the send differs. Move the CLI to Unicode 16.0 tables when
-  the Go toolchain has them.
+  makes it NFC when it arrives. So the stored value is the same. The
+  value that the CLI cleans before the send differs. Accept and refuse
+  differ in one case only: near the 256-character limit. The CLI counts
+  each of these pairs as two characters, and the backplane as one. So
+  the CLI can refuse an id made of many such pairs that the backplane
+  accepts (for example 130 pairs: 260 characters for the CLI, 130 for
+  the backplane). Move the CLI to Unicode 16.0 tables when the Go
+  toolchain has them.
 - One case list, `testdata/work_ref_cases.json`, is read by the Go test
   (`TestValidWorkRef_SharedCases`) and by the Python test
   (`backend/tests/test_work_ref_rule.py`), so the two rules cannot drift.

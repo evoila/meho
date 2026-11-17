@@ -57,8 +57,10 @@ func CleanWorkRef(ref string) string {
 // refuse the same characters. But the NFC step joins 20 letter pairs
 // (Todhri, Tulu-Tigalari, Gurung Khema and Kirat Rai) only on the
 // backplane, so the CLI cleans those ids to another text than the
-// backplane does. The backplane joins them again when the id arrives. See
-// docs/codebase/cli.md. The shared case list testdata/work_ref_cases.json
+// backplane does. The backplane joins them again when the id arrives. The
+// CLI counts each such pair as two characters, so near the 256-character
+// limit it can refuse an id made of these pairs that the backplane
+// accepts. See docs/codebase/cli.md. The shared case list testdata/work_ref_cases.json
 // is read by this package's test and by the backend test, so the two rules
 // cannot drift.
 func ValidWorkRef(ref string) bool {

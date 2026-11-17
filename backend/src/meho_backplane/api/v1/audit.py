@@ -14,7 +14,7 @@ Mounts six routes. Five dispatch through the T1
 * ``GET /api/v1/audit/who-touched/{target}`` — pre-canned shortcut
   bound to ``target=<path>``.
 * ``GET /api/v1/audit/by-work-ref/{ref}`` — pre-canned shortcut bound
-  to ``work_ref=<path>`` (exact match); the "show every write
+  to ``work_ref=<path>`` (whole ticket id); the "show every write
   authorised by change-ticket X" lookup (work_ref I1-T1 #1655).
 * ``GET /api/v1/audit/my-recent`` — pre-canned shortcut bound to
   ``principal_sub=<operator.sub>`` (exact match on the user id).

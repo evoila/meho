@@ -22,8 +22,8 @@ import (
 //	meho agent run-list [--filter-work-ref REF] [--status S] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
 // Role: operator. Lists the tenant's agent runs via GET /api/v1/agents/runs,
-// newest first. Filters: --filter-work-ref (exact-match external change-ticket
-// reference, work_ref I3-T2 #1662), --status, and --agent-name (exact-match
+// newest first. Filters: --filter-work-ref (ticket id, whole id; white space
+// at the ends is ignored, work_ref I3-T2 #1662), --status, and --agent-name (exact-match
 // agent definition name, #2472). Tenant-isolated server-side via the JWT —
 // only the caller's tenant's runs are visible.
 func newRunListCmd() *cobra.Command {

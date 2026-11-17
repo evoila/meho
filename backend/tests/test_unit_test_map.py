@@ -397,12 +397,54 @@ def test_test_helper_means_the_full_suite(repo: Path, path: str) -> None:
     assert picked.line == f"full suite: a test helper or test data changed ({path})"
 
 
-def test_new_source_file_means_the_full_suite(repo: Path) -> None:
+def test_new_source_file_that_nothing_imports_means_the_full_suite(repo: Path) -> None:
     _write_tree(repo, {f"{SRC}/new.py": "Z = 3\n"})
 
     picked = _pick(repo, [f"{SRC}/new.py"])
 
-    assert picked.line == f"full suite: the test map does not know {SRC}/new.py"
+    assert picked.line == (
+        f"full suite: the test map does not know {SRC}/new.py and no file imports it"
+    )
+
+
+def test_new_source_file_picks_the_tests_of_the_files_that_import_it(repo: Path) -> None:
+    _write_tree(
+        repo,
+        {
+            f"{SRC}/new.py": "Z = 3\n",
+            f"{SRC}/core.py": "from meho_backplane.new import Z\n",
+            "backend/tests/test_new.py": (
+                "from meho_backplane import new\n\n\ndef test_n():\n    pass\n"
+            ),
+        },
+    )
+
+    picked = _pick(repo, [f"{SRC}/new.py", f"{SRC}/core.py", "backend/tests/test_new.py"])
+
+    assert picked.line.startswith("test map from 2026-11-02")
+    assert "tests/test_new.py" in picked.tests
+    assert "tests/test_core.py::test_core" in picked.tests
+    assert "test_unrelated" not in str(picked.tests)
+
+
+def test_new_source_file_that_a_unit_conftest_imports_means_the_full_suite(repo: Path) -> None:
+    _write_tree(
+        repo,
+        {
+            f"{SRC}/new.py": "Z = 3\n",
+            "backend/tests/conftest.py": "import meho_backplane.new\n",
+        },
+    )
+
+    picked = _pick(repo, [f"{SRC}/new.py"])
+
+    assert picked.line == f"full suite: backend/tests/conftest.py imports {SRC}/new.py"
+
+
+def test_deleted_source_file_the_map_does_not_know_means_the_full_suite(repo: Path) -> None:
+    picked = _pick(repo, [f"{SRC}/gone.py"])
+
+    assert picked.line == f"full suite: the test map does not know {SRC}/gone.py"
 
 
 def test_changed_test_file_picks_its_own_tests(repo: Path) -> None:

@@ -318,11 +318,17 @@ merge to `main`.
 - [ ] **Upgrade-notes discipline.** When the release carries an
       upgrade-relevant change (a chart field operators may have hand-patched,
       a new default-on guard, a schema-breaking value, a forward-only
-      migration with an operator caveat), append a row to the
-      version-specific upgrade-notes table in
-      [`deploying.md`](deploying.md) in this same PR. This is the discipline
+      migration with an operator caveat), add a row file
+      under [`upgrade-rows/`](upgrade-rows/README.md) in this same PR (it
+      shows in the version-specific upgrade-notes table of the docs site). This is the discipline
       that #2393's `startupProbe` (the Helm-4 SSA field-conflict caveat)
       would have triggered.
+- [ ] **Upgrade rows into `deploying.md`.** In the release-cutting PR, after
+      the CHANGELOG roll, check that the row folders under `docs/upgrade-rows/`
+      carry the version you release (rename a folder if not). Then run
+      `python3 scripts/ci/upgrade_rows.py --write` and commit
+      `docs/deploying.md`. The script adds the new rows to the end of its
+      table. A test fails while a row of a released version is missing there.
 
 Before merging, run the **release-body path-freshness gate**. The same
 recurring class of defect that motivated #928 at PR time (snapshot
@@ -1086,8 +1092,9 @@ Steps 2–7 as written, with `PREV` = the last **final** tag (R1
   is checked.
 - [ ] `docs-site/reference/whats-new.md`: one `## [v1.0.0]` section
   for the series (step 2.4).
-- [ ] `deploying.md` upgrade-notes row for v1.0.0 (step 3), covering
-  every upgrade-relevant change since `PREV`.
+- [ ] Upgrade row files for v1.0.0 (step 3), covering every
+  upgrade-relevant change since `PREV`, written into `deploying.md` by
+  `upgrade_rows.py --write`.
 - [ ] Tag `v1.0.0` on `REL_SHA` per step 4. Verify per step 5 — the
   Release is **not** marked pre-release; `meho version` → `v1.0.0`;
   chart `1.0.0`; docs republish `1.0` in place, and this final tag
@@ -1145,8 +1152,8 @@ are left. Each is a follow-up task.
        (scripts/ci/check_tested_live_claims.py)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
-       upgrade-relevant change → deploying.md version-specific notes row
-       appended; release-cutting PR merged to main
+       upgrade-relevant change → row files, written into deploying.md by
+       upgrade_rows.py --write; release-cutting PR merged to main
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published; form-2 download + SHA256SUMS-linux

@@ -44,13 +44,16 @@ The rules of ``pick``. Any doubt means the full suite:
   ``*_schemas.py`` files), import analysis picks every test file that
   imports it, directly or through other modules, and the tests that the
   map links to those other modules. When a unit ``conftest.py`` imports
-  the file itself, the full suite runs. Import analysis does not follow
+  the file itself, the full suite runs. A new source file (the map is
+  older than the file) is treated the same way, but only when some file
+  imports it: a new file that nothing imports may be loaded by name at run
+  time, so it means the full suite. Import analysis does not follow
   ``conftest.py`` files any further: the main ``conftest.py`` imports the
   app, so almost every file would pick the full suite;
 * every other changed file means the full suite: a migration, a template
   or other data file, a ``conftest.py`` or test helper, ``pyproject.toml``,
   ``uv.lock``, a workflow, the Go CLI, and a source file the map does not
-  know (for example a new one);
+  know that is also gone from the tree (a deleted new file);
 * :data:`MAX_TESTS` or more picked tests means the full suite: one job
   would take too long. The map says how many test items each test runs.
   A test file the pull request changed, or that the map does not know,
@@ -675,6 +678,7 @@ def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime
     files: set[str] = set()
     changed_tests: set[str] = set()
     no_test: list[str] = []
+    new_files: set[str] = set()
     paths = sorted({line.strip() for line in changed if line.strip()})
     if not paths:
         raise FullSuiteError("no changed files")
@@ -690,7 +694,13 @@ def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime
                 files.add(inner)
                 changed_tests.add(inner)
         elif path not in test_map.files:
-            raise FullSuiteError(f"the test map does not know {path}")
+            if not (repo_root / path).is_file():
+                raise FullSuiteError(f"the test map does not know {path}")
+            # A new file: no test ran it when the map was made, so the
+            # import analysis below picks the tests, like for a file whose
+            # code runs only on import.
+            new_files.add(path)
+            no_test.append(path)
         elif test_map.files[path]:
             numbers.update(test_map.files[path])
         else:
@@ -702,7 +712,12 @@ def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime
             for conftest in sorted(graph.conftests):
                 if path in graph.deps[conftest]:
                     raise FullSuiteError(f"{conftest} imports {path}")
-            for user in graph.importers(path):
+            users = graph.importers(path)
+            if path in new_files and users == {path}:
+                # Nothing imports it: it may be loaded by name at run time,
+                # and no analysis can see that.
+                raise FullSuiteError(f"the test map does not know {path} and no file imports it")
+            for user in users:
                 if user.startswith("backend/tests/") and _is_test_file(PurePosixPath(user)):
                     files.add(user.removeprefix("backend/"))
                 numbers.update(test_map.files.get(user, ()))

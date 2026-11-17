@@ -2403,6 +2403,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#an-admin-signs-out-a-tool-for-someone-else" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An admin signs out a tool for someone else
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#before-you-start" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3185,6 +3196,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#an-admin-signs-out-a-tool-for-someone-else" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        An admin signs out a tool for someone else
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#before-you-start" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3306,6 +3328,39 @@ card says that MEHO's Keycloak admin client needs the right
 <p>The web console has no button here. To sign out a browser, use the card
 <strong>Active sessions</strong> on the same page.</p>
 <p>You can sign out only your own tools.</p>
+<h2 id="an-admin-signs-out-a-tool-for-someone-else">An admin signs out a tool for someone else<a class="headerlink" href="#an-admin-signs-out-a-tool-for-someone-else" title="Permanent link">&para;</a></h2>
+<p>A tenant admin can sign out one tool of another person, for example
+when a laptop with Claude Desktop is lost. There is no console page for
+this. Use the command line:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>admin<span class="w"> </span>tools<span class="w"> </span>sign-out<span class="w"> </span>--user<span class="w"> </span>&lt;username<span class="w"> </span>or<span class="w"> </span>user<span class="w"> </span>id&gt;<span class="w"> </span>--tool<span class="w"> </span>claude-desktop
+</code></pre></div>
+<ul>
+<li><code>--user</code> is the person's username or Keycloak user id in the realm
+  MEHO uses for sign-in. MEHO finds only people of your tenant.</li>
+<li><code>--tool</code> is <code>cli</code>, <code>claude-code</code>, <code>claude-desktop</code> or <code>other-mcp</code>. The
+  web console cannot be signed out this way.</li>
+<li>You need the <code>tenant_admin</code> role. The call waits until a person
+  approves it, in the console or with <code>meho approvals approve</code>. Every
+  tenant admin may approve their own request, so no second person is
+  needed.</li>
+<li>While <code>MCP_CLIENT_PER_TOOL_KIND</code> is off, MEHO refuses the call at once
+  and makes no approval request.</li>
+<li>The approval shows the person by user id. MEHO signs out that user id,
+  even if the username points at someone else by then.</li>
+<li>The person's other tools keep working.</li>
+<li>The sign-out ends the tool's login in the whole sign-in realm, not only
+  in your tenant. A person who is in two tenants also loses that tool's
+  login for the other tenant.</li>
+<li>The same limits hold as for your own sign-out: the tool's last access
+  token works for a few more minutes, and the tool can sign in again.
+  To stop the person, disable their account in Keycloak.</li>
+<li>The audit entry <code>auth.tool_sign_out</code> names the admin who ran the call
+  (<code>operator_sub</code>: the admin who approved it), the admin who asked
+  (<code>requested_by</code>), the person (<code>user_id</code>, <code>username</code>) and the login
+  client. When you approve your own request, <code>operator_sub</code> and
+  <code>requested_by</code> are both you. If the call fails, the command shows the
+  error, and no "signed out" entry is written.</li>
+</ul>
 <h2 id="before-you-start">Before you start<a class="headerlink" href="#before-you-start" title="Permanent link">&para;</a></h2>
 <p>The card shows only when your MEHO admin has given each AI tool its own
 login client: the setting <code>MCP_CLIENT_PER_TOOL_KIND</code> is on. See

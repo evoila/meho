@@ -115,8 +115,8 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
 def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.service_grants import (
-        credential_read_grant_reason,
         delete_grant_reason,
+        secret_grant_reason,
     )
 
     op_id = descriptor.op_id
@@ -124,9 +124,9 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     marks = {
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
-        "credential_read": credential_read_grant_reason(
-            op_id, getattr(descriptor, "op_class", None)
-        )
+        # No grant covers an op that reads, makes or sends a secret
+        # (``secret_grant_reason``): the same check as grant create and use.
+        "credential_read": secret_grant_reason(op_id, getattr(descriptor, "op_class", None))
         is not None,
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,

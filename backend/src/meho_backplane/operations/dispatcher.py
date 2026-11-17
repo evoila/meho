@@ -302,11 +302,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
-from meho_backplane.broadcast.events import (
-    classify_op,
-    resolve_op_class,
-    scrub_secret_named_values,
-)
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.broadcast.target_advisory import build_target_activity_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
@@ -333,7 +329,6 @@ from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
     audit_safe,
-    descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
     policy_rule_var,
@@ -487,6 +482,11 @@ from meho_backplane.operations.dispatch_limits import (
     resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_class_of import (
+    descriptor_op_class,
+    note_ran_op_class,
+    write_note_op_class,
+)
 from meho_backplane.operations.op_policy import approval_classification
 from meho_backplane.operations.reducer import (
     SECRET_REVEAL_CONTEXT_KEY,
@@ -1048,6 +1048,7 @@ async def _execute_and_audit_inner(
         connector_id=connector_id,
         operator=operator,
         op_id=op_id,
+        op_class=descriptor_op_class(descriptor),
     )
     if isinstance(redaction, OperationResult):
         return await _audit_error_and_return(
@@ -1611,8 +1612,10 @@ async def _reduce_and_audit_success(
         # a successful return for every op, read or write (postulate 7 /
         # v0.1-spec §6). The outcome is uncertain and must not be retried.
         return result_audit_commit_failed(op_id, duration_ms)
-    # The two write checks below use the class the audit row above stores.
-    op_class = descriptor_op_class(descriptor)
+    # The two write checks below use the class the audit row above stores,
+    # except for a stored ``credential_read`` on an op that also changes
+    # something: it keeps the write notes (``write_note_op_class``).
+    op_class = write_note_op_class(descriptor)
     activity_advisory = await build_target_activity_advisory(
         operator,
         op_class=op_class,
@@ -2273,7 +2276,12 @@ async def _audit_error_and_return(
     secret-named fields and Tier-1 shapes in every string of ``error``,
     ``extras`` and ``result``.
     """
-    result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
+    result = withhold_vendor_text(
+        result,
+        op_id=descriptor.op_id,
+        tags=descriptor.tags,
+        op_class=descriptor_op_class(descriptor),
+    )
     result = redact_error_result(result)
     receipt = await audit_safe(
         audit_id=audit_id,
@@ -2785,6 +2793,7 @@ def _apply_redaction_middleware(
     connector_id: str,
     operator: Operator,
     op_id: str,
+    op_class: str,
 ) -> RedactionMiddlewareResult | OperationResult:
     """Wrap :func:`apply_connector_boundary_redaction` with error capture.
 
@@ -2822,7 +2831,7 @@ def _apply_redaction_middleware(
         )
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
-    if classify_op(op_id) != "credential_mint":
+    if op_class != "credential_mint":
         return redaction
     # An op that makes a new credential returns it to the caller, but the
     # audit row's raw copy keeps only the other fields.
@@ -3170,9 +3179,17 @@ def _build_reducer_context(
         "operator_sub": handle_owner_sub_var.get() or operator.sub,
         "audit_id": str(audit_id),
         "source_kind": descriptor.source_kind,
+        # The class of the row that runs. The reducer reads it to decide whether
+        # the answer may hold a secret (``jsonflux_reducer._is_credential_class``).
+        "op_class": descriptor_op_class(descriptor),
     }
-    # A reveal's answer holds secret values: the reducer keeps no copy of it.
-    if reveal_secret_var.get() is True:
+    # A reveal's answer holds secret values: the reducer keeps no copy of it. So
+    # does the answer of an ingested operation whose row stores
+    # ``credential_mint`` (a connector floor set it): it holds a new credential.
+    if (
+        reveal_secret_var.get() is True
+        or getattr(descriptor, "op_class", None) == "credential_mint"
+    ):
         reducer_context[SECRET_REVEAL_CONTEXT_KEY] = True
     # G0.20-T7 (#1507): carry the operator's tenant id so the reducer can
     # spill the full materialized set into the tenant-scoped
@@ -3364,7 +3381,7 @@ async def _build_proposed_effect(
         # (declined) envelope is classified not-populated rather than
         # mislabelled by the merged ``op_id``.
         preview_populated, preview_reason = describe_preview_provenance(
-            preview, op_id=op_id, stored_op_class=getattr(descriptor, "op_class", None)
+            preview, op_id=op_id, op_class=descriptor_op_class(descriptor)
         )
         base["preview_populated"] = preview_populated
         if preview_reason is not None:
@@ -3385,7 +3402,7 @@ async def _build_proposed_effect(
             op_id=op_id, connector_id=connector_id, target=target
         ).items():
             base.setdefault(_key, _value)
-        base.setdefault("op_class", resolve_op_class(op_id, getattr(descriptor, "op_class", None)))
+        base.setdefault("op_class", descriptor_op_class(descriptor))
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``
@@ -3806,6 +3823,7 @@ async def _handle_needs_approval(
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
                 category=descriptor.policy_category,
+                op_class=descriptor_op_class(descriptor),
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -4030,9 +4048,6 @@ async def _dispatch_now(
     # one hash (the reveal choice is recorded separately on the audit row,
     # and a call that waits for approval keeps it on the approval request).
     params, reveal_secret = split_reveal_secret(params)
-    op_class = classify_op(op_id)
-    secret_read = op_class == "credential_read" or hides_secret_values(op_id)
-    makes_new_secret = op_class == "credential_mint"
     # The hash every audit row of this dispatch carries: keyed, with
     # secret-named values left out. A parked approval stores the full
     # approval hash instead (``_handle_needs_approval``).
@@ -4142,15 +4157,15 @@ async def _dispatch_now(
         descriptor = selection.descriptor
         connector_id = selection.connector_id
         product, version = descriptor.product, descriptor.version
-    # An ingested op whose row stores a class (a connector's safety floor set
-    # it at ingest) is a secret read like any other. Read from the row that
-    # runs, after any switch to a sibling catalog, so the audit row, the
-    # policy and this flag all use the same row.
-    stored_op_class = getattr(descriptor, "op_class", None)
-    if stored_op_class is not None:
-        op_class = resolve_op_class(op_id, stored_op_class)
-        secret_read = secret_read or op_class == "credential_read"
-        makes_new_secret = op_class == "credential_mint"
+    # The class comes from the row that runs, after any switch to a sibling
+    # catalog, so the audit row, the policy and these flags all use the same
+    # row. A stored class of an ingested op (a connector's safety floor set it
+    # at ingest) counts like any other.
+    op_class = descriptor_op_class(descriptor)
+    # The outer MCP row of ``call_operation`` hides the detail by this class.
+    note_ran_op_class(op_class)
+    secret_read = op_class == "credential_read" or hides_secret_values(op_id)
+    makes_new_secret = op_class == "credential_mint"
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error
@@ -4406,7 +4421,7 @@ async def _dispatch_now(
             if AfterGateCheck.ANNOUNCE_RULE in checks_after_gate(verdict):
                 announce_block = await announce_gate_blocks(
                     operator,
-                    op_class=descriptor_op_class(descriptor),
+                    op_class=write_note_op_class(descriptor),
                     safety_level=descriptor.safety_level,
                     target_name=getattr(target, "name", None),
                 )

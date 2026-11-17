@@ -29,6 +29,7 @@ from meho_backplane.operations.service_grants import (
     always_wait_grant_reason,
     caller_address_grant_reason,
     delete_grant_reason,
+    secret_grant_reason,
 )
 
 __all__ = ["consult_and_record_run_approval"]
@@ -81,6 +82,7 @@ def _never_covered(descriptor: EndpointDescriptor) -> bool:
         or needs_per_call_approval(descriptor.op_id)
         or caller_address_grant_reason(descriptor) is not None
         or always_wait_grant_reason(descriptor) is not None
+        or secret_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None)) is not None
     ):
         return True
     patterns = get_settings().service_grant_delete_shaped_patterns

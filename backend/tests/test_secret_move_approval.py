@@ -264,8 +264,9 @@ async def test_move_with_no_grant_parks_pending(
     assert row.status == ApprovalRequestStatus.PENDING.value
 
     effect = row.proposed_effect
-    # build_proposed_effect wraps the builder dict as {op_class, preview}.
-    assert effect["op_class"] == "other"
+    # build_proposed_effect wraps the builder dict as {op_class, preview}. The
+    # class is the one the run row gets: a typed op at ``caution`` is a write.
+    assert effect["op_class"] == "write"
     preview = effect["preview"]
     assert preview["source"] == {"kind": "vault", "ref": "secret/db/prod#password"}
     assert preview["sink"] == {"kind": "vault", "ref": "secret/db/replica#password"}

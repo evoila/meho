@@ -40,6 +40,7 @@ from meho_backplane.operations.embed import (
 from meho_backplane.operations.ingest.exceptions import OpIdCollision
 from meho_backplane.operations.ingest.safety_floors import has_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
+from meho_backplane.operations.op_class_of import SECRET_CLASSES
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 _SPEC_TAG_PREFIX = "spec:"
@@ -346,9 +347,10 @@ def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> 
 
     A class from the floor is stored. When the floor gives none, the stored
     class stays, like the stored risk level: a re-ingest never weakens a row.
-    A stored ``credential_read`` is never replaced by another class.
+    A stored secret class (``credential_read``, ``credential_write`` or
+    ``credential_mint``) is never replaced by another class.
     """
-    if ctx.proto.op_class is not None and existing.op_class != "credential_read":
+    if ctx.proto.op_class is not None and existing.op_class not in SECRET_CLASSES:
         existing.op_class = ctx.proto.op_class
     if not _keeps_stored_policy(existing, ctx):
         existing.safety_level = ctx.proto.safety_level

@@ -104,6 +104,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations.governed_subops import governed_subops_for
+from meho_backplane.operations.op_class_of import descriptor_op_class
 from meho_backplane.settings import get_settings
 
 _log = structlog.get_logger(__name__)
@@ -989,6 +990,7 @@ async def enforce_subop_policy(
                     # reviewer who runs the re-run. ``None`` outside a re-run.
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
+                    op_class=descriptor_op_class(descriptor),
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed

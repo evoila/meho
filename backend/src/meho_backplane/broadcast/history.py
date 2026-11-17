@@ -90,8 +90,10 @@ DEFAULT_WINDOW_MINUTES: Final[int] = 30
 #: * ``approval`` -- no audit row persists
 #:   ``payload["op_class"] == "approval"``: the approval REST routes
 #:   bind ``audit_op_class`` to ``read`` / ``write``
-#:   (``api/v1/approvals.py``), and the queue's own request/decision
-#:   rows persist no ``op_class`` key at all. (Drawers still *display*
+#:   (``api/v1/approvals.py``), the queue's own decision rows persist no
+#:   ``op_class`` key, and its request row persists the class of the
+#:   operation that waits (``read``, ``write``, ``credential_read``, ...),
+#:   never ``approval``. (Drawers still *display*
 #:   ``approval`` for those routes' ``approval.*`` op-ids -- the
 #:   read-time classifier -- but ``query_audit`` filters on the
 #:   persisted key.)

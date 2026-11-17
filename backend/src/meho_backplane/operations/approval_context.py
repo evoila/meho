@@ -55,7 +55,7 @@ Secret hygiene (the hard constraint)
 Params stay hidden by design. This resolver reads **identity fields
 only** -- the path-variable moids in the op path and a caller-supplied
 ``name`` -- never the request body, arguments, or env values. A
-credential-class op (:func:`~meho_backplane.broadcast.events.classify_op`)
+credential-class op (:func:`~meho_backplane.operations.op_class_of.request_op_class`)
 gets **no** subject echo at all. Every candidate identity value is run
 through the same connector-boundary redaction engine the response path
 uses; anything the engine flags as secret-shaped is dropped rather than
@@ -82,13 +82,13 @@ from typing import TYPE_CHECKING, Any, Final
 import sqlalchemy as sa
 import structlog
 
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import (
     ApprovalRequest,
     AuditLog,
     EndpointDescriptor,
     Target,
 )
+from meho_backplane.operations.op_class_of import request_op_class
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
@@ -321,7 +321,7 @@ def _resolve_subject(request: ApprovalRequest) -> str | None:
         return None
     # A credential-class op gets no identity echo at all -- the whole point
     # of the credential suppression is that nothing rides the durable row.
-    if classify_op(request.op_id) in _CREDENTIAL_CLASSES:
+    if request_op_class(request.op_id, request.proposed_effect) in _CREDENTIAL_CLASSES:
         return None
 
     path_vars = tuple(_PATH_VAR.findall(request.op_id))
@@ -351,7 +351,7 @@ def _preview_subject(request: ApprovalRequest) -> str | None:
     params: no subject for a credential-class op, and a value the
     redaction engine flags is dropped.
     """
-    if classify_op(request.op_id) in _CREDENTIAL_CLASSES:
+    if request_op_class(request.op_id, request.proposed_effect) in _CREDENTIAL_CLASSES:
         return None
     effect = request.proposed_effect if isinstance(request.proposed_effect, dict) else {}
     preview = effect.get("preview")

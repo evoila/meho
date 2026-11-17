@@ -505,7 +505,7 @@ async def test_untouched_operations_keep_their_stored_policy(
 
 @pytest.mark.parametrize(
     "bad",
-    ["credential_mint", "credential_write", "credential_reads", "read", "audit_query", ""],
+    ["credential_reads", "read", "audit_query", "approval", ""],
 )
 def test_ingest_refuses_a_class_that_is_not_allowed(bad: str) -> None:
     def floor(version: str, proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
@@ -519,11 +519,13 @@ def test_ingest_refuses_a_class_that_is_not_allowed(bad: str) -> None:
         )
 
     assert "GET:/clients" in str(raised.value)
-    assert "Allowed classes: credential_read, write." in str(raised.value)
+    assert "Allowed classes: credential_mint, credential_read, credential_write, write." in str(
+        raised.value
+    )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["nonsense", "credential_mint", "credential_write"])
+@pytest.mark.parametrize("bad", ["nonsense", "credential_reads", "audit_query"])
 async def test_register_refuses_a_class_that_is_not_allowed_and_stores_nothing(
     stub_embedding_service: AsyncMock, bad: str
 ) -> None:

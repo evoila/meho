@@ -40,9 +40,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.no_store import mark_answer_holds_secret
+from meho_backplane.operations.op_class_of import request_op_class, request_write_note_op_class
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -64,8 +64,8 @@ __all__ = [
 #: who asked can now fetch the value.
 WAITING_FOR_REQUESTER: Final[str] = "waiting_for_requester"
 
-#: The op classes (:func:`~meho_backplane.broadcast.events.classify_op`) of an
-#: operation that only reads. Every other class counts as a change.
+#: The op classes of an operation that only reads (:func:`is_write_reveal`).
+#: Every other class counts as a change.
 _READ_CLASSES: Final[frozenset[str]] = frozenset({"read", "credential_read"})
 
 #: Status code of the ``approval.reveal`` audit row of a refused fetch.
@@ -106,8 +106,18 @@ def is_write_reveal(request: ApprovalRequest) -> bool:
     Only an operation of class ``read`` or ``credential_read`` counts as a
     read. Every other class counts as a change, also ``other`` (for example
     an apply, a scale, or a reboot). When in doubt, the approve in order stops.
+    A stored ``credential_read`` on an operation that also changes something
+    (a ``POST``, ``PUT`` or ``DELETE``) counts as a change.
+
+    A request counts as a read only when both its op id and its stored class
+    say so. A hand-written ``safe`` operation stores ``read`` on its request,
+    but its op id may say ``other``: it still counts as a change.
     """
-    return is_secret_reveal(request) and classify_op(request.op_id) not in _READ_CLASSES
+    if not is_secret_reveal(request):
+        return False
+    op_id_class = request_op_class(request.op_id, None)
+    stored_class = request_write_note_op_class(request.op_id, request.proposed_effect)
+    return op_id_class not in _READ_CLASSES or stored_class not in _READ_CLASSES
 
 
 def reveal_fetch_window() -> timedelta:

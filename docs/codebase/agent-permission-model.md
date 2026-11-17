@@ -81,8 +81,10 @@ An op marked `requires_approval` also waits for approval, for every kind of
 login. There are two exceptions. A refusal for an agent login stays a
 refusal. A service account's standing grant can still let the op run, but
 never a `destructive` one, and never an op that shows a secret: also an
-ingested op whose row stores `credential_read`, set by a connector floor
+ingested op whose row stores `credential_read` or `credential_mint`, set by a connector floor
 ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)).
+A grant does not cover a credential write (an op that sends a secret) that
+has no preview builder either: the approver would see nothing of the call.
 
 "Waits for approval" means MEHO stores an approval request and returns
 `awaiting_approval`. The op runs only after someone approves it. See

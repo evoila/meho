@@ -128,6 +128,13 @@ from meho_backplane.mcp.tenant_gate import STATUS_TOOL
 from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.delivery_budget import tool_result_text
+from meho_backplane.operations.op_class_of import (
+    SECRET_CLASSES,
+    RanOpClass,
+    lookup_secret_op_class,
+    lookup_secret_op_class_any_version,
+    ran_op_class_var,
+)
 from meho_backplane.request_usage.collector import (
     current_request_id,
     note_request_route,
@@ -434,6 +441,9 @@ async def handle_tools_call(
     #: The handler itself refused the arguments (the #1481 projection below).
     handler_rejected = False
     record_scope = open_classified_record_scope()
+    # The dispatcher notes the class of the row it runs (``call_operation``).
+    ran_class = RanOpClass()
+    ran_class_token = ran_op_class_var.set(ran_class)
 
     try:
         if not isinstance(name, str) or not name:
@@ -689,9 +699,11 @@ async def handle_tools_call(
                     request_override=request_override,
                     status_code=status_code,
                     duration_ms=(time.monotonic() - start) * 1000,
+                    ran_op_class=ran_class.op_class,
                 )
         finally:
             close_classified_record_scope(record_scope)
+            ran_op_class_var.reset(ran_class_token)
 
 
 # code-quality-allow: the ``tools/call`` audit tail moved here
@@ -708,8 +720,12 @@ async def _write_tool_call_row(
     request_override: Literal["full"] | None,
     status_code: int,
     duration_ms: float,
+    ran_op_class: str | None = None,
 ) -> None:
     """Write the ``tools/call`` wrapper row.
+
+    *ran_op_class* is the class of the row the dispatcher ran for a
+    ``call_operation`` (it can be another version than the one named).
 
     No Broadcast event is published: the feed carries deliberate agent
     announcements only (#3758). The audit row is the record.
@@ -775,6 +791,26 @@ async def _write_tool_call_row(
     # back. ``call_operation`` keeps its ``tool_call`` label on both;
     # only the redaction detail comes from the inner op above.
     _wraps_inner_op = _broadcast_op_id != audit_name
+    # The inner operation's own row can say it holds a secret (a class that a
+    # connector's safety floor stored): then the broadcast shows only the
+    # aggregate, as for an op id in a secret class. The row the dispatcher
+    # ran counts first; the row the caller named counts too. When this
+    # request saw no row picked (a call started in the background, a check
+    # of such a call, or a call that stopped early), every version the
+    # dispatcher could pick counts.
+    _inner_secret_class: str | None = None
+    if _wraps_inner_op and ran_op_class in SECRET_CLASSES:
+        _inner_secret_class = ran_op_class
+    elif (
+        _wraps_inner_op and ran_op_class is None and isinstance(arguments.get("connector_id"), str)
+    ):
+        _inner_secret_class = await lookup_secret_op_class_any_version(
+            operator.tenant_id, arguments["connector_id"], _broadcast_op_id
+        )
+    elif _wraps_inner_op and isinstance(arguments.get("connector_id"), str):
+        _inner_secret_class = await lookup_secret_op_class(
+            operator.tenant_id, arguments["connector_id"], _broadcast_op_id
+        )
     (
         broadcast_op_class,
         broadcast_detail,
@@ -784,7 +820,7 @@ async def _write_tool_call_row(
         tenant_id=operator.tenant_id,
         raw_params=resolver_params,
         request_override=request_override,
-        op_class_override=None if _wraps_inner_op else audit_payload["op_class"],
+        op_class_override=(_inner_secret_class if _wraps_inner_op else audit_payload["op_class"]),
     )
     if not _wraps_inner_op:
         audit_payload["op_class"] = broadcast_op_class

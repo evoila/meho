@@ -111,7 +111,6 @@ from meho_backplane.audit_query import (
     replay_session,
 )
 from meho_backplane.auth.client_identity import via_label
-from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import load_trace
@@ -135,6 +134,7 @@ from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     fetch_audit_row,
     is_aggregate_only,
     resolve_op_id,
+    resolve_row_op_class,
 )
 from meho_backplane.ui.routes.work_ref_form import filter_work_ref
 from meho_backplane.ui.templating import get_templates
@@ -426,8 +426,8 @@ async def _build_drawer_context(
 ) -> dict[str, object]:
     """Assemble the row-detail drawer context for one ``audit_log`` row.
 
-    Classifies the op via the same :func:`classify_op` chain the broadcast
-    drawer uses, applies the shared aggregate-only gate
+    Classifies the op with :func:`resolve_row_op_class` (the stored secret class
+    of the audit row, else the op id), applies the shared aggregate-only gate
     (:func:`is_aggregate_only`) so a ``credential_read`` / ``credential_mint``
     / ``audit_query`` row -- or any row whose ``broadcast_detail_effective``
     is ``"aggregate"`` -- renders the 🔒 placeholder and **no** payload, and
@@ -445,7 +445,7 @@ async def _build_drawer_context(
     ``agent_session_id``.
     """
     op_id = resolve_op_id(row)
-    op_class = classify_op(op_id)
+    op_class = resolve_row_op_class(row, op_id)
     aggregate_only = is_aggregate_only(row, op_class)
     # Only the full-detail path projects the request payload; the
     # aggregate-only branch never renders it at all (decision #3).

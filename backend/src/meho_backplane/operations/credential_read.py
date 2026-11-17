@@ -3,8 +3,9 @@
 
 """The floor for operations that show a secret value.
 
-An operation whose class is ``credential_read`` runs at risk level
-``caution`` or higher and waits for a person's approval. The floor only
+An operation whose class is ``credential_read``, or whose row stores
+``credential_mint``, runs at risk level ``caution`` or higher and waits for
+a person's approval. The floor only
 raises: a connector may set a higher level, never a lower one.
 
 The one exception is a read that is marked in code as one that returns no
@@ -83,7 +84,12 @@ def has_credential_read_floor(
     operation (a connector's safety floor sets it at ingest). It counts
     like a declared class: it never replaces a credential or audit class
     that the op id already gives (:func:`resolve_op_class`).
+
+    An operation with a stored ``credential_mint`` gets the same floor: it
+    makes a new credential, so a person approves every call.
     """
+    if stored_op_class == "credential_mint":
+        return True
     if resolve_op_class(op_id, stored_op_class) != "credential_read":
         return False
     if op_id in _VAULT_NO_SECRET_VALUE_OPS or returns_no_secret_value(op_id):

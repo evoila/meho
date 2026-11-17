@@ -65,6 +65,7 @@ from meho_backplane.operations._request_preview import (
     is_credential_builder_op,
 )
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.op_class_of import descriptor_op_class
 
 __all__ = ["PLAN_NOT_SHOWN_NOTE", "build_composite_preview", "safe_params_view"]
 
@@ -121,7 +122,9 @@ async def _synthetic_proposed_effect(
             connector_id=connector_id,
         )
     )
-    populated, _reason = describe_preview_provenance(proposed_effect, op_id=descriptor.op_id)
+    populated, _reason = describe_preview_provenance(
+        proposed_effect, op_id=descriptor.op_id, op_class=descriptor_op_class(descriptor)
+    )
     return proposed_effect if populated else None
 
 

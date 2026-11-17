@@ -505,6 +505,7 @@ async def _resume_approved_or_already_resumed(
         refuse_resume_if_target_changed,
     )
     from meho_backplane.operations.meta_tools import apply_target_fqdn_override
+    from meho_backplane.operations.op_class_of import request_op_class
     from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 
     # #5024: a stopping pod starts no new run. Refuse before the claim and
@@ -610,7 +611,12 @@ async def _resume_approved_or_already_resumed(
     # #3486: store the outcome, as the operator resume does, so the list and
     # show views move the request from ``started`` to ``executed`` or
     # ``failed``. Fail-soft: the dispatch's own audit row already committed.
-    await persist_resume_result(approval_request_id, envelope, parked_op_id=request.op_id)
+    await persist_resume_result(
+        approval_request_id,
+        envelope,
+        parked_op_id=request.op_id,
+        parked_op_class=request_op_class(request.op_id, request.proposed_effect),
+    )
     return envelope
 
 

@@ -605,7 +605,7 @@ async def test_the_floors_run_against_the_stored_operations(
     )
     await _register(embedding, "polfix.pw.read")
     monkeypatch.setattr(
-        validate_module, "has_credential_read_floor", lambda op_id: op_id == "polfix.pw.read"
+        validate_module, "has_credential_read_floor", lambda op_id, **_: op_id == "polfix.pw.read"
     )
     content = b"policy: v1\nclassifications:\n  - {match: {op: 'polfix.*'}, always_wait: false}\n"
     async with get_sessionmaker()() as session:

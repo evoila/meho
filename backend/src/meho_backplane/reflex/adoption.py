@@ -357,8 +357,9 @@ async def _fetch_dispatch_rows(
 ) -> list[Any]:
     """Pull successful dispatcher rows in the window (write-class filtered later).
 
-    Returns ``(occurred_at, agent_session_id, path)``. ``path`` is the
-    descriptor ``op_id``; the write-class filter is applied in Python via
+    Returns ``(occurred_at, agent_session_id, path, op_class)``. ``path`` is
+    the descriptor ``op_id`` and ``op_class`` the class the dispatcher stored
+    on the row (``None`` on an old row); the write-class filter is applied in Python via
     :func:`classify_op` because the classifier is match-order-significant
     Python, not expressible in portable SQL.
     """
@@ -367,6 +368,7 @@ async def _fetch_dispatch_rows(
             AuditLog.occurred_at,
             AuditLog.agent_session_id,
             AuditLog.path,
+            AuditLog.payload["op_class"].as_string().label("op_class"),
         )
         .where(AuditLog.occurred_at >= since)
         .where(AuditLog.occurred_at <= until)
@@ -462,7 +464,10 @@ def _announce_coverage(
     for row in dispatch_rows:
         if _is_agent_surface(row.agent_session_id) != surface:
             continue
-        if classify_op(row.path) not in WRITE_OP_CLASSES:
+        # The class the dispatcher stored on the row counts too: a stored
+        # class on an ingested operation is not in the op id.
+        stored = getattr(row, "op_class", None)
+        if stored not in WRITE_OP_CLASSES and classify_op(row.path) not in WRITE_OP_CLASSES:
             continue
         write_ops += 1
         sid = row.agent_session_id

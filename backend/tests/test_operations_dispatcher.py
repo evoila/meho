@@ -3859,7 +3859,7 @@ async def test_park_populates_proposed_effect_from_builder(
             assert row is not None
             # The builder's preview landed under the {op_class, preview}
             # envelope.
-            assert row.proposed_effect["op_class"] == "other"
+            assert row.proposed_effect["op_class"] == "read"
             assert row.proposed_effect["preview"]["would_change"] == ["deployment/web"]
             # Uniform op-identity envelope (#2681): op_id/connector_id/target_id
             # are stamped onto the built-preview envelope too, so the parked
@@ -3925,7 +3925,7 @@ async def test_park_without_builder_uses_identifier_default(
             "op_id": "vault.kv.no_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
-            "op_class": "other",
+            "op_class": "read",
             "safety_level": "safe",
             "preview_populated": False,
             "preview_reason": "connector_did_not_populate",
@@ -3998,7 +3998,7 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             assert row is not None
             # Generic params-echo base (#1856) carries the op identity via
             # op_class + the echoed params; the preflight is merged in.
-            assert row.proposed_effect["op_class"] == "other"
+            assert row.proposed_effect["op_class"] == "write"
             assert row.proposed_effect["params_echo"] == {"path": "meho/test/x"}
             preflight = row.proposed_effect["permission_preflight"]
             assert preflight["will_be_denied"] is False

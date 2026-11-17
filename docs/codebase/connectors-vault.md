@@ -690,8 +690,9 @@ target registration) is documented in
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
 | `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
+| `vault.kv.generate` | `read_secret_version` + `create_or_update_secret` | caution | `write` |
 
-All nine register into operation group `kv`.
+All ten register into operation group `kv`.
 
 **What `vault.kv.read` returns.** The answer keeps the key names under
 `data` and the `version`. Every value is hidden as
@@ -709,6 +710,27 @@ once, within 15 minutes of the approval, and MEHO stores no value
 `vault.kv.list` and `vault.kv.compare` return no secret value, so they
 stay `safe` and run at once. See
 [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals).
+
+**Make a password (`vault.kv.generate`, `ops_kv_generate.py`).** Makes a
+random password that meets a product's rules and stores it in one KV field.
+Other operations then use it by reference (path and field).
+
+- Params: `mount`, `path`, `field` (default `password`), `length` (default
+  24), `min_upper`, `min_lower`, `min_digits` (default 1 each), `min_special`
+  (default 0), `special_chars` (default `!@#$%^&*-_=+`; an empty string means
+  none), `max_repeat` (the longest run of one character) and `rotate`.
+- `PasswordRules` checks that the rules can be met (the minimums fit in the
+  length, `min_special` needs special characters). A bad rule set is
+  refused before any Vault call. The value comes from Python `secrets`.
+- The read and the write are shared with the userpass password source
+  (`userpass_password.py`): the write uses `cas`, so a second writer is not
+  overwritten, and it keeps the other fields at the path.
+- Safe to run twice: a field that holds a value is left alone
+  (`generated: false`). `rotate: true` writes a new version.
+- The result is `{mount, path, field, version, generated}`. The params hold
+  no value, so the op class is plain `write`. The approval preview shows the
+  path, the field and the rules, never a value. The Vault rights it needs
+  are `read`, `create` and `update` on `<mount>/data/<path>`.
 
 **Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
 many secrets under one folder with one approval. Before it, each secret
@@ -963,7 +985,7 @@ broadcast is the consistent, safe direction (same rationale as the
 
 The mutating KV ops — `vault.kv.put` (`caution`), `vault.kv.patch`
 (`caution`), `vault.kv.delete` (`dangerous`), `vault.kv.metadata.delete`
-(`destructive`, #3424), `vault.kv.folder.delete` (`dangerous`) — register `requires_approval=True` (G3.15-T1
+(`destructive`, #3424), `vault.kv.folder.delete` (`dangerous`), `vault.kv.generate` (`caution`) — register `requires_approval=True` (G3.15-T1
 #1409). The flag became meaningful
 once G11.7-T1 (#1401) routed human principals hitting a
 `requires_approval` op to the **approval queue** (park for review)

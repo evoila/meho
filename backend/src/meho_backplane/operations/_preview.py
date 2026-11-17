@@ -859,6 +859,7 @@ def _register_builtin_builders() -> None:
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",
+        "vault.kv.generate",
         "vault.kv.delete",
         "vault.kv.metadata.delete",
     ):

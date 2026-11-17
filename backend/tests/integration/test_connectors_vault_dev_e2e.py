@@ -2215,6 +2215,68 @@ async def test_userpass_generated_password_is_only_in_kv_and_works_once(
 
 
 @pytest.mark.asyncio
+async def test_kv_generate_stores_a_value_that_meets_the_rules_and_shows_it_nowhere(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """``vault.kv.generate``: the value is in KV only, a repeat changes nothing, rotate adds one."""
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    root.secrets.kv.v2.create_or_update_secret(
+        path="labs/generated", secret={"username": "svc-user"}, mount_point=_KV_MOUNT
+    )
+    params = {
+        "path": "labs/generated",
+        "length": 20,
+        "min_special": 1,
+        "special_chars": "!#-_",
+        "max_repeat": 2,
+    }
+
+    first = await _dispatch_approved(target, "vault.kv.generate", params, "op-kvgen-1")
+    assert first.status == "ok", first.error
+    assert first.result == {
+        "mount": _KV_MOUNT,
+        "path": "labs/generated",
+        "field": "password",
+        "version": 2,
+        "generated": True,
+    }
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="labs/generated", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    value = stored["password"]
+    assert stored["username"] == "svc-user"
+    assert len(value) == 20
+    assert any(c in "!#-_" for c in value)
+    assert all(not (a == b == c) for a, b, c in zip(value, value[1:], value[2:], strict=False))
+    assert value not in json.dumps(first.result)
+    row = await _assert_audited(
+        "vault.kv.generate", operator_sub="op-kvgen-1", expected_op_class="write"
+    )
+    assert value not in json.dumps(row.payload, default=str)
+
+    # A second run changes nothing: same version, same value.
+    second = await _dispatch_approved(target, "vault.kv.generate", params, "op-kvgen-2")
+    assert second.status == "ok", second.error
+    assert second.result["generated"] is False
+    assert second.result["version"] == 2
+    again = root.secrets.kv.v2.read_secret_version(path="labs/generated", mount_point=_KV_MOUNT)
+    assert again["data"]["metadata"]["version"] == 2
+    assert again["data"]["data"]["password"] == value
+
+    # rotate writes a new version with a new value and keeps the other field.
+    rotated = await _dispatch_approved(
+        target, "vault.kv.generate", {**params, "rotate": True}, "op-kvgen-3"
+    )
+    assert rotated.status == "ok", rotated.error
+    assert rotated.result["version"] == 3
+    assert rotated.result["generated"] is True
+    latest = root.secrets.kv.v2.read_secret_version(path="labs/generated", mount_point=_KV_MOUNT)
+    assert latest["data"]["data"]["password"] != value
+    assert latest["data"]["data"]["username"] == "svc-user"
+
+
+@pytest.mark.asyncio
 async def test_userpass_disable_blocks_login_and_enable_restores_it(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:

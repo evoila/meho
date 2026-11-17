@@ -89,8 +89,10 @@ from meho_backplane.connectors.linux.ops_host import (
     validate_unit_name,
 )
 from meho_backplane.connectors.linux.script_preview import (
+    SCRIPT_MAX_BYTES,
     script_matches_expected,
     script_preview_fields,
+    script_too_large_message,
 )
 
 if TYPE_CHECKING:
@@ -1170,6 +1172,27 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     return preview
 
 
+def _check_script_size(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Params check of ``linux.script.run``: refuse a script over the size limit.
+
+    Runs before the call can wait for approval. The schema ``maxLength`` counts
+    characters; this counts UTF-8 bytes, which is what the limit means.
+    """
+    script = params.get("script")
+    if not isinstance(script, str):
+        return None
+    size = len(script.encode("utf-8"))
+    if size <= SCRIPT_MAX_BYTES:
+        return None
+    from meho_backplane.operations._validate import params_problem
+
+    return params_problem(
+        "script",
+        f"a script of at most {SCRIPT_MAX_BYTES:,} bytes",
+        script_too_large_message(size),
+    )
+
+
 def register_linux_write_previews() -> None:
     """Register the two credential-class bespoke preview builders (import-time).
 
@@ -1182,9 +1205,11 @@ def register_linux_write_previews() -> None:
     bespoke builder -- they preview via the generic params-echo default.
     """
     from meho_backplane.operations._preview import register_preview_builder
+    from meho_backplane.operations._validate import register_params_check
 
     register_preview_builder("linux.file.write", _linux_file_write_preview)
     register_preview_builder("linux.script.run", _linux_script_run_preview)
+    register_params_check("linux.script.run", _check_script_size)
 
 
 # ===========================================================================
@@ -1381,9 +1406,11 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "script": {
                 "type": "string",
+                "maxLength": SCRIPT_MAX_BYTES,
                 "description": (
-                    "The script body to run. The approver reads it and its "
-                    "SHA-256. Do NOT embed bare secrets."
+                    "The script body to run, at most 1,048,576 bytes. The "
+                    "approver reads it page by page, and its SHA-256. Do NOT "
+                    "embed bare secrets."
                 ),
             },
             "script_ref": {

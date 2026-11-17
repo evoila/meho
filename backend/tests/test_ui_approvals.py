@@ -2688,7 +2688,7 @@ def test_modal_decisions_are_two_phase_armers_not_direct_posts() -> None:
 
 def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
     """AC3: the armed confirm buttons post to the existing approve/reject routes;
-    the ``/ui/approvals`` route inventory gains no new endpoint."""
+    the ``/ui/approvals`` route inventory gains no new endpoint for the confirm."""
     body, rid = _render_pending_modal()
     assert f'hx-post="/ui/approvals/{rid}/approve"' in body
     assert f'hx-post="/ui/approvals/{rid}/reject"' in body
@@ -2708,6 +2708,8 @@ def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
         ("/ui/approvals/list", frozenset({"GET"})),
         ("/ui/approvals", frozenset({"GET"})),
         ("/ui/approvals/{request_id}", frozenset({"GET"})),
+        # The script block's page links of a long ``linux.script.run`` script.
+        ("/ui/approvals/{request_id}/script", frozenset({"GET"})),
         ("/ui/approvals/{request_id}/approve", frozenset({"POST"})),
         ("/ui/approvals/{request_id}/reject", frozenset({"POST"})),
     }

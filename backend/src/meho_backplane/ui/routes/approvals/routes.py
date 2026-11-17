@@ -146,6 +146,8 @@ from meho_backplane.auth.approval_sign_in import (
 )
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.rbac import require_approvals_access
+from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_context import (
@@ -185,6 +187,11 @@ from meho_backplane.operations.approval_rights import (
     ApproveRightReason,
     approve_right,
     self_approval_confirmation,
+)
+from meho_backplane.operations.approval_script import (
+    ApprovalScriptGoneError,
+    ApprovalScriptMissingError,
+    read_script_page,
 )
 from meho_backplane.policy.routing import routing_enabled
 from meho_backplane.settings import get_settings
@@ -669,6 +676,16 @@ def build_approvals_router() -> APIRouter:
         """Render the request-detail + approve/deny modal (delegates below)."""
         return await _render_detail_modal(request, session, request_id)
 
+    @router.get("/ui/approvals/{request_id}/script", response_class=HTMLResponse)
+    async def approval_script_page(
+        request: Request,
+        request_id: uuid.UUID,
+        session: UISessionContext = _require_session,
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        """Render one page of the script block of a waiting script run."""
+        return await _render_script_page(request, session, request_id, page)
+
     @router.post("/ui/approvals/{request_id}/approve", response_class=HTMLResponse)
     async def approval_approve(
         request: Request,
@@ -901,6 +918,40 @@ async def _render_history(
         else "approvals/_history.html"
     )
     return get_templates().TemplateResponse(request, template, context)
+
+
+async def _render_script_page(
+    request: Request, session: UISessionContext, request_id: uuid.UUID, page: int
+) -> HTMLResponse:
+    """Render the script block at page *page*, the fragment the page links swap in.
+
+    The same access as ``GET /api/v1/approvals/{id}/script``: a person who may
+    not read the request gets no page.
+    """
+    require_approvals_access(await _resolve_operator(session))
+    async with get_sessionmaker()() as db_session:
+        try:
+            row = await get_request(db_session, tenant_id=session.tenant_id, request_id=request_id)
+            page_fields = await read_script_page(db_session, row, page)
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+            ) from exc
+        except ApprovalScriptGoneError as exc:
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+        except (ApprovalScriptMissingError, ScriptPageOutOfRangeError) as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    preview = (row.proposed_effect or {}).get("preview")
+    fields: dict[str, object] = {}
+    if isinstance(preview, dict):
+        fields.update({k: v for k, v in preview.items() if k in ("script_ref", "script_check")})
+    fields.update(page_fields)
+    fields["script_page"] = page
+    return get_templates().TemplateResponse(
+        request,
+        "approvals/_script.html",
+        {"fields": fields, "script_request_id": row.id},
+    )
 
 
 async def _render_detail_modal(

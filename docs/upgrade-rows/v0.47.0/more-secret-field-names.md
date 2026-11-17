@@ -1,0 +1,5 @@
+## Note
+MEHO hides more secret fields. Results, approval previews, audit rows, the call trace and the broadcast now show `[REDACTED:param_name]` in place of the value of these fields: names that end in `auth_key`, `priv_key`, `authentication_key`, `privacy_key`, `community_string`, `tacacs_key`, `radius_key`, `hmac_key`, `signing_key`, `store_key` or `application_key`, the names `pass_phrase` and `snmp_community`, and a `community` field in an SNMP place (next to an SNMP field, under an `snmp` key, or a name/value pair named `community`). Every spelling counts: `authKey`, `auth-key`, `AUTHKEY`, `snmpAuthKey`. A name that ends in `_ref` is hidden when the rest of it is such a name (`auth_key_ref`).
+
+## Action
+A caller that needs such a value reads it through its secret reference, not from the result. Check scripts that read one of these fields from a result: they now get the marker. A settings file that has one of the new names under a target's `extras` is now refused by the settings check: store the value in OpenBao and use `secret_ref`. A call that sends one of the new names now shows in the broadcast in its short summary form, without its params.

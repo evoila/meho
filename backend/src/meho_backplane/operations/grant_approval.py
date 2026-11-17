@@ -143,6 +143,9 @@ class _GrantOp:
     #: A card key that lists the ``{"id": ...}`` entries the run acts on, and
     #: the refusal when the live card lists other ids. ``None``: no such list.
     bound_ids: tuple[str, str] | None = None
+    #: The refusal when the approved card has no list under the ``bound_ids``
+    #: key: the request was made before MEHO put that list on the card.
+    bound_ids_missing: str | None = None
 
 
 #: op_id -> where its params carry the login and the group.
@@ -155,6 +158,7 @@ def register_grant_op(
     user_id_params: tuple[str, ...] = (),
     group_id_params: tuple[str, ...] = (),
     bound_ids: tuple[str, str] | None = None,
+    bound_ids_missing: str | None = None,
 ) -> None:
     """Record that *op_id* changes the rights of a login or a group.
 
@@ -163,8 +167,10 @@ def register_grant_op(
     *bound_ids* is ``(card key, refusal)`` for a change that acts on a list
     of objects shown on the card: the run is refused with the refusal when
     the live card lists other ids than the approved card.
+    *bound_ids_missing* is the refusal when the approved card has no list
+    under that key at all: the request is older than the list.
     """
-    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params, bound_ids)
+    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params, bound_ids, bound_ids_missing)
 
 
 #: Operations that are always a change of rights, but not of one login or
@@ -473,10 +479,15 @@ def _bound_ids_moved(request: ApprovalRequest, live_preview: Any) -> str | None:
     if op is None or op.bound_ids is None:
         return None
     key, reason = op.bound_ids
+    approved_preview = (request.proposed_effect or {}).get("preview")
+    if op.bound_ids_missing is not None and not (
+        isinstance(approved_preview, dict) and key in approved_preview
+    ):
+        return op.bound_ids_missing
     now = _card_ids(live_preview, key)
     if now is None:
         return GRANT_REASON_UNREADABLE
-    approved = _card_ids((request.proposed_effect or {}).get("preview"), key)
+    approved = _card_ids(approved_preview, key)
     return None if approved == now else reason
 
 

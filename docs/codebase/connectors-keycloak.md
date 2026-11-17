@@ -500,6 +500,14 @@ guide, and the `user_write` blurb tells the agent not to put `tenant_*`
 on the user (Keycloak's default user profile drops unmanaged
 attributes) but to add the user to one role group.
 
+`role_mapping.assign` and `group.member.add` also wait for a person on
+every call (`declare_per_call_approval` in `op_classes.py`). No standing
+grant of a service account and no run approval covers them, and a grant
+made before this rule does not cover a call. `role_mapping.assign` gives a
+role and every part of it. `group.member.add` gives the new member the
+roles of the group. MEHO does not yet judge a group by the roles it gives,
+so waiting for a person each time is the safe rule.
+
 Four load-bearing properties (of the original nine; the group ops layer
 their own idempotency above):
 
@@ -515,6 +523,8 @@ their own idempotency above):
   `role_mapping.assign`. A `/`, a dot or a `%` stays part of the name.
   `role_mapping.assign` refuses a role whose returned name is not the
   name asked for, and its result lists the names Keycloak returned.
+  When the user cannot be read when the request is made, the approved run
+  is refused, because the approval card shows no stored username.
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
   success (`conflict: true`), and the existing object's UUID is resolved.
 - **Password handling.** `user.create` / `user.reset_password` source the
@@ -676,14 +686,17 @@ for example at the end of an event or when someone leaves.
 - Pass `id` (the user's UUID) or `username`. A username is looked up with
   `_find_user_uuid` (exact match), the same as `user.reset_password`.
 - A user that does not exist raises `KeycloakUserNotFoundError`: no match
-  for the username, or a 404 from the logout call for an `id`.
+  for the username, or a 404 when the op reads the user before the logout
+  call. A 404 from the logout call itself (the user was removed in between)
+  raises it too.
 - Safe to run twice. Keycloak answers 204 whether or not the user had
   sessions. The result is `{id, username, logged_out: true}`.
 - It reads and returns no credential. It does not change the password (that
   is `user.reset_password`). It signs out one user only; the realm-wide
   `POST .../logout-all` is not offered.
-- Risk level `caution`, approval required, group `user_write`. No bespoke
-  approval card: the generic params echo shows the `id` / `username`. On the
+- Risk level `caution`, approval required, group `user_write`. The approval
+  card shows the user as Keycloak stores it (see "One user, as Keycloak
+  stores it"). On the
   broadcast feed it is a plain `write` (pinned in
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
@@ -728,7 +741,15 @@ in. For these three, the person the change is for never approves it. In
 MEHO's own login realm another admin must approve it; a person who may
 approve their own changes cannot approve these alone. In MEHO's own login
 realm, a role of the `realm-management` client (in any case) also needs a
-platform admin as approver: it decides who may manage the realm. In another
+platform admin as approver: it decides who may manage the realm. The same
+holds for `role_mapping.assign` and `client.assign` when a part of the
+named role, on any level, is such a role or a role that MEHO's login maps to
+platform admin rights. The card lists them as `effective_roles`, and the run
+is refused when the parts change before it (`ops_write_effective_roles.py`).
+A request that waited from before MEHO read the parts has no
+`effective_roles` on its card. Its run is refused in every realm with "This
+request was made before MEHO read what a role gives. Send it again."
+(`bound_ids_missing` in `operations/grant_approval.py`). In another
 realm these writes are not a change of rights: the normal approval rules of
 their risk level apply, and only the person the change is for is refused.
 
@@ -846,6 +867,54 @@ the existing mapper is changed.
 - Not offered: adding a mapper to a client scope, and changing or deleting a
   mapper on a client.
 
+### One user, as Keycloak stores it
+
+Every Keycloak user write shares one helper,
+`connectors/keycloak/ops_write_user_identity.py`. It covers
+`user.disable`, `user.enable`, `user.logout`, `user.reset_password`,
+`user.delete`, `user.required_actions.update`, `role_mapping.assign`,
+`role_mapping.client.assign`, `role_mapping.client.remove`, `user.update`,
+`user.credential.delete`, `group.member.add` and `group.member.remove`
+(these two name the user as `user_id`). That is 13 ops. A test
+(`test_every_keycloak_user_write_uses_the_shared_user_check`) finds every
+Keycloak write op that takes a user id and a `username`, and fails when one
+of them does not use this check.
+
+- A request with both an id and a `username` must name one user. The
+  username stored in Keycloak for that id must match (case does not
+  count). If not, the request is refused before it waits for approval (a
+  park check), and no approval request is stored. The same check runs
+  again when the approved request runs, so a user who was renamed in
+  between is refused. Nothing is written. `user.delete` uses the same park
+  check, and its lookup (`find_user`) refuses a mismatch.
+- The approval card shows the username stored in Keycloak for the user id
+  (`username`, `user_available: true`). A name the caller sent is never
+  shown as the user's name: when the user cannot be read, the card has no
+  `username`. It shows the sent value as `requested_username` and
+  `user_available: false`.
+- `user.delete` keeps its own card (the delete's `blast_radius` block). Its
+  `username` is only the stored name. For a user that does not exist, the
+  card shows the sent name as `requested_username`.
+- After approval, the op acts on the user id shown on the card. It does not
+  look the username up again. A card without a user id is refused. A card
+  without a stored username (no `username`, or `user_available` is not
+  true) is refused too: MEHO cannot tell that it is the same user. The
+  run then compares the card's username with the name Keycloak stores
+  now. So a request sent with only an id is refused too when the user was
+  renamed while it waited. Nothing is written. A request that waited
+  across the upgrade to this rule is refused for the same reason: its card
+  has no `user_available`.
+- `user.delete` after approval: it uses the user id and the realm on the
+  card. The run is refused when the card said the user does not exist,
+  when the card shows no username, or when the username stored for that
+  id is not the one on the card (the user was renamed). A user who was deleted and made again with the same
+  name has a new id, so the run finds nothing and answers
+  `already_absent: true`. The delete guards are checked again.
+- The result shows the stored username (`group.member.*` results now carry
+  `username` too).
+- With only an id, or only a username, the call works as before. Each run
+  now reads the user once before the write.
+
 ### One-time code set-up
 
 Two ops in `ops_user_required_actions.py`. The usual use is to make users
@@ -877,11 +946,11 @@ login.
   - Answer: `{id, username, realm, changed, added, removed,
     required_actions, unrequested_changes, read_back_checked}`.
   - The approval card shows `{resource, username, id, realm, add, remove,
-    current_available[, current_required_actions,
+    current_available, user_available[, current_required_actions,
     resulting_required_actions][, warning]}`. When the user could be
     read, the card and the answer show the username stored in Keycloak.
     When the user cannot be read at park time, the card still shows the
-    request.
+    request, and the approved run is refused.
   - When the realm is the one MEHO's own sign-in uses and `add` has a
     passkey set-up (`webauthn-register` or
     `webauthn-register-passwordless`), the card's `warning` says: "this
@@ -988,14 +1057,18 @@ a change made while the request waited). A refused delete never reaches an
 approver: the builder raises, the park is refused with
 `blast_radius_required`, and the reason carries the refusal, for example
 `keycloak.client.delete refused (builtin_client): ...`. A delete by name
-acts on the object that has that name when the approved call runs; pass
-the `id` to pin one exact object (the card shows the id).
+of a group or a client acts on the object that has that name when the
+approved call runs; pass the `id` to pin one exact object (the card shows
+the id). A user delete always acts on the user id and the realm on the card
+(see "One user, as Keycloak stores it").
 
 Safe to run twice: when the object is already gone, the handler sends no
 DELETE and returns `already_absent: true`. The approval card says so too
 (`present: false`, irreversibility `none-object-already-absent`), so a
-repeated teardown still waits for approval as usual and then reports
-`already_absent: true`.
+repeated teardown of a group or a client still waits for approval as usual
+and then reports `already_absent: true`. A user delete whose card said the
+user does not exist is refused when it runs: the approver saw no user to
+delete.
 
 The CLI verbs `meho keycloak user|group|client delete` run the same two
 steps: without `--preview-hash` they only preview and print the hash; with
@@ -1366,7 +1439,7 @@ use:
 | `keycloak.realm.create` | `{resource, realm, representation}` |
 | `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
 | `keycloak.user.reset_password` | `{resource, username, id, realm, password_source, password_secret_ref, temporary[, password_secret_mount, password_secret_key]}` |
-| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles, effective_roles}` |
 | `keycloak.group.create` | `{resource, name, parent_id, realm, attribute_keys, attributes}` |
 | `keycloak.group.update_attributes` | `{resource, id, name, realm, replace, attribute_keys, attributes}` |
 | `keycloak.group.member.add` / `.member.remove` | `{resource, action, user_id, username, group_id, group_name, realm}` |
@@ -1374,7 +1447,7 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
-| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
+| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available, user_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |

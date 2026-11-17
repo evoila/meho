@@ -134,6 +134,11 @@ def test_strict_booleans() -> None:
         ("client-secret", True),
         ("bearer_token", True),
         ("private_key", True),
+        # new secret names, and a name that ends in ref where the rest is one
+        ("snmpAuthKey", True),
+        ("pass_phrase", True),
+        ("community_string", True),
+        ("password_ref", True),
         ("token_url", False),
         ("secret_path", False),
         ("basic_username", False),

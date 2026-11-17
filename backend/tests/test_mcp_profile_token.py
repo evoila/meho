@@ -128,6 +128,7 @@ def test_token_without_the_claim_works_as_before(client: TestClient, key: Any, u
 @pytest.mark.parametrize(
     ("value", "detail"),
     [
+        (None, "malformed_mcp_profile_claim"),
         (123, "malformed_mcp_profile_claim"),
         ("", "malformed_mcp_profile_claim"),
         (["k8s"], "malformed_mcp_profile_claim"),
@@ -180,7 +181,14 @@ async def test_an_entrance_refuses_a_profile_token_unless_it_allows_it(key: Any)
 
 @pytest.mark.parametrize(
     ("claims", "expected"),
-    [({}, None), ({"mcp_profile": None}, None), ({"mcp_profile": " K8s "}, "k8s")],
+    [({}, None), ({"mcp_profile": " K8s "}, "k8s")],
 )
 def test_the_claim_is_read(claims: dict[str, Any], expected: str | None) -> None:
     assert read_mcp_profile_claim(claims) == expected
+
+
+def test_a_null_claim_is_refused() -> None:
+    with pytest.raises(HTTPException) as caught:
+        read_mcp_profile_claim({"mcp_profile": None})
+    assert caught.value.status_code == 403
+    assert caught.value.detail == "malformed_mcp_profile_claim"

@@ -61,13 +61,13 @@ def _http_403(detail: str) -> HTTPException:
 def read_mcp_profile_claim(claims: Any) -> str | None:
     """Return the profile name of the ``mcp_profile`` claim, or ``None``.
 
-    No claim gives ``None``. A value that is not a non-blank text, or a
-    profile name MEHO does not know, raises 403: the claim takes rights
-    away, so a value MEHO cannot use must never free the token.
+    No claim gives ``None``. A value that is not a non-blank text (also
+    ``null``), or a profile name MEHO does not know, raises 403: the claim
+    takes rights away, so a value MEHO cannot use must never free the token.
     """
-    raw = claims.get(MCP_PROFILE_CLAIM)
-    if raw is None:
+    if MCP_PROFILE_CLAIM not in claims:
         return None
+    raw = claims[MCP_PROFILE_CLAIM]
     log = structlog.get_logger(__name__)
     if not isinstance(raw, str) or not raw.strip():
         log.warning(MALFORMED_CLAIM, claim_name=MCP_PROFILE_CLAIM)

@@ -104,7 +104,7 @@ from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     card_user_id,
     check_card_username,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
@@ -192,7 +192,7 @@ async def user_blast_radius(
             target,
             fill_path(
                 _USER_GROUPS_PATH,
-                {"realm": found.realm, "user-id": quote_segment(found.object_id)},
+                {"realm": found.realm, "user-id": found.object_id},
             ),
             operator=operator,
         )
@@ -241,7 +241,7 @@ async def group_blast_radius(
     obj: dict[str, Any] = {"kind": "keycloak_group", "name": found.name}
     children: list[dict[str, Any]] = []
     if found.rep is not None and found.object_id is not None:
-        values = {"realm": found.realm, "group-id": quote_segment(found.object_id)}
+        values = {"realm": found.realm, "group-id": found.object_id}
         members = await connector._get_admin_list(
             target,
             fill_path(_GROUP_MEMBERS_PATH, values),
@@ -337,7 +337,7 @@ async def _approved_user(
             "Send a new request."
         )
     realms = dataclasses.replace(resolve_realm_config(target), managed_realm=realm)
-    path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)})
+    path = fill_path(_USER_PATH, {"realm": realm, "user-id": uuid})
     rep = await get_or_none(connector, target, path, operator)
     if rep is not None:
         check_card_username(USER_DELETE_OP, shown, rep)
@@ -364,7 +364,7 @@ async def keycloak_user_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_user_guards(self, operator, target, found)
-    path = fill_path(_USER_PATH, {"realm": found.realm, "user-id": quote_segment(found.object_id)})
+    path = fill_path(_USER_PATH, {"realm": found.realm, "user-id": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=USER_DELETE_OP, path=path, result=result
     )
@@ -382,9 +382,7 @@ async def keycloak_client_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_client_guards(self, operator, target, found)
-    path = fill_path(
-        _CLIENT_PATH, {"realm": found.realm, "client-uuid": quote_segment(found.object_id)}
-    )
+    path = fill_path(_CLIENT_PATH, {"realm": found.realm, "client-uuid": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=CLIENT_DELETE_OP, path=path, result=result
     )
@@ -411,9 +409,7 @@ async def keycloak_group_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     check_group_guards(found, params)
-    path = fill_path(
-        _GROUP_PATH, {"realm": found.realm, "group-id": quote_segment(found.object_id)}
-    )
+    path = fill_path(_GROUP_PATH, {"realm": found.realm, "group-id": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=GROUP_DELETE_OP, path=path, result=result
     )

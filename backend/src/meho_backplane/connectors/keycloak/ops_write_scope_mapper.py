@@ -69,7 +69,7 @@ from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundErr
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
@@ -173,9 +173,7 @@ async def _resolve_scope(
                 f"{_OP_ID}: no client scope named {name!r} in realm {realm!r}"
             )
         return found, name
-    path = fill_path(
-        _CLIENT_SCOPE_PATH, {"realm": realm, "client-scope-id": quote_segment(scope_id)}
-    )
+    path = fill_path(_CLIENT_SCOPE_PATH, {"realm": realm, "client-scope-id": scope_id})
     scope = await get_or_none(connector, target, path, operator)
     if scope is None:
         raise KeycloakUserNotFoundError(
@@ -211,7 +209,7 @@ async def _resolve(
             target,
             fill_path(
                 _CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH,
-                {"realm": realm, "client-scope-id": quote_segment(scope_id)},
+                {"realm": realm, "client-scope-id": scope_id},
             ),
             operator=operator,
             strict=True,
@@ -226,8 +224,8 @@ async def _resolve(
         _CLIENT_SCOPE_PROTOCOL_MAPPER_PATH,
         {
             "realm": realm,
-            "client-scope-id": quote_segment(scope_id),
-            "id": quote_segment(mapper_id),
+            "client-scope-id": scope_id,
+            "id": mapper_id,
         },
     )
     mapper = await get_or_none(connector, target, path, operator)

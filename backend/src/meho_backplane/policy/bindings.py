@@ -34,6 +34,8 @@ The rules (:func:`bind`):
   match give two kinds, the login is refused with 401
   ``multiple_bound_kinds``. This counts every binding that matches, also
   one of another base level, so groups of two base levels never pass.
+  The one exception is the shipped self-approval group next to one other
+  shipped group (see the shipped bindings below).
 * One base level per login stays. Vault reads the ``tenant_role`` claim
   of the token, so a binding never changes the role. When the one kind
   that matches has another role than the token, it is left out and

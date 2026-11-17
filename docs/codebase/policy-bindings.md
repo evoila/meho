@@ -98,7 +98,8 @@ another case.
      another base level. So a person in groups of two base levels (for
      example two subgroups, `/MEHO-Operators/Network` and
      `/MEHO-Readers/Storage`, both bound) is refused, whatever role the
-     token carries.
+     token carries. The one exception is the shipped self-approval group
+     next to one other shipped group (see below).
    - One base level per login stays. Vault reads the `tenant_role` claim of
      the token, so a binding never changes the role. When the one kind
      that matches has another role than the token (for example `Admins`

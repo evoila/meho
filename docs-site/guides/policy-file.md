@@ -183,10 +183,14 @@ bindings:
   the shipped readers group. So a shipped binding on its own gives or
   takes no right to approve. Approver routing by category can still make
   the list of people who may approve a change shorter.
-- A person in the shipped self-approval group and in one other shipped
-  group keeps the kind of the other group: an operator group gives
-  `SA-Operators`, as today, and any other group keeps its own kind. So
-  such a person can still log in.
+- The self-approval group (the setting `JWT_SELF_APPROVER_GROUP`) can be
+  a group that is not in `JWT_ROLE_GROUPS`. Then a person can be in it
+  and in one role group. Next to an operator group the person gets
+  `SA-Operators`, as today. Next to any other group, that group's kind
+  stays.
+- With the default settings the self-approval group is a role group. A
+  person in it and in a second role group cannot log in
+  (`multiple_role_groups`), with the setting on or off.
 - A binding in your file (a stored binding) is your own choice. There the
   group alone gives the flags of the kind: a read-only person in a group
   bound to `Approvers` may approve, whatever the token says.

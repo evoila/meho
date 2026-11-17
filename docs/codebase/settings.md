@@ -216,7 +216,8 @@ them at once.
   password has no shape to find. A key that only names something about a
   token or secret (`token_url`, `secret_path`) passes. The name rule is
   `is_secret_param_name` in `broadcast/events.py`, the same one the broadcast
-  scrub and the approval echo use.
+  scrub and the approval echo use. So every name that the results hide is
+  refused here too (`snmpAuthKey`, `pass_phrase`, `password_ref`).
 - A mask such as `*`, `********` or `<keep>` is refused. It never means
   "keep the stored value".
 - Once a secret is found, nothing else is checked: no later check, and not

@@ -42,7 +42,7 @@ Keycloak stores group attributes as ``Map<String, List<String>>``. The
 coerces a plain scalar value into a single-element list
 (:func:`_normalise_attributes`). Attributes are **not** secret material and
 classify as plain ``write`` on the broadcast feed; the shared
-``redact_secret_fields`` scrub still covers a stray ``password``-keyed
+``redact_preview_fields`` scrub still covers a stray ``password``-keyed
 attribute for defence in depth (see ``ops_write_preview``).
 
 Idempotency (load-bearing)

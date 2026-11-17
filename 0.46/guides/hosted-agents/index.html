@@ -4094,6 +4094,19 @@ meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </
 meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--disabled<span class="w">   </span><span class="c1"># switch it off</span>
 meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--enabled<span class="w">    </span><span class="c1"># switch it on again</span>
 </code></pre></div>
+<p>To let the definition run as another agent, pass <code>--identity-ref</code>. When
+that agent has no grant yet, MEHO asks for its first grants, as at
+create. Pass <code>--grants</code> with it:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent<span class="w"> </span>edit<span class="w"> </span>pod-reader<span class="w"> </span>--identity-ref<span class="w"> </span>agent:&lt;other-agent&gt;<span class="w"> </span>--grants<span class="w"> </span>none
+</code></pre></div>
+<p>When the agent already has grants, MEHO needs no <code>--grants</code>. Then
+<code>meho agent create</code> and <code>meho agent edit</code> print the agent's grants that
+are live, so you see what it may do:</p>
+<div class="highlight"><pre><span></span><code>This agent already has these grants; no starting grant is needed.
+live grants of agent:&lt;other-agent&gt;:
+  op=* target=every target verdict=auto-execute ends=never
+</code></pre></div>
+<p>The console forms show the same list next to the starting grant choices.</p>
 <h2 id="step-5-set-permissions-grants">Step 5 — Set permissions (grants)<a class="headerlink" href="#step-5-set-permissions-grants" title="Permanent link">&para;</a></h2>
 <p>Every operation has a <strong>safety level</strong>: <code>safe</code>, <code>caution</code>, <code>dangerous</code>,
 or <code>destructive</code>. You see it as <code>safety_level</code> in the
@@ -4239,7 +4252,8 @@ and MEHO creates nothing.</p>
 <li>
 <p>Create the definition as in <a href="#step-4-create-the-definition">Step 4</a>,
    with <code>--identity-ref agent:report-reader</code>. It needs no <code>--grants</code>:
-   the agent already has grants.</p>
+   the agent already has grants. The output lists them under "This agent
+   already has these grants; no starting grant is needed."</p>
 </li>
 <li>
 <p>What happens when the agent calls operations:</p>

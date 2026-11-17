@@ -39,8 +39,9 @@
   {# Body slot -- full agent projection. #}
   {% include "agents/_detail_body.html" %}
 
-  {# Mount point for HTMX-loaded modals (edit, delete). #}
-  <div id="agents-modal-container"></div>
+  {# Mount point for HTMX-loaded modals (edit, delete). A refused create or
+     edit answers 422; the hx-on handler swaps that answer in. #}
+  <div id="agents-modal-container" hx-on::before-swap="if (event.detail.requestConfig && ['post', 'patch'].includes(event.detail.requestConfig.verb) && event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
 
   {# Disable-confirm modal -- native ``<dialog>``. Confirming POSTs the
      toggle with ``enabled=false`` and HX-Redirects back to the detail

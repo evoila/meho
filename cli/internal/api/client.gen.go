@@ -1393,6 +1393,34 @@ type AgentDefinitionRead struct {
 	UpdatedAt    time.Time               `json:"updated_at"`
 }
 
+// AgentDefinitionSaved The answer of a create or an edit: the row and the live grants of its agent.
+//
+// “live_grants“ lists the grants of the agent that “identity_ref“
+// names that are live after the save, also the ones a starting grant
+// pick just wrote. When MEHO asks for no pick because the agent already
+// has a live grant, these are the grants that say what the agent may do.
+type AgentDefinitionSaved struct {
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub string             `json:"created_by_sub"`
+	Enabled      bool               `json:"enabled"`
+	Id           openapi_types.UUID `json:"id"`
+	IdentityRef  string             `json:"identity_ref"`
+
+	// LiveGrants The live grants of the agent that identity_ref names, after the save.
+	LiveGrants []LiveGrant `json:"live_grants"`
+
+	// LiveGrantsTruncated True when the agent has more live grants than live_grants lists.
+	LiveGrantsTruncated bool                    `json:"live_grants_truncated"`
+	ModelTier           string                  `json:"model_tier"`
+	Name                string                  `json:"name"`
+	OutputSchema        *map[string]interface{} `json:"output_schema"`
+	SystemPrompt        string                  `json:"system_prompt"`
+	TenantId            openapi_types.UUID      `json:"tenant_id"`
+	Toolset             map[string]interface{}  `json:"toolset"`
+	TurnBudget          int                     `json:"turn_budget"`
+	UpdatedAt           time.Time               `json:"updated_at"`
+}
+
 // AgentDefinitionUpdate PATCH body -- every field optional; only supplied fields change.
 //
 // “extra="forbid"“ for the same reason as
@@ -7959,6 +7987,25 @@ type LearningMetrics struct {
 	Search RetrievalNumbers `json:"search"`
 }
 
+// LiveGrant One live grant of an agent.
+type LiveGrant struct {
+	// ExpiresAt The end date; null when the grant has none.
+	ExpiresAt *time.Time         `json:"expires_at"`
+	Id        openapi_types.UUID `json:"id"`
+
+	// OpPattern The operations the grant covers ('*' = every operation).
+	OpPattern string `json:"op_pattern"`
+
+	// TargetName The name of the target; null for every target or a target MEHO cannot find.
+	TargetName *string `json:"target_name"`
+
+	// TargetScope '*' for every target, else the id of one target.
+	TargetScope string `json:"target_scope"`
+
+	// Verdict auto-execute, needs-approval or deny.
+	Verdict string `json:"verdict"`
+}
+
 // LivenessResponse “GET /api/v1/health/live“ response body.
 //
 // The cheap, low-privilege liveness surface: operator identity (from
@@ -14479,6 +14526,11 @@ type UiAgentPrincipalsListUiAgentsPrincipalsGetParams struct {
 	IncludeRevoked *bool `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
 }
 
+// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams defines parameters for UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet.
+type UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams struct {
+	IdentityRef *string `form:"identity_ref,omitempty" json:"identity_ref,omitempty"`
+}
+
 // UiAgentsRunsListUiAgentsRunsGetParams defines parameters for UiAgentsRunsListUiAgentsRunsGet.
 type UiAgentsRunsListUiAgentsRunsGetParams struct {
 	Status  *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -15153,6 +15205,9 @@ type UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody = U
 
 // UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody defines body for UiAgentPrincipalsListUiAgentsPrincipalsGet for application/json ContentType.
 type UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody = UISessionContext
+
+// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody defines body for UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet for application/json ContentType.
+type UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody = UISessionContext
 
 // UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody defines body for UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet for application/json ContentType.
 type UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody = UISessionContext
@@ -18299,6 +18354,11 @@ type ClientInterface interface {
 	UiAgentPrincipalsListUiAgentsPrincipalsGetWithBody(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody request with any body
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody request with any body
 	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -23362,6 +23422,30 @@ func (c *Client) UiAgentPrincipalsListUiAgentsPrincipalsGetWithBody(ctx context.
 
 func (c *Client) UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -43571,6 +43655,68 @@ func NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequestWithBody(server string,
 	return req, nil
 }
 
+// NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequest calls the generic UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet builder with application/json body
+func NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequest(server string, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody generates requests for UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet with any type of body
+func NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody(server string, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals/live-grants")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.IdentityRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "identity_ref", runtime.ParamLocationQuery, *params.IdentityRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest calls the generic UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet builder with application/json body
 func NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest(server string, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -55157,6 +55303,11 @@ type ClientWithResponsesInterface interface {
 
 	UiAgentPrincipalsListUiAgentsPrincipalsGetWithResponse(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error)
 
+	// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse request with any body
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error)
+
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error)
+
 	// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse request with any body
 	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error)
 
@@ -56443,7 +56594,7 @@ func (r ListAgentsApiV1AgentsGetResponse) StatusCode() int {
 type CreateAgentApiV1AgentsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *AgentDefinitionRead
+	JSON201      *AgentDefinitionSaved
 	JSON422      *HTTPValidationError
 }
 
@@ -56694,7 +56845,7 @@ func (r ShowAgentApiV1AgentsNameGetResponse) StatusCode() int {
 type EditAgentApiV1AgentsNamePatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *AgentDefinitionRead
+	JSON200      *AgentDefinitionSaved
 	JSON422      *HTTPValidationError
 }
 
@@ -61858,6 +62009,28 @@ func (r UiAgentPrincipalsListUiAgentsPrincipalsGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAgentPrincipalsListUiAgentsPrincipalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69581,6 +69754,23 @@ func (c *ClientWithResponses) UiAgentPrincipalsListUiAgentsPrincipalsGetWithResp
 	return ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp)
 }
 
+// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse
+func (c *ClientWithResponses) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error) {
+	rsp, err := c.UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error) {
+	rsp, err := c.UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse(rsp)
+}
+
 // UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse
 func (c *ClientWithResponses) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error) {
 	rsp, err := c.UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx, contentType, body, reqEditors...)
@@ -73014,7 +73204,7 @@ func ParseCreateAgentApiV1AgentsPostResponse(rsp *http.Response) (*CreateAgentAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest AgentDefinitionRead
+		var dest AgentDefinitionSaved
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -73363,7 +73553,7 @@ func ParseEditAgentApiV1AgentsNamePatchResponse(rsp *http.Response) (*EditAgentA
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AgentDefinitionRead
+		var dest AgentDefinitionSaved
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -80487,6 +80677,32 @@ func ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp *http.Response)
 	}
 
 	response := &UiAgentPrincipalsListUiAgentsPrincipalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse parses an HTTP response from a UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithResponse call
+func ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse(rsp *http.Response) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

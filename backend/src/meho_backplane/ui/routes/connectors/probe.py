@@ -84,6 +84,7 @@ _log = structlog.get_logger(__name__)
 def _render_alert(
     request: Request,
     *,
+    target_name: str,
     title: str,
     message: str,
     status_code: int,
@@ -100,7 +101,7 @@ def _render_alert(
     return get_templates().TemplateResponse(
         request,
         "connectors/_probe_alert.html",
-        {"title": title, "message": message},
+        {"target_name": target_name, "title": title, "message": message},
         status_code=status_code,
     )
 
@@ -125,6 +126,7 @@ async def _do_probe(
     if label == "no_connector":
         return _render_alert(
             request,
+            target_name=target.name,
             title="No matching connector",
             message=message or f"no connector registered for product={target.product!r}",
             status_code=501,
@@ -132,6 +134,7 @@ async def _do_probe(
     if label == "ambiguous_connector":
         return _render_alert(
             request,
+            target_name=target.name,
             title="Connector resolution ambiguous",
             message=message
             or (
@@ -156,8 +159,17 @@ async def _do_probe(
         # The same answer as the REST probe and a call: no Vault text, no
         # Vault address. Nothing is stored.
         detail = target_secret_error_detail(secret_exc, tenant_id=session_ctx.tenant_id)
+        _log.warning(
+            "ui_target_reprobe_secret_unreadable",
+            target_name=target.name,
+            tenant_id=str(session_ctx.tenant_id),
+            operator_sub=operator.sub,
+            error_code=detail["error"],
+            secret_ref=detail.get("secret_ref"),
+        )
         return _render_alert(
             request,
+            target_name=target.name,
             title="MEHO cannot read the target's secret",
             message=str(detail["message"]),
             status_code=422,

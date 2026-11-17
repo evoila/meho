@@ -248,8 +248,8 @@ class OperatorTokenRequiredError(VaultCredentialsReadError):
 
     Raised by :meth:`VaultCredentialBackend.load_secret_data` before any
     network round-trip when ``operator.raw_jwt`` is empty: a
-    system-initiated call (the topology scheduler, a runbook verify
-    dispatch, a legacy ``execute()`` shim) cannot read a target's
+    system-initiated call (the topology scheduler, a legacy
+    ``execute()`` shim) cannot read a target's
     credentials from Vault. Callers that treat that refusal as an
     expected outcome (#4952) catch this class; every other read-phase
     failure stays a plain :class:`VaultCredentialsReadError`.
@@ -543,9 +543,8 @@ class VaultCredentialBackend:
         and structurally unwraps the nested ``data["data"]`` to the flat
         secret-field dict.
         """
-        # System-initiated calls (topology scheduler, the runbook verify
-        # dispatch's synthetic operator, the legacy connector ``execute()``
-        # shims, and — unless a check-runner principal is configured, #2642
+        # System-initiated calls (topology scheduler, the legacy
+        # connector ``execute()`` shims, and — unless a check-runner principal is configured, #2642
         # — the sensor runner) carry ``raw_jwt=""``. The readiness probe is
         # not among them: ``/ready`` runs registered backend probes and
         # never resolves a per-target ``secret_ref``, so it does not reach

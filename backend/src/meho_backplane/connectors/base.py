@@ -161,10 +161,26 @@ class Connector(ABC):
     #: so a target can be probed again after its system is upgraded.
     strict_version_range: bool = False
 
+    #: The products a probe must report for this class to serve a target
+    #: (the ``product`` of the target's fingerprint). ``None`` (the
+    #: default): any product, and a target that was never probed. When set,
+    #: the resolver picks the class only for a probed target whose product
+    #: is in the set. Use it when two products share one product slug and
+    #: overlapping version numbers, so the version range alone cannot tell
+    #: them apart.
+    fingerprint_products: frozenset[str] | None = None
+
     #: One plain sentence on what the connector does, shown in the
     #: "What it does" column of the generated connector list on the docs
     #: site. ``None`` (the default) leaves the column empty for this row.
     summary: str | None = None
+
+    #: Other names people and models use for :attr:`product`, for example
+    #: ``("vcenter", "vsphere")`` for a VMware connector. With the switch
+    #: ``CONNECTOR_LIST_PRODUCT_ALIASES`` on, a ``product`` filter of
+    #: ``meho_connector_list`` also matches these names (case is ignored).
+    #: The connector declares them; the core only reads them.
+    product_aliases: tuple[str, ...] = ()
 
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it

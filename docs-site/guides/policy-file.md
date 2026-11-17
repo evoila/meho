@@ -176,6 +176,21 @@ bindings:
   tenant list (`meho_tenants`, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
   `meho policy export` shows them.
+- A shipped binding counts only when it agrees with the token. The group
+  alone never gives or takes the right to approve: a person in the
+  shipped approver group may approve only when the token also says
+  `approver: true`, and a person with `approver: true` keeps that right in
+  the shipped readers group. So with the setting on and no stored
+  bindings, every person may approve exactly what they may approve with
+  the setting off.
+- A binding in your file (a stored binding) is your own choice. There the
+  group alone gives the flags of the kind: a read-only person in a group
+  bound to `Approvers` may approve, whatever the token says.
+- `meho policy export` with the setting on writes the shipped bindings into
+  your file. After an import they are stored bindings, and then they count
+  for every person, also for a person with a tenant list, whose groups may
+  belong to another tenant. In a setup with tenant lists, remove the
+  shipped bindings from the exported file before you import it.
 - A shipped binding takes its kind from the **end** of the group name:
   `Corp-Operators` gives `Operators`. If your site renamed the groups,
   check that each name ends with its kind. Run `meho policy export` and
@@ -193,7 +208,9 @@ bindings:
 !!! note "Off by default"
 
     Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
-    `config.policy.approverRouting`) is on. The policy commands, and so
+    `config.policy.approverRouting`) is on. You can import a file with
+    `bindings` while the setting is off: the bindings take effect when the
+    setting goes on. The policy commands, and so
     the import of bindings, also need the setting `POLICY_CLASSIFICATION`
     (Helm `config.policy.classification`).
 
@@ -287,6 +304,33 @@ Good to know:
 - explain asks about a call **with no parameters**. For an operation
   whose answer depends on its parameters, the answer is the one of a call
   without parameters.
+- explain also asks two checks that come after the policy rules, as the
+  call does. When one of them refuses the call, the answer is **deny**
+  with its reason:
+  - the announce rule of your tenant: an agent or a service login must
+    announce a write of risk level `caution` or higher before it runs
+    (asked only when the call would run at once);
+  - an operation ingested from an API file, on a target whose connector
+    runs only its own hand-written operations.
+- Some checks after the policy rules need the call's parameters, the
+  vendor, or a later step of the call. explain does **not** ask them. The
+  last line of the answer names each one that can still refuse the call
+  (`Not checked: ...`). When there is no such line, nothing after the
+  policy rules can refuse the call. The names:
+  - `connector_resolution`: MEHO finds the connector of the target, and
+    only one.
+  - `operation_param_check`: the operation's own check of its parameters
+    before the call waits (for example, a user write that names two
+    different users).
+  - `destructive_preview_binding`: a `destructive` call waits, or runs
+    at once with a delete grant, only with the hash of a matching preview.
+  - `permission_preflight`: the operation asks the vendor whether its
+    login may do the write.
+  - `idempotency_key`: another waiting call holds the same idempotency
+    key.
+- Who may approve is a list of **MEHO group kinds** (`MEHO-Operators`,
+  `MEHO-Admins`, ...). These are not the names of the login groups of
+  your install. Each login group is bound to one of these kinds.
 - explain works with `POLICY_ENGINE_SHADOW` off. It then shows today's
   answer only.
 - Only a tenant admin or a platform admin sees the entries of the policy
@@ -310,6 +354,7 @@ Rules in order:
 Risk level: caution, always waits: yes, category: compute
   matched file:classifications[0]
   matched file:classifications[1]
+Not checked: idempotency_key, connector_resolution
 ```
 
 !!! note "The policy evaluator is off by default"

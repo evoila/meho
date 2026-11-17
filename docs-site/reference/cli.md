@@ -127,6 +127,27 @@ meho admin keycloak bootstrap-clients [flags]
 - `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
 - `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
 
+### `meho admin tools`
+
+Admin work on the tool logins of people in your tenant
+
+```
+meho admin tools
+```
+
+#### `meho admin tools sign-out`
+
+Sign out one tool of a person; their other tools keep working
+
+```
+meho admin tools sign-out [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--tool` — the tool kind: cli, claude-code, claude-desktop or other-mcp (required)
+- `--user` — the person: Keycloak user id or exact username (required)
+
 ## `meho agent`
 
 Manage agent definitions, runs and grants (list / show / create / edit / delete / run / grant)
@@ -225,11 +246,13 @@ meho agent edit <name> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--disabled` — disable (park) the definition
 - `--enabled` — enable the definition
+- `--grants` — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target
 - `--identity-ref` — new identity reference
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — new model tier: standard | fast | deep
 - `--output-schema` — new output schema as a JSON object: inline JSON, @<path>, or @-
 - `--system-prompt` — new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--target` — a target name for --grants read-targets; repeat the flag for more targets
 - `--toolset` — new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — new turn budget (1..1000)
 
@@ -4197,7 +4220,9 @@ meho policy diff FILE [flags]
 
 ### `meho policy explain`
 
-Say why a call runs, waits or is denied, and who may approve it
+Say if a call runs, waits or is denied, and why.
+
+Who may approve is a list of MEHO group kinds (MEHO-<kind>), not the names of the login groups of your install.
 
 ```
 meho policy explain [CONNECTOR_ID OP_ID] [flags]
@@ -4853,6 +4878,7 @@ meho secret move [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--from` — source '<kind>:<ref>' reference the credential is read from (required)
 - `--json` — emit the full OperationResult envelope as JSON
+- `--merge` — keep the other fields of the sink secret; change only the named field (Vault sinks)
 - `--reason` — justification recorded for the approver and the audit trail (required)
 - `--to` — sink '<kind>:<ref>' reference the credential is written to (required)
 

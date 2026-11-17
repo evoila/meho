@@ -359,6 +359,43 @@ def test_list_work_ref_filter_narrows_rows() -> None:
     assert str(other)[:8] not in body
 
 
+# A ticket id that is valid only after cleaning: 256 characters with
+# spaces around it, and 130 decomposed letters (260 before NFC, 130 after).
+_PADDED_LONG_REF = "  " + "x" * 256 + "  "
+_DECOMPOSED_REF = "A\u0308" * 130
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [(_PADDED_LONG_REF, "x" * 256), (_DECOMPOSED_REF, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_list_work_ref_filter_counts_length_after_cleaning(typed: str, stored: str) -> None:
+    """The search box cleans first, then checks the length, like the REST filter."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    matching = _seed_run(tenant_id=_TENANT_A, work_ref=stored)
+    other = _seed_run(tenant_id=_TENANT_A, work_ref="gh:evoila/meho#99")
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs", params={"work_ref": typed})
+    assert response.status_code == 200, response.text
+    assert str(matching)[:8] in response.text
+    assert str(other)[:8] not in response.text
+
+
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [("CHG\u200b1", "control or invisible characters"), ("x" * 257, "at most 256 characters")],
+    ids=["invisible", "too-long"],
+)
+def test_list_work_ref_filter_refuses_a_bad_ticket_id(typed: str, message: str) -> None:
+    """A value the rule refuses is a 422 that names the rule, not a search for the raw text."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs", params={"work_ref": typed})
+    assert response.status_code == 422, response.text
+    assert message in response.json()["detail"]
+
+
 def test_list_empty_state_renders() -> None:
     """A filter matching nothing renders the empty-state row, not an error."""
     _seed_tenant(_TENANT_A, "tenant-a")

@@ -126,8 +126,10 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
    The import also loads `op_classes.py`, which declares
    `harbor.robot.create` as `credential_mint` for the broadcast classifier,
    `ops_robot_create_preview.py`, which registers the approval card preview
-   of `harbor.robot.create`, and `ops_robot_delete_preview.py`, which
-   registers the preview builder for `harbor.robot.delete`.
+   of `harbor.robot.create`, `ops_robot_delete_preview.py`, which
+   registers the preview builder for `harbor.robot.delete`, and
+   `ops_robot_vault.py`, which registers the `vault_target` params check and
+   permission preflight of `harbor.robot.create`.
 3. At lifespan startup `run_typed_op_registrars` invokes the queued registrars,
    landing the 12 read + 2 write descriptor rows before the first dispatch. No
    `meho connector ingest` is required — the read core dispatches on a fresh
@@ -210,7 +212,38 @@ appears in the SSE stream, and the audit row's raw copy has the `secret`
 value replaced. It registers `safety_level="caution"`, tagged
 `write`/`credential-mint`, with `requires_approval=True`: minting a robot
 credential gives out new access, so a human `tenant_admin` dispatch waits at
-`awaiting_approval` until a second person approves it.
+`awaiting_approval` until a second person approves it. `op_classes.py` also
+marks it with `declare_per_call_approval`: a person approves each call, and
+no standing grant or run approval covers it.
+
+**`vault_target` (an agent must set it).** Harbor shows the robot secret
+only once, and MEHO hides secret fields from an agent. So `robot_create`
+takes an optional `vault_target` (`vault:<path>#<field>`, the form
+`secret.move` uses; the path is below the default KV v2 mount). The code is
+in `ops_robot_vault.py`:
+
+- Before the Harbor call, the handler checks the form and the tenant scope of
+  the path. A bad target stops the call before a robot exists.
+- The handler merges the secret into that Vault item (`vault.kv.patch`; when
+  the item is missing, `vault.kv.put` with `cas=0`). Other fields stay.
+- The answer holds `id`, `name`, `status="stored"`, `stored_to`,
+  `value_fingerprint` and `length`. It has no `secret`.
+- When the Vault write fails, or Harbor's answer has no secret, the handler
+  deletes the new robot, because its secret would be lost. It returns an
+  error result with `error_code="robot_secret_not_stored"`, `robot_id` and
+  `robot_deleted` (true or false). The caller's answer and the audit row both
+  hold these fields. The error names the exception class only, never the
+  secret.
+- The approval request shows `secret_goes_to`: the Vault mount, path and
+  field, and a note that an existing value in that field is replaced. Without
+  `vault_target` it says the secret is returned in the answer.
+- Park time: a params check refuses a wrong form as `invalid_params`, and a
+  permission preflight asks Vault (`sys/capabilities-self`) whether the write
+  will be denied. A check that fails (for example, Vault refuses the login)
+  counts as denied too. Then the call is refused with
+  `write_capability_denied` and no approval card is made.
+- Without `vault_target` the answer holds the secret, as before (for a person
+  at the CLI).
 
 `robot_delete` (op `harbor.robot.delete`) registers
 `safety_level="destructive"` + `requires_approval=True`, tagged
@@ -373,6 +406,7 @@ not one of the 9.
 | `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}/summary` |
 | `harbor.quota.list` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/quotas?reference=project` |
 | `harbor.project.create` *(typed write, `caution` + approval)* | `harbor-projects` | `POST /api/v2.0/projects` |
+| `harbor.artifact.copy` *(typed write, `caution` + approval)* | `harbor-artifacts` | `POST …/artifacts?from=` |
 
 `harbor.project.create` (`ops_project_create.py`) creates a project from
 `project_name`, `public` (default `false`, so private) and an optional
@@ -380,6 +414,19 @@ not one of the 9.
 taken name, and the handler returns `created: false` without a change. Any
 other HTTP error is raised. The result names `harbor.project.info` as the
 read back. Its tests are in `tests/test_connectors_harbor_project_create.py`.
+
+`harbor.artifact.copy` (`ops_artifact_copy.py`) copies an image inside Harbor
+from `from` (`<project>/<repository>@<digest>` or `:<tag>`) into `project` and
+`repository`. Nothing is uploaded. It is safe to run twice: it reads the source
+digest (for a tag), then reads the target by that digest. When the target holds
+that digest, under any tag or none, it returns `copied: false` and sends no
+copy. The copy itself names the source by digest (`from=<project>/<repository>@<digest>`),
+so a tag that moves after the read cannot change what is copied. Harbor copies
+the tags of the source image along with it. Only a
+`404` counts as "not there"; any other failed read, a missing source, and any
+copy error are raised. The result carries the `digest` and names
+`harbor.artifact.list` as the read back. Its tests are in
+`tests/test_connectors_harbor_artifact_copy.py`.
 
 **Quota lives on the summary endpoint, not on `Project`**: `harbor.project.info`
 (`GET /projects/{name}`) returns the vendor `Project` object, which has no
@@ -413,7 +460,7 @@ names (`{project_name_or_id}` on the project detail / `/summary` routes,
 `{project_name}` / `{repository_name}` / `{reference}` on the repository
 sub-tree, `{robot_id}` on the robot read and delete). All 14 were served on the
 first armed run — no repoints, no exclusions. The robot read before the delete
-(`GET /api/v2.0/robots/{robot_id}`) is the 15th, and the project create (`POST /api/v2.0/projects`) is the 16th. Standard:
+(`GET /api/v2.0/robots/{robot_id}`) is the 15th, the project create (`POST /api/v2.0/projects`) is the 16th, and the artifact copy (`POST …/artifacts`) is the 17th. Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## CLI verbs

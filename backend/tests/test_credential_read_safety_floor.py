@@ -129,6 +129,7 @@ def op_class_state() -> Iterator[None]:
     saved_root_shell = set(op_classes._ROOT_SHELL)
     saved_per_call = set(op_classes._PER_CALL_APPROVAL)
     saved_no_secret_value = set(op_classes._NO_SECRET_VALUE)
+    saved_wait_when_set = dict(op_classes._WAIT_WHEN_SET)
     try:
         yield
     finally:
@@ -138,6 +139,7 @@ def op_class_state() -> Iterator[None]:
         op_classes._ROOT_SHELL.update(saved_root_shell)
         op_classes._PER_CALL_APPROVAL.update(saved_per_call)
         op_classes._NO_SECRET_VALUE.update(saved_no_secret_value)
+        op_classes._WAIT_WHEN_SET.update(saved_wait_when_set)
 
 
 @pytest.fixture

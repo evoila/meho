@@ -36,6 +36,7 @@ from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatcher, grant_approval
 from meho_backplane.operations._errors import result_awaiting_approval
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.templating import get_templates
 from tests.test_api_v1_approvals_fresh_sign_in import _settings_env  # noqa: F401 -- autouse
 
 _KC = "https://keycloak.test"
@@ -183,6 +184,32 @@ async def test_a_disabled_person_does_not_count() -> None:
             {"g-admins": [_user(_ADMIN_A), _user(_ADMIN_B, enabled=False)]},
         )
         assert await admin_count(_TENANT) == 1
+
+
+async def test_a_service_account_in_the_admin_group_does_not_count() -> None:
+    """Only a person may approve a change of rights, so a client login is not counted."""
+    robot = {"id": "user-robot", "username": "service-account-meho-agent", "enabled": True}
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A), robot]})
+        assert await admin_count(_TENANT) == 1
+        tenant_admins._kept.clear()
+        note = await only_admin_note(_TENANT, _ADMIN_A)
+    assert note == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+
+
+async def test_the_service_account_prefix_follows_the_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "robot-")
+    get_settings.cache_clear()
+    robot = {"id": "user-robot", "username": "robot-meho-agent", "enabled": True}
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(
+            mock,
+            [_admins_group()],
+            {"g-admins": [_user(_ADMIN_A), _user("service-account-is-a-person"), robot]},
+        )
+        assert await admin_count(_TENANT) == 2
 
 
 async def test_members_are_read_page_by_page() -> None:
@@ -408,3 +435,64 @@ async def test_health_reports_the_count(
     response = await build_health_response(operator)
     assert response.approvals is not None
     assert response.approvals.rights_change_admins == (None if ids is None else len(ids))
+
+
+# --- the console shows the note -------------------------------------------------------
+
+_NOTE = f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+
+
+def _waiting(note: str | None) -> dict[str, Any]:
+    return result_awaiting_approval(_RIGHTS_OP, uuid.uuid4(), 1.0, note=note).model_dump(
+        mode="json"
+    )
+
+
+def _render(template: str, envelope: dict[str, Any]) -> str:
+    context: dict[str, Any] = {"envelope": envelope, "error_message": None}
+    if template == "operations/_result.html":
+        context |= {"connector_id": "demo", "op_id": _RIGHTS_OP, "chain": None}
+    return get_templates().env.get_template(template).render(**context)
+
+
+@pytest.mark.parametrize(
+    ("template", "marker"),
+    [
+        ("keycloak/_write_result.html", "data-write-approval-note"),
+        ("operations/_result.html", "data-run-approval-note"),
+    ],
+)
+def test_the_console_answer_shows_the_note(template: str, marker: str) -> None:
+    html = _render(template, _waiting(_NOTE))
+    assert marker in html
+    assert ONLY_ONE_ADMIN in html
+    assert RIGHTS_CHANGE_GUIDE_URL in html
+
+
+@pytest.mark.parametrize("template", ["keycloak/_write_result.html", "operations/_result.html"])
+def test_the_console_answer_without_a_note_is_unchanged(template: str) -> None:
+    envelope = _waiting(None)
+    html = _render(template, envelope)
+    assert "approval-note" not in html
+    assert ONLY_ONE_ADMIN not in html
+    # The note is escaped like any other text.
+    with_markup = _render(template, _waiting("<b>a & b</b>"))
+    assert "&lt;b&gt;a &amp; b&lt;/b&gt;" in with_markup
+
+
+def test_the_classify_page_shows_the_note() -> None:
+    template = get_templates().env.get_template("policy/_classify_result.html")
+    requested = {
+        "status": "awaiting_approval",
+        "approval_request_id": str(uuid.uuid4()),
+        "error": None,
+        "matched_operations": 2,
+        "approval_note": _NOTE,
+    }
+    html = template.render(error=None, preview=None, form={}, requested=requested)
+    assert "data-classify-approval-note" in html
+    assert ONLY_ONE_ADMIN in html
+    plain = template.render(
+        error=None, preview=None, form={}, requested=requested | {"approval_note": None}
+    )
+    assert "data-classify-approval-note" not in plain

@@ -1284,7 +1284,9 @@ admin's change of rights. MEHO says so; it builds no exception.
   whose attributes give `tenant_admin` in the tenant (`tenant_role` with
   `tenant_id`, or `meho_tenant` `<tenant>:<name>:Admins`) or
   `platform_admin`. A child group takes a missing attribute from its
-  parent, as the token does. The answer is kept 60 seconds per tenant.
+  parent, as the token does. A service account (a username that starts
+  with `JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`) is not counted: only a
+  person may approve. The answer is kept 60 seconds per tenant.
 - The count is "not known" (`None`) when the admin client is not set up,
   a read fails or is refused, platform admins come from a realm role
   (`JWT_PLATFORM_ADMIN_ROLE_NAME`), or no enabled admin is found. "Not
@@ -1296,7 +1298,8 @@ admin's change of rights. MEHO says so; it builds no exception.
   This tenant has only one admin." and a link to the approvals guide. The
   note is added to `error` too. The request is still stored, so an admin
   added later can approve it. `meho operation call` prints the note under
-  the parked hint.
+  the parked hint. The web console shows it in the waiting answer of the
+  Keycloak pages, the operation run window, and the classify page.
 - `/api/v1/health` and `meho_status` report the count in
   `approvals.rights_change_admins`. `meho doctor` shows the line "second
   admin": a warning with the same sentence for one admin, ok for two or

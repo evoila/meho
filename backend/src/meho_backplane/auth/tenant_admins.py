@@ -13,7 +13,9 @@ MEHO stores no list of people. :func:`tenant_admin_ids` reads them from
 MEHO's own sign-in realm with the backplane's Keycloak admin client
 (:class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`): the
 enabled members of each group that gives the ``tenant_admin`` role in the
-tenant, plus the members of each group that gives ``platform_admin``. A
+tenant, plus the members of each group that gives ``platform_admin``.
+Service accounts (logins of a client) are not counted: only a person may
+approve a change of rights. A
 group without these attributes takes them from its parent group, as
 Keycloak does when it fills the login token. The groups and the members are
 read page by page.
@@ -171,13 +173,31 @@ async def _admin_groups(kc: KeycloakAdminClient, tenant_id: uuid.UUID) -> list[s
     return found
 
 
-async def _admins(kc: KeycloakAdminClient, tenant_id: uuid.UUID) -> frozenset[str]:
+def _is_service_account(user: Mapping[str, Any], prefix: str) -> bool:
+    """Whether *user* is the login of a client (a service account), not a person.
+
+    Only a person may approve a change of rights, so a service account in an
+    admin group is not counted. Keycloak names it ``service-account-<client>``;
+    the prefix is ``JWT_SERVICE_ACCOUNT_USERNAME_PREFIX``, as at sign-in.
+    """
+    username = user.get("username")
+    return bool(prefix) and isinstance(username, str) and username.startswith(prefix)
+
+
+async def _admins(
+    kc: KeycloakAdminClient, tenant_id: uuid.UUID, service_account_prefix: str
+) -> frozenset[str]:
     ids: set[str] = set()
     for group_id in await _admin_groups(kc, tenant_id):
         path = f"/groups/{quote(group_id, safe='')}/members"
         for user in await _read_list(kc, path, briefRepresentation="true"):
             user_id = user.get("id")
-            if isinstance(user_id, str) and user_id and user.get("enabled") is not False:
+            if (
+                isinstance(user_id, str)
+                and user_id
+                and user.get("enabled") is not False
+                and not _is_service_account(user, service_account_prefix)
+            ):
                 ids.add(user_id.casefold())
     return frozenset(ids)
 
@@ -192,7 +212,7 @@ async def _read(settings: Settings, tenant_id: uuid.UUID) -> frozenset[str] | No
         return None
     try:
         async with asyncio.timeout(_READ_TIMEOUT_S), kc:
-            ids = await _admins(kc, tenant_id)
+            ids = await _admins(kc, tenant_id, settings.jwt_service_account_username_prefix)
     except Exception as exc:
         structlog.get_logger(__name__).info(
             "tenant_admin_count_unknown", error_class=type(exc).__name__

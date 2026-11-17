@@ -1624,6 +1624,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-login-client-for-one-tool-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A login client for one tool profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#how-long-each-login-lasts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3784,6 +3795,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-login-client-for-one-tool-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A login client for one tool profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#how-long-each-login-lasts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4013,6 +4035,11 @@ the end, then return to the trail.</p>
 <td><code>meho-mcp-code</code>, <code>meho-mcp-desktop</code></td>
 <td><strong>Public</strong> clients, copies of <code>meho-mcp</code></td>
 <td>The Claude Code plugin and the Claude Desktop extension, each with a login of its own, when <code>MCP_CLIENT_PER_TOOL_KIND</code> is on. See <a href="#the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools</a>.</td>
+</tr>
+<tr>
+<td><code>meho-mcp-profile-&lt;name&gt;</code></td>
+<td><strong>Public</strong> client, copy of <code>meho-mcp</code> plus a fixed claim (optional)</td>
+<td>A session tied to one MCP tool profile. See <a href="#a-login-client-for-one-tool-profile">A login client for one tool profile</a>.</td>
 </tr>
 <tr>
 <td><code>meho-web</code></td>
@@ -5387,6 +5414,41 @@ MEHO keeps the answer for one minute.</p>
 Older plugins and other MCP clients keep <code>meho-mcp</code> in any case. MEHO
 accepts tokens of all three clients on <code>/mcp</code>. None of them can approve
 a request: an approval needs <code>meho-cli-approve</code> or the web console.</p>
+<h2 id="a-login-client-for-one-tool-profile">A login client for one tool profile<a class="headerlink" href="#a-login-client-for-one-tool-profile" title="Permanent link">&para;</a></h2>
+<p>You can make a login client whose tokens work only for one MCP tool
+profile. Use it when an agent must stay inside one profile, for example a
+profile that may use only the Kubernetes connectors. The profile itself is
+set on the backplane; see "Tool profiles" in the MCP surface page.</p>
+<p><strong>With <code>bootstrap-clients</code>.</strong> Add <code>--mcp-profile &lt;name&gt;</code> (repeat it for
+more profiles). It makes <code>meho-mcp-profile-&lt;name&gt;</code>.</p>
+<p><strong>By hand.</strong></p>
+<ol>
+<li>Make a client exactly like <code>meho-mcp</code>: public, standard flow with PKCE
+   <code>S256</code>, the same redirect URIs, the eight mappers, the four default
+   scopes and the same optional scopes.</li>
+<li>Add one more mapper on the client itself, not in a client scope:
+   <strong>Mappers → Add mapper → By configuration → Hardcoded claim</strong>.</li>
+<li>Name: <code>mcp-profile</code></li>
+<li>Token Claim Name: <code>mcp_profile</code></li>
+<li>Claim value: the profile name, for example <code>k8s</code></li>
+<li>Claim JSON type: <code>String</code></li>
+<li>Add to access token: <strong>On</strong>. Add to ID token and to userinfo: Off.</li>
+</ol>
+<p>Because the mapper is on the client, every token of the client has the
+claim, also a renewed token and a token with fewer scopes.</p>
+<p><strong>What MEHO does with such a token:</strong></p>
+<ul>
+<li>It works only at <code>https://&lt;meho-host&gt;/mcp?profile=&lt;name&gt;</code>.</li>
+<li>At <code>/mcp</code> without the profile, at another profile, at the REST API and
+  at the status route, MEHO answers 403 <code>mcp_profile_scope_violation</code>.</li>
+<li>A claim value MEHO cannot read, or a profile MEHO does not know, gives
+  403 everywhere. A profile from <code>MCP_CONNECTOR_PROFILES</code> is known only
+  while <code>MCP_PROFILE_CONNECTOR_LISTS</code> is on.</li>
+<li>Tokens without the claim work as before.</li>
+</ul>
+<p>Limit: this stops someone from using the profile's token anywhere else.
+It does not stop the same person from signing in again through another
+login client, such as <code>meho-mcp</code>.</p>
 <h2 id="how-long-each-login-lasts">How long each login lasts<a class="headerlink" href="#how-long-each-login-lasts" title="Permanent link">&para;</a></h2>
 <table>
 <thead>

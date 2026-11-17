@@ -1850,6 +1850,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="A smaller tool list for small models (tool profiles)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#profiles-that-limit-the-connectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profiles that limit the connectors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3265,6 +3282,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="A smaller tool list for small models (tool profiles)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#profiles-that-limit-the-connectors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profiles that limit the connectors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3494,6 +3528,42 @@ of it before the user asks anything. So a client can ask for a
   still runs under the person's role, and changes still wait for
   approval when the rules say so.</li>
 </ul>
+<h3 id="profiles-that-limit-the-connectors">Profiles that limit the connectors<a class="headerlink" href="#profiles-that-limit-the-connectors" title="Permanent link">&para;</a></h3>
+<p>An admin can add profiles that also limit what the session may do. They
+are set on the backplane with <code>MCP_CONNECTOR_PROFILES</code> and count only
+while <code>MCP_PROFILE_CONNECTOR_LISTS</code> is on (both off by default). Example:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"k8s"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"tools"</span><span class="p">:</span><span class="w"> </span><span class="s2">"investigate"</span><span class="p">,</span><span class="w"> </span><span class="nt">"connectors"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"kubernetes"</span><span class="p">]}}</span>
+</code></pre></div>
+<p>A session at <code>https://&lt;meho-host&gt;/mcp?profile=k8s</code> then:</p>
+<ul>
+<li>may use only the connectors of the profile. Each name counts for every
+  version of that connector. Any other <code>connector_id</code> in <code>call_operation</code>,
+  <code>preview_operation</code>, <code>search_operations</code> or <code>list_operation_groups</code> is
+  refused with "not in your profile".</li>
+<li>may use only targets whose connector is in the profile. A call or a
+  preview on another target is refused, also when the <code>connector_id</code> is
+  in the profile.</li>
+<li>sees only those connectors in <code>meho_connector_list</code>, and only their
+  targets in <code>list_targets</code>.</li>
+<li>in a read-only profile (the default), cannot change anything: MEHO
+  refuses every operation that changes something, and the profile has
+  none of MEHO's own write tools.</li>
+<li>reads back only the stored results and background runs it made
+  itself, under this profile.</li>
+</ul>
+<p>A connector name in a profile counts for every connector whose id starts
+with the name and a dash. Keep the names as narrow as you can: <code>vmware</code>
+counts for every <code>vmware-...</code> connector, <code>vmware-rest</code> only for the
+<code>vmware-rest</code> connectors.</p>
+<p>After a person approves a request that waited, the approved run is not
+checked against the profile again.</p>
+<p>MEHO applies the stricter of the person's rules and the profile's rules.
+Every audit row names the profile in its <code>mcp_profile</code> field.</p>
+<p>A login client can be tied to one profile, so its token works only at
+that profile's URL. See "A login client for one tool profile" on the
+Keycloak realm setup page. The MCP resources (<code>resources/list</code>,
+<code>resources/read</code>) are not limited by a profile; they hold no connector
+data.</p>
 <p>A small model also gains from shorter tool texts. Add <code>texts=short</code> to
 the URL, for example <code>https://&lt;meho-host&gt;/mcp?texts=short</code>, or together
 with a profile: <code>https://&lt;meho-host&gt;/mcp?profile=investigate&amp;texts=short</code>.

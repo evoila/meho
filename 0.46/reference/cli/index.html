@@ -18053,6 +18053,7 @@
 <li><code>--keycloak-ca-bundle</code> — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive</li>
 <li><code>--mcp-client-id</code> — public client_id for the MCP browser-flow client</li>
 <li><code>--mcp-offline-session-idle</code> — how many seconds an unused MCP login stays valid: sets the <code>client.offline.session.idle.timeout</code> attribute on the MCP browser-flow client. Default 48h. Without it the realm's Offline Session Idle applies (30 days by default)</li>
+<li><code>--mcp-profile</code> — also make a login client <code>meho-mcp-profile-&lt;name&gt;</code> for this MCP tool profile (repeat for more). Every token of that client carries the claim <code>mcp_profile: &lt;name&gt;</code>, and MEHO takes it only at <code>/mcp?profile=&lt;name&gt;</code></li>
 <li><code>--mcp-redirect-uri</code> — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)</li>
 <li><code>--mcp-resource-uri</code> — audience the <code>meho-mcp-audience</code> mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)</li>
 <li><code>--mcp-web-origin</code> — CORS web origin(s) for the MCP browser-flow client (default: <code>+</code> — allow the redirect-URI origins)</li>

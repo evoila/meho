@@ -346,6 +346,31 @@ async def test_a_custom_self_approval_group_next_to_an_operator_group_changes_no
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("group", "role", "extra"),
+    [
+        pytest.param("/MEHO-Admins", "tenant_admin", {}, id="admins"),
+        pytest.param("/MEHO-Readers", "read_only", {}, id="readers"),
+        pytest.param("/MEHO-Approvers", "read_only", {"approver": True}, id="approvers"),
+    ],
+)
+async def test_a_custom_self_approval_group_next_to_another_role_group_changes_no_login(
+    monkeypatch: pytest.MonkeyPatch, group: str, role: str, extra: dict[str, Any]
+) -> None:
+    """The self-approval group is not a role group: the role group decides the kind."""
+    monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
+    claims = _person(groups=[group, "/Ops-Self-Approve"], tenant_role=role, **extra)
+    _switch(monkeypatch, on=False)
+    off = await _login(monkeypatch, claims, None)
+    _switch(monkeypatch, on=True)
+    on = await _login(monkeypatch, claims, None)
+    assert isinstance(off, Operator) and isinstance(on, Operator)
+    assert off.self_approver is True
+    assert on == off
+    assert on.bound_kind is None
+
+
 # ---------------------------------------------------------------------------
 # The approve right comes from the token, not from a shipped group alone
 # ---------------------------------------------------------------------------

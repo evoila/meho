@@ -181,6 +181,7 @@ from meho_backplane.runbooks.substitution import (
     RUN_PARAMS_PATTERN,
     resolve_substitutions,
 )
+from meho_backplane.work_ref import work_ref_filter_values
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -919,7 +920,7 @@ class RunbookRunService:
             if filter_.template_slug is not None:
                 stmt = stmt.where(RunbookRun.template_slug == filter_.template_slug)
             if filter_.work_ref is not None:
-                stmt = stmt.where(RunbookRun.work_ref == filter_.work_ref)
+                stmt = stmt.where(RunbookRun.work_ref.in_(work_ref_filter_values(filter_.work_ref)))
             rows = (await session.execute(stmt)).scalars().all()
 
             # Per-row current step + position need the pinned template body
@@ -1350,7 +1351,11 @@ class RunbookRunService:
         }
 
         call_result = await self._linked_call_result(
-            caller, approval_request_id, call_arguments=call_arguments
+            caller,
+            approval_request_id,
+            call_arguments=call_arguments,
+            run_id=run.run_id,
+            step_id=current_step.id,
         )
         if call_result is None:
             call_result = await self._dispatch_check_call(
@@ -1378,8 +1383,14 @@ class RunbookRunService:
         approval_request_id: uuid.UUID | None,
         *,
         call_arguments: dict[str, Any],
+        run_id: uuid.UUID,
+        step_id: str,
     ) -> dict[str, Any] | None:
         """Return the result of the approved call the check waited for.
+
+        The read writes an ``approval.result`` audit row. *run_id* and
+        *step_id* are bound while it is read, so the row names the run and
+        the step.
 
         Returns ``None`` when the check must run its call (no linked
         request, or :func:`read_linked_approval` says so). Raises
@@ -1389,12 +1400,18 @@ class RunbookRunService:
         """
         if approval_request_id is None:
             return None
-        linked = await read_linked_approval(
-            caller,
-            approval_request_id,
-            op_id=call_arguments["op_id"],
-            connector_id=call_arguments["connector_id"],
-        )
+        run_token = run_id_var.set(run_id)
+        step_token = step_id_var.set(step_id)
+        try:
+            linked = await read_linked_approval(
+                caller,
+                approval_request_id,
+                op_id=call_arguments["op_id"],
+                connector_id=call_arguments["connector_id"],
+            )
+        finally:
+            step_id_var.reset(step_token)
+            run_id_var.reset(run_token)
         if linked is None:
             return None
         if linked.result is None:

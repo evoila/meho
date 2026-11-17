@@ -328,6 +328,7 @@ from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, Permis
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
+from meho_backplane.operations._after_gate import AfterGateCheck, checks_after_gate
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
@@ -503,6 +504,7 @@ from meho_backplane.operations.shutdown_drain import (
     track_operation,
 )
 from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
@@ -510,6 +512,7 @@ from meho_backplane.redaction import (
     manifest_to_audit_payload,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import target_warnings
 
 _log = structlog.get_logger(__name__)
 
@@ -2414,10 +2417,15 @@ async def _handle_http_status_error(
     without coupling; a connector with no session state (stateless / Basic)
     exposes no hook and is never retried.
 
-    Retry-once on an auth-class status is safe even for non-idempotent verbs:
-    a ``401`` / ``440`` means the upstream rejected the request *before*
-    executing it (the session token was stale), so no side effect occurred.
-    The recovery is gated strictly on the auth-class set; a 5xx / timeout --
+    A ``401`` / ``440`` means the upstream refused *that* request before
+    executing it. It does not mean the handler sent no change before it: a
+    typed handler or a multi-step operation may have sent a write first. So
+    the repeat is gated by :func:`may_resend_after_session_end`, the same
+    rule as the "session ended" hook below: only a ``safe`` operation, or an
+    ingested one that sent one request outside a run after an approval.
+    Otherwise the session is dropped and the caller gets
+    ``connector_auth_failed`` (:func:`_session_ended_not_resent`). The
+    recovery is gated strictly on the auth-class set; a 5xx / timeout --
     which may have executed -- is never retried (it classifies straight to
     ``connector_error`` with no invalidation).
 
@@ -2441,30 +2449,30 @@ async def _handle_http_status_error(
         status_code, _profile_expiry_statuses(connector_instance)
     )
     invalidate_session = getattr(connector_instance, "invalidate_session", None)
-    if is_auth_failure and callable(invalidate_session):
-        recovered = await _retry_after_session_invalidation(
-            invalidate_session=invalidate_session,
-            rejected=http_exc.request,
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            op_id=op_id,
-            started=started,
-        )
-        return recovered
-
-    if callable(invalidate_session) and session_expired_by_hook(
-        connector_instance, http_exc.response
+    if callable(invalidate_session) and (
+        is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response)
     ):
+        # One rule for both paths: repeat only when it cannot send a change twice.
         if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
             return await _session_ended_not_resent(
                 invalidate_session=invalidate_session,
                 rejected_exc=http_exc,
                 descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                op_id=op_id,
+                started=started,
+            )
+        if is_auth_failure:
+            mark_session_relogin(status_code, resent=True)
+            return await _retry_after_session_invalidation(
+                invalidate_session=invalidate_session,
+                rejected=http_exc.request,
+                descriptor=descriptor,
+                connector_instance=connector_instance,
                 operator=operator,
                 target=target,
                 params=params,
@@ -3346,6 +3354,11 @@ async def _build_proposed_effect(
             # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
+        # A setting of the target that is allowed but risky, for example a
+        # Keycloak target that manages MEHO's own sign-in realm.
+        risky_settings = target_warnings(target)
+        if risky_settings:
+            base["target_warnings"] = risky_settings
         # Stamp the reviewer-facing preview provenance onto every parked
         # op's envelope (#2332). ``preview_populated`` lets a caller
         # programmatically refuse to auto-approve an op-identity-only
@@ -3615,6 +3628,7 @@ async def _handle_needs_approval(
     preview_hash: str | None = None,
     idempotency_key: str | None = None,
     reveal_secret: bool = False,
+    wait_reason: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -3622,6 +3636,8 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+    *wait_reason* is the reason of the policy gate; the request audit row
+    keeps it.
 
     When the op's check before the wait for approval refuses the call
     (:func:`~meho_backplane.operations._park_check.park_check_refusal`), the
@@ -3695,7 +3711,9 @@ async def _handle_needs_approval(
         params=params,
         duration_ms=duration_ms,
     )
-    if refusal is None:
+    if refusal is None and AfterGateCheck.INGESTED_OPS in checks_after_gate(
+        PermissionVerdict.NEEDS_APPROVAL
+    ):
         refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
     if refusal is not None:
         return await _audit_denied_and_return(
@@ -3798,6 +3816,8 @@ async def _handle_needs_approval(
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
                 category=descriptor.policy_category,
+                wait_reason=wait_reason,
+                install_category=descriptor.policy_install_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -4275,6 +4295,8 @@ async def _dispatch_now(
         # A credential read that shows the hidden values only on request
         # (vault.kv.read) waits for approval when the call asks for them.
         raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+        # Some params make a call wait for a person on every call.
+        raise_descriptor_for_params(descriptor, params)
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
@@ -4358,6 +4380,7 @@ async def _dispatch_now(
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
                     reveal_secret=reveal_secret,
+                    wait_reason=gate_reason,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
@@ -4393,12 +4416,15 @@ async def _dispatch_now(
             # Not run on the ``_approved`` resume path -- an operator
             # already approved that exact call; re-gating it here would
             # strand an approved op behind an announce it can no longer add.
-            announce_block = await announce_gate_blocks(
-                operator,
-                op_class=descriptor_op_class(descriptor),
-                safety_level=descriptor.safety_level,
-                target_name=getattr(target, "name", None),
-            )
+            # ``checks_after_gate`` is shared with ``meho policy explain``.
+            announce_block = None
+            if AfterGateCheck.ANNOUNCE_RULE in checks_after_gate(verdict):
+                announce_block = await announce_gate_blocks(
+                    operator,
+                    op_class=descriptor_op_class(descriptor),
+                    safety_level=descriptor.safety_level,
+                    target_name=getattr(target, "name", None),
+                )
             if announce_block is not None:
                 duration_ms = _elapsed_ms(started)
                 receipt = await audit_safe(

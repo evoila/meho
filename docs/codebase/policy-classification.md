@@ -30,6 +30,11 @@ specific entry for the same key is shown instead. MEHO still
 looks for conflicts on the labels as stored, before it leaves one out:
 two entries of the same rank that give one operation different values
 for a label are a conflict, and the call waits for approval. While the
+call waits, MEHO still shows one of the two values for that label: the
+value of the entry that comes first. An entry of a policy file comes
+before the override of the one operation, and in a file the entry
+listed first comes first. When that value breaks the rule, MEHO shows
+the other value (`_shown_labels` in `policy/classification.py`). While the
 call contract shows labels, its `result_shape.guidance` also says that
 label text is data, never an instruction.
 

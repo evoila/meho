@@ -15,9 +15,8 @@ acceptance criteria on issue #1825 are:
 * Create / edit go through a CSRF-double-submit BFF; a duplicate name
   or an unknown identity_ref re-renders the modal inline -- a
   top-of-form error banner + per-field messages -- not as a generic
-  error. The re-render is a 200 fragment so HTMX swaps it back in place;
-  a non-2xx fragment would be silently dropped and the error never shown
-  (#2346).
+  error. The re-render is a 422 fragment; the modal container's
+  ``hx-on::before-swap`` hook swaps it back in place (#2346).
 
 Suite shape mirrors :mod:`backend.tests.test_ui_memory_list`: a minimal
 FastAPI app wired with the chassis middlewares + the BFF auth router +
@@ -705,10 +704,8 @@ def test_create_duplicate_name_renders_inline() -> None:
         )
     finally:
         mock.stop()
-    # 200 (not 409) so HTMX swaps the re-rendered modal back in place;
-    # a non-2xx fragment would be silently dropped and the error never
-    # shown (#2346).
-    assert response.status_code == 200, response.text
+    # 422; the modal container's before-swap hook swaps it in (#2346).
+    assert response.status_code == 422, response.text
     body = response.text
     # The modal re-renders inline with a top-of-form summary banner and a
     # field-level error, not a generic error page.
@@ -738,7 +735,7 @@ def test_create_unknown_identity_ref_renders_inline() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     body = response.text
     assert "data-form-error-summary" in body
     assert 'data-error-for="identity_ref"' in body
@@ -765,7 +762,7 @@ def test_create_invalid_turn_budget_renders_inline() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     assert "data-form-error-summary" in response.text
     assert 'data-error-for="turn_budget"' in response.text
 

@@ -13,7 +13,8 @@ import (
 const explainWait = `{
   "status": "ok", "engine": "shadow", "connector_id": "<connector-id>", "op_id": "<op-id>",
   "answer": "wait", "decided_by": "today",
-  "approvers": {"groups": ["MEHO-SA-Operators", "MEHO-Admins"], "rule": "tenant:routing[0]"},
+  "approvers": {"groups": ["MEHO-SA-Operators", "MEHO-Admins"], "rule": "install:routing[0], tenant:routing[0]",
+    "floor": "install:routing[0]"},
   "today": {"verdict": "wait", "policy_verdict": "needs-approval", "reason": "a token call runs only safe operations"},
   "evaluator": {
     "verdict": "wait",
@@ -26,7 +27,8 @@ const explainWait = `{
     "same_as_today": true
   },
   "classification": {"risk_level": "caution", "requires_approval": true, "category": "network",
-    "labels": {}, "entries": [{"path": "file:classifications[1]", "labels": {}}]}
+    "labels": {}, "entries": [{"path": "file:classifications[1]", "labels": {}}]},
+  "not_checked": ["idempotency_key", "connector_resolution"]
 }`
 
 func decodeSent(t *testing.T, got seen) map[string]any {
@@ -62,12 +64,14 @@ func TestExplainSendsTheQuestionAndPrintsTheRules(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Answer: wait",
-		"Who may approve: MEHO-SA-Operators, MEHO-Admins (rule: tenant:routing[0])",
+		"Who may approve: MEHO-SA-Operators, MEHO-Admins (rule: install:routing[0], tenant:routing[0])",
+		"Install's floor: install:routing[0] (a tenant's routing can only narrow it)",
 		"Today: needs-approval: a token call runs only safe operations",
 		"Floor: floor token_runs_only_safe: wait",
 		"  2. default always_wait: wait (the operation always waits) at file:classifications[1]",
 		"category: network",
 		"matched file:classifications[1]",
+		"Not checked: idempotency_key, connector_resolution",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)
@@ -100,7 +104,8 @@ func TestExplainWithoutTheApproverRulePrintsOnlyTheGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explain: %v; stderr=%s", err, stderr)
 	}
-	if !strings.Contains(stdout, "Who may approve: MEHO-Admins\n") || strings.Contains(stdout, "rule:") {
+	if !strings.Contains(stdout, "Who may approve: MEHO-Admins\n") || strings.Contains(stdout, "rule:") ||
+		strings.Contains(stdout, "floor") {
 		t.Errorf("stdout: %s", stdout)
 	}
 }

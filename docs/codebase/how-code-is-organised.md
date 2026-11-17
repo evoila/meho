@@ -44,6 +44,36 @@ These rules stop that.
     shorter, lower its pin in the same pull request. When a list is gone,
     remove its row.
 
+## Upgrade rows
+
+Almost every pull request that changes behaviour adds a row to the upgrade
+tables. Do not edit the tables. Add one file per row:
+`docs/upgrade-rows/<version>/<short-name>.md`, with a `## Note` and an
+`## Action` section of one line each (see `docs/upgrade-rows/README.md`).
+A link in a row must be a full `https://` address, because the same row
+goes into both tables.
+`mkdocs build` adds the rows to the end of the table in
+`docs-site/install/upgrades.md`. The release pull request runs
+`python3 scripts/ci/upgrade_rows.py --write`, which adds the rows of the
+release to the end of the table in `docs/deploying.md`. The checks are in
+`scripts/ci/upgrade_rows.py`. The docs build and
+`backend/tests/test_upgrade_rows.py` both run them. They fail on:
+
+- a broken row file, or a file outside a version folder;
+- a conflict marker line, a row with the wrong number of columns, or a
+  doubled row in either table;
+- a row added to either table by hand (the older rows are frozen, see
+  `FROZEN_ROWS`);
+- a row of the newest release (a `## [X.Y.Z]` heading in `CHANGELOG.md`)
+  that is missing in `docs/deploying.md`;
+- a new row in the folder of a version that was released before.
+
+Why not a `merge=union` line in `.gitattributes`? It works with a local
+`git merge`. But GitHub does not read `.gitattributes` merge rules when it
+merges on its servers (the update button, the merge queue), so the conflict
+would stay there. Reference:
+<https://github.com/orgs/community/discussions/9288>.
+
 **Before you open a pull request:** merge main into your branch and run the
 tests again. Then check: does your change add a line to a file that other
 features also edit? If yes, move that part into your own module.

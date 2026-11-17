@@ -61,6 +61,7 @@ _READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "CREDENTIAL_READ_WAIT_NOTE",
     "TOKEN_CALL_WAIT",
     "InstallKeyMissingError",
     "InvalidOpSchemaError",
@@ -602,6 +603,13 @@ async def _null_target_park_hint(
         return None
 
 
+#: The end of the wait reason of a service call that reads a credential.
+CREDENTIAL_READ_WAIT_NOTE = (
+    "the operation reads a credential, so no standing grant and no run approval "
+    "covers it; a person approves each call"
+)
+
+
 async def _service_grant_verdict(
     *,
     operator: Operator,
@@ -620,13 +628,17 @@ async def _service_grant_verdict(
     selector, #3349) clears the gate, else ``(None, gate_reason)``. For an
     op with a parameter marked ``x-meho-caller-address: true`` the grant
     lookup refuses every row, and *gate_reason* says that a person approves
-    each call. Otherwise *gate_reason* gets the
+    each call. For an op that reads a credential, *gate_reason* ends with
+    :data:`CREDENTIAL_READ_WAIT_NOTE`. Otherwise *gate_reason* gets the
     #3349 null-target hint appended when the dispatch is
     target-scoped and the only live candidate for this
     ``(principal, op, connector)`` is a null-target grant (the operator
     likely created it believing null = "any target").
     """
-    from meho_backplane.operations.service_grants import consult_and_record_grant
+    from meho_backplane.operations.service_grants import (
+        consult_and_record_grant,
+        credential_read_grant_reason,
+    )
 
     grant_id = await consult_and_record_grant(
         operator=operator,
@@ -671,11 +683,16 @@ async def _service_grant_verdict(
     if run_approval_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-approved by run approval {run_approval_id}"
 
+    notes: list[str] = []
     if has_caller_address(descriptor.parameter_schema):
-        note = (
+        notes.append(
             "the operation connects to an address the caller gives, so no "
             "standing grant covers it; a person approves each call"
         )
+    if credential_read_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None)):
+        notes.append(CREDENTIAL_READ_WAIT_NOTE)
+    if notes:
+        note = "; ".join(notes)
         return None, f"{gate_reason}; {note}" if gate_reason else note
 
     hint = await _null_target_park_hint(

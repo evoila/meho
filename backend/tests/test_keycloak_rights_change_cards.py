@@ -100,7 +100,7 @@ def _ctx(
         target=_FakeTarget(),
         params=params,
         connector_id="keycloak-admin-26.x",
-        for_agent=for_agent,
+        agent_preview=for_agent,
     )
 
 

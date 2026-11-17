@@ -1433,9 +1433,12 @@ type AgentDefinitionUpdate struct {
 	// * ``deep`` -- a more capable tier for harder reasoning.
 	ModelTier    *AgentModelTier         `json:"model_tier,omitempty"`
 	OutputSchema *map[string]interface{} `json:"output_schema"`
-	SystemPrompt *string                 `json:"system_prompt"`
-	Toolset      *map[string]interface{} `json:"toolset"`
-	TurnBudget   *int                    `json:"turn_budget"`
+
+	// StartingGrants The first grants of a new agent, picked when it is registered or defined.
+	StartingGrants *StartingGrants         `json:"starting_grants,omitempty"`
+	SystemPrompt   *string                 `json:"system_prompt"`
+	Toolset        *map[string]interface{} `json:"toolset"`
+	TurnBudget     *int                    `json:"turn_budget"`
 }
 
 // AgentElevationCreate Convenience alias for time-bounded elevations.
@@ -2324,7 +2327,9 @@ type AuditClassCountsRequest struct {
 	Target         *string             `json:"target"`
 	TextChanged    *bool               `json:"text_changed"`
 	Until          *string             `json:"until"`
-	WorkRef        *string             `json:"work_ref"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef *string `json:"work_ref"`
 }
 
 // AuditEntry One row of the audit query result.
@@ -2482,7 +2487,9 @@ type AuditQueryRequest struct {
 	Target        *string             `json:"target"`
 	TextChanged   *bool               `json:"text_changed"`
 	Until         *string             `json:"until"`
-	WorkRef       *string             `json:"work_ref"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef *string `json:"work_ref"`
 }
 
 // AuditQueryResult Page of audit rows plus the forward-only continuation cursor.
@@ -3266,9 +3273,11 @@ type BodyUiAgentsEditSubmitUiAgentsNamePatch struct {
 	// has not picked one; the middleware then lets the request reach only
 	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
 	// a switch.
-	SessionCtx   *UISessionContext `json:"session_ctx,omitempty"`
-	SystemPrompt *string           `json:"system_prompt,omitempty"`
-	TurnBudget   *string           `json:"turn_budget"`
+	SessionCtx           *UISessionContext `json:"session_ctx,omitempty"`
+	StartingGrantTargets *[]string         `json:"starting_grant_targets,omitempty"`
+	StartingGrants       *string           `json:"starting_grants,omitempty"`
+	SystemPrompt         *string           `json:"system_prompt,omitempty"`
+	TurnBudget           *string           `json:"turn_budget"`
 }
 
 // BodyUiAgentsRunSubmitUiAgentsNameRunPost defines model for Body_ui_agents_run_submit_ui_agents__name__run_post.
@@ -3346,14 +3355,15 @@ type BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost struct {
 
 // BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
 type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
-	Aliases   *string `json:"aliases"`
-	AuthModel *string `json:"auth_model,omitempty"`
-	Host      *string `json:"host,omitempty"`
-	Name      *string `json:"name,omitempty"`
-	Notes     *string `json:"notes"`
-	Port      *string `json:"port"`
-	Product   *string `json:"product,omitempty"`
-	SecretRef *string `json:"secret_ref"`
+	Aliases      *string `json:"aliases"`
+	AuthModel    *string `json:"auth_model,omitempty"`
+	Host         *string `json:"host,omitempty"`
+	ManagedRealm *string `json:"managed_realm"`
+	Name         *string `json:"name,omitempty"`
+	Notes        *string `json:"notes"`
+	Port         *string `json:"port"`
+	Product      *string `json:"product,omitempty"`
+	SecretRef    *string `json:"secret_ref"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -3386,13 +3396,14 @@ type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 
 // BodyUiConnectorsEditSubmitUiConnectorsNamePatch defines model for Body_ui_connectors_edit_submit_ui_connectors__name__patch.
 type BodyUiConnectorsEditSubmitUiConnectorsNamePatch struct {
-	Aliases   *string `json:"aliases"`
-	AuthModel *string `json:"auth_model,omitempty"`
-	Host      *string `json:"host,omitempty"`
-	Notes     *string `json:"notes"`
-	Port      *string `json:"port"`
-	Product   *string `json:"product,omitempty"`
-	SecretRef *string `json:"secret_ref"`
+	Aliases      *string `json:"aliases"`
+	AuthModel    *string `json:"auth_model,omitempty"`
+	Host         *string `json:"host,omitempty"`
+	ManagedRealm *string `json:"managed_realm"`
+	Notes        *string `json:"notes"`
+	Port         *string `json:"port"`
+	Product      *string `json:"product,omitempty"`
+	SecretRef    *string `json:"secret_ref"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -4041,7 +4052,9 @@ type BroadcastAnnounceRequest struct {
 	Target         *string                                 `json:"target"`
 	Targets        *[]string                               `json:"targets,omitempty"`
 	TtlMinutes     *int                                    `json:"ttl_minutes"`
-	WorkRef        *string                                 `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // BroadcastAnnounceRequestPhase defines model for BroadcastAnnounceRequest.Phase.
@@ -4293,7 +4306,9 @@ type CallOperationBody struct {
 	// PreviewHash Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op — the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197.
 	PreviewHash *string                   `json:"preview_hash"`
 	Target      *CallOperationBody_Target `json:"target"`
-	WorkRef     *string                   `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // CallOperationBodyTarget0 defines model for .
@@ -6656,9 +6671,11 @@ type EventSourceUpdate struct {
 
 // ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
 type ExplainApprovers struct {
+	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. For a waiting request it is the install's routing as it is now, as at the approve click. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
+	Floor  *string  `json:"floor"`
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. category_not_stored when MEHO does not know the category the install's policy gives the change (it gives it two categories, or a waiting request started before MEHO stored it) and an install entry that matches on a category could fit it; then no group may approve it. Null for a caller who is not a tenant admin or a platform admin.
 	Rule *string `json:"rule"`
 }
 
@@ -7887,6 +7904,19 @@ type KbWikiSearch struct {
 // KbWikiSearchReason defines model for KbWikiSearch.Reason.
 type KbWikiSearchReason string
 
+// KeycloakRealmCheck The Keycloak targets MEHO refuses; “all_tenants“ says how far the list goes.
+type KeycloakRealmCheck struct {
+	AllTenants bool                   `json:"all_tenants"`
+	Items      []KeycloakRealmProblem `json:"items"`
+}
+
+// KeycloakRealmProblem One Keycloak target MEHO refuses, and why.
+type KeycloakRealmProblem struct {
+	Name     string             `json:"name"`
+	Problem  string             `json:"problem"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+}
+
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
 // Mirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`
@@ -8947,8 +8977,11 @@ type PolicyExplainResponse struct {
 	Extras    *map[string]interface{} `json:"extras"`
 
 	// File True when a policy file that is not imported was asked.
-	File *bool   `json:"file,omitempty"`
-	OpId *string `json:"op_id"`
+	File *bool `json:"file,omitempty"`
+
+	// NotChecked Each check after the policy gate that explain does not ask and that can still refuse the call, by a fixed name. Empty for deny. Null for a stored approval request and for an error.
+	NotChecked *[]string `json:"not_checked"`
+	OpId       *string   `json:"op_id"`
 
 	// Request The rule stored on an approval request.
 	Request *ExplainStoredRequest       `json:"request,omitempty"`
@@ -9831,7 +9864,7 @@ type RunApprovalCreate struct {
 	// Reason What the run does, for the approver.
 	Reason string `json:"reason"`
 
-	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header.
+	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
 	WorkRef string `json:"work_ref"`
 }
 
@@ -9859,21 +9892,24 @@ type RunApprovalListResponse struct {
 
 // RunApprovalRead One run approval with its status.
 type RunApprovalRead struct {
-	ApprovedAt    *time.Time            `json:"approved_at"`
-	ApprovedBySub *string               `json:"approved_by_sub"`
-	EndedAt       *time.Time            `json:"ended_at"`
-	Entries       []RunApprovalEntry    `json:"entries"`
-	ExpiresAt     time.Time             `json:"expires_at"`
-	Id            openapi_types.UUID    `json:"id"`
-	PrincipalSub  string                `json:"principal_sub"`
-	Reason        string                `json:"reason"`
-	RequestedAt   time.Time             `json:"requested_at"`
-	RevokedAt     *time.Time            `json:"revoked_at"`
-	RevokedBySub  *string               `json:"revoked_by_sub"`
-	RevokedReason *string               `json:"revoked_reason"`
-	Status        RunApprovalReadStatus `json:"status"`
-	TenantId      openapi_types.UUID    `json:"tenant_id"`
-	WorkRef       string                `json:"work_ref"`
+	ApprovedAt    *time.Time         `json:"approved_at"`
+	ApprovedBySub *string            `json:"approved_by_sub"`
+	EndedAt       *time.Time         `json:"ended_at"`
+	Entries       []RunApprovalEntry `json:"entries"`
+
+	// EntriesThatWait Entries that wait for a person; the reason says which calls. Filled by request, show and approve; null in list, revoke and end.
+	EntriesThatWait *[]RunApprovalWaitNote `json:"entries_that_wait"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	Id              openapi_types.UUID     `json:"id"`
+	PrincipalSub    string                 `json:"principal_sub"`
+	Reason          string                 `json:"reason"`
+	RequestedAt     time.Time              `json:"requested_at"`
+	RevokedAt       *time.Time             `json:"revoked_at"`
+	RevokedBySub    *string                `json:"revoked_by_sub"`
+	RevokedReason   *string                `json:"revoked_reason"`
+	Status          RunApprovalReadStatus  `json:"status"`
+	TenantId        openapi_types.UUID     `json:"tenant_id"`
+	WorkRef         string                 `json:"work_ref"`
 }
 
 // RunApprovalReadStatus defines model for RunApprovalRead.Status.
@@ -9882,6 +9918,21 @@ type RunApprovalReadStatus string
 // RunApprovalRevoke Body of “POST /api/v1/service-principals/run-approvals/{id}/revoke“.
 type RunApprovalRevoke struct {
 	Reason *string `json:"reason"`
+}
+
+// RunApprovalWaitNote An entry the run approval never covers; each of its calls waits for a person.
+//
+// The list keeps the entry (the request is not refused), and this note
+// says so to the add-on that asks and to the person who approves.
+type RunApprovalWaitNote struct {
+	ConnectorId string `json:"connector_id"`
+
+	// Entry The position of the entry in ``entries``, from 0.
+	Entry int    `json:"entry"`
+	OpId  string `json:"op_id"`
+
+	// Reason Why each call of this entry waits for a person.
+	Reason string `json:"reason"`
 }
 
 // RunCompletedResponse Returned by “meho_runbook_next“ when the previous step was the last.
@@ -10418,7 +10469,9 @@ type ScheduledTriggerCreate struct {
 	Kind     ScheduledTriggerKind `json:"kind"`
 	TenantId *openapi_types.UUID  `json:"tenant_id"`
 	Timezone *string              `json:"timezone,omitempty"`
-	WorkRef  *string              `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // ScheduledTriggerInFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
@@ -11446,7 +11499,9 @@ type StartRunRequest struct {
 	Params       *map[string]interface{} `json:"params,omitempty"`
 	Target       string                  `json:"target"`
 	TemplateSlug string                  `json:"template_slug"`
-	WorkRef      *string                 `json:"work_ref"`
+
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	WorkRef *string `json:"work_ref"`
 }
 
 // StartingGrantSet The three starting grant sets a person can pick.
@@ -11888,6 +11943,50 @@ type TargetUpdate struct {
 	VerifyTls             *bool                   `json:"verify_tls"`
 	Version               *string                 `json:"version"`
 	VpnRequired           *bool                   `json:"vpn_required"`
+}
+
+// TargetWriteResult The answer of a target create or update: the target, plus warnings.
+//
+// “warnings“ holds plain lines about a setting that is allowed but
+// risky, for example a Keycloak target that manages the realm MEHO
+// itself signs in with
+// (:func:`~meho_backplane.targets.keycloak_realm_warnings.keycloak_realm_warnings`).
+// Empty when there is nothing to say.
+type TargetWriteResult struct {
+	Aliases []string `json:"aliases"`
+
+	// AuthModel Per-target identity model per v0.1-spec L447-454.
+	AuthModel AuthModel              `json:"auth_model"`
+	CreatedAt time.Time              `json:"created_at"`
+	DeletedAt *time.Time             `json:"deleted_at"`
+	Extras    map[string]interface{} `json:"extras"`
+
+	// Fingerprint Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI.
+	Fingerprint           *map[string]interface{} `json:"fingerprint"`
+	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
+	Fqdn                  *string                 `json:"fqdn"`
+	Host                  string                  `json:"host"`
+	Id                    openapi_types.UUID      `json:"id"`
+	Name                  string                  `json:"name"`
+	Notes                 *string                 `json:"notes"`
+	Port                  *int                    `json:"port"`
+	PreferredImplId       *string                 `json:"preferred_impl_id"`
+	Product               string                  `json:"product"`
+	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
+	SecretRef             *string                 `json:"secret_ref"`
+
+	// SecretRefDerived True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.
+	SecretRefDerived *bool              `json:"secret_ref_derived,omitempty"`
+	TenantId         openapi_types.UUID `json:"tenant_id"`
+	TlsCaPin         *string            `json:"tls_ca_pin"`
+	TlsServerName    *string            `json:"tls_server_name"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	VerifyTls        *bool              `json:"verify_tls,omitempty"`
+	Version          *string            `json:"version"`
+	VpnRequired      bool               `json:"vpn_required"`
+
+	// Warnings Plain lines about a setting that is allowed but risky. Empty when none.
+	Warnings *[]string `json:"warnings,omitempty"`
 }
 
 // TargetsDiscoverResult Aggregated discover output across every connector for a product.
@@ -12659,6 +12758,21 @@ type WithdrawRequestBody struct {
 	Reason *string `json:"reason,omitempty"`
 }
 
+// WriteAwaitingApproval The 202 answer of a REST write that waits for approval.
+type WriteAwaitingApproval struct {
+	// ApprovalRequestId Id of the approval request. A person approves it in the console, with `meho approvals approve <id>`, or on REST.
+	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
+
+	// Message What happens next, in plain words.
+	Message string `json:"message"`
+
+	// OpId The operation that runs after approval, for example `targets.register`.
+	OpId string `json:"op_id"`
+
+	// Status Always `awaiting_approval`: nothing is written yet.
+	Status string `json:"status"`
+}
+
 // UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
 //
 // “kind“ is typed against :data:`_EdgeKindSlug` so a malformed kind
@@ -12999,7 +13113,7 @@ type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
 
 // ListRunsApiV1AgentsRunsGetParams defines parameters for ListRunsApiV1AgentsRunsGet.
 type ListRunsApiV1AgentsRunsGetParams struct {
-	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
@@ -13058,7 +13172,7 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Status Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
-	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Limit Return at most this many requests (1..500). Omit for no limit.
@@ -13221,11 +13335,13 @@ type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
 
 // RecentBroadcastEventsApiV1BroadcastRecentGetParams defines parameters for RecentBroadcastEventsApiV1BroadcastRecentGet.
 type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
-	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-	OpClass       *string `form:"op_class,omitempty" json:"op_class,omitempty"`
-	Principal     *string `form:"principal,omitempty" json:"principal,omitempty"`
-	Target        *string `form:"target,omitempty" json:"target,omitempty"`
-	ActorSub      *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
+	Cursor    *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
+	Target    *string `form:"target,omitempty" json:"target,omitempty"`
+	ActorSub  *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
 	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	ActiveOnly    *bool   `form:"active_only,omitempty" json:"active_only,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -13816,12 +13932,14 @@ type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
 // ListRunsApiV1RunbooksRunsGetParams defines parameters for ListRunsApiV1RunbooksRunsGet.
 type ListRunsApiV1RunbooksRunsGetParams struct {
-	Assignee      *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
-	Status        *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TemplateSlug  *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
-	WorkRef       *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	Limit         *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
-	Authorization *string                                   `json:"authorization,omitempty"`
+	Assignee     *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
+	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // ListRunsApiV1RunbooksRunsGetParamsStatus defines parameters for ListRunsApiV1RunbooksRunsGet.
@@ -13924,13 +14042,15 @@ type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams
 
 // ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
 type ListTriggersApiV1SchedulerTriggersGetParams struct {
-	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset        *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
-	Kind          *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
-	Status        *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	WorkRef       *string                                            `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	TenantFilter  *openapi_types.UUID                                `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
-	Authorization *string                                            `json:"authorization,omitempty"`
+	Limit  *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
+	Kind   *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
+	Status *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	WorkRef       *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
 }
 
 // ListTriggersApiV1SchedulerTriggersGetParamsKind defines parameters for ListTriggersApiV1SchedulerTriggersGet.
@@ -14166,6 +14286,11 @@ type ListTargetsApiV1TargetsGetParams struct {
 
 // CreateTargetApiV1TargetsPostParams defines parameters for CreateTargetApiV1TargetsPost.
 type CreateTargetApiV1TargetsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams defines parameters for KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet.
+type KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -17973,6 +18098,9 @@ type ClientInterface interface {
 	CreateTargetApiV1TargetsPostWithBody(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet request
+	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22334,6 +22462,18 @@ func (c *Client) CreateTargetApiV1TargetsPostWithBody(ctx context.Context, param
 
 func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateTargetApiV1TargetsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -40539,6 +40679,48 @@ func NewCreateTargetApiV1TargetsPostRequestWithBody(server string, params *Creat
 	return req, nil
 }
 
+// NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest generates requests for KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet
+func NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(server string, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/checks/keycloak-realm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDiscoverTargetsApiV1TargetsDiscoverGetRequest generates requests for DiscoverTargetsApiV1TargetsDiscoverGet
 func NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(server string, params *DiscoverTargetsApiV1TargetsDiscoverGetParams) (*http.Request, error) {
 	var err error
@@ -54774,6 +54956,9 @@ type ClientWithResponsesInterface interface {
 
 	CreateTargetApiV1TargetsPostWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error)
 
+	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse request
+	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error)
+
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
 
@@ -60421,7 +60606,8 @@ func (r ListTargetsApiV1TargetsGetResponse) StatusCode() int {
 type CreateTargetApiV1TargetsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *Target
+	JSON201      *TargetWriteResult
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60435,6 +60621,29 @@ func (r CreateTargetApiV1TargetsPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateTargetApiV1TargetsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KeycloakRealmCheck
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60467,6 +60676,7 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
 type DeleteTargetApiV1TargetsNameDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON409      *struct {
 		Detail struct {
 			GraphNodeRefs int                                             `json:"graph_node_refs"`
@@ -60520,7 +60730,8 @@ func (r DescribeTargetApiV1TargetsNameGetResponse) StatusCode() int {
 type UpdateTargetApiV1TargetsNamePatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *Target
+	JSON200      *TargetWriteResult
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60821,6 +61032,7 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON201      *TopologyEdge
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60844,6 +61056,7 @@ type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *UnderscoreBulkImportResponse
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60866,6 +61079,7 @@ func (r BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse) StatusCode() int
 type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60927,6 +61141,7 @@ func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
 type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -68713,6 +68928,15 @@ func (c *ClientWithResponses) CreateTargetApiV1TargetsPostWithResponse(ctx conte
 		return nil, err
 	}
 	return ParseCreateTargetApiV1TargetsPostResponse(rsp)
+}
+
+// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse request returning *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse
+func (c *ClientWithResponses) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error) {
+	rsp, err := c.KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp)
 }
 
 // DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request returning *DiscoverTargetsApiV1TargetsDiscoverGetResponse
@@ -78636,11 +78860,51 @@ func ParseCreateTargetApiV1TargetsPostResponse(rsp *http.Response) (*CreateTarge
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest Target
+		var dest TargetWriteResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse parses an HTTP response from a KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse call
+func ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp *http.Response) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KeycloakRealmCheck
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -78701,6 +78965,13 @@ func ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp *http.Response) (*Delet
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
 		var dest struct {
 			Detail struct {
@@ -78774,11 +79045,18 @@ func ParseUpdateTargetApiV1TargetsNamePatchResponse(rsp *http.Response) (*Update
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Target
+		var dest TargetWriteResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -79211,6 +79489,13 @@ func ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse(rsp *http.Response) (*
 		}
 		response.JSON201 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79244,6 +79529,13 @@ func ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse(rsp *http.Respo
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79270,6 +79562,13 @@ func ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp *http.Re
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79355,6 +79654,13 @@ func ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp *http.Respon
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

@@ -210,6 +210,7 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_keycloak_realm.go # authenticated layer: warns about Keycloak targets MEHO refuses (GET /api/v1/targets/checks/keycloak-realm; all tenants for a platform admin).
     │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
     │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
@@ -1131,17 +1132,29 @@ that header from one place, so every verb gets it without its own flag.
 - The root command has a persistent `--work-ref` flag. When the flag is
   not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
 - The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
-  value once with `api.ValidWorkRef`. The CLI check is simpler than the
-  backplane rule (below). It refuses only a blank value and a value with
-  a control character such as a line break, because the `Meho-Work-Ref`
-  header cannot carry one. The backplane then applies its one rule to
-  every ticket id, so it also refuses a tab inside the id, invisible
-  characters and a value over 256 characters. A given flag is
-  always checked, so `--work-ref ""` is refused. An empty
-  `MEHO_WORK_REF` means "not set". The variable is checked before the
-  CLI trims it, so a trailing line break is refused too. A bad value
-  stops the command before any request leaves the CLI. A good value
-  goes on the command context (`api.WithWorkRef`).
+  value once with `api.ValidWorkRef`. It applies the same rule as the
+  backplane (below): it refuses a blank value, a value over 256
+  characters, and a value with a control character (also a tab or a line
+  break), an invisible format character or a line or paragraph
+  separator. Text that is not valid UTF-8 is refused too. Like the
+  backplane, the CLI counts the length after it strips white space and
+  makes the text NFC, so 130 decomposed letters (260 characters as typed)
+  pass. One difference, on purpose: the CLI looks for refused characters
+  before it strips white space. So it refuses a control character or a
+  line or paragraph separator also at the start or the end of the id: a
+  tab, a line feed, a vertical tab, a form feed, a carriage return (so
+  also CR LF), U+001C to U+001F, U+0085, U+2028 and U+2029.
+  The backplane strips these at the ends and takes the value. So the CLI
+  is stricter than the backplane, never looser. Such a character in a
+  flag or variable value is most likely a mistake. A given
+  flag is always checked, so `--work-ref ""` is refused. An empty
+  `MEHO_WORK_REF` means "not set". A bad value stops the command before
+  any request leaves the CLI. A good value is cleaned with
+  `api.CleanWorkRef` (it strips like Python's `str.strip` and makes the
+  text NFC) and goes on the command context (`api.WithWorkRef`).
+- One case list, `testdata/work_ref_cases.json`, is read by the Go test
+  (`TestValidWorkRef_SharedCases`) and by the Python test
+  (`backend/tests/test_work_ref_rule.py`), so the two rules cannot drift.
 - `meho operation call` has its own `--work-ref` flag, which goes into
   the request body. It is checked and trimmed the same way, so
   `--work-ref " CHG1 "` stores `CHG1`, like the global flag.
@@ -1203,12 +1216,23 @@ that header from one place, so every verb gets it without its own flag.
   ticket X. For one release, a `--work-ref` on these commands still
   filters too when `--filter-work-ref` is not given, and
   `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
-  line on stderr that names `--filter-work-ref`. A filter value that
-  `api.ValidWorkRef` refuses (for example one with a line break) does
-  not fail there: `applyWorkRef` skips the tag on these commands, and
-  the value only filters. When `--filter-work-ref` is given, also
-  empty (`--filter-work-ref=""` means no filter), `--work-ref` only
-  tags, and a bad value is an error like on every other command.
+  line on stderr that names `--filter-work-ref`.
+- The CLI sends a filter value as typed and does not check it. The
+  backplane checks it with the ticket id rule. It strips white space at
+  both ends and makes the text NFC, so a value with a line break at the
+  end still finds the ticket. A value that the rule refuses (only white
+  space, a tab or an invisible character inside, or more than 256
+  characters after stripping) gets HTTP 422 with a message that names
+  the rule. The backplane matches the cleaned id and also the text
+  exactly as typed. So a search finds the exact text stored before the
+  rule, if that text follows the rule. An old id that breaks the rule
+  (for example with a tab) can no longer be used as a filter; such rows
+  still show in a list without a filter. An empty `--filter-work-ref=""`
+  means no filter.
+- While the old `--work-ref` still filters (no `--filter-work-ref`
+  given), `applyWorkRef` does not check it and does not tag the request
+  with it. When `--filter-work-ref` is given, also empty, `--work-ref`
+  only tags, and a bad value is an error like on every other command.
   `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
   the command tree and fails when a command adds its own `--work-ref`
   that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
@@ -3264,6 +3288,16 @@ so it is read-only rather than offline), `--json` (structured plan
 output), `--backplane` (override the configured backplane URL),
 `--secret-field connector_field=source_field` (repeatable; adds the
 pair to every target's secret field map).
+
+**Each row waits for approval.** The import sends one `POST` or `PATCH`
+per row with the person's token, so each row makes its own approval
+request and the summary counts it as "waiting for approval" (see
+[targets.md](targets.md)). The help text (`importManyRowsNote`) says
+what to do with a large file: import it in the web console, where it is
+written at once, or run it with `--work-ref`. Then a person goes
+through all its rows with
+`meho approvals approve --filter-work-ref <ref> --in-order`, which asks
+for a yes at each row.
 
 **Mapping rules.** The CLI parses the YAML as a generic
 `map[string]any` per entry and partitions every key:

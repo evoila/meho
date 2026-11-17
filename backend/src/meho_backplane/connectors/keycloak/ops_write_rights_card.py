@@ -59,8 +59,8 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     _realm_label,
     _realm_update_preview,
 )
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
@@ -96,7 +96,7 @@ def _hide(ctx: PreviewContext, value: Any) -> Any:
     """*value* with every secret hidden, the way the realm update card hides it."""
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
     hidden = _redact_echoed_params(
-        {"value": redact_secret_fields(value)},
+        {"value": redact_preview_fields(value)},
         connector_id=ctx.connector_id,
         tenant=tenant,
         op_id=ctx.descriptor.op_id,
@@ -145,7 +145,7 @@ async def _read_client(ctx: PreviewContext) -> tuple[str | None, dict[str, Any] 
             return None, None
         client = await connector._get_admin_json(
             ctx.target,
-            fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": quote_segment(client_uuid)}),
+            fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid}),
             operator=ctx.operator,
         )
     except Exception:
@@ -162,7 +162,7 @@ async def _read_realm(ctx: PreviewContext) -> dict[str, Any] | None:
     try:
         current = await connector._get_admin_json(
             ctx.target,
-            fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(realm)}),
+            fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
             operator=ctx.operator,
         )
     except Exception:
@@ -211,7 +211,7 @@ async def _client_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
 async def _realm_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
     """Card for ``keycloak.realm.update``: the realm card plus the realm's values now."""
     card = await _realm_update_preview(ctx)
-    if card is None or (ctx.for_agent and not _cards_on()):
+    if card is None or (ctx.agent_preview and not _cards_on()):
         return card
     return _add_current_values(card, ctx, await _read_realm(ctx), _representation(ctx))
 

@@ -7,7 +7,7 @@ Nothing runs and nothing is written. The answer comes from the same code
 the call uses:
 
 * **Today's answer**: the preview's policy fields
-  (:func:`~meho_backplane.operations._request_preview._governance_fields`),
+  (:func:`~meho_backplane.operations._request_preview.governance_and_gate`),
   which call :func:`~meho_backplane.operations._validate.policy_gate` with
   ``decide_only=True``. No audit row, no approval request, no grant use.
 * **The evaluator's answer** (only with ``POLICY_ENGINE_SHADOW`` on):
@@ -33,9 +33,13 @@ it.
 While the evaluator is off or in shadow mode, today's checks decide, so
 ``answer`` is today's answer.
 
+The checks after the policy gate that can still refuse the call are asked
+too, the same ones the call asks (:mod:`meho_backplane.policy.explain_checks`).
+
 Explain asks about a call with no parameters. For an operation whose
 answer depends on its parameters, the answer is the one of a call
-without parameters.
+without parameters. Each check after the gate that explain does not ask
+and that can still refuse the call is named in ``not_checked``.
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ from meho_backplane.policy.classification import (
 )
 from meho_backplane.policy.evaluate import Decision, RuleRef, Verdict
 from meho_backplane.policy.explain_asker import ExplainInputError, asker_view
+from meho_backplane.policy.explain_checks import not_checked, refusal_after_gate
 from meho_backplane.policy.explain_models import (
     Answer,
     ExplainApprovers,
@@ -76,8 +81,15 @@ from meho_backplane.policy.explain_models import (
     ExplainToday,
     PolicyExplainResponse,
 )
-from meho_backplane.policy.routing import RouteEntry, _routes, routing_enabled, stored_kinds
+from meho_backplane.policy.routing import (
+    DEFAULT_RULE,
+    RouteEntry,
+    _routes,
+    routing_enabled,
+    stored_kinds,
+)
 from meho_backplane.policy.routing import today_kinds as _today_kinds
+from meho_backplane.policy.routing_floor import CATEGORY_NOT_STORED, install_floor
 from meho_backplane.policy.shadow import evaluate_call, shadow_enabled
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.policy.store import (
@@ -197,8 +209,8 @@ async def _policy_view(
     if routing_enabled():
         try:
             routes = [
-                *_routes(tenant_doc, labels["tenant"]),
-                *_routes(install_doc, labels["install"]),
+                *_routes(tenant_doc, labels["tenant"], install=False),
+                *_routes(install_doc, labels["install"], install=True),
             ]
         except ValueError as exc:
             raise invalid_routing(exc) from exc
@@ -388,21 +400,21 @@ async def _resolve(
 
 async def _today_and_evaluator(
     question: CallQuestion, descriptor: EndpointDescriptor, connector_id: str, target: Any
-) -> tuple[dict[str, Any], Decision | None]:
-    """Today's policy fields and the evaluator's decision.
+) -> tuple[dict[str, Any], PermissionVerdict, Decision | None]:
+    """Today's policy fields, the gate's own answer and the evaluator's decision.
 
     Today's fields come from ``policy_gate`` with ``decide_only=True``. A
     question with groups unbinds the hosted agent of the caller's run, so
     its grants are never read: the made-up login asks alone.
     """
     from meho_backplane.auth.permissions import agent_no_grant_log_scope
-    from meho_backplane.operations._request_preview import _governance_fields
+    from meho_backplane.operations._request_preview import governance_and_gate
 
     asker = question.asker
     actor = {} if question.me else {ACTOR_SUB_KEY: None}
     try:
         with agent_no_grant_log_scope(), structlog.contextvars.bound_contextvars(**actor):
-            governance = await _governance_fields(
+            governance, gate = await governance_and_gate(
                 operator=asker,
                 descriptor=descriptor,
                 target=target,
@@ -420,7 +432,7 @@ async def _today_and_evaluator(
                 )
     finally:
         forget_rule()  # the gate's shadow kept a rule; explain writes no row
-    return governance, decision
+    return governance, gate, decision
 
 
 async def _approvers(
@@ -439,6 +451,7 @@ async def _approvers(
         op_id=descriptor.op_id,
         level=descriptor.safety_level,
         category=descriptor.policy_category,
+        install_category=descriptor.policy_install_category,
     )
 
 
@@ -456,8 +469,17 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         file_document=question.file_document,
         file_scope=question.file_scope,
     )
-    governance, decision = await _today_and_evaluator(question, descriptor, connector_id, target)
+    governance, gate, decision = await _today_and_evaluator(
+        question, descriptor, connector_id, target
+    )
     today_verdict = PermissionVerdict(governance["policy_verdict"])
+    reason = governance.get("policy_reason")
+    # Asked for the gate's own answer, before the step check, as the call does.
+    refusal = await refusal_after_gate(
+        operator=question.asker, descriptor=descriptor, target=target, answer=_FROM_TODAY[gate]
+    )
+    if refusal is not None:
+        today_verdict, reason = PermissionVerdict.DENY, refusal
     answer = _FROM_TODAY[today_verdict]
     approvers = None
     if answer == "wait":
@@ -477,15 +499,16 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         today=ExplainToday(
             verdict=answer,
             policy_verdict=today_verdict.value,
-            reason=governance.get("policy_reason"),
+            reason=reason,
         ),
         evaluator=_evaluator_view(decision, answer, wait_path) if decision is not None else None,
         classification=_classification_view(descriptor, matched),
+        not_checked=not_checked(descriptor=descriptor, answer=answer),
     )
 
 
 def _approvers_view(found: Approvers) -> ExplainApprovers:
-    return ExplainApprovers(groups=list(found.groups), rule=found.rule)
+    return ExplainApprovers(groups=list(found.groups), rule=found.rule, floor=found.floor)
 
 
 def _without_place(rule: ExplainRule | None) -> ExplainRule | None:
@@ -493,7 +516,9 @@ def _without_place(rule: ExplainRule | None) -> ExplainRule | None:
 
 
 def _without_rule(approvers: ExplainApprovers | None) -> ExplainApprovers | None:
-    return approvers.model_copy(update={"rule": None}) if approvers is not None else None
+    if approvers is None:
+        return None
+    return approvers.model_copy(update={"rule": None, "floor": None})
 
 
 def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
@@ -502,8 +527,8 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
     It keeps the answer, the reason, the risk level and who may approve.
     The entries of the policy and their places in it are left out: the
     matching classification entries with their category and labels, the
-    place of each evaluator rule, and the routing entry that names the
-    approvers.
+    place of each evaluator rule, and the routing entries (also the
+    install's floor) that name the approvers.
     """
     update: dict[str, Any] = {"approvers": _without_rule(response.approvers)}
     if response.classification is not None:
@@ -532,24 +557,37 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
 # ---------------------------------------------------------------------------
 
 
-def _request_approvers(request: ApprovalRequest, level: str | None) -> Approvers:
+async def _request_approvers(
+    session: AsyncSession, request: ApprovalRequest, level: str | None
+) -> Approvers:
     """The groups that may approve *request*: the ones the approve check uses.
 
     The groups stored on the request count only while the
     ``POLICY_APPROVER_ROUTING`` switch is on, as in
     :func:`~meho_backplane.policy.routing.routing_refusal`. With the switch
-    off, or with no stored groups, today's rule.
+    off, or with no stored groups, today's rule. With the switch on, the
+    install's routing as it is now narrows them, as at the approve click
+    (:func:`~meho_backplane.policy.routing_floor.install_floor`); ``floor``
+    is its entry that fits.
     """
     from meho_backplane.operations.grant_approval import is_rights_change
 
     if is_rights_change(request):
         return Approvers(("MEHO-Admins",), RIGHTS_CHANGE_RULE)
     kinds = stored_kinds(request.approver_roles) if routing_enabled() else None
-    if kinds is not None:
-        return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), request.approver_rule or "")
-    return Approvers(
-        tuple(f"MEHO-{kind}" for kind in _today_kinds(level, request.op_id)), "default"
-    )
+    rule = (request.approver_rule or "") if kinds is not None else DEFAULT_RULE
+    if kinds is None:
+        kinds = _today_kinds(level, request.op_id)
+    try:
+        floor = await install_floor(session, request)
+    except ValueError as exc:
+        raise invalid_routing(exc) from exc
+    if floor is None or floor.rule == DEFAULT_RULE:
+        return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), rule)
+    if floor.rule == CATEGORY_NOT_STORED:
+        return Approvers((), CATEGORY_NOT_STORED)
+    narrowed = tuple(f"MEHO-{kind}" for kind in kinds if kind in floor.kinds)
+    return Approvers(narrowed, rule, floor.rule)
 
 
 async def explain_request(*, tenant_id: UUID, request_id: UUID) -> PolicyExplainResponse:
@@ -573,7 +611,7 @@ async def explain_request(*, tenant_id: UUID, request_id: UUID) -> PolicyExplain
             risk_level=level,
             policy_rule=dict(request.policy_rule) if request.policy_rule else None,
             policy_version=request.policy_version,
-            approvers=_approvers_view(_request_approvers(request, level)),
+            approvers=_approvers_view(await _request_approvers(session, request, level)),
         )
     return PolicyExplainResponse(
         status="ok",

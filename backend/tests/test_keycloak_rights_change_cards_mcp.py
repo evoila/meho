@@ -114,7 +114,7 @@ def _effect(op_id: str, params: dict[str, Any], now: dict[str, Any], *, for_agen
         target=_FakeTarget(),
         params=params,
         connector_id=_CONNECTOR_ID,
-        for_agent=for_agent,
+        agent_preview=for_agent,
     )
     return asyncio.run(build_proposed_effect(ctx))
 

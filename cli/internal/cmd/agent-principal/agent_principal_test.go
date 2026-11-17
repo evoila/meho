@@ -446,6 +446,10 @@ func TestRegisterSendsTypedBody(t *testing.T) {
 			seen = readJSONBody[api.AgentPrincipalCreate](t, r)
 			writeJSON(t, w, http.StatusCreated, newPrincipalRead(t, seen.Name, false))
 		},
+		// --json reads the agent's grants after the register.
+		"GET /api/v1/agents/grants": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, api.AgentGrantListResponse{Grants: []api.AgentGrantRead{}})
+		},
 	})
 	defer srv.Close()
 
@@ -480,6 +484,10 @@ func TestRegisterOmitsOwnerSubWhenUnset(t *testing.T) {
 				t.Fatalf("read body: %v", err)
 			}
 			writeJSON(t, w, http.StatusCreated, newPrincipalRead(t, "alice-bot", false))
+		},
+		// --json reads the agent's grants after the register.
+		"GET /api/v1/agents/grants": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, api.AgentGrantListResponse{Grants: []api.AgentGrantRead{}})
 		},
 	})
 	defer srv.Close()

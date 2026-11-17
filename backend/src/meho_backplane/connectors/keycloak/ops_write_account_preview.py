@@ -23,6 +23,10 @@ a group), up to :data:`HOLDER_CAP` per role. A count MEHO cannot read is
 "unknown" on the card. The ``current`` block of the user update card is
 ``None`` when MEHO cannot read the user.
 
+Every card shows the user as Keycloak stores it, and an ``id`` and a
+``username`` of different users are refused before the request waits for
+approval (:mod:`~meho_backplane.connectors.keycloak.ops_write_user_identity`).
+
 The credential card reads the user's credentials when the request is
 parked and shows each one as ``id``, ``type``, ``userLabel`` and
 ``createdDate`` only (the allow-list of
@@ -38,11 +42,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.keycloak._paths import (
-    _CLIENT_ROLE_USERS_PATH,
-    _USER_PATH,
-    fill_path,
-)
+from meho_backplane.connectors.keycloak._paths import _CLIENT_ROLE_USERS_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_write_account_common import (
     is_realm_management,
     opt_str,
@@ -58,8 +58,14 @@ from meho_backplane.connectors.keycloak.ops_write_user_credential import (
     match_credentials,
     read_credentials,
 )
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment
+from meho_backplane.connectors.keycloak.ops_write_user_identity import (
+    read_user_for_write,
+    refuse_other_user_check,
+    register_user_write,
+    with_stored_user,
+)
+from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -84,8 +90,8 @@ async def _holders(
         _CLIENT_ROLE_USERS_PATH,
         {
             "realm": realm,
-            "client-uuid": quote_segment(client_uuid),
-            "role-name": quote_segment(role),
+            "client-uuid": client_uuid,
+            "role-name": role,
         },
     )
     ids: list[str] = []
@@ -175,14 +181,11 @@ async def _current_user(ctx: PreviewContext) -> dict[str, Any] | None:
     if connector is None:
         return None
     try:
-        uuid, _username, realm = await resolve_user(
-            connector, ctx.operator, ctx.target, ctx.params, op_id="keycloak.user.update"
-        )
-        row = await connector._get_admin_json(
-            ctx.target,
-            fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)}),
-            operator=ctx.operator,
-        )
+        row = (
+            await read_user_for_write(
+                connector, ctx.operator, ctx.target, ctx.params, op_id="keycloak.user.update"
+            )
+        ).user
     except Exception:
         return None
     return {"username": opt_str(row.get("username")), "email": opt_str(row.get("email"))}
@@ -197,7 +200,7 @@ async def _user_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "id": opt_str(ctx.params.get("id")),
         "realm": _managed_realm(ctx),
         "current": await _current_user(ctx),
-        "changes": redact_secret_fields(changes) if isinstance(changes, dict) else {},
+        "changes": redact_preview_fields(changes) if isinstance(changes, dict) else {},
     }
 
 
@@ -241,18 +244,14 @@ async def _credential_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
 
 
 def _register() -> None:
-    register_preview_builder(
-        "keycloak.role_mapping.client.assign",
-        with_grant_facts("keycloak.role_mapping.client.assign", _client_role_preview("assign")),
-    )
-    register_preview_builder("keycloak.role_mapping.client.remove", _client_role_preview("remove"))
-    register_preview_builder(
-        "keycloak.user.update", with_grant_facts("keycloak.user.update", _user_update_preview)
-    )
-    register_preview_builder(
-        "keycloak.user.credential.delete",
-        with_grant_facts("keycloak.user.credential.delete", _credential_delete_preview),
-    )
+    for op_id, builder in (
+        ("keycloak.role_mapping.client.assign", _client_role_preview("assign")),
+        ("keycloak.user.update", _user_update_preview),
+        ("keycloak.user.credential.delete", _credential_delete_preview),
+    ):
+        register_park_check(op_id, refuse_other_user_check(op_id))
+        register_preview_builder(op_id, with_grant_facts(op_id, with_stored_user(builder)))
+    register_user_write("keycloak.role_mapping.client.remove", _client_role_preview("remove"))
 
 
 _register()

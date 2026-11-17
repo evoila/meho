@@ -886,6 +886,63 @@ class SupportBundleTests(HostTestCase):
             [self.host.host_path(BUNDLE_PATH).name], [path.name for path in folder.iterdir()]
         )
 
+    def test_a_header_token_an_address_password_and_an_sql_password_are_removed(self) -> None:
+        # None of these values is in a Secret, so only the three rules for
+        # these forms can remove them.
+        bearer = "eyJhbGciOiJSUzI1NiJ9.fake-bearer-4b7c"
+        basic = "ZmFrZTpiYXNpYy04ZDJl"
+        json_bearer = "fake-json-bearer-6a1f"
+        escaped_bearer = "fake-escaped-bearer-0c5d"
+        db_pass = "Fake-Db-Pass-2c9e"
+        at_pass = "fake-p@ss-7d3b"
+        redis_pass = "fake-redis-pass-1e8a"
+        sql_pass = "Fake-Sql-Pass-5f0d"
+        quoted_pass = "it''s-fake-8b4c"
+        lower_pass = "fake-lower-pass-3a6e"
+        secrets = (
+            bearer,
+            basic,
+            json_bearer,
+            escaped_bearer,
+            db_pass,
+            at_pass,
+            redis_pass,
+            sql_pass,
+            quoted_pass,
+            lower_pass,
+        )
+        self.host.answer(
+            "kube_logs",
+            f"2026-10-23T11:00:00Z GET /api/v1/status Authorization: Bearer {bearer} 200\n"
+            f"2026-10-23T11:00:01Z authorization: basic {basic}\n"
+            f'{{"headers": {{"Authorization": "Bearer {json_bearer}"}}, "status": 401}}\n'
+            f'{{"body": "{{\\"Authorization\\": \\"Bearer {escaped_bearer}\\"}}"}}\n'
+            f"connect postgresql://meho:{db_pass}@meho-postgres:5432/meho\n"  # trufflehog:ignore
+            f"connect postgresql://meho:{at_pass}@meho-postgres/meho\n"  # trufflehog:ignore
+            f'{{"url": "redis://:{redis_pass}@meho-redis:6379", "ok": true}}\n'  # trufflehog:ignore
+            f"2026-10-23T11:00:04Z ALTER ROLE meho WITH PASSWORD '{sql_pass}' VALID UNTIL x\n"
+            f"2026-10-23T11:00:05Z alter role meho password '{quoted_pass}';\n"
+            f'2026-10-23T11:00:06Z CREATE ROLE app Password "{lower_pass}" LOGIN\n'
+            "2026-10-23T11:00:07Z open http://meho-keycloak:8080/auth as admin\n",
+        )
+
+        log = self.bundle()["pods/meho.meho-keycloak-0.log"]
+
+        for value in secrets:
+            with self.subTest(value=value):
+                self.assertNotIn(value, log)
+        self.assertIn("GET /api/v1/status Authorization: Bearer [removed] 200", log)
+        self.assertIn("authorization: basic [removed]", log)
+        self.assertIn('{"headers": {"Authorization": "Bearer [removed]"}, "status": 401}', log)
+        self.assertIn('{"body": "{\\"Authorization\\": \\"Bearer [removed]\\"}"}', log)
+        self.assertIn("connect postgresql://meho:[removed]@meho-postgres:5432/meho", log)
+        self.assertIn("connect postgresql://meho:[removed]@meho-postgres/meho", log)
+        self.assertIn('{"url": "redis://:[removed]@meho-redis:6379", "ok": true}', log)
+        self.assertIn("ALTER ROLE meho WITH PASSWORD '[removed]' VALID UNTIL x", log)
+        self.assertIn("alter role meho password '[removed]';", log)
+        self.assertIn('CREATE ROLE app Password "[removed]" LOGIN', log)
+        self.assertIn("open http://meho-keycloak:8080/auth as admin", log)
+
     def test_the_bundle_is_written_when_rke2_is_down(self) -> None:
         self.host.answer("kubectl_rc", "1")
 

@@ -13,24 +13,28 @@ first people log in.
 
     Two kinds of step get different approvers:
 
-    - **Create a group** (Step 2): a MEHO-SA-Operator may approve their
-      own. Anyone else needs a second person: a MEHO-SA-Operator or an
-      admin.
+    - **Create a group** (Step 2): a MEHO-SA-Operator or a MEHO-Admin
+      may approve their own. Anyone else needs a second person: a
+      MEHO-SA-Operator or an admin.
     - **Create a user** (Step 4) and **add a person to a group**
       (Step 5): these are changes of rights. Another admin (a tenant
       admin or a platform admin) must approve them, never the person who
       asked. A MEHO-SA-Operator who is not an admin cannot approve them.
       See [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
-    Before you start, pick one of these:
+    For Steps 4 and 5, an admin who is not the person who asked approves
+    each change. No setup below changes that. An install with only one
+    admin adds a second admin first (see
+    [An install with only one admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin)).
 
-    - **A second person** in your current tenant approves each step. For
-      Steps 4 and 5, this person must be an admin.
-    - **You are a MEHO-SA-Operator** in your current tenant, and you
-      approve the group steps yourself, on purpose, in the web interface.
-      An admin who is not you still approves Steps 4 and 5.
-    - **An agent makes the requests** and you approve them. For Steps 4
-      and 5, you must be an admin. This is the
+    For the group step, pick one of these before you start:
+
+    - **A second person** in your current tenant (a MEHO-SA-Operator or
+      an admin) approves it.
+    - **You are a MEHO-SA-Operator or a MEHO-Admin** in your current
+      tenant, and you approve it yourself, on purpose, in the web
+      interface.
+    - **An agent makes the request** and you approve it. This is the
       agent-requester pattern in
       [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
       The agent needs a grant only when the switch
@@ -81,9 +85,9 @@ each change is approved and stored in the audit log.
 - A Vault target registered in MEHO (here called `vault-main`), and the
   right to write Vault identities and groups.
 - An `operator` or `tenant_admin` login in your current tenant.
-- A second person who can approve, or the agent setup from the box
-  above. For the user and group member steps, the approver must be an
-  admin who did not ask for the change. Step 8 needs a `tenant_admin` approver in the new tenant too,
+- For the group step: a second person who can approve, or one of the
+  setups from the box above. For the user and group member steps: an
+  admin who is not the person who asked. Step 8 needs a `tenant_admin` approver in the new tenant too,
   because an approval belongs to one tenant. Step 8 explains the
   choices.
 - This guide gives each person one tenant. For a person who works in
@@ -329,7 +333,7 @@ Pick one of these two ways to get an approver:
 - **A second person in the new tenant.** Run Steps 4 to 6 again for a
   second person with the `tenant_admin` role. You make these requests
   in your current tenant, so your current approver approves them as
-  before.
+  before: an admin who is not you approves Steps 4 and 5.
 - **An agent requester in the new tenant.** The new `tenant_admin` sets
   up the agent-requester pattern from
   [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern)
@@ -480,5 +484,5 @@ meho approvals approve <approval-id>
 | Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity. | Step 6 for that person. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. For an agent requester, the agent setup in Step 8. |
-| `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself, and you are not a MEHO-SA-Operator. | A MEHO-SA-Operator or an admin approves, or use the agent-requester pattern (see the box at the top). |
+| `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself. For the group step, you are not a MEHO-SA-Operator or a MEHO-Admin. Steps 4 and 5 are changes of rights, and nobody approves their own. | For the group step: a MEHO-SA-Operator or an admin approves, or use the agent-requester pattern (see the box at the top). For Steps 4 and 5: an admin who is not you approves. |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

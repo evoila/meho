@@ -30,8 +30,8 @@ one login. At the end:
       approve it. See
       [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
     - **Taking a person out of a group** only takes rights away. A
-      MEHO-SA-Operator may approve their own; anyone else needs a second
-      person (a MEHO-SA-Operator or an admin).
+      MEHO-SA-Operator or a MEHO-Admin may approve their own; anyone else
+      needs a second person (a MEHO-SA-Operator or an admin).
 
 ## How it works
 
@@ -62,12 +62,10 @@ The design is in the
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- An admin who did not ask for the change, to approve each time you put
-  a person in a group (see
+- An admin who is not the person who asked, to approve each time you
+  put a person in a group. An install with only one admin adds a second
+  admin first (see
   [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin)).
-  This works also with the agent setup from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern),
-  when you are an admin.
 
 ## Step 1: Add the tenant in Keycloak
 

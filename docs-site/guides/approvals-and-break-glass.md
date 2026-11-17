@@ -173,9 +173,10 @@ come from the [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-
 | `MEHO-Approvers` | (you cannot run changes) | yes, but not a change of rights | no | no |
 | `MEHO-Readers` | (you cannot run changes) | no | no | no |
 
-A platform admin (`MEHO-Platform-Admins`) counts as an admin in every
-tenant, so a platform admin may approve another person's change of
-rights too.
+A platform admin (`MEHO-Platform-Admins`) who has no role group in a
+tenant acts as its admin there, so they may approve another person's
+change of rights in that tenant. A platform admin with a lower role
+group in a tenant keeps that role there.
 
 "SA" means self-approval. MEHO-Admins may approve their own changes in
 the same way. Self-approval never covers a change of rights (see
@@ -243,8 +244,8 @@ These Keycloak writes are changes of rights:
 - **Who may sign in, and how:** create a user, change a user's user name
   or email, turn a login on, set a new password, remove a passkey or a
   one-time code, or set the steps a user must do at the next sign-in.
-- **What a login token says:** create or change a realm, a client, a
-  client scope or a protocol mapper.
+- **What a login token says:** create or change a realm or a client,
+  create a client scope, or create or change a protocol mapper.
 - **How strong a sign-in is:** set up MEHO's approval sign-in, the touch
   sign-in, or the step that skips the one-time code after a passkey.
 
@@ -431,6 +432,9 @@ change. Understand exactly what you traded away:
   risk levels. For `dangerous` and `destructive` changes only the group
   rules count: a MEHO-SA-Operator or a MEHO-Admin may approve their own,
   everyone else needs a MEHO-SA-Operator or a MEHO-Admin.
+- **It never covers a change of rights.** Another admin approves a
+  change of rights, also with the flag on (see
+  [Changes of rights need another admin](#changes-of-rights-need-another-admin)).
 - **It is for emergencies, not the solo default.** Reach for Option 1
   first. Leaving this on lets every person in every tenant approve their
   own lower-risk changes.

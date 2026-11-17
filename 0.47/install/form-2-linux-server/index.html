@@ -1,0 +1,4516 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.47/install/form-2-linux-server/">
+      
+      
+        <link rel="prev" href="../form-1-vmware-appliance/">
+      
+      
+        <link rel="next" href="../form-3-your-kubernetes/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>Form 2: Linux server - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#form-2-the-linux-server" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Form 2: Linux server
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../can-do/" class="md-tabs__link">
+          
+  
+  
+  What MEHO can do
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../which-form/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extend/connector-kit/" class="md-tabs__link">
+          
+  
+  
+  Extend MEHO
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What MEHO can do
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    What MEHO can do
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What MEHO can do
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/installation-options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/connectors-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/approvals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/hidden-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secret values stay hidden
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../which-form/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Which install form is right for you?
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-1-vmware-appliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 1: VMware appliance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 2: Linux server
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 2: Linux server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-check-what-the-machine-needs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: Check what the machine needs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-download-and-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: Download and check
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: Install
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 3: Install">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-admin-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The admin network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-pod-and-service-ranges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The pod and service ranges
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-the-script-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the script does
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-first-login" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: First login
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-the-certificate-and-the-unseal-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5: The certificate and the unseal key
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 5: The certificate and the unseal key">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-console-certificate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The console certificate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#use-a-certificate-from-your-own-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Use a certificate from your own CA
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-unseal-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The unseal key
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#daily-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Daily work
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Daily work">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#check-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Check the server
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#change-the-ssh-range" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Change the SSH range
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-help-from-support" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Get help from support
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-keeps-the-operating-system-up-to-date" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who keeps the operating system up to date
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Security">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#closed-by-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Closed by default
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-meho-connects-to" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What MEHO connects to
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-firewall-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The firewall file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cis-hardening" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CIS hardening
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#files-with-secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files with secrets
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#uninstall" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Uninstall
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-3-your-kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 3: Your Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-3-vks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install MEHO on VKS by hand
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-3-openshift/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install MEHO on OpenShift by hand
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup-page/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The setup page and the settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-start-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The first-start checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-day/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first day
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Set up login
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../laptop-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tools for your laptop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backup-restore-update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Back up, restore and update
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../move-login-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Move the login setup to another install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../common-problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common problems
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail: full detail and your own parts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keycloak-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak break-glass: get admin access back
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../company-login-authentik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login with authentik
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openbao-unseal-key/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenBao unseal key: who keeps what
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_22" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_22" id="__nav_3_22_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_22_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_22">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Company login
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/local-users/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local users
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/ad-ldap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AD / LDAP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/entra-id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Entra ID
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/customer-keycloak/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your own Keycloak
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/organisation-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Organisation setup for the Claude admin
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/codex/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Codex
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/tenant-bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/several-tenants/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    One person in several tenants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/phone-and-laptop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MEHO on your phone and laptop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/your-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your tools: sign out one tool
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/agent-sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/policy-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The policy file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/hosted-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extend MEHO
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extend MEHO
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extend/connector-kit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Write a connector package
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-check-what-the-machine-needs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: Check what the machine needs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-download-and-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: Download and check
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: Install
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 3: Install">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-admin-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The admin network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-pod-and-service-ranges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The pod and service ranges
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-the-script-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the script does
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-first-login" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: First login
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-the-certificate-and-the-unseal-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5: The certificate and the unseal key
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 5: The certificate and the unseal key">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-console-certificate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The console certificate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#use-a-certificate-from-your-own-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Use a certificate from your own CA
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-unseal-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The unseal key
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#daily-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Daily work
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Daily work">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#check-the-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Check the server
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#change-the-ssh-range" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Change the SSH range
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-help-from-support" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Get help from support
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-keeps-the-operating-system-up-to-date" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who keeps the operating system up to date
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Security">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#closed-by-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Closed by default
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-meho-connects-to" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What MEHO connects to
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-firewall-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The firewall file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cis-hardening" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CIS hardening
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#files-with-secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files with secrets
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#uninstall" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Uninstall
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/install/form-2-linux-server.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="form-2-the-linux-server">Form 2: the Linux server<a class="headerlink" href="#form-2-the-linux-server" title="Permanent link">&para;</a></h1>
+<div class="admonition note">
+<p class="admonition-title">Available, in testing</p>
+<p>Use this form for tests and pilots. Talk to evoila before you run
+it in production.</p>
+</div>
+<p>This chapter takes you from a plain Linux server to a running MEHO and
+a first login. Follow it from top to bottom.</p>
+<p>One download holds everything: the install script, a small built-in
+Kubernetes (RKE2), the MEHO chart, every container image, <code>helm</code> and the
+<code>meho</code> command. One script, <code>install.sh</code>, installs MEHO with its
+database (PostgreSQL), its login server (Keycloak) and its password safe
+(OpenBao). The server needs no internet.</p>
+<p>You never manage the built-in Kubernetes yourself, and you need no
+Kubernetes tools. For the work after the install, the server has its
+own command, <code>meho-host</code>.</p>
+<p>Not sure this is your form? See
+<a href="../which-form/">Which install form is right for you?</a>.</p>
+<h2 id="step-1-check-what-the-machine-needs">Step 1: Check what the machine needs<a class="headerlink" href="#step-1-check-what-the-machine-needs" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Recommended</th>
+<th>Minimum</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Operating system</td>
+<td>Ubuntu 24.04 LTS on x86-64. This is tested.</td>
+<td>x86-64 with systemd. Another Linux, for example Red Hat Enterprise Linux 9, gets a "not tested" warning, and the install goes on.</td>
+</tr>
+<tr>
+<td>Processors</td>
+<td>4</td>
+<td>4</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>16 GB</td>
+<td>8 GB</td>
+</tr>
+<tr>
+<td>Disk</td>
+<td>120 GB, on SSD</td>
+<td>80 GB free under <code>/var/lib</code></td>
+</tr>
+</tbody>
+</table>
+<p>The install refuses a machine below the minimum.</p>
+<p>The machine also needs:</p>
+<ul>
+<li><strong>Root access.</strong> You run the install with <code>sudo</code>, over SSH or on the
+  console of the machine.</li>
+<li><strong>A DNS name.</strong> A full DNS name for the machine, for example
+  <code>meho.example.com</code>. Your DNS server must have an A record for it that
+  points to an address of the machine. An entry in <code>/etc/hosts</code> does not
+  count. The install does not create the record.</li>
+<li><strong>A time server.</strong> The clock of the machine must be synchronised, for
+  example with <code>systemd-timesyncd</code> or <code>chrony</code>. <code>timedatectl</code> must show
+  <code>System clock synchronized: yes</code>.</li>
+<li><strong>The address range of your admin network.</strong> After the install, only
+  this range may use SSH. See <a href="#the-admin-network">The admin network</a>.</li>
+<li><strong>Nothing else that runs containers.</strong> No Docker, containerd, k3s,
+  RKE2 or other Kubernetes may be on the machine. The ports of the
+  built-in Kubernetes must be free. The install checks both.</li>
+</ul>
+<p>You also need a computer on the management network with a browser:
+Chrome 111, Safari 16.4 or Firefox 128, or newer.</p>
+<p>MEHO runs on your management network only, never on the internet. Users
+reach it on ports 80 and 443 from the management network. MEHO holds the
+logins for your systems, so an address on the internet is a risk you do
+not need. See
+<a href="../first-start-checks/#meho-stays-on-the-management-network">MEHO stays on the management network</a>.</p>
+<h2 id="step-2-download-and-check">Step 2: Download and check<a class="headerlink" href="#step-2-download-and-check" title="Permanent link">&para;</a></h2>
+<p>Each <a href="https://github.com/evoila/meho/releases">GitHub release</a> has three
+files for the Linux server:</p>
+<ul>
+<li><code>meho-linux-&lt;version&gt;-amd64.tar</code>: the download;</li>
+<li><code>SHA256SUMS-linux</code>: the checksum of the download;</li>
+<li><code>SHA256SUMS-linux.cosign.bundle</code>: the signature of the checksum file.</li>
+</ul>
+<p>The server needs no internet, so download the three files on another
+machine. Check the signature of the checksum file there first, then the
+download. You need
+<a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>
+version 3 or newer. Version 2 cannot read the signature file of the
+release: it stops with <code>bundle does not contain cert for verification</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>v&lt;version&gt;
+cosign<span class="w"> </span>verify-blob<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--certificate-identity<span class="w"> </span><span class="s2">"https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/</span><span class="nv">$TAG</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--certificate-oidc-issuer<span class="w"> </span>https://token.actions.githubusercontent.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--bundle<span class="w"> </span>SHA256SUMS-linux.cosign.bundle<span class="w"> </span>SHA256SUMS-linux
+sha256sum<span class="w"> </span>-c<span class="w"> </span>SHA256SUMS-linux
+</code></pre></div>
+<p>Both commands must succeed. cosign checks that the release workflow of
+evoila/meho signed the checksum file for this tag. <code>sha256sum</code> prints
+<code>OK</code> for the download.</p>
+<p>Copy the download and <code>SHA256SUMS-linux</code> to the server, for example with
+<code>scp</code>. Then run <code>sha256sum -c SHA256SUMS-linux</code> on the server too. So you
+know that the copy is complete.</p>
+<h2 id="step-3-install">Step 3: Install<a class="headerlink" href="#step-3-install" title="Permanent link">&para;</a></h2>
+<p>Unpack the download and run the install script as root:</p>
+<div class="highlight"><pre><span></span><code>tar<span class="w"> </span>-xf<span class="w"> </span>meho-linux-&lt;version&gt;-amd64.tar
+<span class="nb">cd</span><span class="w"> </span>meho-linux-&lt;version&gt;-amd64
+sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span class="w"> </span>meho.example.com<span class="w"> </span>--admin-network<span class="w"> </span><span class="m">192</span>.0.2.0/24
+</code></pre></div>
+<p>Use your own DNS name and your own admin range.
+<code>sudo ./install.sh --help</code> lists every option.</p>
+<h3 id="the-options">The options<a class="headerlink" href="#the-options" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>What it is</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--hostname &lt;fqdn&gt;</code></td>
+<td>The full DNS name of the machine. Users open the console at this name.</td>
+<td>The full name of the machine (<code>hostname -f</code>).</td>
+</tr>
+<tr>
+<td><code>--admin-network &lt;range&gt;</code></td>
+<td>The IPv4 addresses that may use SSH: a range such as <code>192.0.2.0/24</code>, one address, or <code>none</code>.</td>
+<td>Only the address of your SSH session.</td>
+</tr>
+<tr>
+<td><code>--public-address &lt;ipv4&gt;</code></td>
+<td>Only when address translation inside your network is in front of the machine, for example a load balancer: the address that the DNS name points to. Never an address on the internet.</td>
+<td>None.</td>
+</tr>
+<tr>
+<td><code>--first-tenant-id &lt;uuid&gt;</code></td>
+<td>The id of the first tenant. Give the old id when you move MEHO to another machine.</td>
+<td>A new random id.</td>
+</tr>
+<tr>
+<td><code>--admin-user &lt;name&gt;</code></td>
+<td>The user name of the first admin.</td>
+<td><code>admin</code></td>
+</tr>
+<tr>
+<td><code>--approver-user &lt;name&gt;</code></td>
+<td>The user name of the second person, who approves the admin's changes.</td>
+<td><code>approver</code></td>
+</tr>
+<tr>
+<td><code>--cluster-cidr &lt;cidr&gt;</code></td>
+<td>The address range of the pods.</td>
+<td><code>10.42.0.0/16</code></td>
+</tr>
+<tr>
+<td><code>--service-cidr &lt;cidr&gt;</code></td>
+<td>The address range of the services.</td>
+<td><code>10.43.0.0/16</code></td>
+</tr>
+</tbody>
+</table>
+<p>An update keeps these answers and refuses these options. Only the SSH
+range can change after the install, with <code>meho-host admin-network</code> (see
+<a href="#daily-work">Daily work</a>). The options to join a second server are not
+tested yet.</p>
+<h3 id="the-admin-network">The admin network<a class="headerlink" href="#the-admin-network" title="Permanent link">&para;</a></h3>
+<p>After the install, SSH answers only from the admin network. A range must
+start at its first address: <code>192.0.2.0/24</code> is right, <code>192.0.2.7/24</code> is
+refused.</p>
+<table>
+<thead>
+<tr>
+<th>You give</th>
+<th>You run the install over SSH</th>
+<th>You run the install on the console of the machine</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A range or an address</td>
+<td>The install goes on when your own address is in it. It stops when your address is not in it, so you do not lock yourself out.</td>
+<td>The install goes on.</td>
+</tr>
+<tr>
+<td>Nothing</td>
+<td>SSH is allowed only from your own address. The install warns and goes on.</td>
+<td>The install stops and asks for <code>--admin-network</code>.</td>
+</tr>
+<tr>
+<td><code>none</code></td>
+<td>The install warns: no new SSH login works after this session. Only the console works.</td>
+<td>The install goes on.</td>
+</tr>
+</tbody>
+</table>
+<p>The SSH session that runs the install stays open in every case.</p>
+<h3 id="the-pod-and-service-ranges">The pod and service ranges<a class="headerlink" href="#the-pod-and-service-ranges" title="Permanent link">&para;</a></h3>
+<p>The built-in Kubernetes gives its pods and services addresses from two
+ranges: <code>10.42.0.0/16</code> and <code>10.43.0.0/16</code> by default. The install stops
+when a range overlaps an address or a route of the machine.</p>
+<p>The install cannot see the addresses of the systems that MEHO will
+manage. When one of them, for example a vCenter, has an address in one
+of these ranges, MEHO cannot reach it. The machine sends that traffic to
+its own pods or services. Then choose two other ranges that no system of
+your site uses, and give them with <code>--cluster-cidr</code> and
+<code>--service-cidr</code>. Decide this before the install.</p>
+<h3 id="what-the-script-does">What the script does<a class="headerlink" href="#what-the-script-does" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>It checks the machine.</strong> Each check prints <code>[ok]</code> or <code>[WARN]</code>. When
+   something is wrong, the script stops with one <code>[FAIL]</code> line that says
+   what to fix. Nothing on the machine has changed yet, so fix the
+   problem and run the script again.</li>
+<li><strong>It prepares the machine.</strong> It turns on the MEHO host firewall (see
+   <a href="#security">Security</a>). When firewalld or ufw is on, it turns them off
+   after the MEHO firewall is on, so the machine is never without a
+   firewall. It writes the settings of RKE2 and installs the command
+   <code>meho-host</code>.</li>
+<li><strong>It installs and starts RKE2</strong>, with its CIS hardening profile.</li>
+<li><strong>It installs MEHO</strong> with its database, login server and password
+   safe.</li>
+<li><strong>It writes the first-login passwords and the unseal key</strong> to two
+   files that only root can read. Nothing secret shows on the screen.</li>
+<li><strong>It installs the <code>meho</code> command</strong> and writes the install record
+   <code>/etc/meho/install.json</code>. The record holds no secret. From v0.47.0, it
+   also writes the CA of the console certificate to
+   <code>/var/lib/meho/console-ca.crt</code> (see
+   <a href="#the-console-certificate">The console certificate</a>), and it reads the
+   <a href="../first-start-checks/">first-start list</a>. A red line in the list does
+   not stop the install.</li>
+</ol>
+<p>When a later step fails, its <code>[FAIL]</code> line says what to do. After RKE2
+has started, a second run finds a machine that is only partly installed,
+and it stops. Then run <code>sudo meho-host support-bundle</code> and send the file
+to evoila support (see <a href="#get-help-from-support">Get help from support</a>).</p>
+<p>At the end, the script prints the result. From v0.47.0 it looks like
+this:</p>
+<div class="highlight"><pre><span></span><code>install.sh: MEHO &lt;version&gt; is installed on meho.example.com.
+  Console:               https://meho.example.com/ui/
+  Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
+  First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
+  Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
+  First-start list:      a red line; each red line says what to fix
+    GREEN   dns           The host name meho.example.com resolves. Where it points is checked once the certificate check is green.
+    RED     certificate   The certificate of meho.example.com is not trusted. Install the full chain, and add your own CA to the trust bundle of MEHO.
+    ...
+</code></pre></div>
+<p>With the install's own certificate, the <code>certificate</code> line is red. That
+is expected (see <a href="#the-console-certificate">The console certificate</a>).
+Each other red line says what to fix. When the script cannot read the
+list, for example behind address translation (<code>--public-address</code>), the
+line says <code>not read</code>. Then open the first-start page in the console after
+the first login (<a href="#step-4-first-login">Step 4</a>).</p>
+<p>Before v0.47.0, the result has no <code>Console CA</code> line, and the last line
+says <code>First-start list: not in this version yet</code>.</p>
+<h2 id="step-4-first-login">Step 4: First login<a class="headerlink" href="#step-4-first-login" title="Permanent link">&para;</a></h2>
+<p>The install made two users with temporary passwords: the first admin,
+and a second person who approves the admin's changes.</p>
+<ol>
+<li>
+<p>On the server, read the file with the passwords:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>cat<span class="w"> </span>/var/lib/meho/first-login-passwords
+</code></pre></div>
+<p>It has four lines, each as <code>name=value</code>: <code>admin_username</code>,
+<code>admin_password</code>, <code>approver_username</code> and <code>approver_password</code>.</p>
+</li>
+<li>
+<p>From a computer on the management network, open the console address,
+   for example <code>https://meho.example.com/ui/</code>. Port 80 sends you on to
+   port 443.</p>
+</li>
+<li>Your browser warns about the certificate. The install made its own
+   certificate, and your browser does not know who signed it. Check that
+   the address is the one you installed, and go on. See
+   <a href="#the-console-certificate">The console certificate</a>.</li>
+<li>Log in as the admin, with the temporary password. The login page
+   asks you to set a new password and to set up an authenticator app for
+   one-time codes. Then it shows recovery codes. Keep them in your key
+   store.</li>
+<li>Give the approver's user name and temporary password to the second
+   person in a safe way. That person logs in the same way.</li>
+<li>
+<p>Copy the unseal key to your key store, for example your password
+   manager or a safe:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>cat<span class="w"> </span>/var/lib/meho/unseal-key
+</code></pre></div>
+<p>The key shows on your screen. Make sure that nobody else sees it,
+and clear the screen afterwards. You need the key to restore a
+backup and in an emergency. See
+<a href="../openbao-unseal-key/">OpenBao unseal key</a>.</p>
+</li>
+<li>
+<p>Delete both files. MEHO does not need them, and an update does not
+   write them again:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>rm<span class="w"> </span>/var/lib/meho/first-login-passwords<span class="w"> </span>/var/lib/meho/unseal-key
+</code></pre></div>
+</li>
+<li>
+<p>In the console, open the first-start checks:
+   <code>https://meho.example.com/ui/first-start</code>. The page is described in
+   <a href="../first-start-checks/">The first-start checks</a>. With the install's
+   own certificate, the <code>certificate</code> line is red. That is expected (see
+   the next step).</p>
+</li>
+<li>
+<p>On the server, check the built-in Kubernetes and the hardening:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>check
+</code></pre></div>
+<p>Every line must be <code>[ok]</code>. See <a href="#check-the-server">Check the server</a>.</p>
+</li>
+</ol>
+<h2 id="step-5-the-certificate-and-the-unseal-key">Step 5: The certificate and the unseal key<a class="headerlink" href="#step-5-the-certificate-and-the-unseal-key" title="Permanent link">&para;</a></h2>
+<h3 id="the-console-certificate">The console certificate<a class="headerlink" href="#the-console-certificate" title="Permanent link">&para;</a></h3>
+<p>The install made a certificate for the DNS name. It is signed by the
+install's own certificate authority (CA), "MEHO install CA". Your
+browsers and laptops do not know this CA. So:</p>
+<ul>
+<li>browsers warn at the first visit;</li>
+<li>the <code>certificate</code> line of the first-start list is red;</li>
+<li>the <code>meho</code> command and the Claude tools on your laptops refuse the
+  certificate (see <a href="../laptop-tools/">Tools for your laptop</a>).</li>
+</ul>
+<p>From v0.47.0, the install writes this CA to
+<code>/var/lib/meho/console-ca.crt</code>. The CA is not secret. Only root can open
+the folder, so read the file with <code>sudo</code>:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>cat<span class="w"> </span>/var/lib/meho/console-ca.crt
+</code></pre></div>
+<p>Give the file to the computers that use MEHO. <a href="../laptop-tools/#step-1-trust-the-sites-own-certificate-authority">Tools for your
+laptop</a>
+says how a computer trusts it. MEHO itself does not trust this CA, so the
+<code>certificate</code> line of the first-start list stays red.</p>
+<p>For production, use a certificate from your own CA.</p>
+<h3 id="use-a-certificate-from-your-own-ca">Use a certificate from your own CA<a class="headerlink" href="#use-a-certificate-from-your-own-ca" title="Permanent link">&para;</a></h3>
+<p>From v0.47.0, <code>meho-host certificate</code> puts a certificate from your own CA
+in place.</p>
+<ol>
+<li>Get a certificate for the DNS name of the install from your CA. It
+   must be made for a TLS server. You need two files:<ul>
+<li><code>chain.pem</code>: the server certificate first, then every intermediate
+  CA certificate, and your CA certificate last;</li>
+<li><code>key.pem</code>: the private key of the server certificate, without a pass
+  phrase.</li>
+</ul>
+</li>
+<li>
+<p>Copy both files to the server, and run:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>certificate<span class="w"> </span>--cert<span class="w"> </span>chain.pem<span class="w"> </span>--key<span class="w"> </span>key.pem
+</code></pre></div>
+<p>The command checks that the key belongs to the certificate, that the
+certificate names the DNS name of the install and is valid now, and
+that the chain ends at your CA. When a check fails, one <code>[FAIL]</code> line
+says what is wrong, and nothing changes.</p>
+</li>
+<li>
+<p>When every check passes, the console, the API and the login show the
+   new certificate within a minute. The command writes your CA to
+   <code>/var/lib/meho/console-ca.crt</code>. Its last line is the <code>console-certificate</code>
+   line of <code>meho-host check</code>. With 30 days or less left, the line is a
+   <code>[WARN]</code>.</p>
+</li>
+<li>MEHO keeps the key. Delete your copy of <code>key.pem</code> from the server.</li>
+</ol>
+<p>An update keeps your certificate. To replace it, for example before it
+expires, run the command again with the new files.</p>
+<h3 id="the-unseal-key">The unseal key<a class="headerlink" href="#the-unseal-key" title="Permanent link">&para;</a></h3>
+<p>OpenBao, the password safe, locks itself ("seals") at every restart. By
+default it opens ("unseals") itself again within seconds, with a copy of
+the key that the install keeps on the machine. So a restart of the
+machine needs no person. The page
+<a href="../openbao-unseal-key/#what-self-unseal-protects-and-what-it-does-not">OpenBao unseal key</a>
+says what this protects and what it does not.</p>
+<p>In keyholder mode, OpenBao stays sealed after a restart until a person
+unseals it with the key. From v0.47.0, <code>meho-host</code> switches the mode.</p>
+<p>To switch to keyholder mode:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>keyholder<span class="w"> </span>on
+</code></pre></div>
+<p>The command asks for the unseal key from your key store. What you type
+or paste is not shown. It checks that the key is the right one, deletes
+the copy of the key that MEHO keeps on the machine, and restarts OpenBao.
+OpenBao is then sealed, and MEHO waits. So you see at once that the
+keyholder step works. Unseal OpenBao:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>unseal
+</code></pre></div>
+<p>From now on, after every restart of the machine, a keyholder runs
+<code>sudo meho-host unseal</code>. Until then, MEHO waits. When an update restarts
+OpenBao, it waits up to 10 minutes for a keyholder (see <a href="#update">Update</a>).</p>
+<p>To go back, so that OpenBao unseals itself again:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>keyholder<span class="w"> </span>off
+</code></pre></div>
+<p>It asks for the key, keeps a copy of it on the machine, and restarts
+OpenBao.</p>
+<p>Never give the key on the command line, because it would stay in the
+shell history. A script gives the key on standard input instead.</p>
+<div class="admonition note">
+<p class="admonition-title">Before v0.47.0</p>
+<p><code>meho-host certificate</code>, <code>meho-host keyholder</code> and <code>meho-host unseal</code>
+come with v0.47.0. Ask evoila if you need your own certificate or
+keyholder mode on an older version.</p>
+</div>
+<p><strong>You now have a running MEHO and a logged-in admin.</strong> Go on with
+<a href="../setup-page/">the setup page and the settings file</a>. The rest of this
+chapter is for later: updates, daily work, the operating system,
+security and uninstall.</p>
+<h2 id="update">Update<a class="headerlink" href="#update" title="Permanent link">&para;</a></h2>
+<p>A new MEHO version comes as a new download. You run its <code>install.sh</code> on
+the same machine. There is no other update command.</p>
+<ol>
+<li><strong>Take a VM snapshot or a backup of the machine.</strong> When an update
+   fails, you go back to it. There is no other way back.</li>
+<li>Download and check the new download as in
+   <a href="#step-2-download-and-check">Step 2</a>. Copy it to the server and
+   unpack it.</li>
+<li>
+<p>Run its install script, without the options of a first install:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>meho-linux-&lt;new<span class="w"> </span>version&gt;-amd64
+sudo<span class="w"> </span>./install.sh
+</code></pre></div>
+<p>The script finds the install and says which version it updates to.
+Then it asks:
+<code>Did you take a VM snapshot or a backup of this machine? Type yes to go on:</code>.
+Only <code>yes</code> goes on. For a run with no person at the terminal, add
+<code>--confirm-backup</code>.</p>
+<p>In keyholder mode, when the update restarts OpenBao, it waits up to
+10 minutes for the unseal. A keyholder then runs
+<code>sudo meho-host unseal</code> in a second SSH session.</p>
+</li>
+<li>
+<p>When the script is done, run <code>sudo meho-host check</code>.</p>
+</li>
+</ol>
+<p>The update keeps the answers of the install, the firewall with your SSH
+range, your certificate, the data, the passwords and the keys. It does not
+write the two first-login files again. From v0.47.0, it writes the CA file
+again and shows the first-start list at the end, as the install does.</p>
+<p><strong>One minor version at a time.</strong> RKE2 moves only one minor version at a
+time, for example from v1.37 to v1.38, but not from v1.37 to v1.39. When
+you skipped MEHO releases, the script may stop and name the RKE2
+version that must come first. Then install the MEHO release with that
+RKE2 version first. The file <code>VERSION</code> in each unpacked download names
+its RKE2 version (<code>RKE2_VERSION</code>). <code>sudo cat /etc/meho/install.json</code>
+shows the installed versions.</p>
+<p>The script also refuses a MEHO version that is older than the installed
+one, because the database changes of an update cannot be undone.</p>
+<p>When a step fails, the script stops with one <code>[FAIL]</code> line. The install
+record still names the old version. So you can fix the problem and run
+the update again, or go back to the snapshot.</p>
+<h2 id="daily-work">Daily work<a class="headerlink" href="#daily-work" title="Permanent link">&para;</a></h2>
+<p>All commands run as root on the server.</p>
+<h3 id="check-the-server">Check the server<a class="headerlink" href="#check-the-server" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>check
+</code></pre></div>
+<p>The command prints a red/green list:</p>
+<table>
+<thead>
+<tr>
+<th>Line</th>
+<th>What it checks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>node</code></td>
+<td>The built-in Kubernetes is ready.</td>
+</tr>
+<tr>
+<td><code>pods</code></td>
+<td>Every part of MEHO and of the built-in Kubernetes runs.</td>
+</tr>
+<tr>
+<td><code>disk</code></td>
+<td>The free space in <code>/var/lib/rancher</code> and <code>/var/lib/meho</code>. A warning below 20 %, red below 15 %: the built-in Kubernetes starts to stop pods when less than 15 % is free.</td>
+</tr>
+<tr>
+<td><code>certificates</code></td>
+<td>The internal certificates of the built-in Kubernetes. A warning when one has less than 30 days left, red when one has expired.</td>
+</tr>
+<tr>
+<td><code>firewall</code></td>
+<td>The MEHO host firewall is loaded, and it is loaded again at every start of the machine.</td>
+</tr>
+<tr>
+<td><code>cis-profile</code></td>
+<td>The CIS hardening profile of RKE2 is on.</td>
+</tr>
+<tr>
+<td><code>console-certificate</code></td>
+<td>The certificate of the console is valid, names the DNS name, and has more than 30 days left.</td>
+</tr>
+</tbody>
+</table>
+<p>Each line is <code>[ok]</code>, <code>[WARN]</code> or <code>[FAIL]</code>. A line that is not ok says
+what to do. The exit code is 0 when every line is ok or a warning, and 1
+when a line is red. So your monitoring can run the check. <code>--json</code>
+prints the same list as JSON.</p>
+<p><code>sudo meho doctor</code> on the server shows the same lines, after its own
+checks. See
+<a href="../../clients/troubleshooting/#start-with-meho-doctor">Troubleshooting</a>.</p>
+<h3 id="change-the-ssh-range">Change the SSH range<a class="headerlink" href="#change-the-ssh-range" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>admin-network<span class="w"> </span><span class="m">192</span>.0.2.0/24
+</code></pre></div>
+<p>The command changes only the SSH rule of the MEHO firewall. It takes one
+IPv4 range or one address. <code>none</code> closes SSH from every address, so only
+the console of the machine works. Over SSH, the command asks first when
+the new range does not hold your own address.</p>
+<h3 id="get-help-from-support">Get help from support<a class="headerlink" href="#get-help-from-support" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>support-bundle
+</code></pre></div>
+<p>The command writes one file to <code>/var/lib/meho/support/</code> and prints its
+path. Only root can read the file. It holds:</p>
+<ul>
+<li>the check list;</li>
+<li>the logs of MEHO and of its web entry point (Traefik);</li>
+<li>the state of the built-in Kubernetes;</li>
+<li>the log of RKE2 of the last 24 hours;</li>
+<li>facts about the operating system.</li>
+</ul>
+<p><strong>Check the file before you send it.</strong> The command removes the
+passwords and keys that the install made, and the value of each setting
+whose name has PASSWORD, TOKEN, SECRET or KEY in it. It cannot find
+every secret in the logs. For example, it keeps a login token after
+<code>Authorization: Bearer</code>, and a password inside an address such as
+<code>https://&lt;user&gt;:&lt;password&gt;@&lt;host&gt;</code>.</p>
+<p>So unpack the file and search it. Use the path that the command
+printed:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0700</span><span class="w"> </span>/root/support-check
+sudo<span class="w"> </span>tar<span class="w"> </span>-xzf<span class="w"> </span>/var/lib/meho/support/&lt;file&gt;.tar.gz<span class="w"> </span>-C<span class="w"> </span>/root/support-check
+sudo<span class="w"> </span>grep<span class="w"> </span>-r<span class="w"> </span>-n<span class="w"> </span>-i<span class="w"> </span>-E<span class="w"> </span><span class="s1">'authorization:|bearer |://[^/@ ]+:[^/@ ]+@|--password'</span><span class="w"> </span>/root/support-check
+</code></pre></div>
+<p>The search shows the usual places where a secret can stay. It does not
+find every secret. Read each line it shows. When a line holds a secret,
+replace the secret in that file, for example with <code>[removed]</code>. Then
+pack the folder again and send the new file to evoila support:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>tar<span class="w"> </span>-czf<span class="w"> </span>/root/meho-support-checked.tar.gz<span class="w"> </span>-C<span class="w"> </span>/root/support-check<span class="w"> </span>.
+</code></pre></div>
+<p>When support has the file, delete the bundle, the folder and the new
+file:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>rm<span class="w"> </span>-r<span class="w"> </span>/var/lib/meho/support/&lt;file&gt;.tar.gz<span class="w"> </span>/root/support-check<span class="w"> </span>/root/meho-support-checked.tar.gz
+</code></pre></div>
+<h2 id="who-keeps-the-operating-system-up-to-date">Who keeps the operating system up to date<a class="headerlink" href="#who-keeps-the-operating-system-up-to-date" title="Permanent link">&para;</a></h2>
+<p>You do. The machine and its Linux are yours, with your patch cycle and
+your tools. For example: Ubuntu's unattended upgrades, Red Hat
+Satellite, or updates by hand. The download holds no operating system
+packages. A server with no internet gets its updates from your own
+package mirror.</p>
+<p>While MEHO is on the machine:</p>
+<ul>
+<li>Install operating system updates as usual. A restart is fine: RKE2
+  and MEHO start again by themselves, and OpenBao unseals itself.</li>
+<li>Do not change or delete <code>/var/lib/rancher</code>, <code>/etc/rancher</code>,
+  <code>/var/lib/meho</code> or <code>/etc/meho</code>. They hold the built-in Kubernetes, the
+  data of MEHO, its settings and the firewall file. There are three
+  exceptions, each described in this chapter: your own rules in
+  <code>/etc/meho/firewall.nft</code>, the two first-login files, and the support
+  bundles in <code>/var/lib/meho/support/</code>.</li>
+<li>Do not replace the MEHO firewall, and do not turn on firewalld or ufw
+  again. Add your own rules to the MEHO firewall file instead (see
+  <a href="#the-firewall-file">The firewall file</a>).</li>
+<li>Do not install Docker, another container runtime or another
+  Kubernetes on the machine.</li>
+</ul>
+<h2 id="security">Security<a class="headerlink" href="#security" title="Permanent link">&para;</a></h2>
+<h3 id="closed-by-default">Closed by default<a class="headerlink" href="#closed-by-default" title="Permanent link">&para;</a></h3>
+<p>From another machine, only these ports answer:</p>
+<table>
+<thead>
+<tr>
+<th>Port</th>
+<th>From where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TCP 443</td>
+<td>Every address: the console, the API and the login.</td>
+</tr>
+<tr>
+<td>TCP 80</td>
+<td>Every address. It only redirects to 443.</td>
+</tr>
+<tr>
+<td>TCP 22 (SSH) and ping</td>
+<td>Only the admin network.</td>
+</tr>
+<tr>
+<td>Everything else</td>
+<td>Nothing. The MEHO firewall drops it.</td>
+</tr>
+</tbody>
+</table>
+<p>The ports of the built-in Kubernetes are closed from outside too. A port
+scan from another machine shows only the ports above. The traffic that
+leaves the machine is not filtered, because the operating system and its
+other software are yours.</p>
+<h3 id="what-meho-connects-to">What MEHO connects to<a class="headerlink" href="#what-meho-connects-to" title="Permanent link">&para;</a></h3>
+<p>MEHO connects to the systems it manages and to the AI service. From
+v0.47.0, MEHO may connect to every address outside the built-in
+Kubernetes, on every port. You need no setting for a new system.</p>
+<p>Two things stay closed to MEHO:</p>
+<ul>
+<li>the other parts of the built-in Kubernetes. There MEHO reaches only its
+  own parts, such as its database and its password safe, and DNS;</li>
+<li>the ports of this machine itself, except the console on port 443.</li>
+</ul>
+<p>To limit where MEHO may connect, use a firewall in your network.</p>
+<p>Before v0.47.0, MEHO on this form can connect only to its own parts, so
+it cannot reach the systems it manages. Update to v0.47.0 or later.</p>
+<h3 id="the-firewall-file">The firewall file<a class="headerlink" href="#the-firewall-file" title="Permanent link">&para;</a></h3>
+<p>The rules are in one file, <code>/etc/meho/firewall.nft</code>, with comments for
+your security team. The file is for nftables, the firewall of the Linux
+kernel. It holds only its own table, <code>inet meho</code>, and leaves the rules
+of other tables in place.</p>
+<p>The service <code>meho-firewall.service</code> loads the file at every start of the
+machine, before the network and before RKE2. RKE2 does not start while
+the rules are missing.</p>
+<p>To let more traffic in, add your own accept rules to the chain
+<code>prerouting</code>, before its last rule (<code>counter</code>). Then check the file and
+load it again:</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>nft<span class="w"> </span>-c<span class="w"> </span>-f<span class="w"> </span>/etc/meho/firewall.nft
+sudo<span class="w"> </span>systemctl<span class="w"> </span>reload<span class="w"> </span>meho-firewall.service
+</code></pre></div>
+<p>The first command only checks the file. It changes nothing. Never add
+<code>flush ruleset</code> to the file: the built-in Kubernetes keeps its own rules
+in other tables, and that command deletes them.</p>
+<h3 id="cis-hardening">CIS hardening<a class="headerlink" href="#cis-hardening" title="Permanent link">&para;</a></h3>
+<p>The built-in Kubernetes runs with RKE2's CIS profile from the first
+install. CIS, the Center for Internet Security, writes the hardening
+checklists that security teams check against. The profile follows the
+CIS Kubernetes Benchmark. With it:</p>
+<ul>
+<li>the strictest built-in pod rule of Kubernetes ("restricted") applies
+  in every namespace, the namespace of MEHO too;</li>
+<li>the install creates the <code>etcd</code> user and group when they are missing,
+  and sets the kernel settings of RKE2 in
+  <code>/etc/sysctl.d/60-rke2-cis.conf</code>.</li>
+</ul>
+<p>MEHO adds one exception: the namespace <code>local-path-storage</code>. Its storage
+helper keeps the data of MEHO in folders of the machine
+(<code>/var/lib/meho/volumes</code>), and the strictest rule refuses access to
+folders of the machine. The exceptions of RKE2 itself stay as they are:
+<code>kube-system</code>, <code>compliance-operator-system</code> and <code>tigera-operator</code>.</p>
+<p>The profile hardens the built-in Kubernetes, not the operating system.
+<code>meho-host check</code> shows whether the firewall and the profile are on.</p>
+<h3 id="files-with-secrets">Files with secrets<a class="headerlink" href="#files-with-secrets" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Only root can read <code>/var/lib/meho/first-login-passwords</code> and
+  <code>/var/lib/meho/unseal-key</code>. Delete both after the first login
+  (<a href="#step-4-first-login">Step 4</a>).</li>
+<li>Only root can open the folders <code>/etc/meho</code> and <code>/var/lib/meho</code>.</li>
+<li><code>/var/lib/meho/console-ca.crt</code> holds only the CA certificate of the
+  console. It is not secret.</li>
+<li>The support bundle can still hold secrets from the logs. Check it
+  before you send it (see <a href="#get-help-from-support">Get help from support</a>).</li>
+</ul>
+<h2 id="uninstall">Uninstall<a class="headerlink" href="#uninstall" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>uninstall
+</code></pre></div>
+<p>The command removes MEHO and the built-in Kubernetes from the machine,
+with all their data. It asks twice, and only <code>yes</code> goes on. Take a
+backup first if you need the data.</p>
+<p>It also removes the kernel settings file of RKE2, and the <code>etcd</code> user and
+group when the install created them. A restart of the machine brings
+back the kernel values of the operating system.</p>
+<p>It also removes the route that the pod network of RKE2 leaves on the
+machine. So you can run <code>install.sh</code> again right away, without a restart.</p>
+<p>The MEHO firewall stays on, so the machine is never without a firewall.
+The last lines of the command name the command that removes it. Turn on
+your own firewall first, then remove the MEHO firewall.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../form-1-vmware-appliance/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Form 1: VMware appliance">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Form 1: VMware appliance
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../form-3-your-kubernetes/" class="md-footer__link md-footer__link--next" aria-label="Next: Form 3: Your Kubernetes">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Form 3: Your Kubernetes
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -38,6 +38,7 @@ type groupRow struct {
 	decideHT int    // HTTP status the decide route answers (default 200)
 	reveal   bool   // the requester asked for the hidden values (reveal_secret)
 	change   bool   // the request changes something when it runs (reveal_changes_something)
+	script   bool   // the request runs a script whose SHA-256 is testScriptSHA
 	// results the detail route answers as result_state after the decide,
 	// one per read; the last one repeats. Plays the waiting requester
 	// whose run ends later (dispatch "already_resumed").
@@ -82,6 +83,11 @@ func groupViews(t *testing.T, rows []groupRow) []api.ApprovalRequestView {
 		if r.change {
 			change := true
 			v.RevealChangesSomething = &change
+		}
+		if r.script {
+			v.ProposedEffect["preview"] = map[string]interface{}{
+				"script": "echo hi\n", "script_bytes": float64(8), "script_sha256": testScriptSHA,
+			}
 		}
 		views = append(views, v)
 	}

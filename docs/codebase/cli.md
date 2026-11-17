@@ -1049,8 +1049,10 @@ lines (indented JSON, an error message) and keeps the line breaks.
   yes, or the script's SHA-256, to approve." From a terminal `yes`
   approves; on a pipe only the matching SHA-256 approves. A wrapper script
   can run `printf '%s\n' "$REVIEWED_SHA256" | meho approvals approve <id>`.
-  There is no `--yes` flag. A request without a script, `reject`, several
-  ids, `--in-order` and `--wait` are unchanged (#6630).
+  There is no `--yes` flag. With several ids and with `--in-order`, a
+  request that runs a script gets the same rule; there a refused answer
+  skips the request or stops the run. An id given twice is refused. A
+  request without a script and `reject` are unchanged (#6630).
 - The audit commands (`meho audit show`, `query`, `recent`, `my-recent`,
   `who-touched`, `replay`, `trace show`) pass every server string of the
   human output through `SafeText`. A stored request path with control

@@ -62,14 +62,19 @@ const severalIDsHelp = "With several ids, approve shows each request (what it " 
 	"does, the operation, the connector and its version, the target, the " +
 	"risk level and the parameters) and asks you about each one on its " +
 	"own. Type yes to approve that request; anything else skips it. Each " +
-	"approval is a separate decision about one request."
+	"approval is a separate decision about one request. A request that " +
+	"runs a script gets the same check as with one id (see below), and " +
+	"a refused answer skips it. Give each id once: an id given twice " +
+	"stops the command before anything is approved."
 
-// scriptStepHelp explains the question before a one-id approve of a script.
+// scriptStepHelp explains the question before an approve of a script.
 const scriptStepHelp = "With one id, when the request runs a script, approve first " +
 	"shows the script's size and SHA-256 and where to read the whole " +
 	"script (`meho approvals show <id>` and the approvals page of the " +
 	"console). Then it asks: Type yes, or the script's SHA-256, to " +
-	"approve. Anything else stops, and nothing is approved. From a " +
+	"approve. Anything else stops, and nothing is approved. With " +
+	"several ids and with --in-order, a request that runs a script gets " +
+	"the same rule: yes only from a terminal, or the matching SHA-256. From a " +
 	"terminal, yes approves. When input is not a terminal (a pipe), only " +
 	"the matching SHA-256 approves. When MEHO shows no SHA-256 (values " +
 	"that look like secrets were hidden, or MEHO could not check the " +
@@ -223,7 +228,7 @@ func runDecision(
 		}
 		if before == nil {
 			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected("backplane returned 200 OK but no JSON body decoded against ApprovalRequestView, so the request was not shown and nothing was approved"),
+				output.Unexpected("MEHO did not answer with the request, so it was not shown and nothing was approved."),
 				jsonOut,
 			)
 		}

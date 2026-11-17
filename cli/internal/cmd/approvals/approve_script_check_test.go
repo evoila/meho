@@ -95,7 +95,7 @@ func TestOneIDApproveOfAScriptAsksAndYesFromATerminalApproves(t *testing.T) {
 		"Size:             8 bytes",
 		"SHA-256:          " + testScriptSHA,
 		"Reviewed copy:    app-repo@abc123:check.sh",
-		"Expected SHA-256: matches",
+		"SHA-256 check:    matches",
 		"meho approvals show " + stubID,
 		"approvals page of the console",
 		"Type yes, or the script's SHA-256, to approve. Anything else stops: ",
@@ -174,12 +174,13 @@ func TestOneIDApproveOfAScriptWithHiddenValuesNeedsYesFromATerminal(t *testing.T
 }
 
 func TestOneIDApproveOfAScriptMEHOCouldNotCheckExplainsIt(t *testing.T) {
-	view := scriptRunView(t, map[string]interface{}{"script_unavailable": "the script could not be read"})
+	reason := "MEHO could not check the script for values that look like secrets, so it is not shown"
+	view := scriptRunView(t, map[string]interface{}{"script_unavailable": reason})
 	run := runOneID(t, "approve", view, "yes\n", true)
 	if run.err != nil || run.decides != 1 {
 		t.Fatalf("err = %v, decides = %d", run.err, run.decides)
 	}
-	if !strings.Contains(run.stderr, "MEHO could not check the script: the script could not be read") {
+	if !strings.Contains(run.stderr, "SHA-256:          none. "+reason+"\n") || strings.Count(run.stderr, "could not check the script") != 1 {
 		t.Errorf("stderr:\n%s", run.stderr)
 	}
 }
@@ -279,8 +280,13 @@ func TestOneIDApproveFailsWhenTheRequestIsNotJSON(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetIn(strings.NewReader("yes\n"))
 	cmd.SetContext(context.Background())
+	errOut := &bytes.Buffer{}
+	cmd.SetErr(errOut)
 	if err := runDecision(cmd, stubID, "approve", "", decisionOpts{BackplaneOverride: srv.URL}); err == nil {
 		t.Fatal("want an error when the request is not JSON")
+	}
+	if !strings.Contains(errOut.String(), "MEHO did not answer with the request, so it was not shown and nothing was approved.") {
+		t.Errorf("stderr:\n%s", errOut.String())
 	}
 	if decides != 0 {
 		t.Fatalf("decides = %d; want no decision when the request could not be shown", decides)

@@ -47,7 +47,7 @@ func printScriptBlock(w io.Writer, idArg string, preview map[string]interface{})
 	} else if hidden, _ := preview["script_values_hidden"].(bool); hidden {
 		fmt.Fprintln(w, "  SHA-256:          none. Values that look like secrets were hidden, so MEHO shows no SHA-256.")
 	} else if reason, _ := preview["script_unavailable"].(string); reason != "" {
-		fmt.Fprintf(w, "  SHA-256:          none. MEHO could not check the script: %s\n", output.SafeText(reason))
+		fmt.Fprintf(w, "  SHA-256:          none. %s\n", output.SafeText(reason))
 	} else {
 		fmt.Fprintln(w, "  SHA-256:          none. MEHO shows no SHA-256 for this script.")
 	}
@@ -55,15 +55,13 @@ func printScriptBlock(w io.Writer, idArg string, preview map[string]interface{})
 		fmt.Fprintf(w, "  Reviewed copy:    %s\n", output.SafeText(ref))
 	}
 	if check, _ := preview["script_check"].(string); check != "" {
-		fmt.Fprintf(w, "  Expected SHA-256: %s\n", output.SafeText(check))
+		fmt.Fprintf(w, "  SHA-256 check:    %s\n", output.SafeText(check))
 	}
 	fmt.Fprintf(w, "  Read the whole script: `meho approvals show %s`, or the approvals page of the console.\n", idArg)
 }
 
 // confirmScript shows the script block of a one-id approve and asks. It
 // returns "" when the person may approve, or the plain reason why not.
-// From a terminal, "yes" approves. The script's SHA-256 approves from a
-// terminal or a pipe, when it matches. Anything else stops.
 func confirmScript(cmd *cobra.Command, idArg string, detail *api.ApprovalRequestView) string {
 	preview := scriptPreview(detail.ProposedEffect)
 	if preview == nil {
@@ -72,8 +70,17 @@ func confirmScript(cmd *cobra.Command, idArg string, detail *api.ApprovalRequest
 	w := cmd.ErrOrStderr()
 	printScriptBlock(w, idArg, preview)
 	in := cmd.InOrStdin()
-	fmt.Fprint(w, scriptQuestion)
-	line, _ := bufio.NewReader(in).ReadString('\n')
+	return askScript(bufio.NewReader(in), inputIsTerminal(in), w, preview, scriptQuestion)
+}
+
+// askScript asks about a request that runs a script, on every approve
+// path. It returns "" when the person may approve, or the plain reason
+// why not. From a terminal, "yes" approves. The script's SHA-256
+// approves from a terminal or a pipe, when it matches. Anything else
+// stops.
+func askScript(in *bufio.Reader, terminal bool, w io.Writer, preview map[string]interface{}, question string) string {
+	fmt.Fprint(w, question)
+	line, _ := in.ReadString('\n')
 	answer := strings.TrimSpace(line)
 	fmt.Fprintln(w)
 	sha := scriptSHA256(preview)
@@ -82,7 +89,7 @@ func confirmScript(cmd *cobra.Command, idArg string, detail *api.ApprovalRequest
 		return ""
 	case sha != "" && len(answer) == len(sha) && isHex(answer):
 		return "That SHA-256 does not match the script of this request. Nothing was approved."
-	case strings.EqualFold(answer, "yes") && inputIsTerminal(in):
+	case strings.EqualFold(answer, "yes") && terminal:
 		return ""
 	case strings.EqualFold(answer, "yes"):
 		if sha == "" {

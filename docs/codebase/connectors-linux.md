@@ -662,7 +662,8 @@ script. It then asks "Type yes, or the script's SHA-256, to approve."
 `yes` approves from a terminal only; on a pipe only the matching SHA-256
 approves. A wrapper script of a person can pass the reviewed copy's
 SHA-256: `printf '%s\n' "$REVIEWED_SHA256" | meho approvals approve <id>`.
-There is no `--yes` flag (`approve_script_check.go`).
+There is no `--yes` flag (`approve_script_check.go`). With several ids
+and with `--in-order`, a request that runs a script gets the same rule.
 
 ### Approval + secret hygiene
 

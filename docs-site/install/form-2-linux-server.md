@@ -381,14 +381,18 @@ command:
 - removes the person's one-time code and recovery codes;
 - makes the next login of the person ask for a new password and a new
   one-time code app, and then show twelve new recovery codes;
-- writes one row into the MEHO audit. It names your Linux user (the one
-  behind `sudo`), this server, the person's user name and the time. You
-  find it with `meho audit query --op-id meho-host.reset-second-factor`.
+- writes one row into the MEHO audit for each tenant of the person. It
+  names your Linux user (the one behind `sudo`), this server, the person's
+  user name and the time. An admin of each of these tenants finds it with
+  `meho audit query --op-id meho-host.reset-second-factor`.
 
 It prints what it removed. An unknown user name changes nothing, and the
 command ends with exit code 1. Run as another user than root, it changes
 nothing and ends with exit code 2. When the command cannot write the
-audit row, it does not report success.
+audit row, it does not report success. When Keycloak does not answer a
+change in time, the change may still have happened: the command says so,
+writes the audit row with it, and ends with exit code 1. Run it again; a
+second run is safe.
 
 Give the person a new temporary password in a safe way, for example in
 the Keycloak admin console (see [Local users](login/local-users.md)). It

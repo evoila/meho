@@ -62,7 +62,7 @@ This version has nine commands:
   back in for a person of a local account who lost the one-time code app
   and the recovery codes. It removes both from the user in realm `meho`,
   makes the next login ask for a new password and a new code app, and
-  writes one audit row.
+  writes one audit row for each tenant of the user.
 
 `keyholder` and `unseal` read the unseal key from a hidden prompt, or one
 line of standard input when it is not a terminal. The key is never an
@@ -601,9 +601,8 @@ Steps of the module:
 2. Find the user: `GET /admin/realms/meho/users?username=<user>&exact=true`,
    then keep only the user whose name matches without case (Keycloak
    ignores case in user names). None: `[FAIL]`, nothing changed.
-3. Read the user, and the user's groups: the tenant of the audit row is
-   the one tenant that the groups' `meho_tenant` attribute names. With no
-   tenant or more than one, the row has no tenant.
+3. Read the user, and the user's groups: the tenants of the user are the
+   tenants that the groups' `meho_tenant` attribute names.
 4. Check that the database answers (`SELECT 1`). If not: `[FAIL]`, nothing
    changed.
 5. `GET .../users/{id}/credentials`, and `DELETE .../credentials/{id}` for
@@ -612,14 +611,22 @@ Steps of the module:
 6. `PUT .../users/{id}`: the user read in step 3 with `UPDATE_PASSWORD`
    and `CONFIGURE_TOTP` added to `requiredActions` (PUT replaces the whole
    list, so the other actions stay).
-7. Write one `audit_log` row: class `operation_execution`, `operator_sub`
+7. Write one `audit_log` row for each tenant of the user, in one
+   transaction: class `operation_execution`, `operator_sub`
    `system:meho-host`, method `INTERNAL`, path and `payload["op_id"]`
    `meho-host.reset-second-factor`, and in `payload` the Linux user, the
    host, the Keycloak user name and id, the removed credential types, the
-   required actions set and `result`.
+   required actions set, `maybe_changed` and `result`. The audit query
+   always filters on the caller's tenant, so one row per tenant lets an
+   admin of each tenant find the reset, and no tenant sees another's ids.
+   A user in no tenant gets one row without a tenant.
 
 When step 5 or 6 fails after something changed, the row is still written,
-with `result: error` and status 500, and the command fails. When the row
+with `result: error` and status 500, and the command fails. A write whose
+reply was lost (a timeout, no HTTP answer) may have worked: it goes into
+`maybe_changed` (`otp`, `recovery-authn-codes` or `required_actions`), the
+row is written, and the command does not say "Nothing was changed". A
+write that Keycloak refused with an HTTP answer did not happen. When the row
 cannot be written, the command fails after the lines of what changed: it
 never reports success without the row. A second run is safe: it finds no
 code to remove and the actions set already.

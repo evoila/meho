@@ -6,8 +6,9 @@
 The module runs against saved Keycloak Admin REST answers (a fake
 :class:`~meho_backplane.core.keycloak_api.Admin`) and the test database.
 Cases: a user with a one-time code and recovery codes, a user without them,
-an unknown user, a failure part-way, a database that cannot be reached, and
-an audit row that cannot be written. No output holds the client secret.
+an unknown user, a failure part-way, a write whose reply was lost, a user in
+two tenants, a database that cannot be reached, and an audit row that cannot
+be written. No output holds the client secret.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from meho_backplane.audit_query import query_audit
+from meho_backplane.audit_query.schemas import AuditQueryFilters
 from meho_backplane.core import reset_second_factor as rsf
 from meho_backplane.core.keycloak_api import RealmStageError, Reply
 from meho_backplane.db.engine import get_sessionmaker
@@ -164,6 +167,7 @@ async def test_user_with_code_and_recovery_codes(capfd: pytest.CaptureFixture[st
     assert row.payload["keycloak_user_id"] == _ID
     assert row.payload["removed_credentials"] == ["otp", "recovery-authn-codes"]
     assert row.payload["required_actions_set"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
+    assert row.payload["maybe_changed"] == []
     assert row.payload["result"] == "ok"
     assert _SECRET not in str(row.payload)
 
@@ -266,7 +270,7 @@ async def test_no_success_without_the_audit_row(
     async def broken(*_: Any, **__: Any) -> uuid.UUID:
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(rsf, "write_audit_row", broken)
+    monkeypatch.setattr(rsf, "write_audit_rows", broken)
     admin = FakeAdmin([_OTP])
 
     assert await _run(admin) == rsf.EXIT_FAILED
@@ -276,7 +280,56 @@ async def test_no_success_without_the_audit_row(
     assert "the audit row could not be written (RuntimeError)" in out.err
 
 
-async def test_two_tenants_leave_the_row_without_tenant() -> None:
+async def test_lost_reply_of_the_first_delete_is_audited(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    admin = FakeAdmin([_OTP, _CODES])
+    admin.replies[("DELETE", f"{_CREDS}/cred-otp")] = RealmStageError(
+        "Keycloak request failed: ReadTimeout"
+    )
+
+    assert await _run(admin) == rsf.EXIT_FAILED
+
+    assert admin.writes() == [("DELETE", f"{_CREDS}/cred-otp")]
+    out = capfd.readouterr()
+    assert "Nothing was changed" not in out.out + out.err
+    assert "the one-time code of admin, so it may be removed" in out.out
+    assert "wrote audit row" in out.out
+    assert "what may have changed" in out.err
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].status_code == 500
+    assert rows[0].payload["removed_credentials"] == []
+    assert rows[0].payload["maybe_changed"] == ["otp"]
+    assert "ReadTimeout" in rows[0].payload["error"]
+
+
+async def test_lost_reply_of_the_put_is_audited(capfd: pytest.CaptureFixture[str]) -> None:
+    admin = FakeAdmin([_PASSWORD])
+    admin.replies[("PUT", _USER)] = RealmStageError("Keycloak request failed: ReadTimeout")
+
+    assert await _run(admin) == rsf.EXIT_FAILED
+
+    out = capfd.readouterr()
+    assert "Nothing was changed" not in out.out + out.err
+    assert "what the next login of admin asks for, so it may be changed" in out.out
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["required_actions_set"] == []
+    assert rows[0].payload["maybe_changed"] == ["required_actions"]
+
+
+async def test_refused_first_delete_changes_nothing(capfd: pytest.CaptureFixture[str]) -> None:
+    admin = FakeAdmin([_OTP])
+    admin.replies[("DELETE", f"{_CREDS}/cred-otp")] = Reply(403, None)
+
+    assert await _run(admin) == rsf.EXIT_FAILED
+
+    assert "Keycloak answered HTTP 403. Nothing was changed." in capfd.readouterr().err
+    assert await _audit_rows() == []
+
+
+async def test_user_in_two_tenants_is_found_by_the_audit_query_of_each() -> None:
     admin = FakeAdmin([_OTP])
     other = uuid.UUID("99999999-2222-4333-8444-555555555555")
     admin.replies[("GET", f"{_USER}/groups")] = Reply(
@@ -288,7 +341,17 @@ async def test_two_tenants_leave_the_row_without_tenant() -> None:
     )
 
     assert await _run(admin) == rsf.EXIT_DONE
-    assert (await _audit_rows())[0].tenant_id is None
+
+    filters = AuditQueryFilters(op_id=rsf.AUDIT_PATH)
+    async with get_sessionmaker()() as session:
+        for tenant in (_TENANT, other):
+            found = await query_audit(filters, tenant_id=tenant, session=session)
+            assert len(found.rows) == 1
+            assert found.rows[0].payload["keycloak_user"] == "admin"
+            assert found.rows[0].op_id == rsf.AUDIT_PATH
+        unrelated = uuid.UUID("77777777-2222-4333-8444-555555555555")
+        assert (await query_audit(filters, tenant_id=unrelated, session=session)).rows == []
+    assert len(await _audit_rows()) == 2
 
 
 def test_main_without_admin_login(

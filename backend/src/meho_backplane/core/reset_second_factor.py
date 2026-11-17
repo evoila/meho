@@ -20,11 +20,13 @@ and is never printed. Then it:
    ``recovery-authn-codes``;
 4. adds the required actions ``UPDATE_PASSWORD`` and ``CONFIGURE_TOTP``, so
    the next login asks for a new password and a new code app;
-5. writes one ``audit_log`` row: the Linux user, the host, the Keycloak
-   user, what was removed and the time. The row is written also when step
-   3 or 4 fails part-way, and it then says so.
+5. writes one ``audit_log`` row for each tenant of the user: the Linux
+   user, the host, the Keycloak user, what was removed and the time. The
+   rows are written also when step 3 or 4 fails part-way, and they then say
+   so. A write whose reply was lost (a timeout) may have worked, so the
+   rows list it as such.
 
-Exit code ``0`` when all is done and the audit row is written. Exit code
+Exit code ``0`` when all is done and the audit rows are written. Exit code
 ``3`` on any failure, after one ``[FAIL]`` line; ``meho-host`` turns it into
 its own exit code 1. Exit code ``2`` for a wrong command line. See
 docs/codebase/linux-server-meho-host.md.
@@ -63,6 +65,7 @@ __all__ = [
     "Reset",
     "main",
     "reset_second_factor",
+    "write_audit_rows",
 ]
 
 EXIT_DONE = 0
@@ -88,14 +91,18 @@ class Reset:
 
     username: str
     user_id: str = ""
-    tenant_id: uuid.UUID | None = None
+    tenant_ids: list[uuid.UUID] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     required_actions: list[str] = field(default_factory=list)
+    #: Writes whose reply was lost: a credential type, or ``required_actions``.
+    #: Keycloak may have done them.
+    uncertain: list[str] = field(default_factory=list)
     error: str = ""
 
     @property
     def changed(self) -> bool:
-        return bool(self.removed or self.required_actions)
+        """True when Keycloak did or may have done a write."""
+        return bool(self.removed or self.required_actions or self.uncertain)
 
 
 def _say(line: str) -> None:
@@ -139,11 +146,8 @@ async def find_user(admin: Admin, username: str) -> dict[str, Any] | None:
     return user
 
 
-async def _tenant_of(admin: Admin, user_path: str, username: str) -> uuid.UUID | None:
-    """The one tenant of the user's groups (``meho_tenant`` is ``<uuid>:<name>:<role>``).
-
-    ``None`` when the groups name no tenant or more than one.
-    """
+async def _tenants_of(admin: Admin, user_path: str, username: str) -> list[uuid.UUID]:
+    """The tenants of the user's groups (``meho_tenant`` is ``<uuid>:<name>:<role>``)."""
     groups = await _get(
         admin,
         f"{user_path}/groups",
@@ -158,7 +162,7 @@ async def _tenant_of(admin: Admin, user_path: str, username: str) -> uuid.UUID |
                 tenants.add(uuid.UUID(str(value).split(":", 1)[0]))
             except ValueError:
                 continue
-    return tenants.pop() if len(tenants) == 1 else None
+    return sorted(tenants)
 
 
 async def _change(admin: Admin, user: dict[str, Any], result: Reset) -> None:
@@ -176,6 +180,7 @@ async def _change(admin: Admin, user: dict[str, Any], result: Reset) -> None:
                 "DELETE", f"{user_path}/credentials/{quote(str(credential['id']), safe='')}"
             )
         except RealmStageError as exc:
+            result.uncertain.append(kind)
             raise ResetError(f"cannot remove {_TYPE_WORDS[kind]}: {exc}") from None
         if reply.status not in (204, 404):
             raise ResetError(
@@ -189,6 +194,7 @@ async def _change(admin: Admin, user: dict[str, Any], result: Reset) -> None:
     try:
         reply = await admin.call("PUT", user_path, json={**user, "requiredActions": wanted})
     except RealmStageError as exc:
+        result.uncertain.append("required_actions")
         raise ResetError(f"cannot set what the next login asks for: {exc}") from None
     if reply.status != 204:
         raise ResetError(
@@ -213,7 +219,7 @@ async def reset_second_factor(
         return None
     result = Reset(username=str(user.get("username") or username), user_id=str(user["id"]))
     user_path = f"{_USERS}/{quote(result.user_id, safe='')}"
-    result.tenant_id = await _tenant_of(admin, user_path, result.username)
+    result.tenant_ids = await _tenants_of(admin, user_path, result.username)
     try:
         await check_database()
     except Exception as exc:
@@ -233,48 +239,70 @@ async def _check_database() -> None:
         await session.execute(text("SELECT 1"))
 
 
-async def write_audit_row(result: Reset, *, by: str, host: str, duration_ms: float) -> uuid.UUID:
-    """Commit the one audit row of a run that changed something."""
-    audit_id = uuid.uuid4()
+async def write_audit_rows(
+    result: Reset, *, by: str, host: str, duration_ms: float
+) -> list[uuid.UUID]:
+    """Commit the audit rows of a run that changed something, in one transaction.
+
+    One row for each tenant of the user, so the audit query of each tenant
+    finds the reset. A user in no tenant gets one row without a tenant.
+    """
+    occurred_at = datetime.now(UTC)
+    payload = {
+        "op_id": AUDIT_PATH,
+        "linux_user": by,
+        "host": host,
+        "keycloak_user": result.username,
+        "keycloak_user_id": result.user_id,
+        "removed_credentials": result.removed,
+        "required_actions_set": result.required_actions,
+        "maybe_changed": result.uncertain,
+        "result": "error" if result.error else "ok",
+        **({"error": result.error} if result.error else {}),
+    }
+    tenants: list[uuid.UUID | None] = [*result.tenant_ids] or [None]
+    audit_ids: list[uuid.UUID] = []
     async with get_sessionmaker()() as session:
-        session.add(
-            AuditLog(
-                id=audit_id,
-                event_class=AuditEventClass.OPERATION_EXECUTION,
-                occurred_at=datetime.now(UTC),
-                operator_sub=OPERATOR_SUB,
-                tenant_id=result.tenant_id,
-                method=INTERNAL_METHOD,
-                path=AUDIT_PATH,
-                status_code=500 if result.error else 200,
-                duration_ms=Decimal(str(round(duration_ms, 3))),
-                payload={
-                    "op_id": AUDIT_PATH,
-                    "linux_user": by,
-                    "host": host,
-                    "keycloak_user": result.username,
-                    "keycloak_user_id": result.user_id,
-                    "removed_credentials": result.removed,
-                    "required_actions_set": result.required_actions,
-                    "result": "error" if result.error else "ok",
-                    **({"error": result.error} if result.error else {}),
-                },
+        for tenant_id in tenants:
+            audit_ids.append(uuid.uuid4())
+            session.add(
+                AuditLog(
+                    id=audit_ids[-1],
+                    event_class=AuditEventClass.OPERATION_EXECUTION,
+                    occurred_at=occurred_at,
+                    operator_sub=OPERATOR_SUB,
+                    tenant_id=tenant_id,
+                    method=INTERNAL_METHOD,
+                    path=AUDIT_PATH,
+                    status_code=500 if result.error else 200,
+                    duration_ms=Decimal(str(round(duration_ms, 3))),
+                    payload=dict(payload),
+                )
             )
-        )
         await session.commit()
-    return audit_id
+    return audit_ids
 
 
 def _report(result: Reset) -> None:
     for kind in SECOND_FACTOR_TYPES:
         if kind in result.removed:
             _say(f"[ok]   removed {_TYPE_WORDS[kind]} of {result.username}")
-    if not result.removed:
+        if kind in result.uncertain:
+            _say(
+                f"[warn] Keycloak did not answer the removal of {_TYPE_WORDS[kind]} of "
+                f"{result.username}, so it may be removed"
+            )
+    if not result.removed and not result.uncertain:
         _say(f"[note] {result.username} had no one-time code and no recovery codes.")
     if result.required_actions:
         _say(
             f"[ok]   the next login of {result.username} asks for a new password and a new "
             "one-time code app, and gives twelve new recovery codes"
+        )
+    if "required_actions" in result.uncertain:
+        _say(
+            "[warn] Keycloak did not answer the change of what the next login of "
+            f"{result.username} asks for, so it may be changed"
         )
 
 
@@ -298,22 +326,23 @@ async def _run(admin: Admin, args: argparse.Namespace, secret: str, client_id: s
         return _fail(f"{result.error}. Nothing was changed.", _SUPPORT)
     _report(result)
     try:
-        audit_id = await write_audit_row(
+        audit_ids = await write_audit_rows(
             result, by=args.by, host=args.host, duration_ms=(time.monotonic() - started) * 1000
         )
     except Exception as exc:
         return _fail(
-            "the changes above were made, but the audit row could not be written "
-            f"({type(exc).__name__}).",
+            "the changes above were made or may have been made, but the audit row could not "
+            f"be written ({type(exc).__name__}).",
             f"run the command again, so the audit holds the reset. Then {_SUPPORT}",
         )
+    rows = "audit row" if len(audit_ids) == 1 else "audit rows (one per tenant)"
     _say(
-        f"[ok]   wrote audit row {audit_id}: {args.by} on {args.host} "
-        f"reset the second factor of {result.username}"
+        f"[ok]   wrote {rows} {', '.join(str(i) for i in audit_ids)}: {args.by} on "
+        f"{args.host} reset the second factor of {result.username}"
     )
     if result.error:
         return _fail(
-            f"{result.error}. The audit row lists what was changed.",
+            f"{result.error}. The audit row lists what was changed and what may have changed.",
             f"run the command again. If it fails again, {_SUPPORT}",
         )
     return EXIT_DONE

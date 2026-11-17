@@ -20,11 +20,18 @@ one login. At the end:
 
     Putting a person in a group, or taking them out, runs at the
     **dangerous** risk level when you do it through MEHO, so each change
-    waits for approval. Only a **MEHO-SA-Operator** may approve their own
-    change; anyone else needs a second person (a MEHO-SA-Operator or an
-    admin). The self-approval switch does not cover the dangerous risk
-    level (decision record:
+    waits for approval. The self-approval switch does not cover the
+    dangerous risk level (decision record:
     [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
+
+    - **Putting a person in a group** is a change of rights. Another
+      admin (a tenant admin or a platform admin) must approve it, never
+      the person who asked. A MEHO-SA-Operator who is not an admin cannot
+      approve it. See
+      [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+    - **Taking a person out of a group** only takes rights away. A
+      MEHO-SA-Operator may approve their own; anyone else needs a second
+      person (a MEHO-SA-Operator or an admin).
 
 ## How it works
 
@@ -55,9 +62,12 @@ The design is in the
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- A MEHO-SA-Operator who approves their own changes, a second person
-  who can approve, or the agent setup from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+- An admin who did not ask for the change, to approve each time you put
+  a person in a group (see
+  [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin)).
+  This works also with the agent setup from
+  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern),
+  when you are an admin.
 
 ## Step 1: Add the tenant in Keycloak
 
@@ -76,7 +86,7 @@ The tenant gets five role groups. They carry **only** `meho_tenant`, no
 |---|---|---|
 | `MEHO-team-b-Readers` | `<tenant-uuid>:team-b:Readers` | `read_only` |
 | `MEHO-team-b-Operators` | `<tenant-uuid>:team-b:Operators` | `operator` |
-| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator`, may approve their own changes |
+| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator`, may approve their own changes, but not a change of rights |
 | `MEHO-team-b-Admins` | `<tenant-uuid>:team-b:Admins` | `tenant_admin` |
 | `MEHO-team-b-Approvers` | `<tenant-uuid>:team-b:Approvers` | `read_only`, may approve |
 
@@ -289,7 +299,8 @@ meho keycloak group member add --target keycloak-main \
   --username alice@example.com --group-name MEHO-team-b-Operators
 ```
 
-Each command waits for approval. The second person approves it:
+Each command waits for approval. It is a change of rights, so another
+admin approves it, never the person who asked:
 
 ```bash
 meho approvals list

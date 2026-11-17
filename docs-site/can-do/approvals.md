@@ -40,8 +40,9 @@ More rules:
   the `MEHO-SA-Operators` group or an admin. A person may approve their
   own change in three cases only:
     - A member of the `MEHO-SA-Operators` group or of the `MEHO-Admins`
-      group may approve their own change at every risk level. See
-      [Approvals and break-glass](../guides/approvals-and-break-glass.md).
+      group may approve their own change at every risk level, but never
+      a change of rights. Another admin approves a change of rights. See
+      [Approvals and break-glass](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
     - An operator or an admin may approve their own `caution` change
       when it waited only because they sent it with a token. This works
       only with a click in the web interface.

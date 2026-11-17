@@ -6,20 +6,31 @@ first people log in.
 
 !!! warning "Each step waits for approval"
 
-    Every step that changes a Keycloak group runs at the **dangerous**
-    risk level, so each one waits for approval. Only a
-    **MEHO-SA-Operator** may approve their own `dangerous` change. Anyone
-    else needs a second person: a MEHO-SA-Operator or an admin. The
+    Every step that changes a Keycloak group or user runs at the
+    **dangerous** risk level, so each one waits for approval. The
     self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does **not**
     cover the dangerous risk level.
 
+    Two kinds of step get different approvers:
+
+    - **Create a group** (Step 2): a MEHO-SA-Operator may approve their
+      own. Anyone else needs a second person: a MEHO-SA-Operator or an
+      admin.
+    - **Create a user** (Step 4) and **add a person to a group**
+      (Step 5): these are changes of rights. Another admin (a tenant
+      admin or a platform admin) must approve them, never the person who
+      asked. A MEHO-SA-Operator who is not an admin cannot approve them.
+      See [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+
     Before you start, pick one of these:
 
+    - **A second person** in your current tenant approves each step. For
+      Steps 4 and 5, this person must be an admin.
     - **You are a MEHO-SA-Operator** in your current tenant, and you
-      approve each step yourself, on purpose, in the web interface.
-    - **A second person** in your current tenant (a MEHO-SA-Operator or
-      an admin) approves each step.
-    - **An agent makes the requests** and you approve them. This is the
+      approve the group steps yourself, on purpose, in the web interface.
+      An admin who is not you still approves Steps 4 and 5.
+    - **An agent makes the requests** and you approve them. For Steps 4
+      and 5, you must be an admin. This is the
       agent-requester pattern in
       [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
       The agent needs a grant only when the switch
@@ -71,7 +82,8 @@ each change is approved and stored in the audit log.
   right to write Vault identities and groups.
 - An `operator` or `tenant_admin` login in your current tenant.
 - A second person who can approve, or the agent setup from the box
-  above. Step 8 needs a `tenant_admin` approver in the new tenant too,
+  above. For the user and group member steps, the approver must be an
+  admin who did not ask for the change. Step 8 needs a `tenant_admin` approver in the new tenant too,
   because an approval belongs to one tenant. Step 8 explains the
   choices.
 - This guide gives each person one tenant. For a person who works in
@@ -163,9 +175,10 @@ meho keycloak user create --target keycloak-main -f alice.json \
   --password-secret-ref <vault-path-of-the-password> --temporary
 ```
 
-This step waits for approval too (risk level `dangerous`). A
-MEHO-SA-Operator or an admin must approve it, the same as the group
-steps.
+This step waits for approval too (risk level `dangerous`). Creating a
+user is a change of rights, so another admin (a tenant admin or a
+platform admin) must approve it, never the person who asked. See
+[Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 ## Step 5: Put each person in exactly one group
 
@@ -174,7 +187,8 @@ meho keycloak group member add --target keycloak-main \
   --username alice@acme.example --group-name MEHO-acme-Admins
 ```
 
-The second person approves it. Check the members:
+Adding a person to a group is a change of rights. Another admin
+approves it, never the person who asked. Check the members:
 
 ```bash
 meho keycloak group member list --target keycloak-main --id <group-id>

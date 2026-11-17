@@ -3811,6 +3811,16 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td>A request for <code>keycloak.role_mapping.assign</code> or <code>keycloak.role_mapping.client.assign</code> that already waited for approval before this version does not run, in every realm. Its card holds no list of what the role gives. The refusal says: "This request was made before MEHO read what a role gives. Send it again."</td>
+<td>Send such a request again after the upgrade.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed (service logins and run approvals).</strong> No standing grant and no run approval covers <code>keycloak.role_mapping.assign</code> and <code>keycloak.group.member.add</code>. Each call waits for a person to approve it, also when an older grant names the operation. A new grant or run approval that names them is refused.</td>
+<td>Plan for a person to approve each call. Remove grants for these two operations that no longer do anything.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td>MEHO hides more secret fields. Results, approval previews, audit rows, the call trace and the broadcast now show <code>[REDACTED:param_name]</code> in place of the value of these fields: names that end in <code>auth_key</code>, <code>priv_key</code>, <code>authentication_key</code>, <code>privacy_key</code>, <code>community_string</code>, <code>tacacs_key</code>, <code>radius_key</code>, <code>hmac_key</code>, <code>signing_key</code>, <code>store_key</code> or <code>application_key</code>, the names <code>pass_phrase</code> and <code>snmp_community</code>, and a <code>community</code> field in an SNMP place (next to an SNMP field, under an <code>snmp</code> key, or a name/value pair named <code>community</code>). Every spelling counts: <code>authKey</code>, <code>auth-key</code>, <code>AUTHKEY</code>, <code>snmpAuthKey</code>. A name that ends in <code>_ref</code> is hidden when the rest of it is such a name (<code>auth_key_ref</code>).</td>
 <td>A caller that needs such a value reads it through its secret reference, not from the result. Check scripts that read one of these fields from a result: they now get the marker. A settings file that has one of the new names under a target's <code>extras</code> is now refused by the settings check: store the value in OpenBao and use <code>secret_ref</code>. A call that sends one of the new names now shows in the broadcast in its short summary form, without its params.</td>
 </tr>

@@ -119,6 +119,7 @@ async def _synthetic_proposed_effect(
             target=target,
             params=params,
             connector_id=connector_id,
+            agent_preview=True,
         )
     )
     populated, _reason = describe_preview_provenance(proposed_effect, op_id=descriptor.op_id)

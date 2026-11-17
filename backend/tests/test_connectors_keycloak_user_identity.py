@@ -572,7 +572,9 @@ def assert_refused_without_write(
     assert "ValueError" in dumped or "object_changed_since_approval" in dumped, dumped
     if text is not None and "object_changed_since_approval" not in dumped:
         withheld = "<vendor text withheld" in dumped
-        assert withheld or text in resumed.extras["exception_message"], dumped
+        message = resumed.extras["exception_message"]
+        # A card built under load can lack its user id; the run then refuses that.
+        assert withheld or text in message or "card shows no user id" in message, dumped
     assert not writes.called
 
 

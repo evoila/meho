@@ -369,7 +369,7 @@ async def test_user_delete_already_gone_by_name(kc: KeycloakConnector) -> None:
     assert result["result"] == {
         "realm": _REALM,
         "id": None,
-        "username": "event-guest",
+        "requested_username": "event-guest",
         "deleted": False,
         "already_absent": True,
     }
@@ -805,8 +805,14 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
         mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups").respond(
             200, json=[{"id": _GROUP_UUID, "name": "event-team", "path": "/event-team"}]
         )
-        mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(404)
-        del_route = mock.delete(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(204)
+        # The approved run reads the user on the card by its id; after the
+        # DELETE the read answers 404.
+        user_read = mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(
+            200, json=_user()
+        )
+        del_route = mock.delete(f"/admin/realms/{_REALM}/users/{_USER_UUID}").mock(
+            side_effect=lambda _request: (user_read.respond(404), httpx.Response(204))[1]
+        )
 
         preview = await preview_operation(requester, args)
         assert preview["status"] == "ok", preview

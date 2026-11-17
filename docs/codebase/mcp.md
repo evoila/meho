@@ -1231,7 +1231,10 @@ server. Two settings, both off by default:
   - `connectors`: one or more connector families. A name counts for the
     connector with exactly that id and for every connector whose id
     starts with the name and a dash. So `kubernetes` counts for every
-    version of every Kubernetes connector.
+    version of every Kubernetes connector. Make each name as narrow as
+    you can: `vmware` counts for `vmware-rest-9.0` and for every other
+    connector whose id starts with `vmware-`; write `vmware-rest` when
+    the profile needs only that one.
   - `read_only`: `true` when left out.
   - A name is lower-case letters, digits and dashes, and not
     `investigate` or `operate`.
@@ -1249,6 +1252,18 @@ What such a profile does (`mcp/profiles.py`):
   runs before the list becomes a result handle. It is the same filter the
   hosted agents use for their connector list (`keep_connector_rows` in
   `mcp/tools/connector_admin.py`).
+- A call runs on the connector that its target resolves to, and that
+  can differ from the `connector_id` argument. So the policy gate also
+  refuses a target whose connector is outside the profile, or whose
+  connector cannot be found (`profile_target_denial` in
+  `mcp/profiles.py`). This holds for a call, a preview, the steps of a
+  multi-step operation and the checks of a runbook, because they all ask
+  the policy gate. A preview on such a target is refused before it shows
+  the request (`denied`), and nothing is sent and no approval request is
+  made.
+- `list_targets` shows only the targets whose connector is in the
+  profile, with and without a `connector_id` argument. Such a page can
+  hold fewer targets than `limit` and still have a `next_cursor`.
 - MEHO applies the stricter of the person's rules and the profile's
   rules. The policy gate (`policy_gate` in `operations/_validate.py`)
   denies a connector outside the profile, and in a read-only profile
@@ -1269,6 +1284,16 @@ What such a profile does (`mcp/profiles.py`):
   profile, and every session while the switch is off keep and read
   results as before, also results made before the upgrade or through
   REST.
+- A background run of `call_operation` keeps the profile the same way
+  (`operation_run.mcp_profile`, migration `0174`). Reading it with the
+  `run_id` under another profile, or without a profile, gives
+  `unknown_run` (`poll_call` in `mcp/tools/_call_operation_async.py`).
+- After a person approves a waiting request, the approved run is not
+  checked against the profile again. The approval runs outside the MCP
+  session, so its result is stored without the profile.
+- `/ready` says only whether `MCP_PROFILE_CONNECTOR_LISTS` is on
+  (`profile_connector_lists`). It needs no login, so it does not name
+  the profiles.
 
 Not filtered: the MCP resources (`resources/list`, `resources/read`).
 They hold tenant info, conventions, knowledge and memory, and no
@@ -1301,7 +1326,7 @@ It does not stop the same person from signing in again through another
 login client.
 
 Tests: `tests/test_mcp_profile_connectors.py`,
-`tests/test_mcp_profile_token.py`.
+`tests/test_mcp_profile_targets.py`, `tests/test_mcp_profile_token.py`.
 
 ## The current tenant of a session (#5239)
 

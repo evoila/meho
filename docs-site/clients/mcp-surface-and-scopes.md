@@ -102,11 +102,24 @@ A session at `https://<meho-host>/mcp?profile=k8s` then:
   version of that connector. Any other `connector_id` in `call_operation`,
   `preview_operation`, `search_operations` or `list_operation_groups` is
   refused with "not in your profile".
-- sees only those connectors in `meho_connector_list`.
+- may use only targets whose connector is in the profile. A call or a
+  preview on another target is refused, also when the `connector_id` is
+  in the profile.
+- sees only those connectors in `meho_connector_list`, and only their
+  targets in `list_targets`.
 - in a read-only profile (the default), cannot change anything: MEHO
   refuses every operation that changes something, and the profile has
   none of MEHO's own write tools.
-- reads back only the stored results it made itself, under this profile.
+- reads back only the stored results and background runs it made
+  itself, under this profile.
+
+A connector name in a profile counts for every connector whose id starts
+with the name and a dash. Keep the names as narrow as you can: `vmware`
+counts for every `vmware-...` connector, `vmware-rest` only for the
+`vmware-rest` connectors.
+
+After a person approves a request that waited, the approved run is not
+checked against the profile again.
 
 MEHO applies the stricter of the person's rules and the profile's rules.
 Every audit row names the profile in its `mcp_profile` field.

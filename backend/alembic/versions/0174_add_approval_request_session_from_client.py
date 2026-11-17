@@ -3,8 +3,8 @@
 
 """Add ``approval_request.session_from_client``.
 
-Revision ID: 0173
-Revises: 0172
+Revision ID: 0174
+Revises: 0173
 Create Date: 2026-11-16
 
 One nullable boolean column. ``True`` when ``agent_session_id`` holds the
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0173"
-down_revision: str | None = "0172"
+revision: str = "0174"
+down_revision: str | None = "0173"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

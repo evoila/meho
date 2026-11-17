@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0173_add_approval_request_session_from_client``.
+"""Tests for Alembic migration ``0174_add_approval_request_session_from_client``.
 
 * The upgrade adds one nullable boolean column on ``approval_request``:
   ``session_from_client``. Other columns stay as they are.
@@ -24,15 +24,15 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0173"
-_DOWN_REVISION = "0172"
+_REVISION = "0174"
+_DOWN_REVISION = "0173"
 _COLUMN = "session_from_client"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0173.db"
+    db_path = tmp_path / "migration_0174.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

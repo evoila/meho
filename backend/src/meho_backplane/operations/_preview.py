@@ -75,7 +75,7 @@ writes are the separate follow-up #1452).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
@@ -83,9 +83,11 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from meho_backplane.broadcast.events import (
-    classify_op,
+    has_snmp_word,
     is_secret_name_value_pair,
     is_secret_param_name,
+    is_snmp_community_key,
+    resolve_op_class,
 )
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
@@ -105,10 +107,14 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "has_permission_preflight",
     "has_preview_builder",
     "preview_failure_reason",
+    "proposed_effect_for_agent",
     "register_permission_preflight",
+    "register_person_only_preview_keys",
     "register_preview_builder",
+    "register_preview_builder_switch",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -221,7 +227,7 @@ def _redact_preview_message(message: str) -> str:
     return redacted
 
 
-def _scrub_secret_param_keys(value: Any) -> Any:
+def _scrub_secret_param_keys(value: Any, *, in_snmp: bool = False) -> Any:
     """Replace secret-by-name param values with :data:`_PARAM_REDACTED`.
 
     Walks any mapping and any sequence (other than strings and bytes)
@@ -244,6 +250,10 @@ def _scrub_secret_param_keys(value: Any) -> Any:
     a secret keyed deep inside the params tree is still caught. The input
     is never mutated; a new structure is returned.
 
+    A bare ``community`` is hidden in an SNMP place: next to an SNMP field,
+    or under a key with an SNMP word (*in_snmp*,
+    :func:`~meho_backplane.broadcast.events.is_snmp_community_key`).
+
     This is the key-name half of the generic echo's redaction; the
     value-shape half is :func:`apply_connector_boundary_redaction`.
     """
@@ -253,14 +263,18 @@ def _scrub_secret_param_keys(value: Any) -> Any:
             key: (
                 _PARAM_REDACTED
                 if isinstance(key, str)
-                and (is_secret_param_name(key) or (hide_pair_value and key == "value"))
+                and (
+                    is_secret_param_name(key)
+                    or is_snmp_community_key(value, key, in_snmp=in_snmp)
+                    or (hide_pair_value and key == "value")
+                )
                 and isinstance(item, (str, Mapping, Sequence))
-                else _scrub_secret_param_keys(item)
+                else _scrub_secret_param_keys(item, in_snmp=in_snmp or has_snmp_word(key))
             )
             for key, item in value.items()
         }
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_scrub_secret_param_keys(item) for item in value]
+        return [_scrub_secret_param_keys(item, in_snmp=in_snmp) for item in value]
     return value
 
 
@@ -350,6 +364,12 @@ class PreviewContext:
             the generic params-echo default. ``None`` (the default) falls
             back to the conservative connector-boundary default policy --
             the same behaviour as an unmatched override.
+        agent_preview: ``True`` when the agent's own ``preview_operation``
+            asks, ``False`` (the default) for the approval request. A
+            builder may show the approver more than the agent; what the
+            agent gets beyond that follows ``PREVIEW_TYPED_WRITES``. A
+            builder switch (:func:`register_preview_builder_switch`)
+            applies only to the agent's side.
     """
 
     descriptor: EndpointDescriptor
@@ -358,6 +378,7 @@ class PreviewContext:
     target: Any
     params: dict[str, Any]
     connector_id: str | None = None
+    agent_preview: bool = False
 
 
 class PreviewBuilder(Protocol):
@@ -400,6 +421,18 @@ class PermissionPreflight(Protocol):
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
 
+#: ``op_id`` -> the switch of its builder for the caller's side. Off, the
+#: preview the caller gets back is the one of an op with no builder; the
+#: approval request a person reads always uses the builder.
+_PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
+
+#: ``op_id`` -> the switch, and the keys its builder adds to the preview for
+#: the person only. Off, a caller reads the stored preview without them.
+_PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] = {}
+
+#: The keys a builder's result puts on a stored ``proposed_effect``.
+_BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
+
 #: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
 #: preflight (and no entry in the approval row's ``permission_preflight``).
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
@@ -414,9 +447,86 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     _PREVIEW_BUILDERS[op_id] = builder
 
 
+def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> None:
+    """Use the builder of *op_id* for the caller's preview only while ``enabled()`` is true.
+
+    Off, the preview the caller gets back (``preview_operation``) is the one
+    of an op with no builder (the generic params echo). The approval request
+    a person reads always uses the builder. A new card for an op the agent
+    already sees goes behind a switch this way.
+    """
+    _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
+
+
+def register_person_only_preview_keys(
+    op_id: str, enabled: Callable[[], bool], keys: frozenset[str]
+) -> None:
+    """Show the preview *keys* of *op_id* to a caller only while ``enabled()`` is true.
+
+    The builder adds them to the approval request a person reads. Off, a
+    caller that reads the stored request (:func:`proposed_effect_for_agent`)
+    gets the preview without them.
+    """
+    _PERSON_ONLY_PREVIEW_KEYS[op_id] = (enabled, keys)
+
+
+def proposed_effect_for_agent(
+    op_id: str,
+    effect: dict[str, Any] | None,
+    *,
+    params: Mapping[str, Any] | None,
+    connector_id: str | None,
+    tenant: str | None,
+) -> dict[str, Any] | None:
+    """The stored ``proposed_effect`` of an approval request, as a caller reads it.
+
+    The request a person reads always holds the builder's card. A caller
+    (``meho_approvals_get`` / ``meho_approvals_list``) gets what
+    ``preview_operation`` gives while a card's switch is off:
+
+    * the generic params echo of the stored params, for an op whose builder
+      switch is off (:func:`register_preview_builder_switch`);
+    * the preview without the person-only keys
+      (:func:`register_person_only_preview_keys`).
+
+    Every other ``proposed_effect`` comes back unchanged.
+    """
+    if not isinstance(effect, dict):
+        return effect
+    switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
+    if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
+        shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}
+        shown.pop("preview_reason", None)
+        if params:
+            shown["params_echo"] = _redact_echoed_params(
+                dict(params), connector_id=connector_id, tenant=tenant, op_id=op_id
+            )
+        populated, reason = describe_preview_provenance(
+            shown if params else None, op_id=op_id, stored_op_class=shown.get("op_class")
+        )
+        shown["preview_populated"] = populated
+        if reason is not None:
+            shown["preview_reason"] = reason
+        return shown
+    person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
+    preview = effect.get("preview")
+    if person_only is None or person_only[0]() or not isinstance(preview, dict):
+        return effect
+    kept = {key: value for key, value in preview.items() if key not in person_only[1]}
+    return {**effect, "preview": kept}
+
+
+def _preview_builder(op_id: str, *, for_agent: bool) -> PreviewBuilder | None:
+    """The builder of *op_id*; ``None`` when it has none, or for the caller when it is off."""
+    switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
+    if for_agent and switch is not None and not switch():
+        return None
+    return _PREVIEW_BUILDERS.get(op_id)
+
+
 def has_preview_builder(op_id: str) -> bool:
-    """True when *op_id* has a bespoke preview builder registered."""
-    return op_id in _PREVIEW_BUILDERS
+    """True when *op_id* has a bespoke preview builder for the caller's preview."""
+    return _preview_builder(op_id, for_agent=True) is not None
 
 
 def register_permission_preflight(op_id: str, preflight: PermissionPreflight) -> None:
@@ -426,6 +536,11 @@ def register_permission_preflight(op_id: str, preflight: PermissionPreflight) ->
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PERMISSION_PREFLIGHTS[op_id] = preflight
+
+
+def has_permission_preflight(op_id: str) -> bool:
+    """True when *op_id* has a park-time permission check registered."""
+    return op_id in _PERMISSION_PREFLIGHTS
 
 
 async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -472,8 +587,8 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     place of ``"preview"``.
     """
     op_id = ctx.descriptor.op_id
-    op_class = classify_op(op_id)
-    builder = _PREVIEW_BUILDERS.get(op_id)
+    op_class = resolve_op_class(op_id, getattr(ctx.descriptor, "op_class", None))
+    builder = _preview_builder(op_id, for_agent=ctx.agent_preview)
     if op_class in _SENSITIVE_CLASSES and builder is None:
         # A credential-class op with NO bespoke builder must not surface
         # request/response detail in a durable row -- the *generic*
@@ -546,7 +661,7 @@ def _preview_unavailable_marker(
 
 
 def describe_preview_provenance(
-    preview: dict[str, Any] | None, *, op_id: str
+    preview: dict[str, Any] | None, *, op_id: str, stored_op_class: str | None = None
 ) -> tuple[bool, str | None]:
     """Classify a built ``proposed_effect`` envelope for the reviewer surface (#2332).
 
@@ -584,7 +699,7 @@ def describe_preview_provenance(
     # Collapsed to the identifier-only default: name WHY so the approver
     # sees a deliberately-redacted credential write distinctly from a
     # connector that simply never populated a preview.
-    if classify_op(op_id) in _SENSITIVE_CLASSES:
+    if resolve_op_class(op_id, stored_op_class) in _SENSITIVE_CLASSES:
         return False, PREVIEW_REASON_CREDENTIAL_REDACTED
     return False, PREVIEW_REASON_NOT_POPULATED
 

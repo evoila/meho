@@ -44,7 +44,14 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["REDACTED", "redact_secret_fields", "redact_trace_fields"]
+from meho_backplane.broadcast.events import is_secret_param_name
+
+__all__ = [
+    "REDACTED",
+    "redact_preview_fields",
+    "redact_secret_fields",
+    "redact_trace_fields",
+]
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
 #: marker (rather than dropping the key) keeps the shape stable so a
@@ -79,6 +86,9 @@ _SECRET_FIELDS: frozenset[str] = frozenset(
     {
         # Keycloak representation secret fields (camelCase, as Keycloak emits).
         "secret",  # ClientRepresentation.secret (confidential client secret)
+        # ClientRepresentation.attributes: the old client secret, kept while
+        # a secret rotation is in progress.
+        "client.secret.rotated",
         "credentials",  # UserRepresentation.credentials (list of credential records)
         "value",  # CredentialRepresentation.value (raw credential value)
         "secretdata",  # CredentialRepresentation.secretData (hash + salt blob)
@@ -116,8 +126,24 @@ def redact_secret_fields(value: Any) -> Any:
     unchanged. The input is not mutated — a new structure is returned so
     the handler's scrub can never accidentally leave a half-redacted
     object aliased somewhere else.
+
+    Used for the result of a read operation. It does not use the shared
+    name rule: the dispatcher hides those fields in the normal answer and
+    keeps their values, so a person who asks with ``reveal_secret: true``
+    still gets them. A value replaced here is gone for good.
     """
-    return _redact(value, _SECRET_FIELDS)
+    return _redact(value, _SECRET_FIELDS, shared=False)
+
+
+def redact_preview_fields(value: Any) -> Any:
+    """Return *value* with secrets masked for an approval preview.
+
+    The same walk as :func:`redact_secret_fields`, and every key the
+    shared name rule marks as secret is masked too
+    (:func:`_is_shared_secret`). A preview has no reveal, so it hides
+    everything at the source.
+    """
+    return _redact(value, _SECRET_FIELDS, shared=True)
 
 
 #: Field names masked only in the flight recorder trace, on top of
@@ -132,23 +158,35 @@ _TRACE_ONLY_FIELDS: frozenset[str] = frozenset({"lastipfailure"})
 def redact_trace_fields(value: Any) -> Any:
     """Return *value* with secrets and trace-only personal fields masked.
 
-    The same walk as :func:`redact_secret_fields`, with
+    The same walk as :func:`redact_preview_fields`, with
     :data:`_TRACE_ONLY_FIELDS` masked too. Used for the vendor answer the
     flight recorder stores.
     """
-    return _redact(value, _SECRET_FIELDS | _TRACE_ONLY_FIELDS)
+    return _redact(value, _SECRET_FIELDS | _TRACE_ONLY_FIELDS, shared=True)
 
 
-def _redact(value: Any, fields: frozenset[str]) -> Any:
+def _redact(value: Any, fields: frozenset[str], *, shared: bool) -> Any:
     if isinstance(value, dict):
         return {
             key: (
                 REDACTED
-                if isinstance(key, str) and key.lower() in fields
-                else _redact(item, fields)
+                if isinstance(key, str)
+                and (key.lower() in fields or (shared and _is_shared_secret(key, item)))
+                else _redact(item, fields, shared=shared)
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact(item, fields) for item in value]
+        return [_redact(item, fields, shared=shared) for item in value]
     return value
+
+
+def _is_shared_secret(key: str, item: Any) -> bool:
+    """True when the shared name rule hides *item* under *key*.
+
+    The rule every other place uses
+    (:func:`~meho_backplane.broadcast.events.is_secret_param_name`), with
+    its value rule: a string, an object or a list is hidden; a flag or a
+    number (``resetPasswordAllowed``) stays.
+    """
+    return is_secret_param_name(key) and isinstance(item, (str, dict, list))

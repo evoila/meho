@@ -65,7 +65,9 @@ the tests set it, as `install.sh` does.
    --error-on=any`, then `apt-get upgrade --with-new-pkgs` with the same
    options as step 1 of `cis/harden.sh`. Then the VM restarts, and the
    build waits until SSH answers from the new boot (a new
-   `/proc/sys/kernel/random/boot_id`). So the install, the hardening and
+   `/proc/sys/kernel/random/boot_id`) and the clock is synchronised
+   (`timedatectl`, up to 2 minutes): the form-2 install checks the clock
+   first, and a fast runner gets there before the time sync. So the install, the hardening and
    its scan run on the newest kernel. Only this step may restart the VM:
    from step 3 on, a restart would run first start, and after the
    hardening SSH no longer lets the build user in. Then the download goes

@@ -234,6 +234,9 @@ data:
   TEAM_KNOWLEDGE_RECALL: {{ .Values.config.teamKnowledgeRecall | quote }}
   KB_SIMILAR_CHECK: {{ .Values.config.kbSimilarCheck | quote }}
   MCP_SHORT_TOOL_TEXTS: {{ .Values.config.mcpShortToolTexts | quote }}
+  # Tool profiles with a connector list. Off by default.
+  MCP_PROFILE_CONNECTOR_LISTS: {{ .Values.config.mcpProfileConnectorLists | quote }}
+  MCP_CONNECTOR_PROFILES: {{ .Values.config.mcpConnectorProfiles | quote }}
   # Claude Code and Claude Desktop sign in with their own login client.
   MCP_CLIENT_PER_TOOL_KIND: {{ .Values.config.mcpClientPerToolKind | quote }}
   # Category, labels and "always wait" on connectors, groups and
@@ -249,7 +252,7 @@ data:
   POLICY_APPROVER_ROUTING: {{ .Values.config.policy.approverRouting | quote }}
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
-  # shared, upkeep on, once a week).
+  # shared, upkeep off, once a week when on).
   KB_SHARED_TENANT_IDS: {{ .Values.config.kbSharedTenantIds | quote }}
   KNOWLEDGE_UPKEEP_ENABLED: {{ .Values.config.knowledgeUpkeepEnabled | quote }}
   KNOWLEDGE_UPKEEP_INTERVAL_SECONDS: {{ .Values.config.knowledgeUpkeepIntervalSeconds | int | quote }}

@@ -195,16 +195,24 @@ Detail payloads land in ``extras``. Codes:
   :exc:`hvac.exceptions.Forbidden`: Vault answered ``permission denied``
   under the operator's identity. #2091 (Initiative #2150), extending the
   #1627/#1649 structured-cause pattern to the Vault-authorization
-  sibling. The load-bearing case is dispatch-time credential resolution
-  (``connectors/_shared/vault_creds.py`` reading ``target.secret_ref``):
-  a ref outside the readable per-tenant subtree (#1723) is the likely
-  cause, so the ``error`` names the target's ``secret_ref``, the
-  ``tenants/<tenant_id>/<name>`` convention, the exact expected path,
-  and the stage-the-credential remediation (never "widen the
-  deploy-owned Vault policy"). A typed ``vault.*`` op denied by the
-  Vault ACL itself gets the target-less generic shape. ``extras``
-  carries ``secret_ref`` / ``expected_secret_ref`` /
-  ``exception_class`` / ``exception_message``. Login-phase denials are
+  sibling. Three answers, by what Vault refused:
+
+  * the target's own ``secret_ref`` (the shared loader in
+    ``connectors/_shared/vault_creds.py`` raises
+    :exc:`~meho_backplane.connectors._shared.vault_creds.TargetSecretForbiddenError`):
+    the ``error`` names the target and its ``secret_ref``, says whether
+    MEHO built the ref from the target name (``secret_ref_derived``), and
+    advises a path MEHO may read plus ``meho targets update``. It holds no
+    Vault text and no Vault address;
+  * another path on a target (a plain ``Forbidden``): the ``error`` names
+    that path (``refused_path``, never the Vault address) and says "read"
+    or "write" by the request method hvac keeps on the error;
+  * no target (a typed ``vault.*`` op denied by the Vault ACL itself): the
+    target-less generic shape, with the Vault text in ``exception_message``.
+
+  The advice never says to widen the deploy-owned Vault policy.
+  ``extras`` carries ``secret_ref`` / ``secret_ref_derived`` /
+  ``expected_secret_ref`` / ``exception_class``. Login-phase denials are
   wrapped into the ``VaultClientError`` family before the handler sees
   them and still fall through to ``connector_error``.
 * ``connector_probe_refused`` -- a ``net.*`` handler raised
@@ -294,7 +302,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
-from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
+from meho_backplane.broadcast.events import (
+    classify_op,
+    resolve_op_class,
+    scrub_secret_named_values,
+)
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.broadcast.target_advisory import build_target_activity_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
@@ -307,6 +319,7 @@ from meho_backplane.connectors import (
 )
 from meho_backplane.connectors._shared.vault_creds import (
     SecretRefReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -315,6 +328,7 @@ from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, Permis
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
+from meho_backplane.operations._after_gate import AfterGateCheck, checks_after_gate
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
@@ -422,6 +436,14 @@ from meho_backplane.operations._secret_values import (
     reveal_hidden_values,
     split_reveal_secret,
 )
+from meho_backplane.operations._session_expired_hook import (
+    mark_session_relogin,
+    may_resend_after_session_end,
+    same_answer_after_signin_error,
+    session_ended_not_resent_error,
+    session_expired_by_hook,
+    with_refused_signin_remediation,
+)
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._target_version_range import refuse_version_outside_range
 from meho_backplane.operations._tls_presented import probe_presented_leaf
@@ -482,6 +504,7 @@ from meho_backplane.operations.shutdown_drain import (
     track_operation,
 )
 from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
@@ -489,6 +512,7 @@ from meho_backplane.redaction import (
     manifest_to_audit_payload,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import target_warnings
 
 _log = structlog.get_logger(__name__)
 
@@ -1889,22 +1913,12 @@ async def _run_branch_with_error_handling(
     except hvac.exceptions.Forbidden as vault_exc:
         # #2091: Vault answering "permission denied" during dispatch is a
         # classifiable authorization failure, not an unforeseen crash. The
-        # load-bearing case is credential resolution — the shared reader
-        # (``connectors/_shared/vault_creds.py``) reads ``target.secret_ref``
-        # under the operator's identity, and a ref outside the readable
-        # per-tenant subtree (#1723) surfaces as hvac's ``Forbidden``.
-        # Flattening it into the generic ``connector_error: Forbidden``
-        # below buried the cause in ``extras.exception_message``, reading
-        # exactly like a missing Vault grant (and inviting the wrong fix:
-        # widening the deploy-owned Vault policy). The structured
-        # ``connector_vault_forbidden`` names the target's ``secret_ref``
-        # and the per-tenant convention instead. A typed ``vault.*`` op
-        # denied by the Vault ACL itself lands here too (target-less
-        # message shape — the builder degrades gracefully). The arm sits
-        # ahead of the generic ``except Exception`` so the structured shape
-        # wins; ``hvac.exceptions.Forbidden`` is disjoint from every
-        # earlier arm's exception types. Login-phase denials never reach
-        # this arm — ``vault_client_for_operator`` wraps them into the
+        # builder picks the answer: the target's own ref (the loader's
+        # ``TargetSecretForbiddenError``), another path, or no target. The
+        # arm sits ahead of the generic ``except Exception`` so the
+        # structured shape wins; ``hvac.exceptions.Forbidden`` is disjoint
+        # from every earlier arm's exception types. Login-phase denials never
+        # reach this arm: ``vault_client_for_operator`` wraps them into the
         # ``VaultClientError`` family before the handler sees them.
         duration_ms = _elapsed_ms(started)
         # #2331: a typed KV-v2 *write* (``vault.kv.put`` / ``patch`` /
@@ -1946,7 +1960,13 @@ async def _run_branch_with_error_handling(
             )
         else:
             expected_secret_ref: str | None = None
-            target_name = getattr(target, "name", None)
+            # A refused read of a target's own ref names its target: the
+            # ``targets.probe`` op reads a target that is not the dispatch target.
+            target_name = (
+                vault_exc.target_name
+                if isinstance(vault_exc, TargetSecretForbiddenError)
+                else getattr(target, "name", None)
+            )
             if target_name:
                 # Call-time import on purpose (the ingest-arm precedent above):
                 # ``tenant_paths`` drags the vault ops module in via its
@@ -2397,10 +2417,15 @@ async def _handle_http_status_error(
     without coupling; a connector with no session state (stateless / Basic)
     exposes no hook and is never retried.
 
-    Retry-once on an auth-class status is safe even for non-idempotent verbs:
-    a ``401`` / ``440`` means the upstream rejected the request *before*
-    executing it (the session token was stale), so no side effect occurred.
-    The recovery is gated strictly on the auth-class set; a 5xx / timeout --
+    A ``401`` / ``440`` means the upstream refused *that* request before
+    executing it. It does not mean the handler sent no change before it: a
+    typed handler or a multi-step operation may have sent a write first. So
+    the repeat is gated by :func:`may_resend_after_session_end`, the same
+    rule as the "session ended" hook below: only a ``safe`` operation, or an
+    ingested one that sent one request outside a run after an approval.
+    Otherwise the session is dropped and the caller gets
+    ``connector_auth_failed`` (:func:`_session_ended_not_resent`). The
+    recovery is gated strictly on the auth-class set; a 5xx / timeout --
     which may have executed -- is never retried (it classifies straight to
     ``connector_error`` with no invalidation).
 
@@ -2410,16 +2435,55 @@ async def _handle_http_status_error(
     dispatcher's never-raises contract holds on every path. Scoped to
     403 + 422 + the auth-class set; every other status (404, 429, 5xx)
     flattens to the unchanged generic ``connector_error`` shape.
+
+    A connector may also say that a 4xx status outside the auth-class set
+    means "the session ended" (``is_session_expired(response)``, see
+    :mod:`~meho_backplane.operations._session_expired_hook`). MEHO then drops
+    the kept session. It repeats the call once
+    (:func:`_retry_after_expired_session_answer`) only when a repeat cannot
+    send a change twice; otherwise it returns ``connector_auth_failed`` and
+    does not send the operation again (:func:`_session_ended_not_resent`).
     """
     status_code = http_exc.response.status_code
     is_auth_failure = is_auth_failed_status(
         status_code, _profile_expiry_statuses(connector_instance)
     )
     invalidate_session = getattr(connector_instance, "invalidate_session", None)
-    if is_auth_failure and callable(invalidate_session):
-        recovered = await _retry_after_session_invalidation(
+    if callable(invalidate_session) and (
+        is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response)
+    ):
+        # One rule for both paths: repeat only when it cannot send a change twice.
+        if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
+            return await _session_ended_not_resent(
+                invalidate_session=invalidate_session,
+                rejected_exc=http_exc,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                op_id=op_id,
+                started=started,
+            )
+        if is_auth_failure:
+            mark_session_relogin(status_code, resent=True)
+            return await _retry_after_session_invalidation(
+                invalidate_session=invalidate_session,
+                rejected=http_exc.request,
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                op_id=op_id,
+                started=started,
+            )
+        return await _retry_after_expired_session_answer(
             invalidate_session=invalidate_session,
-            rejected=http_exc.request,
+            rejected_exc=http_exc,
             descriptor=descriptor,
             connector_instance=connector_instance,
             operator=operator,
@@ -2430,7 +2494,6 @@ async def _handle_http_status_error(
             op_id=op_id,
             started=started,
         )
-        return recovered
 
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
@@ -2448,6 +2511,147 @@ async def _handle_http_status_error(
         params=params,
         params_hash=params_hash,
         duration_ms=duration_ms,
+    )
+
+
+async def _session_ended_not_resent(
+    *,
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected_exc: httpx.HTTPStatusError,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    op_id: str,
+    started: float,
+) -> OperationResult:
+    """Drop the kept session after "the session ended", without a repeat.
+
+    The operation may already have changed the product (a typed handler or a
+    multi-step operation that sent a write before the refused request, or a
+    call that ran after a person's approval). So MEHO does not send it again.
+    The next call signs in again on a fresh session. The caller gets
+    ``connector_auth_failed`` that says the change may or may not have been
+    made.
+    """
+    await invalidate_session(target, rejected=rejected_exc.request)
+    mark_session_relogin(rejected_exc.response.status_code, resent=False)
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        result_connector_auth_failed(
+            op_id, session_ended_not_resent_error(rejected_exc, target), target, duration_ms
+        ),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=duration_ms,
+    )
+
+
+async def _retry_after_expired_session_answer(
+    *,
+    invalidate_session: Callable[..., Awaitable[None]],
+    rejected_exc: httpx.HTTPStatusError,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    op_id: str,
+    started: float,
+) -> Any | OperationResult:
+    """Sign in again once, after the connector said an answer means "session ended".
+
+    The connector's ``is_session_expired(response)`` method said yes for a
+    4xx status outside the known set (a product that answers an ended
+    session with 403, for example), and a repeat cannot send a change twice
+    (:func:`may_resend_after_session_end`). Like
+    :func:`_retry_after_session_invalidation`, this drops the kept login and
+    repeats the call once. Differences:
+
+    * It is never a loop. The repeated call is not asked again.
+    * The audit row and the trace show that MEHO signed in again
+      (:func:`mark_session_relogin`).
+    * When the fresh sign-in is refused, the caller gets
+      ``connector_auth_failed`` with the text "the product refused the
+      sign-in" (wrong password or locked account), never "grant a
+      permission". When the repeated call gets the same "session ended"
+      answer, the text says the product took the new sign-in and still
+      ended the session.
+
+    Any other answer to the repeated call is classified as it would be on
+    its own, so a real 403 still reads as "insufficient permission".
+    """
+    await invalidate_session(target, rejected=rejected_exc.request)
+    mark_session_relogin(rejected_exc.response.status_code, resent=True)
+    try:
+        raw = await _run_source_kind_branch(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            audit_id=audit_id,
+        )
+    except httpx.HTTPStatusError as retry_exc:
+        duration_ms = _elapsed_ms(started)
+        if session_expired_by_hook(connector_instance, retry_exc.response):
+            result = result_connector_auth_failed(
+                op_id,
+                same_answer_after_signin_error(retry_exc, target),
+                target,
+                duration_ms,
+                relogin="reestablished",
+            )
+        else:
+            result = _classify_http_status_error(
+                http_exc=retry_exc,
+                op_id=op_id,
+                connector_instance=connector_instance,
+                target=target,
+                duration_ms=duration_ms,
+                relogin="reestablished",
+            )
+    except ConnectorAuthError as retry_exc:
+        # The fresh sign-in was refused. Drop the kept credential too, so a
+        # restage is read on the next call.
+        await _evict_connector_credentials(connector_instance, target)
+        result = result_connector_auth_failed(
+            op_id,
+            with_refused_signin_remediation(retry_exc),
+            target,
+            _elapsed_ms(started),
+            relogin="attempted_failed",
+        )
+    except Exception as retry_exc:
+        result = result_connector_error(op_id, retry_exc, _elapsed_ms(started))
+    else:
+        return await _audit_returned_result(
+            raw,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+    return await _audit_error_and_return(
+        result,
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=_elapsed_ms(started),
     )
 
 
@@ -3150,6 +3354,11 @@ async def _build_proposed_effect(
             # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
+        # A setting of the target that is allowed but risky, for example a
+        # Keycloak target that manages MEHO's own sign-in realm.
+        risky_settings = target_warnings(target)
+        if risky_settings:
+            base["target_warnings"] = risky_settings
         # Stamp the reviewer-facing preview provenance onto every parked
         # op's envelope (#2332). ``preview_populated`` lets a caller
         # programmatically refuse to auto-approve an op-identity-only
@@ -3161,7 +3370,9 @@ async def _build_proposed_effect(
         # identifier fields are merged below, so an identifier-only
         # (declined) envelope is classified not-populated rather than
         # mislabelled by the merged ``op_id``.
-        preview_populated, preview_reason = describe_preview_provenance(preview, op_id=op_id)
+        preview_populated, preview_reason = describe_preview_provenance(
+            preview, op_id=op_id, stored_op_class=getattr(descriptor, "op_class", None)
+        )
         base["preview_populated"] = preview_populated
         if preview_reason is not None:
             base["preview_reason"] = preview_reason
@@ -3181,7 +3392,7 @@ async def _build_proposed_effect(
             op_id=op_id, connector_id=connector_id, target=target
         ).items():
             base.setdefault(_key, _value)
-        base.setdefault("op_class", classify_op(op_id))
+        base.setdefault("op_class", resolve_op_class(op_id, getattr(descriptor, "op_class", None)))
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``
@@ -3417,6 +3628,7 @@ async def _handle_needs_approval(
     preview_hash: str | None = None,
     idempotency_key: str | None = None,
     reveal_secret: bool = False,
+    wait_reason: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -3424,6 +3636,8 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+    *wait_reason* is the reason of the policy gate; the request audit row
+    keeps it.
 
     When the op's check before the wait for approval refuses the call
     (:func:`~meho_backplane.operations._park_check.park_check_refusal`), the
@@ -3497,7 +3711,9 @@ async def _handle_needs_approval(
         params=params,
         duration_ms=duration_ms,
     )
-    if refusal is None:
+    if refusal is None and AfterGateCheck.INGESTED_OPS in checks_after_gate(
+        PermissionVerdict.NEEDS_APPROVAL
+    ):
         refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
     if refusal is not None:
         return await _audit_denied_and_return(
@@ -3600,6 +3816,8 @@ async def _handle_needs_approval(
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
                 category=descriptor.policy_category,
+                wait_reason=wait_reason,
+                install_category=descriptor.policy_install_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -3936,6 +4154,15 @@ async def _dispatch_now(
         descriptor = selection.descriptor
         connector_id = selection.connector_id
         product, version = descriptor.product, descriptor.version
+    # An ingested op whose row stores a class (a connector's safety floor set
+    # it at ingest) is a secret read like any other. Read from the row that
+    # runs, after any switch to a sibling catalog, so the audit row, the
+    # policy and this flag all use the same row.
+    stored_op_class = getattr(descriptor, "op_class", None)
+    if stored_op_class is not None:
+        op_class = resolve_op_class(op_id, stored_op_class)
+        secret_read = secret_read or op_class == "credential_read"
+        makes_new_secret = op_class == "credential_mint"
     params_error = _params_error(descriptor, op_id, params, started)
     if params_error is not None:
         return params_error
@@ -4068,6 +4295,8 @@ async def _dispatch_now(
         # A credential read that shows the hidden values only on request
         # (vault.kv.read) waits for approval when the call asks for them.
         raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+        # Some params make a call wait for a person on every call.
+        raise_descriptor_for_params(descriptor, params)
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
@@ -4151,6 +4380,7 @@ async def _dispatch_now(
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
                     reveal_secret=reveal_secret,
+                    wait_reason=gate_reason,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
@@ -4186,12 +4416,15 @@ async def _dispatch_now(
             # Not run on the ``_approved`` resume path -- an operator
             # already approved that exact call; re-gating it here would
             # strand an approved op behind an announce it can no longer add.
-            announce_block = await announce_gate_blocks(
-                operator,
-                op_class=descriptor_op_class(descriptor),
-                safety_level=descriptor.safety_level,
-                target_name=getattr(target, "name", None),
-            )
+            # ``checks_after_gate`` is shared with ``meho policy explain``.
+            announce_block = None
+            if AfterGateCheck.ANNOUNCE_RULE in checks_after_gate(verdict):
+                announce_block = await announce_gate_blocks(
+                    operator,
+                    op_class=descriptor_op_class(descriptor),
+                    safety_level=descriptor.safety_level,
+                    target_name=getattr(target, "name", None),
+                )
             if announce_block is not None:
                 duration_ms = _elapsed_ms(started)
                 receipt = await audit_safe(

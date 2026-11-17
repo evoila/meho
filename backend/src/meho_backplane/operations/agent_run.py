@@ -83,6 +83,7 @@ from meho_backplane.events.outbox import publish as publish_event
 from meho_backplane.operations.addon_step_events import AddonStepEventService
 from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.session_store.hosted_runs import end_run_session
+from meho_backplane.work_ref import work_ref_filter_values
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
 #: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
@@ -388,10 +389,10 @@ async def list_runs(
         session: Open :class:`AsyncSession` (read-only; no commit).
         tenant_id: The tenant whose runs to list.
         work_ref: When supplied, narrows to runs whose ``work_ref``
-            matches this external change ticket exactly
-            (``"gh:evoila/meho#11"``). ``None`` applies no work_ref
-            filter (runs with and without a ticket are returned). An
-            empty string is a legitimate exact-match value, distinct
+            is this external change ticket, the whole id
+            (``"gh:evoila/meho#11"``; :func:`work_ref_filter_values`).
+            ``None`` applies no work_ref filter (runs with and without a
+            ticket are returned). An empty string is a value, distinct
             from ``None`` -- so the filter is applied whenever the
             argument is not ``None``.
         status: When supplied, narrows to runs in this lifecycle state.
@@ -412,7 +413,7 @@ async def list_runs(
     bounded_offset = max(0, offset)
     stmt = select(AgentRun).where(AgentRun.tenant_id == tenant_id)
     if work_ref is not None:
-        stmt = stmt.where(AgentRun.work_ref == work_ref)
+        stmt = stmt.where(AgentRun.work_ref.in_(work_ref_filter_values(work_ref)))
     if status is not None:
         stmt = stmt.where(AgentRun.status == status.value)
     if agent_definition_id is not None:

@@ -72,7 +72,8 @@ tenant_id() {
     fi
 }
 
-# render_place_values <hostname> <tenant id> <admin user> <approver user>:
+# render_place_values <hostname> <tenant id> <admin user> <approver user>
+# <pod range> <service range> <addresses of this machine, one per line>:
 # print the answers of this place as Helm values (form-2 design, section 6).
 # The update writes this file again from the install record, so it also
 # drops the two network-policy ranges older installs wrote here: the chart
@@ -91,11 +92,49 @@ coreKeycloak:
     adminUsername: "${admin_user}"
     approverUsername: "${approver_user}"
 EOF
+    render_egress_values "$5" "$6" "$7"
 }
 
-# write_place_values takes the arguments of render_place_values.
+# render_egress_values <pod range> <service range> <addresses>: the
+# outgoing rule of the MEHO pod (#6612). The chart's NetworkPolicy lets it
+# reach only the built-in parts; on form 2 it also reaches every address
+# outside the built-in Kubernetes, on every port: the systems it manages
+# and the AI service. The pod range, the service range and the addresses of
+# this machine stay closed, so the pod reaches no other pod and none of
+# RKE2's own ports. Its own console address is reached through the Traefik
+# pod, by the chart's rule that values-single-node.yaml turns on
+# (networkPolicy.ingressControllerEgress). An address inside the two ranges,
+# such as the one of RKE2's flannel.1 interface, is closed by the range
+# already.
+render_egress_values() {
+    local pod_range=$1 service_range=$2 addresses=$3 address
+    cat <<EOF
+networkPolicy:
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: "0.0.0.0/0"
+            except:
+              - "${pod_range}"
+              - "${service_range}"
+EOF
+    while IFS= read -r address; do
+        [[ -n $address ]] || continue
+        cidrs_overlap "$address" "$pod_range" && continue
+        cidrs_overlap "$address" "$service_range" && continue
+        printf '              - "%s/32"\n' "$address"
+    done <<<"$addresses"
+}
+
+# write_place_values <hostname> <tenant id> <admin user> <approver user>
+# <pod range> <service range>: render_place_values with the addresses of
+# this machine, into the file for root only.
 write_place_values() {
-    render_place_values "$@" | write_root_file "$MEHO_PLACE_VALUES" 0600
+    local addresses
+    addresses=$(machine_addresses) || addresses=""
+    [[ -n $addresses ]] ||
+        warn "No IPv4 address of this machine was found, so the network rule of MEHO cannot keep the ports of this machine closed to MEHO. MEHO still reaches the systems it manages."
+    render_place_values "$@" "$addresses" | write_root_file "$MEHO_PLACE_VALUES" 0600
     ok "wrote the answers of this place to $MEHO_PLACE_VALUES"
 }
 

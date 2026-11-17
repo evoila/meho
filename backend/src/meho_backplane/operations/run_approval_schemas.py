@@ -12,6 +12,8 @@ Shapes for the REST surface (:mod:`meho_backplane.api.v1.run_approvals`):
 * :class:`RunApprovalRevoke` -- the optional reason of a revoke.
 * :class:`RunApprovalRead` / :class:`RunApprovalListResponse` -- the
   stored request with its status.
+* :class:`RunApprovalWaitNote` -- an entry the run approval never covers:
+  each of its calls still waits for a person.
 
 Request shapes set ``extra="forbid"`` so an unknown field is a 422 at the
 boundary, like the grant schemas.
@@ -25,7 +27,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from meho_backplane.work_ref import WorkRef
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = [
     "MAX_RUN_APPROVAL_ENTRIES",
@@ -35,6 +37,7 @@ __all__ = [
     "RunApprovalRead",
     "RunApprovalRevoke",
     "RunApprovalStatus",
+    "RunApprovalWaitNote",
 ]
 
 #: Upper bound on entries in one request. Enough for a long run; keeps the
@@ -80,7 +83,10 @@ class RunApprovalCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     work_ref: WorkRef = Field(
-        description="The run reference. Calls of the run send it in the Meho-Work-Ref header.",
+        description=(
+            "The run reference. Calls of the run send it in the Meho-Work-Ref header. "
+            + WORK_REF_FIELD_DESCRIPTION
+        ),
     )
     entries: list[RunApprovalEntry] = Field(min_length=1, max_length=MAX_RUN_APPROVAL_ENTRIES)
     reason: str = Field(
@@ -98,6 +104,21 @@ class RunApprovalRevoke(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, min_length=1, max_length=2048)
+
+
+class RunApprovalWaitNote(BaseModel):
+    """An entry the run approval never covers; each of its calls waits for a person.
+
+    The list keeps the entry (the request is not refused), and this note
+    says so to the add-on that asks and to the person who approves.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry: int = Field(description="The position of the entry in ``entries``, from 0.")
+    connector_id: str
+    op_id: str
+    reason: str = Field(description="Why each call of this entry waits for a person.")
 
 
 class RunApprovalRead(BaseModel):
@@ -120,6 +141,13 @@ class RunApprovalRead(BaseModel):
     revoked_by_sub: str | None = None
     revoked_reason: str | None = None
     ended_at: datetime | None = None
+    entries_that_wait: list[RunApprovalWaitNote] | None = Field(
+        default=None,
+        description=(
+            "Entries that wait for a person; the reason says which calls. Filled by "
+            "request, show and approve; null in list, revoke and end."
+        ),
+    )
 
 
 class RunApprovalListResponse(BaseModel):

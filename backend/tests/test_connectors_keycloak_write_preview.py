@@ -270,7 +270,9 @@ async def test_role_mapping_assign_preview_shows_granted_roles() -> None:
     assert effect["op_class"] == "write"
     preview = effect["preview"]
     assert preview["resource"] == "role_mapping"
-    assert preview["username"] == "svc-meho"
+    # The user cannot be read here, so the sent name is not shown as the user's name.
+    assert "username" not in preview
+    assert preview["requested_username"] == "svc-meho"
     # Blank role names are dropped; real ones are surfaced verbatim.
     assert preview["granted_roles"] == ["realm-admin", "manage-users"]
 
@@ -287,7 +289,8 @@ async def test_role_mapping_assign_preview_by_uuid() -> None:
     assert effect is not None
     preview = effect["preview"]
     assert preview["id"] == user_uuid
-    assert preview["username"] is None
+    assert "username" not in preview
+    assert "requested_username" not in preview
     assert preview["granted_roles"] == ["operator"]
 
 

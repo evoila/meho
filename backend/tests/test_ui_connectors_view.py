@@ -41,6 +41,11 @@ Suite shape:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
+import shutil
+import subprocess
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -51,6 +56,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
+import structlog.testing
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
@@ -1571,6 +1577,83 @@ def test_detail_shows_reprobe_button_for_tenant_admin_role() -> None:
     assert 'hx-post="/ui/connectors/admin-view/probe"' in body
 
 
+# A synthetic ``htmx:beforeSwap`` event per status, run through the slot's
+# inline handler the way htmx 2.0.9 calls ``hx-on`` (``this`` is the element,
+# ``event`` is the event). Prints what the handler left in ``event.detail``.
+_SWAP_DRIVER = """
+const handler = new Function("event", process.argv[1]);
+const out = {};
+for (const status of [200, 409, 422, 501, 500]) {
+  const detail = { xhr: { status }, shouldSwap: status < 400, isError: status >= 400 };
+  handler.call({}, { detail });
+  out[status] = { shouldSwap: detail.shouldSwap, isError: detail.isError };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _fingerprint_slot_handler() -> str:
+    """Return the ``hx-on::before-swap`` code of the slot on the detail page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="slot-view", product="ssh")
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/slot-view")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    slot = re.search(
+        r'<div\s+id="fingerprint-card-slot"[^>]*>\s*<article\s+id="fingerprint-card"', body
+    )
+    assert slot is not None, body
+    override = re.search(r'hx-on::before-swap="([^"]*)"', slot.group(0))
+    assert override is not None, slot.group(0)
+    return override.group(1)
+
+
+def test_detail_fingerprint_slot_names_the_alert_statuses() -> None:
+    """The slot turns the swap on for 409, 422 and 501 (runs without node)."""
+    handler = _fingerprint_slot_handler()
+    for code in ("409", "422", "501"):
+        assert code in handler
+    assert "event.detail.shouldSwap = true" in handler
+    assert "event.detail.isError = false" in handler
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None and os.environ.get("MEHO_REQUIRE_NODE") != "1",
+    reason="node not on PATH (set MEHO_REQUIRE_NODE=1 to force)",
+)
+def test_detail_fingerprint_slot_shows_reprobe_alerts() -> None:
+    """The browser swaps the re-probe alert cards in, not only a success card.
+
+    htmx 2.0.9 does not swap a 4xx / 5xx body by default, so the 409 / 422 /
+    501 alert card would stay hidden and the old card would stay on screen.
+    The slot around the card turns the swap on for exactly those statuses.
+    With ``MEHO_REQUIRE_NODE=1`` a missing node fails the test.
+    """
+    handler = _fingerprint_slot_handler()
+    completed = subprocess.run(
+        ["node", "-e", _SWAP_DRIVER, handler],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    for alert_status in ("409", "422", "501"):
+        assert result[alert_status] == {"shouldSwap": True, "isError": False}, alert_status
+    # A success keeps htmx's default swap; another error stays an error.
+    assert result["200"] == {"shouldSwap": True, "isError": False}
+    assert result["500"] == {"shouldSwap": False, "isError": True}
+
+
 # ---------------------------------------------------------------------------
 # Detail view -- recent-ops refresh wiring (#3758)
 # ---------------------------------------------------------------------------
@@ -1699,6 +1782,80 @@ def test_reprobe_returns_alert_when_no_matching_connector() -> None:
     assert response.status_code == 501, response.text
     body = response.text
     assert "No matching connector" in body
+
+
+class _RefusedSecretConnector(_FakeConnector):
+    """Fake connector whose credential read is refused by Vault."""
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
+        import hvac.exceptions
+
+        from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
+
+        err = TargetSecretForbiddenError(target_name=target.name, secret_ref="tenants/shared/x")
+        err.__cause__ = hvac.exceptions.Forbidden(
+            "permission denied", method="GET", url="https://vault.test/v1/secret/data/x"
+        )
+        raise err
+
+
+def test_reprobe_refused_secret_read_returns_a_clear_alert() -> None:
+    """A refused secret read answers a 422 alert with the call's text, no Vault address."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    register_connector_v2(
+        product="fakeprod", version="1.0", impl_id="fakeprod", cls=_RefusedSecretConnector
+    )
+    _seed_target(tenant_id=_TENANT_A, name="refused-secret", product="fakeprod", fingerprint=None)
+    client, mock, csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/refused-secret/probe",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    body = response.text
+    assert "connector_vault_forbidden" in body
+    assert "refused-secret" in body
+    assert "tenants/shared/x" in body
+    assert "vault.test" not in body
+    assert "Vault said:" not in body
+    # The alert replaces the card, so it keeps the button to try again.
+    assert 'hx-post="/ui/connectors/refused-secret/probe"' in body
+    assert 'hx-target="#fingerprint-card"' in body
+
+
+def test_reprobe_refused_secret_read_writes_a_log_line() -> None:
+    """The 422 answer of a refused secret read leaves one log line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    register_connector_v2(
+        product="fakeprod", version="1.0", impl_id="fakeprod", cls=_RefusedSecretConnector
+    )
+    _seed_target(tenant_id=_TENANT_A, name="refused-log", product="fakeprod", fingerprint=None)
+    client, mock, csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        with structlog.testing.capture_logs() as logs:
+            response = client.post(
+                "/ui/connectors/refused-log/probe",
+                headers=_csrf_headers(csrf),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    events = [e for e in logs if e["event"] == "ui_target_reprobe_secret_unreadable"]
+    assert len(events) == 1, logs
+    assert events[0]["target_name"] == "refused-log"
+    assert events[0]["error_code"] == "connector_vault_forbidden"
+    assert "vault.test" not in str(events[0])
 
 
 def test_reprobe_returns_404_for_unknown_target() -> None:

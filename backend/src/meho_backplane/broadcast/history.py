@@ -46,6 +46,7 @@ from meho_backplane.broadcast.claim_state import is_active_claim_step
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.untrusted_text import wrap_untrusted_strings, wrap_untrusted_text
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
@@ -136,7 +137,7 @@ def _target_matches(event: BroadcastEvent | AgentAnnouncementEvent, target: str)
 
 
 def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: str) -> bool:
-    """Exact-match the ``work_ref`` filter against either event kind.
+    """Match the ``work_ref`` filter (the whole ticket id) against either event kind.
 
     Two event kinds now carry a ``work_ref``: an
     :class:`AgentAnnouncementEvent`'s declared change-ticket reference
@@ -147,7 +148,7 @@ def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: 
     and the operations it drove. Events with an unset ``work_ref`` never
     qualify (``None != <filter>``).
     """
-    return event.work_ref == work_ref
+    return event.work_ref in work_ref_filter_values(work_ref)
 
 
 def _is_active(event: BroadcastEvent | AgentAnnouncementEvent, now: datetime) -> bool:

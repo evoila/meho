@@ -298,11 +298,20 @@ that definition. Four steps:
 ```bash
 # 1. Register the agent principal (mints its client_credentials client;
 #    the output includes the client id you pass to --identity-ref below).
-meho agent-principal register nightly-writer
+#    --grants none: no starting grant. Then give it one grant for the
+#    write it makes, on the one target, with needs-approval. The target
+#    UUID is the id: line of `meho targets describe <target-name>`.
+#    With AGENT_GRANT_REQUIRED=on, an agent with no grant is refused, so
+#    the write would never wait for you. The grant never lets the write
+#    run alone: it still waits for a person's approval.
+meho agent-principal register nightly-writer --grants none
+meho agent grant create --principal agent:nightly-writer \
+  --op <write-op-id> --target <target-uuid> --verdict needs-approval
 
 # 2. Author an agent definition bound to that principal. Its toolset and
 #    prompt are what perform the write when the definition runs.
-#    All four flags are required.
+#    All four flags are required. It needs no --grants: the agent
+#    already has its grant from step 1.
 meho agent create nightly-writer --identity-ref agent:nightly-writer \
   --model-tier standard --turn-budget 20 \
   --system-prompt "<what the agent does>"
@@ -321,9 +330,12 @@ meho approvals list
 meho approvals approve <id>
 ```
 
-Every agent request above `safe` waits for a person. For a `dangerous`
-or `destructive` write, the person who approves must be a
-MEHO-SA-Operator or a MEHO-Admin.
+An agent request above `safe` waits for a person when a grant of the
+agent covers it (a `deny` grant refuses it). With no grant, it
+depends on the switch `AGENT_GRANT_REQUIRED`: with `off` (the default)
+or `observe` it waits for a person too, and with `on` it is refused
+(`agent_no_grant`). For a `dangerous` or `destructive` write, the
+person who approves must be a MEHO-SA-Operator or a MEHO-Admin.
 
 !!! warning "It must be an *autonomous* run, not a *delegated* one"
 

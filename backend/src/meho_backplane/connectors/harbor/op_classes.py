@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_op_classes, declare_per_call_approval
 
 declare_op_classes(
     # The robot create returns the freshly-minted robot secret in its
@@ -16,3 +16,8 @@ declare_op_classes(
     # never reaches the SSE stream or a Slack mirror channel.
     credential_mint=("harbor.robot.create",),
 )
+
+# The create makes a new login and can write it to a Vault place the caller
+# names. So a person approves each call: no standing grant or run approval
+# covers it.
+declare_per_call_approval(("harbor.robot.create",))

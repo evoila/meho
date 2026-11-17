@@ -291,6 +291,26 @@ meho agent edit pod-reader --disabled   # switch it off
 meho agent edit pod-reader --enabled    # switch it on again
 ```
 
+To let the definition run as another agent, pass `--identity-ref`. When
+that agent has no grant yet, MEHO asks for its first grants, as at
+create. Pass `--grants` with it:
+
+```bash
+meho agent edit pod-reader --identity-ref agent:<other-agent> --grants none
+```
+
+When the agent already has grants, MEHO needs no `--grants`. Then
+`meho agent create` and `meho agent edit` print the agent's grants that
+are live, so you see what it may do:
+
+```text
+This agent already has these grants; no starting grant is needed.
+live grants of agent:<other-agent>:
+  op=* target=every target verdict=auto-execute ends=never
+```
+
+The console forms show the same list next to the starting grant choices.
+
 ## Step 5 — Set permissions (grants)
 
 Every operation has a **safety level**: `safe`, `caution`, `dangerous`,
@@ -396,7 +416,8 @@ else. This example assumes the switch is `on`.
 
 3. Create the definition as in [Step 4](#step-4-create-the-definition),
    with `--identity-ref agent:report-reader`. It needs no `--grants`:
-   the agent already has grants.
+   the agent already has grants. The output lists them under "This agent
+   already has these grants; no starting grant is needed."
 
 4. What happens when the agent calls operations:
 
@@ -478,6 +499,14 @@ these always wait for a person's approval. An agent never approves.
 Grants only check operations that run through `call_operation`. The
 discovery tools (`meho_connector_list`, `list_operation_groups`,
 `search_operations`, `list_targets`) are not affected by grants.
+A docs lookup that names a target (`search_docs` or `ask_docs` with
+`target`) is checked like a `safe` call on that target. With `off` or
+`observe`, it runs when no grant covers it or when a grant with
+`auto-execute` covers it. With `on`, it runs only when a grant with
+`auto-execute` covers it. A `needs-approval` or `deny` grant refuses it
+in every state, because a docs lookup cannot wait for approval. The
+grants are matched on the operation `meho.docs.search` (for `search_docs`)
+and `meho.docs.ask` (for `ask_docs`).
 
 ### Recipe: a read-only agent for one operation on one target
 

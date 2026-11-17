@@ -123,6 +123,8 @@ from meho_backplane.operations._audit import (
     policy_rule_columns,
     policy_rule_var,
     resolve_agent_session_id,
+    run_id_var,
+    step_id_var,
     work_ref_var,
 )
 from meho_backplane.operations._errors import (
@@ -182,7 +184,9 @@ from meho_backplane.policy.routing import (
     routing_refusal,
     stamp_approver_set,
 )
+from meho_backplane.policy.routing_floor import install_floor_refusal
 from meho_backplane.version import running_release_id
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "EXPIRED_REASON_MESSAGES",
@@ -1325,6 +1329,10 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
+#: Audit paths that carry the runbook run and step of the call.
+_RUNBOOK_STEP_PATHS = frozenset({"approval.request", "approval.result"})
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1368,6 +1376,11 @@ async def _write_audit_row(
         "principal_sub": request.principal_sub,
         "result_status": path.split(".")[-1],  # "request" | "decision"
     }
+    # The class of the operation that waits, as the approval request stores
+    # it (the stored class of an ingested row counts). Only on the "request" row.
+    op_class = (request.proposed_effect or {}).get("op_class")
+    if path == "approval.request" and isinstance(op_class, str):
+        payload["op_class"] = op_class
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
     # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)
@@ -1397,6 +1410,19 @@ async def _write_audit_row(
     if request.approver_rule is not None:
         payload["approver_rule"] = request.approver_rule
         payload["approver_roles"] = request.approver_roles
+    # The runbook run and step of a check that waits or reads its result
+    # (the "request" and "result" rows). Both rows are written on the task
+    # of the runbook step, so the vars are bound. A "decision" row is written
+    # on the approver's task and gets neither.
+    run_id: uuid.UUID | None = None
+    step_id: str | None = None
+    if path in _RUNBOOK_STEP_PATHS:
+        run_id = run_id_var.get()
+        step_id = step_id_var.get()
+        if run_id is not None:
+            payload["run_id"] = str(run_id)
+        if step_id is not None:
+            payload["step_id"] = step_id
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1463,6 +1489,8 @@ async def _write_audit_row(
         # durable source of truth -- it keeps both audit rows aligned with
         # the value the request was parked under.
         work_ref=request.work_ref,
+        run_id=run_id,
+        step_id=step_id,
         **policy_kwargs,
     )
     session.add(row)
@@ -1528,6 +1556,8 @@ async def create_pending_request(
     reveal_secret: bool = False,
     rights_change: bool = False,
     category: str | None = None,
+    wait_reason: str | None = None,
+    install_category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1608,8 +1638,15 @@ async def create_pending_request(
             without it.
         category: The category the classification gave the operation
             (the looked-up row's ``policy_category``). Approver routing
-            matches a ``category`` entry on it
+            matches a tenant's ``category`` entry on it
             (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
+        wait_reason: Why the policy gate made the call wait. The
+            ``approval.request`` audit row keeps it as ``wait_reason``.
+        install_category: The category the install's policy alone gives
+            the operation (the looked-up row's
+            ``policy_install_category``). The install's routing entries
+            match on it, so a tenant that moves the operation to another
+            category cannot take it away from the install's routing.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1747,7 +1784,9 @@ async def create_pending_request(
     if rights_change or is_rights_change(request):
         request.rights_change = True
     try:
-        await stamp_approver_set(session, request, category=category)
+        await stamp_approver_set(
+            session, request, category=category, install_category=install_category
+        )
     except ValueError as exc:
         await _audit_routing_refusal(operator, request, request_audit_id, str(exc))
         raise
@@ -1775,6 +1814,7 @@ async def create_pending_request(
         path="approval.request",
         status_code=_APPROVAL_STATUS_CODE,
         duration_ms=0.0,
+        extra_payload={"wait_reason": wait_reason} if wait_reason else None,
     )
 
     _log().info(
@@ -3886,6 +3926,27 @@ def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None
         )
 
 
+async def _check_install_floor(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Raise :class:`ApprovalRoutingError` when the install's current routing refuses *operator*.
+
+    The install's routing is a floor: it is checked first, with the
+    install's file as it is now, then the stored group kinds
+    (:func:`_check_routed_approver`). Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off
+    (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+    """
+    refusal = await install_floor_refusal(session, operator, request)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+
+
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
     """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
     from meho_backplane.policy.shadow import shadow_approval
@@ -3906,7 +3967,8 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → the stored approver group kinds
+    (:func:`_check_approver_role_floor`) → the install's current approver
+    routing (:func:`_check_install_floor`) → the stored approver group kinds
     (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
@@ -3934,6 +3996,7 @@ async def _load_pending_for_approval(
         _shadow_approval(operator, request, today=False)
         raise
     _shadow_approval(operator, request, today=True)
+    await _check_install_floor(session, operator, request)
     _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
@@ -4036,7 +4099,7 @@ async def list_pending(
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     if after is not None:
         if order == "oldest":
             stmt = stmt.where(
@@ -4096,6 +4159,11 @@ async def pending_chain_positions(
     returned; a lone request has no order to show. The numbers count
     pending requests only, so step 1 is always the oldest request that
     still waits. Tenant-isolated by the WHERE clause.
+
+    With *work_ref*, every row the filter matches is one group, keyed by
+    *work_ref*. The filter matches the cleaned id and the text as typed
+    (:func:`work_ref_filter_values`), so rows of one ticket stored in two
+    forms get one numbering, the same rows the filtered list shows.
     """
     stmt = (
         select(ApprovalRequest.id, ApprovalRequest.work_ref)
@@ -4107,10 +4175,10 @@ async def pending_chain_positions(
         .order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     )
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     groups: dict[str, list[uuid.UUID]] = {}
     for request_id, ref in (await session.execute(stmt)).all():
-        groups.setdefault(ref, []).append(request_id)
+        groups.setdefault(ref if work_ref is None else work_ref, []).append(request_id)
     positions: dict[uuid.UUID, ChainPosition] = {}
     for ref, ids in groups.items():
         if len(ids) < 2:

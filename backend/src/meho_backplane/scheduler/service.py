@@ -83,6 +83,7 @@ from meho_backplane.scheduler.schemas import (
     ScheduledTriggerRead,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "AgentDefinitionMissingError",
@@ -302,9 +303,9 @@ class SchedulerAdminService:
         method accepts the raw string so a future widening doesn't
         require lock-step changes.
 
-        Optional *work_ref* narrows to triggers carrying that exact
-        change-ticket reference (work_ref I3-T3 #1663) -- the
-        tenant-scoped exact-match driven by
+        Optional *work_ref* narrows to triggers carrying that
+        change-ticket reference, the whole id (work_ref I3-T3 #1663) -- the
+        tenant-scoped match driven by
         ``scheduled_trigger_tenant_work_ref_idx``. ``None`` (the
         default) applies no work_ref filter.
 
@@ -328,7 +329,7 @@ class SchedulerAdminService:
             if status is not None:
                 stmt = stmt.where(ScheduledTrigger.status == status)
             if work_ref is not None:
-                stmt = stmt.where(ScheduledTrigger.work_ref == work_ref)
+                stmt = stmt.where(ScheduledTrigger.work_ref.in_(work_ref_filter_values(work_ref)))
             result = await session.execute(stmt)
             rows = list(result.scalars().all())
             return [_row_to_read(r) for r in rows]

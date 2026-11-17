@@ -88,7 +88,7 @@ _ROLE_RESULT: dict[str, Any] = {
         "id": {"type": "string", "description": "The user's internal UUID."},
         "username": {
             "type": ["string", "null"],
-            "description": "The username from the request; null when only id was passed.",
+            "description": "The user name stored in Keycloak.",
         },
         "client_id": {"type": "string", "description": "The client's name from the request."},
         "roles": {
@@ -141,7 +141,7 @@ _UPDATE_RESULT: dict[str, Any] = {
         "id": {"type": "string", "description": "The user's internal UUID."},
         "username": {
             "type": ["string", "null"],
-            "description": "The username from the request; null when only id was passed.",
+            "description": "The user name stored in Keycloak before this change.",
         },
         "requested_fields": {
             "type": "array",
@@ -212,7 +212,7 @@ _CREDENTIAL_RESULT: dict[str, Any] = {
         "id": {"type": "string", "description": "The user's internal UUID."},
         "username": {
             "type": ["string", "null"],
-            "description": "The username from the request; null when only id was passed.",
+            "description": "The user name stored in Keycloak.",
         },
         "removed": {
             "type": "array",

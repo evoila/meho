@@ -11,8 +11,10 @@ handshake against a local server.
 """
 
 import asyncio
+import os
 import ssl
 import tempfile
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -242,12 +244,15 @@ def test_clock_five_minutes_off_gives_one_red_line(monkeypatch: pytest.MonkeyPat
 
 
 def test_clock_source_that_cannot_be_read_is_red_not_green(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meho_backplane.db import engine
+
     _patch_green(monkeypatch)
 
-    async def unreadable() -> None:
-        return None
+    def no_database() -> Any:
+        raise OSError("connection refused")
 
-    monkeypatch.setattr(first_start, "_database_time", unreadable)
+    monkeypatch.setattr(first_start, "_database_time", _REAL_DATABASE_TIME)
+    monkeypatch.setattr(engine, "get_sessionmaker", no_database)
     red = _red(_get())
     assert [c["name"] for c in red] == ["clock"]
     assert "could not read the time from PostgreSQL" in red[0]["message"]
@@ -656,38 +661,175 @@ def test_destination_endpoint_answers_the_proof_without_login() -> None:
 
 
 _REAL_KEYCLOAK_TIME = first_start._keycloak_time
+_REAL_DATABASE_TIME = first_start._database_time
+_DISCOVERY = "https://keycloak.test/realms/meho/.well-known/openid-configuration"
 
 
-async def _keycloak_time_with(status: int) -> datetime | None:
-    """The real Keycloak reader against a discovery answer with the current date."""
-    url = "https://keycloak.test/realms/meho/.well-known/openid-configuration"
+def _date_now() -> dict[str, str]:
+    return {"date": format_datetime(datetime.now(UTC), usegmt=True)}
+
+
+async def _read_keycloak(
+    answer: httpx.Response | Exception, url: str = _DISCOVERY
+) -> first_start.ClockReading:
+    """The real Keycloak reader against one discovery answer, or a failed request."""
     with respx.mock() as mock:
-        mock.get(url).mock(
-            return_value=httpx.Response(
-                status, headers={"date": format_datetime(datetime.now(UTC), usegmt=True)}
-            )
-        )
+        route = mock.get(url)
+        if isinstance(answer, Exception):
+            route.mock(side_effect=answer)
+        else:
+            route.mock(return_value=answer)
         return await _REAL_KEYCLOAK_TIME()
+
+
+async def _keycloak_time_with(status: int) -> first_start.ClockReading:
+    """The real Keycloak reader against a discovery answer with the current date."""
+    return await _read_keycloak(httpx.Response(status, headers=_date_now()))
+
+
+def _clock_line(body: dict[str, Any]) -> dict[str, Any]:
+    return next(c for c in body["checks"] if c["name"] == "clock")
 
 
 async def test_keycloak_time_comes_from_a_successful_answer_only() -> None:
     reading = await _keycloak_time_with(200)
-    assert reading is not None
+    assert isinstance(reading, datetime)
     assert abs((datetime.now(UTC) - reading).total_seconds()) < 5
     # A 503 from a proxy carries the proxy's time, not Keycloak's.
-    assert await _keycloak_time_with(503) is None
+    error_page = await _keycloak_time_with(503)
+    assert isinstance(error_page, first_start.NoClockReading)
+    assert error_page.red is True
 
 
 def test_clock_is_red_when_keycloak_answers_an_error_page(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
 
-    async def error_page() -> datetime | None:
+    async def error_page() -> first_start.ClockReading:
         return await _keycloak_time_with(503)
 
     monkeypatch.setattr(first_start, "_keycloak_time", error_page)
     red = _red(_get())
     assert [c["name"] for c in red] == ["clock"]
-    assert "could not read the time from Keycloak" in red[0]["message"]
+    assert "Keycloak answered with HTTP 503" in red[0]["message"]
+    assert "KEYCLOAK_ISSUER_URL" in red[0]["message"]
+
+
+# --- Keycloak without a Date header -----------------------------------------
+
+
+@pytest.mark.parametrize("headers", [{}, {"date": ""}, {"date": "not a date"}])
+async def test_keycloak_answer_without_a_usable_date_is_not_compared(
+    headers: dict[str, str],
+) -> None:
+    reading = await _read_keycloak(httpx.Response(200, headers=headers, json={"issuer": "x"}))
+    assert isinstance(reading, first_start.NoClockReading)
+    assert reading.red is False
+    assert "no Date header" in reading.message
+
+
+def test_clock_is_green_when_keycloak_sends_no_date_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The core's Keycloak answers its discovery address with 200 and no Date header.
+    _patch_green(monkeypatch)
+
+    async def no_date() -> first_start.ClockReading:
+        return await _read_keycloak(httpx.Response(200, json={"issuer": "x"}))
+
+    monkeypatch.setattr(first_start, "_keycloak_time", no_date)
+    body = _get()
+    clock = _clock_line(body)
+    assert body["ok"] is True
+    assert clock["status"] == "ok"
+    assert "agrees with PostgreSQL within 60 seconds" in clock["message"]
+    assert "Keycloak was not compared" in clock["message"]
+    assert "no Date header" in clock["message"]
+    assert "reach" not in clock["message"]
+
+
+async def test_clock_off_from_postgresql_is_red_and_still_names_the_missing_date() -> None:
+    async def no_date() -> first_start.ClockReading:
+        return first_start.NoClockReading(message="Keycloak has no Date header.", red=False)
+
+    async def late() -> first_start.ClockReading:
+        return datetime.now(UTC) + timedelta(minutes=5)
+
+    line = await first_start.check_clock(keycloak_time=no_date, database_time=late)
+    assert line.status == "fail"
+    assert "away from the clock of PostgreSQL" in line.message
+    assert "Keycloak has no Date header." in line.message
+
+
+async def test_clock_line_is_skipped_when_no_source_is_compared() -> None:
+    async def left_out() -> first_start.ClockReading:
+        return first_start.NoClockReading(message="Not compared.", red=False)
+
+    line = await first_start.check_clock(keycloak_time=left_out, database_time=left_out)
+    assert line.status == "skipped"
+    assert line.message == "Not compared. Not compared."
+
+
+# --- Keycloak that cannot be read names the real cause ----------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("refused"), httpx.ConnectTimeout("slow"), httpx.ReadTimeout("slow")],
+)
+async def test_keycloak_without_an_answer_names_the_connection(error: Exception) -> None:
+    reading = await _read_keycloak(error)
+    assert isinstance(reading, first_start.NoClockReading)
+    assert reading.red is True
+    assert "got no answer from Keycloak" in reading.message
+    assert "KEYCLOAK_ISSUER_URL" in reading.message
+    assert "Date" not in reading.message
+
+
+async def test_keycloak_answer_that_cannot_be_read_is_red() -> None:
+    reading = await _read_keycloak(httpx.DecodingError("bad gzip"))
+    assert isinstance(reading, first_start.NoClockReading)
+    assert reading.red is True
+    assert "could not read the answer of Keycloak" in reading.message
+
+
+async def test_keycloak_fix_names_the_discovery_setting_when_it_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = "http://keycloak-in-cluster.test:8080/auth/realms/meho"
+    monkeypatch.setenv("KEYCLOAK_DISCOVERY_URL", base)
+    get_settings.cache_clear()
+    reading = await _read_keycloak(
+        httpx.ConnectError("refused"), url=f"{base}/.well-known/openid-configuration"
+    )
+    assert isinstance(reading, first_start.NoClockReading)
+    assert "KEYCLOAK_DISCOVERY_URL" in reading.message
+    assert "keycloak-in-cluster.test" not in reading.message
+
+
+@pytest.fixture
+def _local_time_not_utc() -> Iterator[None]:
+    """The local time of this process is five hours behind UTC (a POSIX zone, no tzdata)."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "EST5"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+@pytest.mark.usefixtures("_local_time_not_utc")
+def test_http_date_reads_every_zone_as_utc() -> None:
+    expected = datetime(2026, 11, 16, 10, 0, tzinfo=UTC)
+    assert first_start._http_date("Mon, 16 Nov 2026 10:00:00 GMT") == expected
+    # A -0000 zone parses to a naive value that means UTC, not the local time.
+    assert first_start._http_date("Mon, 16 Nov 2026 10:00:00 -0000") == expected
+    assert first_start._http_date("Mon, 16 Nov 2026 12:00:00 +0200") == expected
+    assert first_start._http_date(None) is None
 
 
 # --- systems whose login is in Vault ----------------------------------------

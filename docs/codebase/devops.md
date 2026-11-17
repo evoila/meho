@@ -385,6 +385,16 @@ egress rules to:
   on `broadcast.enabled: true` and is omitted when the broadcast subchart
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
+- The console address — only when
+  `networkPolicy.ingressControllerEgress.podLabels` is set (default
+  `{}`, #6612): `tcp/<ingressControllerEgress.port>` (default 8443) to
+  the Pods with those labels in `ingressControllerNamespace`. The
+  first-start `certificate` check connects to the backplane's own
+  address, and the host port or Service in front of the ingress sends
+  that connection to the ingress Pod before the rule is checked. This is
+  a separate key, not an `extraEgress` item, because a later values file
+  that sets `extraEgress` replaces the whole list. Install form 2 sets it
+  for RKE2's Traefik (`app.kubernetes.io/name: rke2-traefik`)
 - Operator rules — every item of `networkPolicy.extraEgress` (default
   `[]`), added after the rules above, exactly as written (#3516)
 
@@ -1485,7 +1495,7 @@ them).
 | `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. Not needed with the built-in Keycloak (`meho-backplane`). |
 | `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. Required-when-`credentialBackend: vault`, like `vault.address`. |
 | `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
-| `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*` (#2642 — inert stubs before that); a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors, the topology-refresh scheduler, runbook verify dispatch — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
+| `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend. Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*`; a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors and the topology-refresh scheduler — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. A runbook check step is not background dispatch: it runs with the token of the caller who advances the run. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
 | `checkRunner.enabled` / `.clientId` / `.clientSecret.*` | boolean / string / object | In-process check-runner service principal (#2642). `enabled: true` requires a non-empty `clientId` + `clientSecret.secretName`, and wires `CHECK_RUNNER_CLIENT_ID` (plain env) + `CHECK_RUNNER_CLIENT_SECRET` (`secretKeyRef` only). Default `false` renders nothing: background dispatch carries no bearer token and a Sensor whose target needs an operator-context credential read evaluates `unknown`. |
 | `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default) and the PostgreSQL is your own. |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same, for a Vault you bring yourself (not used with the built-in OpenBao). |
@@ -1506,6 +1516,7 @@ them).
 | `probes.startup.*` | `/healthz` httpGet + 15-min first-boot budget (#2393, #4102) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
+| `networkPolicy.ingressControllerEgress.podLabels` / `.port` | `{}` / `8443` | Labels and Pod port of the ingress controller, so MEHO can reach its own console address (#6612). Empty labels: no rule. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |
@@ -1866,12 +1877,20 @@ reaches `main` through the merge queue, except the advisory path in
 the full matrix on exactly that code. A run on every push would only
 repeat it, take heavy runners and be cancelled by the next merge. The nightly run on
 `main` keeps the caches on `main` warm.
+
 `backend/tests/test_ci_main_push.py` pins this. Branch protection consumes the
 required jobs' status per
 `branches/main/protection.required_status_checks.contexts` —
 re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697.
+
+A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
+in `ci.yml` has `continue-on-error: true`. The test images come through the
+Harbor image proxy (the `MEHO_TEST_*_IMAGE` job variables), so the login only
+adds pull headroom on Docker Hub. A short network problem on the way to Docker
+Hub then costs nothing, and cannot throw a pull request out of the merge queue.
+`backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
 
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
@@ -2067,6 +2086,26 @@ repo, #761). The set depends on the event:
   for the six shards of one merge-queue run).
 - Every other event (pull requests and the nightly run):
   `meho-runners-ci-heavy`.
+
+Measured wait for a heavy runner, 16 Nov 2026, 16:32 to 18:32 UTC
+(#6590). The data is from the Actions jobs API, one row per job:
+
+- Merge-queue runs: 42 jobs on `meho-runners-ci-heavy-queue`, none on
+  `meho-runners-ci-heavy`. Middle wait 7.3 min, longest 14.7 min. The
+  `test_no_merge_group_job_uses_the_shared_heavy_pool` test keeps it so.
+- Pull request runs: 127 jobs on `meho-runners-ci-heavy`. Middle wait
+  45 min, 90th percentile 91 min, longest 118 min. 21 of 22 runs
+  started six heavy jobs. The test map gave a narrow run for none of
+  them. Reasons seen: a migration changed (6 runs), a new source file
+  the map did not know (11, fixed by #6597 after the window), the map
+  picked 2,000 tests or more (2), a workflow or test helper changed (3).
+- No heavy job of a replaced pull request run kept a runner: no
+  cancelled job had started.
+- Pool size, from replaying the same jobs through a first-come queue
+  (the fit to the 45 min middle wait is a pool of about 11 runners):
+  +2 runners give a middle wait of about 24 min, +4 give about 19 min.
+  Under 20 min needs about 4 more runners. A pool change is for the
+  owner to decide.
 
 Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
@@ -2511,7 +2550,13 @@ run, not a broken `main`.
   imports the changed file itself, all the shards run. Docs pick nothing.
   Every other file means all the shards: a migration, a template or data
   file, a `conftest.py` or test helper, `pyproject.toml`, `uv.lock`, a
-  workflow, the Go CLI, a source file the map does not know (a new one).
+  workflow, the Go CLI, a source file the map does not know that is gone
+  from the tree. A new source file (in the tree, not in the map) is
+  handled by import analysis like a file no test ran, and picks nothing
+  of its own: the tests come from the files that import it. A new file
+  that no file imports means all the shards, because it may be loaded by
+  name at run time (#6590: on 16 Nov 2026 about a third of the pull request
+  runs with a backend change ran all six shards only for this reason).
   No map, a map older than 7 days, 2,000 or more picked tests, or any
   error also means all the shards. Every selected run also runs
   `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.

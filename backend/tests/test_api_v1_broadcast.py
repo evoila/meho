@@ -133,7 +133,7 @@ def test_announce_from_a_person_returns_agent_identity_required() -> None:
     assert response.status_code == 403
     detail = response.json()["detail"]
     assert detail["code"] == "agent_identity_required"
-    assert "meho agent-principal register" in detail["remediation"]
+    assert "meho agent-principal register <name> --grants none" in detail["remediation"]
     publish.assert_not_awaited()
 
 

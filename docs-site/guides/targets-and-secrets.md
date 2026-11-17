@@ -34,9 +34,17 @@ which is why this is the first guide.
 
 Create, edit and delete on REST are for people only. A service login
 gets `403 human_principal_required`, also with the **tenant_admin**
-role. It registers a target with the `targets.register` operation and
-removes one with `targets.remove` (connector `targets-registry-1.x`).
-MEHO checks both against the approval rules.
+role. It registers a target with the `targets.register` operation,
+changes one with `targets.update` and removes one with `targets.remove`
+(connector `targets-registry-1.x`). MEHO checks them against the
+approval rules.
+
+**The CLI and REST wait for approval.** A change made with your login
+token (`meho targets add`, `update`, `delete`, `import`, or a script on
+REST) waits until a person approves it. The command prints the approval
+id and exits 0; approving the request makes the change. Find it with
+`meho approvals list`, or in the console under approvals. A change you
+make in the operator console runs at once.
 
 **Register targets on the operator surfaces above.** Registration is an
 operator-trust decision. For agents, the default MCP tools only read
@@ -268,6 +276,33 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 you want to keep. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
 
+### Keycloak targets need a managed realm
+
+A Keycloak target must name the realm MEHO manages, in
+`extras.managed_realm`. MEHO has no built-in realm. Without it, MEHO
+refuses to create or update the target, and refuses every operation on
+it.
+
+```bash
+meho targets add lab-sso --product keycloak --host sso.example.com \
+  --extra managed_realm=example
+```
+
+In YAML, put it under `extras:` (`managed_realm: example`). The optional
+`extras.admin_realm` is the realm the target logs in to; it is `master`
+when you leave it out.
+
+- A realm is one plain name: no `/`, `\`, `?`, `#` or `%`, no spaces at
+  the start or the end, not only dots, and at most 255 characters. MEHO
+  does not trim a value; it refuses it.
+- MEHO allows a managed realm that is the admin realm, or the realm MEHO
+  itself signs in with, but it warns you: at create, at update (REST,
+  CLI and the console forms), and on the approval card of each write on
+  that target.
+- `meho doctor` lists the Keycloak targets MEHO refuses. A platform
+  admin sees the targets of every tenant. You can fix one with
+  `meho targets update`, or in the console edit form ("Managed realm").
+
 ## Change a secret
 
 MEHO keeps a login for each target for a while, so it does not have to
@@ -297,17 +332,34 @@ meho targets import targets.yaml --dry-run
 
 # 2. Apply. Default mode aborts before any write if a name already exists:
 meho targets import targets.yaml
-#   Applied: 2 created, 0 updated.
+#   Applied: 0 created, 0 updated, 2 waiting for approval.
+#   Each target is created when a person approves its request.
 
 # 3. Iterate later with --update: PATCHes existing names, creates new ones.
 #    The PATCH is sparse — fields your YAML omits are left untouched.
 meho targets import targets.yaml --update
 ```
 
-Then probe. The probe invokes the connector matched to the target's
-`product`, live, and persists the resulting fingerprint:
+Each row of the file makes its own approval request, because the CLI
+calls with a token. A file with 50 rows makes 50 requests. For a large
+file, use one of these:
+
+- Import the file in the operator console. A person in the console
+  writes at once.
+- Give the import a change ticket. Then a person goes through all its
+  rows with one command. It shows each row and asks for a yes.
+
+  ```bash
+  meho --work-ref gh:acme/ops#42 targets import targets.yaml
+  meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order
+  ```
+
+Then probe. A target exists only after a person approved its request, so
+approve the rows first. The probe invokes the connector matched to the
+target's `product`, live, and persists the resulting fingerprint:
 
 ```bash
+meho approvals approve <approval-id-of-the-row>
 meho targets probe lab-rke2
 ```
 
@@ -373,7 +425,7 @@ Real failure modes, with the errors they actually produce:
 | Probe exits with 501 — *"no connector registered for product=…"* | The target row is fine; no connector serves that product on this backplane version. Any cached fingerprint is left untouched. | Check the [connector catalog](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-catalog.md) for your version; for spec-ingested (generic) connectors, ingest one first. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…has a KV-v2 API-path-shaped secret_ref…"* | Your ref embeds the mount or a `data/` segment (`secret/data/…`). | Store the logical path only: `tenants/<tenant-id>/<name>`. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…is missing required field '…'"* | The secret exists but doesn't carry the field the connector needs (`username`/`password`, or `kubeconfig` for Kubernetes). | Re-stage the secret with the connector's field names. |
-| Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | `vault kv put` the credential at the expected path. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. |
+| Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | `vault kv put` the credential at the expected path. If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run `meho targets update <name> --secret-ref <path>`. If the error says it is not the target's own `secret_ref`, check the path the operation names. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422. |
 | Dispatch fails, `connector_auth_failed` (HTTP 401 at session establish) | The credential resolved but the vendor rejected it — usually a password rotated upstream while the store copy lagged. | Re-stage the current credential at the same path, then retry. |
 | Dispatch fails TLS: `extras.error_code` is `connector_tls_verify_failed` and `extras.exception_message` contains *"IP address mismatch"* (CPython `ssl` text relayed verbatim, not a MEHO string — MEHO's own summary says the chain "is not trusted") | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
 | Probe shows `reachable: false` / `auth_failed` on a GSM deploy with per-operator Workload Identity Federation | Probes run under a system placeholder identity that cannot complete the per-operator token exchange, so credentialed-target probes cannot read the secret on that configuration. Reachability of *uncredentialed* endpoints still probes fine. | Known limitation — documented in [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md); verify credentialed dispatch with a real operation call instead. |

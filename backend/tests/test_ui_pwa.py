@@ -38,7 +38,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from meho_backplane.ui.paths import static_root_dir, static_src_dir, templates_dir
+from meho_backplane.ui.paths import (
+    static_asset_path,
+    static_mounts,
+    static_src_dir,
+    templates_dir,
+)
 from meho_backplane.ui.static_files import RevalidateStaticFiles
 
 _MANIFEST_URL = "/ui/static/src/pwa/manifest.webmanifest"
@@ -55,16 +60,20 @@ requires_node = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def static_client() -> TestClient:
     app = FastAPI()
-    app.mount(
-        "/ui/static",
-        RevalidateStaticFiles(directory=str(static_root_dir()), check_dir=False),
-        name="ui_static",
-    )
+    for prefix, directory in static_mounts():
+        app.mount(
+            prefix,
+            RevalidateStaticFiles(directory=str(directory), check_dir=False),
+            name=prefix.strip("/").replace("/", "_"),
+        )
     return TestClient(app)
 
 
 def _disk_path(url: str) -> Path:
-    return static_root_dir() / url.removeprefix("/ui/static/")
+    """The file the app serves for *url*, across all three static mounts."""
+    disk = static_asset_path(url)
+    assert disk is not None, f"{url} is not a /ui/static/ URL"
+    return disk
 
 
 def _png_size(data: bytes) -> tuple[int, int]:

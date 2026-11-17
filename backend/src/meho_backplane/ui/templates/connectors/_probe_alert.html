@@ -4,14 +4,18 @@
 
   Re-probe failure alert fragment (Task #873 work item #6). Returned
   in place of the fingerprint card when the resolver reports
-  ``no_connector`` (501) or ``ambiguous_connector`` (409). The HTMX
+  ``no_connector`` (501) or ``ambiguous_connector`` (409), or when MEHO
+  cannot read the target's secret (422). The HTMX
   swap drops this fragment into ``#fingerprint-card`` so the rest of
   the detail page stays intact.
 
   The wrapper keeps the same ``id="fingerprint-card"`` so a follow-up
   successful re-probe (after the operator fixes the underlying state)
   can swap the real card back into the same slot via the same
-  ``hx-target="#fingerprint-card"`` selector.
+  ``hx-target="#fingerprint-card"`` selector. The alert replaces the whole
+  card, so it carries its own Re-probe button: the operator can try again
+  without reloading the page. Only a tenant admin reaches the probe route,
+  so the button is always shown here.
 -#}
 <article
   id="fingerprint-card"
@@ -23,5 +27,16 @@
       <h2 class="card-title text-sm text-warning">{{ title }}</h2>
       <p class="text-xs whitespace-pre-line">{{ message }}</p>
     </div>
+    <button
+      type="button"
+      class="btn btn-primary btn-xs"
+      hx-post="/ui/connectors/{{ target_name | urlencode }}/probe"
+      hx-target="#fingerprint-card"
+      hx-swap="outerHTML"
+      hx-disabled-elt="this"
+      aria-label="Re-probe {{ target_name }}"
+    >
+      Re-probe
+    </button>
   </div>
 </article>

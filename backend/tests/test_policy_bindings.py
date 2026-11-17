@@ -466,7 +466,7 @@ def test_a_shipped_operator_group_and_the_self_approval_group_give_sa_operators(
     monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
     get_settings.cache_clear()
     claims = {"groups": ["/MEHO-Operators", "/Ops-Self-Approve"]}
-    after = bind(_operator(), claims, shipped_bindings(get_settings()))
+    after = bind(_operator(self_approver=True), claims, shipped_bindings(get_settings()))
     assert after.bound_kind is RoleGroup.SA_OPERATORS
     assert after.self_approver is True
     stored = [
@@ -475,6 +475,39 @@ def test_a_shipped_operator_group_and_the_self_approval_group_give_sa_operators(
     ]
     with pytest.raises(BoundKindConflictError):
         bind(_operator(), claims, stored)
+
+
+@pytest.mark.parametrize(
+    ("group", "kind"),
+    [("/MEHO-Admins", RoleGroup.ADMINS), ("/MEHO-Readers", RoleGroup.READERS)],
+)
+def test_stored_bindings_of_another_kind_and_sa_operators_refuse_the_login(
+    group: str, kind: RoleGroup
+) -> None:
+    """The exception is only for shipped bindings: stored ones give two kinds."""
+    claims = {"groups": [group, "/Ops-Self-Approve"]}
+    stored = [
+        _entry(kind, {"*"}, group=group),
+        _entry(RoleGroup.SA_OPERATORS, {"*"}, group="/Ops-Self-Approve"),
+    ]
+    with pytest.raises(BoundKindConflictError) as caught:
+        bind(_operator(), claims, stored)
+    assert str(caught.value).startswith("multiple_bound_kinds:")
+
+
+@pytest.mark.parametrize("group", ["/MEHO-Readers", "/MEHO-Admins"])
+def test_a_shipped_group_of_another_base_level_next_to_the_self_approval_group_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, group: str
+) -> None:
+    """With the switch off bind does not run, so the login stays as it came."""
+    monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
+    get_settings.cache_clear()
+    claims = {"groups": [group, "/Ops-Self-Approve"]}
+    before = _operator(self_approver=True)
+    after = bind(before, claims, shipped_bindings(get_settings()))
+    assert after == before
+    assert after.bound_kind is None
+    assert after.self_approver is True
 
 
 def test_a_bad_stored_binding_is_a_value_error() -> None:
@@ -561,7 +594,7 @@ async def test_the_stored_bindings_of_the_tenant_count() -> None:
 async def test_without_stored_bindings_the_shipped_ones_count() -> None:
     await _store(None)
     claims = {"groups": ["/MEHO-SA-Operators"]}
-    hit = await bind_current_tenant(_operator(), claims)
+    hit = await bind_current_tenant(_operator(self_approver=True), claims)
     assert hit.bound_kind is RoleGroup.SA_OPERATORS
     assert hit.bound_categories == frozenset({"*"})
     assert hit.self_approver is True

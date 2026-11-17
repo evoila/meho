@@ -255,6 +255,74 @@ The guard has two parts:
 the `auth_model == "shared_service_account"` boundary — and does not itself
 reject the system caller; the loader and the cache guards do.)
 
+### A connector says an answer means "the session ended"
+
+The dispatcher signs in again once for a known session-ended status (401,
+vRLI's 440, or a profile's `expiry_statuses`). A 401 means the product refused
+that one request. It does not mean a typed handler or a multi-step operation
+sent no change before it. So the 401 path follows the same repeat rule as the
+hook path below (`may_resend_after_session_end`). Some products answer an ended
+session with another status, for example 403 with a body of their own. Treating
+every 403 that way would be wrong: a real 403 means missing rights, and more
+sign-in tries can lock an account.
+
+So a connector may have an optional method
+`is_session_expired(response: httpx.Response) -> bool`. The dispatcher asks it
+when a 4xx status is outside the known set and the connector has
+`invalidate_session`. It never asks for a 5xx: after a 5xx or a timeout the
+call may have run. The connector reads the status and the body. The default
+is "no": a connector without the method, a method that raises, and any answer
+other than `True` all count as "no", and the status is handled as before (a
+real 403 stays "insufficient permission"). A wrong password or a locked
+account is not "the session ended": the method must say "no" for it.
+
+When the answer is yes, the dispatcher calls `invalidate_session`, so the
+next call signs in again. Then it decides whether to repeat the call
+(`may_resend_after_session_end`):
+
+- **Repeat once** when a repeat cannot send a change twice: the operation's
+  risk level is `safe` (also in a run after a person's approval, for example
+  a read step of an approved multi-step operation), or it is an ingested
+  operation that sent exactly one request (that request was refused, so
+  nothing ran). A write is always one
+  request; a read sends more only when the connector follows pages
+  (`dispatcher._retry_after_session_invalidation` for a known status,
+  `dispatcher._retry_after_expired_session_answer` for the hook).
+- **Do not repeat** in every other case: a typed handler or a multi-step
+  operation that is not `safe` may have sent a write before the refused
+  request. A call that runs after a person's approval and is not `safe` is
+  never repeated: one approval is one run of a change. The caller gets `connector_auth_failed` (cause
+  `session_ended_<status>_not_resent`) that says the session ended, that the
+  change may or may not have been made, and to check the product before a
+  new call (`dispatcher._session_ended_not_resent`).
+
+Rules for the repeat:
+
+- At most one fresh sign-in per call. It is never a loop, and the repeated
+  call is not asked again.
+- If the fresh sign-in is refused, the caller gets `connector_auth_failed`
+  with the text "the product refused the sign-in: the password is wrong or
+  the account is locked". It never says to grant a permission. A connector's
+  own `remediation` on its `ConnectorAuthError` wins.
+- If the repeated call gets the same answer, the caller gets
+  `connector_auth_failed` that says the product took the new sign-in and
+  still gave the same "session ended" answer, and that the account may be
+  locked or not allowed to start a session.
+- Any other answer to the repeated call is classified as it would be alone.
+- The audit row of the call has `session_relogin` (MEHO dropped the kept
+  login; true also when the operation was not sent again),
+  `session_resent` (MEHO sent the operation again), `result_unknown` (true
+  when MEHO did not send it again: the change may or may not have been
+  made) and `session_relogin_status` (the rejected status) in its payload,
+  and the
+  trace has one `typed` span named `session_relogin`. Both are written
+  whether the operation was repeated or not.
+
+The code is in `operations/_session_expired_hook.py` (the hook check, the repeat rule, the
+audit and trace mark, the error text) and the dispatcher function above.
+The connector kit needs no new name: the method is found by name, like
+`invalidate_session`.
+
 ### Cache eviction — establish-auth failures (#2396)
 
 The credential caches above are populated on the **first** load and are

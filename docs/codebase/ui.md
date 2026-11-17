@@ -481,18 +481,21 @@ backplane Python base image already follows).
 `base.html` is the layout every page extends. Its structure (shortened):
 
 ```html
-<html data-theme="meho-dark">
+<html data-theme="evoila">
   <head>
     <script src="/ui/static/src/app/approvals-bell.js" defer>
     <script src="/ui/static/src/app/modal-dialogs.js" defer>
     {% block component_scripts %}{% endblock %}   <!-- Alpine.data() registrations; MUST precede alpine.min.js -->
     <!-- _head_assets.html include (shared with wall.html): -->
-    <script src="/ui/static/src/app/theme.js">    <!-- sync: pre-paint theme -->
     <link href="/ui/static/dist/tailwind.css">
+    <link href="/ui/static/brand/evoila-daisyui.css">  <!-- after the bundle: unlayered beats @layer base -->
+    <link href="/ui/static/brand/evoila-tokens.css">
+    <link href="/ui/static/brand/evoila-fonts.css">
     <script src="/ui/static/src/vendor/htmx.min.js" defer>
     <script src="/ui/static/src/app/csrf-token.js" defer>
     <script src="/ui/static/src/app/session-expiry.js" defer>
     <script src="/ui/static/src/app/page-tenant.js" defer>
+    <script src="/ui/static/src/app/work-ref-refused.js" defer>   <!-- swaps in a refused ticket id search -->
     <script src="/ui/static/src/vendor/sse.min.js" defer>
     <script src="/ui/static/src/vendor/alpine.min.js" defer>
   </head>
@@ -1040,6 +1043,115 @@ Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`,
 On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
 newer), so the switch says to install MEHO first.
 
+## Your tools: sign out one tool kind
+
+With `MCP_CLIENT_PER_TOOL_KIND` on, each tool kind signs in with its own
+Keycloak login client. The account page then has a card "Your tools". It
+lists each tool kind with its login client and its last use:
+
+| Tool kind | Login client | Sign-out button |
+|---|---|---|
+| Web console | `UI_KEYCLOAK_CLIENT_ID` | no: "Active sessions" signs out a browser |
+| Command line | `KEYCLOAK_CLI_CLIENT_ID` | yes |
+| Claude Code | `meho-mcp-code` | yes |
+| Claude Desktop | `meho-mcp-desktop` | yes |
+| Other MCP client | `meho-mcp` | yes |
+
+A kind whose client id is not set is left out.
+
+- **Last use** is the newest audit row of the person (every tenant) whose
+  `client` block names that client, in the last 90 days. Audit rows name
+  the client only while `AUDIT_CLIENT_IDENTITY` is on. MEHO reads at most
+  the person's newest 500 rows of the 90 days (`LAST_USE_MAX_ROWS`),
+  through the index `audit_log_operator_sub_occurred_at_idx`. A tool
+  with no row among them shows "none in your newest 500 audit rows of the
+  last 90 days".
+- **"Sign out this tool"** asks for a confirm, then posts
+  `POST /ui/account/tools/sign-out` with the form field `tool` (the tool
+  kind key, never a client id). With the Keycloak admin client (it needs
+  the realm role `manage-users`), `end_tool_logins` ends both kinds of
+  login of the person for that one client:
+  - it reads the person's ordinary logins
+    (`GET /admin/realms/{realm}/users/{user id}/sessions`) first, so a
+    failed read changes nothing;
+  - `DELETE .../users/{user id}/consents/{client id}` ends the consent
+    and the offline login. MEHO's login clients ask for no consent, so
+    this call leaves ordinary logins alone (404 when there is no offline
+    login);
+  - `DELETE /admin/realms/{realm}/sessions/{id}` ends each ordinary login
+    that holds only this client.
+
+  Keycloak ends an ordinary login only as a whole. A login that this
+  client shares with another client (both signed in through one browser
+  login) is kept, so the other tool keeps working. Then the tool can
+  still renew through that login, so the result line is in the info
+  style and starts with "Partly signed out". It names the other tool and
+  says how to end the shared login in the Keycloak account page. The user id is the person of the session, never a form
+  field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
+  a real Keycloak that only the signed-out tool stops renewing.
+- After at least one login ended, MEHO writes the audit row
+  `auth.tool_sign_out` (method `INTERNAL`, status 200, payload
+  `client_id`, `tool`, `outcome`, `offline_login_ended`,
+  `sessions_ended`, `shared_with`). `outcome` is `signed_out`, or
+  `partly_signed_out` when a shared login was kept. The row is written in
+  the current tenant of the web session, but the sign-out ends the
+  tool's logins of the person in the whole Keycloak realm: a login is
+  per person, not per tenant. The outcomes are listed in
+  [`../architecture/audit.md`](../architecture/audit.md#known-internal-path-values). A failed call (an error answer, no
+  answer, no admin client) shows an error line and writes the same row
+  with status 502, the `error` class name, and `outcome` `failed`. When
+  the call failed after a login already ended
+  (`ToolSignOutIncompleteError`), `outcome` is `partly_signed_out` and
+  the row says what ended. A 403 from Keycloak
+  (`KeycloakForbiddenError`) gets its own line: the admin client lacks
+  `manage-users`. No login at all says "Nothing changed"; only shared
+  logins says so too and names the other tools. Neither writes a row.
+- The tool's last access token works until it ends: the access token
+  lifetime of the realm (about five minutes on the built-in realm: 300
+  seconds plus 30 seconds leeway). The card says so. Signing out is not a
+  block: the tool can sign in again, and with a signed-in browser that
+  can happen without a question.
+- With the switch off, the card is not shown and the route answers 404.
+
+Code: `auth/tool_sign_out.py` (tool kinds, last use, the sign-out and the
+audit row), `ui/routes/account_tools.py` (the route and the card rows),
+`templates/account/_tools.html`. Tests: `tests/test_ui_account_tools.py`.
+
+### An admin signs out a tool of another person
+
+There is no console page for this. A tenant admin runs
+`meho admin tools sign-out --user <name or id> --tool <kind>`. The verb
+calls the typed operation `tools.sign_out` of the synthetic connector
+`tools-admin-1.x` (`connectors/tools/ops.py`) through the normal
+dispatch path:
+
+- `caution` with `requires_approval`, a `tenant_admin` role floor, and a
+  requester check: only a person asks, not an agent, a service login or
+  a call on someone's behalf. Every call waits for approval. Every
+  tenant admin may approve their own request, so no second person is
+  needed.
+- `tool` is one of the kinds above that have a sign-out button. Like the
+  card, the operation refuses while `MCP_CLIENT_PER_TOOL_KIND` is off:
+  the requester check refuses the call at once, before any approval
+  request.
+- `user` is found in MEHO's own sign-in realm through MEHO's Keycloak
+  admin client, never a Keycloak target (`auth/realm_users.py`): by user
+  id, else by exact username. The person must be in a role group of the
+  caller's tenant: a group (or a parent group) whose `meho_tenant` or
+  `tenant_id` attribute names the tenant. MEHO reads every page of the
+  person's groups. A failed read is an error, never "not found".
+- The approval card names the person by id (`user.id`). The approved run
+  signs out that id and checks the tenant again; it never looks the name
+  up again. A card without a person id is refused.
+- The run calls the same `sign_out_tool`, with `for_user`. The audit row
+  `auth.tool_sign_out` has the admin who ran the call (the approver) as
+  `operator_sub`, and in the payload the admin who asked (`requested_by`,
+  from the approval request) and `user_id` and `username` of the person. A failed Keycloak call is an
+  error result and writes only the 502 row with `outcome` `failed`.
+
+Tests: `tests/test_tools_sign_out_op.py`, `tests/test_realm_users.py`,
+`cli/internal/cmd/admin/tools/tools_test.go`.
+
 ## Dependencies
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no
@@ -1207,13 +1319,18 @@ The renderer singleton lives in `meho_backplane.ui.routes.kb.render`.
 A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 (not thread-safe for concurrent `render()` calls). The pygments CSS is
 generated once at module load and injected as an inline `<style>` block
-in the entry-detail template. It is emitted **theme-scoped** (#2452): a
-default/dark token set under `.kb-code` (pygments `github-dark`) plus a
-`[data-theme="meho-light"] .kb-code` override (pygments `default`), with
-pygments' own opaque container background stripped so the block sits on
-the live `var(--color-base-200)` surface the template pins — code blocks
-stay legible in both `meho-dark` and `meho-light` instead of forcing a
-light background via the dead DaisyUI 4 `--b2` variable.
+in the entry-detail template. It is **one token set** under `.kb-code`
+(pygments `default`, whose dark token colours read on the evoila theme's
+light surface), with pygments' own opaque container background stripped
+so the block sits on the live `var(--color-base-200)` surface the
+template pins — rather than forcing a light background via the dead
+DaisyUI 4 `--b2` variable (#2452).
+
+It used to carry two sets, a dark one under `.kb-code` and a light
+override under a `data-theme` scope, because the console had two themes.
+With one theme the dark set could never be selected, so every KB page
+shipped a stylesheet it could not use; it was dropped with the second
+theme.
 
 ## KB editor modal + mobile reflow (G10.2-T3 #872)
 
@@ -2099,10 +2216,18 @@ one.
   there is no `script-src` policy yet. The `<head>` avoids inline
   script so a future nonce-based CSP can land without template
   rewrites.
-- **Two themes and a toggle.** The console ships `meho-dark` (the
-  default) and `meho-light`; `static/src/app/theme.js` and the theme
-  button switch between them. DaisyUI's `dim` theme is only the
-  plugin's fallback default in `styles.css`.
+- **One theme, from the brand package.** The console renders the evoila
+  light theme, which ships in `meho-ui` and is linked in
+  `_head_assets.html` as three plain stylesheets (`evoila-daisyui.css`,
+  `evoila-tokens.css`, `evoila-fonts.css`) served from the
+  `/ui/static/brand` mount. They load *after* the compiled bundle on
+  purpose: they are unlayered author rules, which beat DaisyUI's
+  `@layer base` output, so the theme takes effect without the vendored
+  plugin knowing about it — and needs no Tailwind processing, being
+  variables rather than utilities. DaisyUI's built-in `light` is the
+  plugin-level floor, so a variable the brand theme does not set fails
+  light. `meho-dark`, `meho-light` and `theme.js` are gone, and
+  `tests/test_ui_brand_theme.py` fails if any of them returns.
 
 ## Topology query overlays + 30s polling-refresh (Task #882)
 
@@ -3161,8 +3286,8 @@ between the two agents surfaces, and the agent detail page carries a
   `agents/runs/list.html` page on a browser nav, the
   `agents/runs/_table_rows.html` `<tbody>` fragment on a filter swap.
   Filters: `status` (the runtime `AgentRunStatus` `StrEnum` used directly
-  as the `Query` type — an out-of-enum value 422s) + `work_ref` (exact
-  match). Both ride `hx-push-url` so the filtered view is bookmarkable.
+  as the `Query` type — an out-of-enum value 422s) + `work_ref` (whole
+  ticket id). Both ride `hx-push-url` so the filtered view is bookmarkable.
   Columns: run-id prefix, status pill, agent name, trigger provenance,
   model + provider + tier, turns, work_ref chip, relative created,
   duration.
@@ -3704,11 +3829,10 @@ are mutually-exclusive style variants emitted in the same cascade layer:
 no `badge-<color>` modifier `--badge-color` is unset, so `color` falls back to
 inheritance. On a plain card that inherits `base-content` (readable), but inside
 a coloured alert it inherits the alert's `*-content` token — near-black on
-badge-ghost's `base-200` surface in `meho-dark`, near-white on `base-200` in
-`meho-light` — so the badges vanished in both themes. `styles.css` carries an
+badge-ghost's `base-200` surface — so the badges vanished. `styles.css` carries an
 unlayered `.alert .badge-ghost.badge-outline` rule (in the "Chrome + component
 voice" block) that beats the layered DaisyUI declarations regardless of emission
-order, pinning `base-content` on `base-200` so the labels read in both themes;
+order, pinning `base-content` on `base-200` so the labels read;
 it is scoped to `.alert` so the ~15 on-card usages keep their inherited colour.
 
 ## Vault console — confirm-gated writes (G10.18-T2 #1957)

@@ -29,26 +29,28 @@ and fell back to a raw ``POST`` with a hand-minted JWT. Routing the MCP
 write front (``meho_targets_register``) through
 :func:`~meho_backplane.operations.dispatcher.dispatch` puts it behind
 :func:`~meho_backplane.operations._validate.policy_gate` — the single
-seam where an AGENT principal's ``caution``-level write parks as a
-durable :class:`~meho_backplane.db.models.ApprovalRequest`
-(propose-then-approve) while a human ``tenant_admin`` keeps the
-default-allow immediate path. REST and UI are human-only surfaces and
-keep calling the service primitive directly.
+seam where a ``caution``-level write waits for approval as a durable
+:class:`~meho_backplane.db.models.ApprovalRequest`. An agent's call and a
+person's call made with a token wait; only a person in the web interface
+runs it at once. REST ``POST /api/v1/targets`` with a token becomes a call
+of this op. The web console calls the service function directly.
 
 Approval posture — the load-bearing dial (mirrors ``topology.*`` #2537):
 
-* ``safety_level="caution"`` + ``requires_approval=False`` parks **agent
-  principals only** (the AGENT ``caution`` verdict floor →
-  ``needs-approval`` in :mod:`meho_backplane.auth.permissions`), while a
-  human ``tenant_admin`` rides the default-allow branch and executes
-  immediately.
+* ``safety_level="caution"`` + ``requires_approval=False``: an agent's
+  call and a person's call made with a token wait for approval; a person
+  in the web interface runs it at once.
+* A call that sets ``secret_field_map`` or ``flight_recorder_capture``
+  waits for a person on every call, whoever makes it. No standing grant
+  and no run approval covers it (``declare_wait_when_set`` in the package
+  ``__init__``). A call without these two fields keeps the rules above.
 * The role floor is ``tenant_admin``, the same as REST ``POST
   /api/v1/targets`` and the MCP tool. It is registered below with
   :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
   the policy gate refuses a person with a lower role on every path
   (``call_operation``, the REST dispatch route, the CLI), and the
   approval queue refuses an approver with a lower role.
-* NOT ``requires_approval=True`` — that would park humans too.
+* NOT ``requires_approval=True`` — that would make the web interface wait too.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
   rather than park them. Target registration is reversible
   (``DELETE /api/v1/targets`` + the soft-delete tombstone), so caution
@@ -239,6 +241,7 @@ async def targets_register(
         "secret_ref": created.secret_ref,
         "secret_ref_derived": created.secret_ref_derived,
         "next_step": _probe_next_step(created.name),
+        **({"warnings": list(created.warnings)} if created.warnings else {}),
     }
 
 

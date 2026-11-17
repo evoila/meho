@@ -1365,6 +1365,44 @@ remove_kernel_settings() {
     ok "removed RKE2's kernel settings file $CIS_SYSCTL_FILE"
 }
 
+# install_cluster_cidr: the pod range of the install, from the install record.
+install_cluster_cidr() {
+    awk -F'"' '$2 == "cluster_cidr" { print $4; exit }' "${HOST_ROOT}${MEHO_INSTALL_RECORD}" 2>/dev/null
+}
+
+# remove_pod_routes: the blackhole routes inside the pod range of the
+# install. Canal, the pod network of RKE2, adds one for the pod addresses of
+# the node, and RKE2's uninstall script leaves it. install.sh counts such a
+# route as a network of the machine (machine_networks in lib/checks.sh), so a
+# new install would stop until the machine restarts. A route outside the pod
+# range stays. A failed ip call is a [WARN] line, and uninstall goes on.
+remove_pod_routes() {
+    local cluster_cidr routes type destination range removed=() word=route
+    cluster_cidr=$(install_cluster_cidr) || true
+    [[ $cluster_cidr == */* ]] && is_ipv4_range "$cluster_cidr" || return 0
+    if ! routes=$(ip -4 route show); then
+        warn "ip could not list the routes of this machine, so a blackhole route of the pod range $cluster_cidr may be left. Read its message above. A new install refuses such a route; remove it with: ip route del blackhole <range>"
+        return 0
+    fi
+    while read -r type destination _; do
+        [[ $type == blackhole ]] || continue
+        range=$destination
+        [[ $range == */* ]] || range+=/32
+        is_ipv4_range "$range" || continue
+        if ((${range#*/} < ${cluster_cidr#*/})) || ! range_holds "$cluster_cidr" "${range%/*}"; then
+            continue
+        fi
+        if ip -4 route del blackhole "$destination"; then
+            removed+=("$destination")
+        else
+            warn "ip could not remove the route blackhole $destination of the pod range $cluster_cidr. A new install refuses it. Read its message above, then run: ip route del blackhole $destination"
+        fi
+    done <<<"$routes"
+    ((${#removed[@]} > 0)) || return 0
+    ((${#removed[@]} == 1)) || word=routes
+    ok "removed the blackhole $word $(join_by ', ' "${removed[@]}") of the pod range $cluster_cidr, which RKE2's uninstall script leaves"
+}
+
 # etcd_user_exists, etcd_group_exists and etcd_account_recorded come from
 # lib/cis.sh, sourced above.
 etcd_part_exists() {
@@ -1437,8 +1475,11 @@ command_uninstall() {
     else
         note "$RKE2_UNINSTALL is not on this machine, so RKE2 is already gone."
     fi
-    # RKE2 is stopped now, so no etcd process runs as the etcd user. The
-    # record is in /etc/meho, so the account goes before that folder.
+    # RKE2 is stopped now, so no etcd process runs as the etcd user, and
+    # Canal adds no route again. The records of the etcd account and of the
+    # pod range are in /etc/meho, so the account and the routes go before
+    # that folder.
+    remove_pod_routes
     remove_kernel_settings
     remove_etcd_account
     rm -rf "${HOST_ROOT}${MEHO_STATE_DIR}"

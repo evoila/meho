@@ -413,6 +413,19 @@ the files of that folder in name order, so `10-` comes before Ubuntu's
      when nothing else uses it.
    - A failed `userdel` or `groupdel` is a `[WARN]` line with the command,
      and the uninstall goes on.
+   - The blackhole routes inside the pod range of the install (#6614).
+     Canal, the pod network of RKE2, adds such a route for the pod
+     addresses of the node, and RKE2's script leaves it until the machine
+     restarts. `install.sh` counts every route of the machine in its range
+     check (`machine_networks` in `lib/checks.sh`), so without this step a
+     new install stops with "The pod range ... overlaps". The command reads
+     `cluster_cidr` from `/etc/meho/install.json`, lists the routes with
+     `ip -4 route show`, and removes each `blackhole` route that lies
+     inside that range with `ip -4 route del blackhole <range>`. An
+     `[ok]` line names them. A route outside the range, a wider route, and
+     a route of another type stay. Without a range in the record, no route
+     is read. A failed `ip` call is a `[WARN]` line with the command, and
+     the uninstall goes on.
 4. Remove `/var/lib/meho` (the volumes and the one-time files) and every
    entry of `/etc/meho` except `firewall.nft`, and the drop-in
    `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf`, which
@@ -643,7 +656,10 @@ and `groupdel` stubs remove their lines from the fake `/etc/passwd` and
 `userdel` stub also removes the group of the same name, and the answer
 `usergroups_enab` turns that off. The tests cover each content of the
 record (both parts, only the group, only the user, no record), a failed
-`userdel` and `groupdel`, and the last line. `InstallUpdateUninstallTests`
+`userdel` and `groupdel`, and the last line. The `ip` stub lists the
+routes of the answer `ip_route` and logs each `route del`; the tests
+cover blackhole routes inside and outside the pod range, a record
+without a range, and a failed list and a failed delete. `InstallUpdateUninstallTests`
 runs `install.sh`, then the update, then the `meho-host` that the install
 put on the machine, so it proves that the update keeps the record of the
 first install and that `uninstall` then removes the account. It also

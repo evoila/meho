@@ -96,10 +96,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.keycloak.secret_endpoint import (
-    KeycloakSecretRefError,
-    keycloak_ref_realm_problem,
-)
 from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
 from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
@@ -235,6 +231,13 @@ async def check_secret_move_realms(ctx: PreviewContext) -> str | None:
     which reports it. The reason names the target's managed realm, never a
     param value.
     """
+    # Imported here: the keycloak module imports this package, so a top
+    # import is circular when the keycloak module is imported first.
+    from meho_backplane.connectors.keycloak.secret_endpoint import (
+        KeycloakSecretRefError,
+        keycloak_ref_realm_problem,
+    )
+
     for key in ("from", "to"):
         raw = ctx.params.get(key)
         if not isinstance(raw, str):

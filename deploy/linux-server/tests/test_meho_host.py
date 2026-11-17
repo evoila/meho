@@ -935,8 +935,14 @@ class SupportBundleTests(HostTestCase):
         self.assertIn("authorization: basic [removed]", log)
         self.assertIn('{"headers": {"Authorization": "Bearer [removed]"}, "status": 401}', log)
         self.assertIn('{"body": "{\\"Authorization\\": \\"Bearer [removed]\\"}"}', log)
-        self.assertIn("connect postgresql://meho:[removed]@meho-postgres:5432/meho", log)
-        self.assertIn("connect postgresql://meho:[removed]@meho-postgres/meho", log)
+        self.assertIn(
+            "connect postgresql://meho:[removed]@meho-postgres:5432/meho",  # trufflehog:ignore
+            log,
+        )
+        self.assertIn(
+            "connect postgresql://meho:[removed]@meho-postgres/meho",  # trufflehog:ignore
+            log,
+        )
         self.assertIn('{"url": "redis://:[removed]@meho-redis:6379", "ok": true}', log)
         self.assertIn("ALTER ROLE meho WITH PASSWORD '[removed]' VALID UNTIL x", log)
         self.assertIn("alter role meho password '[removed]';", log)

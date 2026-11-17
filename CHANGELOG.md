@@ -94,6 +94,11 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Contributor docs `docs/README.md`:** explains the two documentation trees (`docs/` contributor-facing vs. `docs-site/` published operator docs) and where to file changes for each, so new contributors don't confuse them.
+- **Python 3.14 requirement documented:** dedicated `## Python version` section in `backend/README.md` plus a `### Python 3.14 + uv (backplane)` subsection in `CONTRIBUTING.md`, noting uv auto-downloads Python 3.14 and CI pins uv to a fixed version.
+
 ## [0.46.0] - 2026-11-09
 
 **An approved change whose settings hold hidden values now runs.** A

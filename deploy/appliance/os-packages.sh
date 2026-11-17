@@ -12,6 +12,11 @@
 # <deb-dir>, an uncompressed Packages file, and InRelease, which lists
 # Packages with its checksum and is signed with the key.
 #
+# Each .deb file gets the name <package>_<version>_<architecture>.deb, read
+# from the package itself, with the version's epoch ("1:") left out, as in
+# the Debian archive. apt download writes the epoch as "%3a" in the name,
+# and install.sh refuses a name with "%".
+#
 # The key comes from one of these (the key text is never printed):
 #   MEHO_OS_PACKAGES_SIGNING_KEY       the secret key, armored text
 #   MEHO_OS_PACKAGES_SIGNING_KEY_FILE  the path of a file with the secret key
@@ -39,6 +44,23 @@ usage_error() {
     exit 2
 }
 
+# deb_name <deb>: the file name for the repository,
+# <package>_<version>_<architecture>.deb without the version's epoch.
+deb_name() {
+    local fields package version architecture name
+    # The ${...} are dpkg-deb's field names, not shell expansions.
+    # shellcheck disable=SC2016
+    fields=$(dpkg-deb --show --showformat='${Package}\t${Version}\t${Architecture}' "$1" 2>/dev/null) ||
+        fail "dpkg-deb cannot read ${1##*/}." "put only OS package files (.deb) into the folder."
+    IFS=$'\t' read -r package version architecture <<<"$fields"
+    name=${package}_${version#*:}_${architecture}.deb
+    # The same names that install.sh accepts in the OS-package file.
+    [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._+~-]*$ ]] ||
+        fail "The package ${1##*/} gives the file name $name, which install.sh does not accept." \
+            "check the package's name, version and architecture."
+    printf '%s\n' "$name"
+}
+
 main() {
     [[ $# -eq 3 ]] || usage_error "expected 3 arguments."
     local version=$1 deb_dir=$2 out_dir=$3
@@ -46,7 +68,7 @@ main() {
         usage_error "the version '$version' is not like 0.36.0."
     [[ -d $deb_dir ]] || usage_error "$deb_dir is not a folder."
     local tool
-    for tool in gpg apt-ftparchive tar; do
+    for tool in gpg apt-ftparchive dpkg-deb tar; do
         command -v "$tool" >/dev/null || fail "$tool is not installed." "install it (apt-utils has apt-ftparchive)."
     done
 
@@ -87,7 +109,15 @@ main() {
 
     local repo=$work/repo
     mkdir "$repo"
-    cp -- "${debs[@]}" "$repo/"
+    local files=(./InRelease ./Packages)
+    local deb deb_file
+    for deb in "${debs[@]}"; do
+        deb_file=$(deb_name "$deb")
+        [[ ! -e $repo/$deb_file ]] ||
+            fail "Two .deb files in $deb_dir are the same package version: $deb_file." "keep only one of them."
+        cp -- "$deb" "$repo/$deb_file"
+        files+=("./$deb_file")
+    done
     (
         cd "$repo"
         apt-ftparchive packages . >Packages 2>/dev/null
@@ -102,9 +132,6 @@ main() {
 
     mkdir -p "$out_dir"
     local name=meho-appliance-$version-os-packages.tar
-    local files=(./InRelease ./Packages)
-    local deb
-    for deb in "${debs[@]}"; do files+=("./${deb##*/}"); done
     tar --format=ustar --owner=0 --group=0 --numeric-owner -C "$repo" -cf "$out_dir/$name" "${files[@]}"
     printf '[ok]   wrote %s/%s with %d .deb files\n' "$out_dir" "$name" "${#debs[@]}"
 }

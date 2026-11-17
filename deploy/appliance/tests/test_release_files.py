@@ -26,6 +26,7 @@ from pathlib import Path
 APPLIANCE = Path(__file__).resolve().parents[1]
 OS_PACKAGES = APPLIANCE / "os-packages.sh"
 UPLOAD = APPLIANCE / "upload-release.sh"
+LINUX_SERVER = APPLIANCE.parent / "linux-server"
 VERSION = "0.38.0"
 TEST_UID = "MEHO TEST KEY - NEVER FOR A RELEASE <test-key@example.invalid>"
 OTHER_UID = "MEHO other signer <signer@example.invalid>"
@@ -147,7 +148,9 @@ class ReleaseFilesCase(unittest.TestCase):
 
 
 class OsPackagesTests(ReleaseFilesCase):
-    def make_deb(self, name: str = "meho-test", version: str = "1.0") -> Path:
+    def make_deb(
+        self, name: str = "meho-test", version: str = "1.0", file_name: str = ""
+    ) -> Path:
         tree = self.root / f"{name}-tree"
         (tree / "DEBIAN").mkdir(parents=True)
         (tree / "DEBIAN" / "control").write_text(
@@ -155,7 +158,7 @@ class OsPackagesTests(ReleaseFilesCase):
             "Maintainer: MEHO tests <tests@example.invalid>\nDescription: a package for the test\n"
         )
         (tree / "payload.txt").write_text("payload\n")
-        deb = self.debs / f"{name}_{version}_all.deb"
+        deb = self.debs / (file_name or f"{name}_{version}_all.deb")
         subprocess.run(
             ["dpkg-deb", "--build", str(tree), str(deb)],
             check=True,
@@ -238,6 +241,71 @@ class OsPackagesTests(ReleaseFilesCase):
             ["apt-cache", *self.apt_options, "policy", "meho-test"],
             capture_output=True, text=True, check=False,
         ).stdout)  # fmt: skip
+
+    def installer_check(self) -> subprocess.CompletedProcess[str]:
+        """Run the archive check of install.sh --os-packages on the file."""
+        machine = self.root / "machine"
+        keyring = machine / "etc/apt/keyrings/meho-os-packages.gpg"
+        keyring.parent.mkdir(parents=True)
+        keyring.write_bytes(b"key\n")
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source lib/common.sh && source lib/update.sh && check_os_packages "$1"',
+                "check",
+                str(self.package_file),
+            ],
+            cwd=LINUX_SERVER,
+            env={**os.environ, "MEHO_TEST_ROOT": str(machine)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    def test_a_package_with_an_epoch_gets_a_name_the_installer_accepts(
+        self,
+    ) -> None:
+        # apt download names this package meho-test_2%3a1.0_all.deb.
+        self.make_deb(version="2:1.0", file_name="meho-test_2%3a1.0_all.deb")
+        key, public = self.keys["test"]
+
+        result = self.run_script(key)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        with tarfile.open(self.package_file) as archive:
+            names = archive.getnames()
+        self.assertEqual(
+            ["./InRelease", "./Packages", "./meho-test_1.0_all.deb"], names
+        )
+        check = self.installer_check()
+        self.assertEqual(0, check.returncode, check.stderr)
+        self.assertIn("Number of .deb files: 1", check.stdout)
+        repo = self.unpack(self.root / "repo")
+        self.assertIn(
+            "Filename: ./meho-test_1.0_all.deb", (repo / "Packages").read_text()
+        )
+        self.assertEqual(0, self.apt_update(repo, public).returncode)
+
+    def test_two_files_of_the_same_package_version_stop(self) -> None:
+        deb = self.make_deb()
+        shutil.copy(deb, self.debs / "copy.deb")
+
+        result = self.run_script(self.keys["test"][0])
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("the same package version: meho-test_1.0_all.deb", result.stderr)
+        self.assertFalse(self.package_file.exists())
+
+    def test_a_file_that_is_not_a_package_stops(self) -> None:
+        (self.debs / "broken.deb").write_bytes(b"not a package\n")
+
+        result = self.run_script(self.keys["test"][0])
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("dpkg-deb cannot read broken.deb", result.stderr)
+        self.assertFalse(self.package_file.exists())
 
     def test_apt_refuses_the_file_with_another_public_key(self) -> None:
         self.make_deb()

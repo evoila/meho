@@ -27,7 +27,7 @@ what it keeps.
 | --- | --- |
 | `deploy/appliance/build.sh` | Options, settings, the five steps, `--from-step`. |
 | `deploy/appliance/clean.sh` | Runs on the build VM as root, outside any SSH session: the deletions, the check (`--check` runs only that), the power-off. |
-| `deploy/appliance/os-packages.sh` | Makes `meho-appliance-<version>-os-packages.tar`, a flat apt repository with a signed `InRelease`. A release run (`MEHO_RELEASE=1`) refuses an empty key and a key whose user id holds `TEST KEY`. |
+| `deploy/appliance/os-packages.sh` | Makes `meho-appliance-<version>-os-packages.tar`, a flat apt repository with a signed `InRelease`. A release run (`MEHO_RELEASE=1`) refuses an empty key and a key whose user id holds `TEST KEY`. Each `.deb` file is named `<package>_<version>_<architecture>.deb` without the epoch, the names `install.sh --os-packages` accepts. |
 | `deploy/appliance/upload-release.sh` | Copies the OVA, the OS-package file, `SHA256SUMS` and its cosign bundle to `gs://<bucket>/<version>/`. Never creates a bucket, never overwrites. Tested against a stand-in `gcloud` (`tests/test_release_files.py`). |
 | `deploy/appliance/rewrite-ovf.sh` | Replaces the product section of an exported `.ovf` and declares the OVF transports. `awk` does the rewrite. |
 | `deploy/appliance/product-section.xml` | The wizard fields of the form-1 design, section 2, with `@VERSION@`. |

@@ -80,6 +80,10 @@ async def test_card_preview_shows_the_effective_access(
             "level": "project",
             "duration": 90,
             "access": expected,
+            "secret_goes_to": {
+                "kind": "answer",
+                "note": "The new secret is returned in the answer to the caller.",
+            },
         },
     }
 

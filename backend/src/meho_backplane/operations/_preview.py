@@ -351,6 +351,10 @@ class PreviewContext:
             the generic params-echo default. ``None`` (the default) falls
             back to the conservative connector-boundary default policy --
             the same behaviour as an unmatched override.
+        agent_preview: ``True`` when the agent's own ``preview_operation``
+            asks, ``False`` (the default) for the approval request. A
+            builder may show the approver more than the agent; what the
+            agent gets beyond that follows ``PREVIEW_TYPED_WRITES``.
     """
 
     descriptor: EndpointDescriptor
@@ -359,6 +363,7 @@ class PreviewContext:
     target: Any
     params: dict[str, Any]
     connector_id: str | None = None
+    agent_preview: bool = False
 
 
 class PreviewBuilder(Protocol):

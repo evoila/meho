@@ -12,8 +12,10 @@
 > [TLS and ingress](https://evoila.github.io/meho/latest/install/tls-ingress/),
 > and [upgrades](https://evoila.github.io/meho/latest/install/upgrades/)
 > (#2671). This file remains the in-repo deep-dive those pages link
-> back into: chart-internals cross-references, the authoritative
-> version-specific upgrade-notes table, and contributor-facing detail.
+> back into: chart-internals cross-references, the version-specific
+> upgrade-notes table, and contributor-facing detail. The Upgrades page
+> on the docs site shows all upgrade rows. The table here gets the rows
+> of a release when the release pull request writes them.
 
 Operator-facing guide for installing MEHO from cold and upgrading an
 existing release. It consolidates deploy/upgrade knowledge that was
@@ -599,9 +601,14 @@ MEHO is down until you roll back; the contract lists the recovery steps.
 
 ## Version-specific upgrade notes
 
-Append a row here in the same PR that carries an upgrade-relevant change
-(this discipline is enforced by a checklist line in
-[`RELEASING.md`](RELEASING.md)).
+Add a row in the same PR that carries an upgrade-relevant change (this
+discipline is enforced by a checklist line in
+[`RELEASING.md`](RELEASING.md)). Do not edit this table: add the row as its
+own file in [`upgrade-rows/`](upgrade-rows/README.md), so two pull requests
+never conflict here. Rows of the next release are on the
+[Upgrades page](https://evoila.github.io/meho/latest/install/upgrades/)
+until the release adds them here
+(`python3 scripts/ci/upgrade_rows.py --write`).
 
 | Version | Upgrade note | Action |
 |---|---|---|

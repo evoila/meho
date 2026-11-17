@@ -17,11 +17,6 @@
   microtask at the end of its own script task, before any later
   deferred script runs (#1692). Zero inline script — CSP-ready.
 -#}
-{# Theme bootstrap — synchronous on purpose (NO defer): it must set
-   <html data-theme> from localStorage / OS preference BEFORE first
-   paint or light-theme operators get a dark flash. External file,
-   not inline, to preserve the zero-inline-script CSP posture. #}
-<script src="/ui/static/src/app/theme.js"></script>
 {# Tab mark — the "Graphite & Signal" wordmark distilled to a monogram
    (static/src/brand/favicon.svg). SVG-only: every browser the console
    targets renders SVG favicons, and one vector scales across tab sizes.
@@ -40,12 +35,25 @@
 {# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the ``tailwindcss``
    CLI step in backend/Dockerfile from static/src/styles.css. #}
 <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
-{# Brand fonts (self-hosted; see static/src/fonts/FONTS.md). The
-   ``crossorigin`` attribute is required on font preloads even for
-   same-origin fetches — font requests are CORS-mode per spec. #}
-<link rel="preload" href="/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2" as="font" type="font/woff2" crossorigin />
-<link rel="preload" href="/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2" as="font" type="font/woff2" crossorigin />
-<link rel="preload" href="/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+{# The evoila brand, served straight out of the installed meho-ui package
+   by the /ui/static/brand mount. After the bundle on purpose: these are
+   unlayered author rules, which beat DaisyUI's @layer base output, which
+   is how the theme takes effect without the plugin knowing about it.
+   evoila-tokens.css carries the same palette as plain --evoila-*
+   properties for anything that reads a brand colour directly. #}
+<link rel="stylesheet" href="/ui/static/brand/evoila-daisyui.css" />
+<link rel="stylesheet" href="/ui/static/brand/evoila-tokens.css" />
+<link rel="stylesheet" href="/ui/static/brand/evoila-fonts.css" />
+{# Brand fonts, self-hosted by the meho-ui package (see its
+   src/meho_ui/brand/fonts/FONTS.md). Only the three faces first paint
+   needs: Rubik carries every heading weight in one variable file, Lato
+   regular is the body text, IBM Plex Mono 400 the ids and payloads. The
+   bold and italic Lato faces load on demand. The ``crossorigin``
+   attribute is required on font preloads even for same-origin fetches —
+   font requests are CORS-mode per spec. #}
+<link rel="preload" href="/ui/static/fonts/rubik-latin-var.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/ui/static/fonts/lato-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/ui/static/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
 {# Vendored JS — pinned SHA256 in static/src/vendor/VENDOR.md. #}
 <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
 {# App-shell CSRF double-submit header hook (#2345). Registers a single

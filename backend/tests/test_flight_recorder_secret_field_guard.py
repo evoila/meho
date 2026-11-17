@@ -249,11 +249,23 @@ def test_the_guard_reports_an_unmarked_operation() -> None:
         },
         ("write",),
     )
-    ops = [password_field, spec_field, example_key]
+    ref_fields = _Op(
+        "acme.host.join",
+        {
+            "type": "object",
+            "properties": {
+                "password_secret_ref": {"type": "string"},
+                "private_key_ref": {"type": "string"},
+            },
+        },
+        ("write",),
+    )
+    ops = [password_field, spec_field, example_key, ref_fields]
 
     assert _unmarked(ops) == {
         "acme.user.create": ["password"],
         "acme.cluster.deploy": ["clusterSpec"],
         "acme.depot.set": ["password"],
+        "acme.host.join": ["password_secret_ref", "private_key_ref"],
     }
     assert _unmarked([op._replace(tags=(*op.tags, "credential")) for op in ops]) == {}

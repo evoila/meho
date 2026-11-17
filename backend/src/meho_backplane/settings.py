@@ -2619,6 +2619,14 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Other product names in the ``product`` filter of
+    #: ``meho_connector_list`` (#6560), behind a switch that is off by
+    #: default. When on, the filter ignores case, also matches the names a
+    #: connector declares in ``product_aliases``, and the answer has a
+    #: ``product_filter`` block: which name matched, or the products that
+    #: exist when nothing matched. Off: the same answer as before. Set via
+    #: ``CONNECTOR_LIST_PRODUCT_ALIASES``.
+    connector_list_product_aliases: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3675,6 +3683,9 @@ def get_settings() -> Settings:
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),
+        ),
+        connector_list_product_aliases=parse_bool_env(
+            os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

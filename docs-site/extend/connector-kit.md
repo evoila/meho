@@ -152,6 +152,10 @@ operations you register, not `execute`.
   it out and set `version_range_reason` to one plain sentence. The template
   has a test, `tests/test_version_range.py`, that fails when a connector has
   neither.
+- **Other product names.** When people know the product by other names,
+  list them in `product_aliases`, for example `("vcenter", "vsphere")`.
+  With the switch `CONNECTOR_LIST_PRODUCT_ALIASES` on, a `product` filter
+  of `meho_connector_list` also finds your connector by these names.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 

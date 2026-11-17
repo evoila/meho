@@ -174,13 +174,36 @@ class BuildWithoutVmInfoTest(unittest.TestCase):
             self.assertTrue(found, f"no '{fragment}' after line {start}: {log}")
             return found[0]
 
-        # In this order: the updates, the restart, the new boot, the install.
+        # In this order: the updates, the restart, the new boot, the
+        # synchronised clock, the install.
         update = first("apt-get update -q --error-on=any")
         upgrade = first("upgrade --with-new-pkgs", update)
         restart = first("sudo systemctl reboot", upgrade)
-        first("install.sh --hostname", first("boot_id", restart))
+        clock = first("NTPSynchronized", first("boot_id", restart))
+        first("install.sh --hostname", clock)
         self.assertIn("the build VM restarted into the kernel", result.stdout)
         self.assertFalse(any("firststart" in line for line in log), log)
+
+    def test_step_2_stops_before_the_install_when_the_clock_does_not_synchronise(self) -> None:
+        boot = self.root / "boot-id"
+        boot.write_text("first-boot\n")
+        self.env["BOOT_ID"] = str(boot)
+        ssh = self.root / "bin" / "ssh"
+        ssh.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >>"$SSH_LOG"\n'
+            'case "$*" in\n'
+            '  *boot_id*) cat "$BOOT_ID" ;;\n'
+            '  *"systemctl reboot"*) echo second-boot >"$BOOT_ID"; exit 255 ;;\n'
+            "  *NTPSynchronized*) exit 1 ;;\n"
+            "esac\n"
+        )
+
+        result = self.run_build("--from-step", "2")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("clock did not synchronise", result.stdout + result.stderr)
+        self.assertNotIn("install.sh --hostname", self.ssh_log.read_text())
 
     def test_the_banner_gets_the_commit_of_the_scripts_not_the_download_version(self) -> None:
         commit = subprocess.run(

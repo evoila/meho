@@ -178,7 +178,10 @@ async def test_a_caller_with_rights_waits_for_approval_with_a_requester_record(
     preflight = dict(row.proposed_effect)["permission_preflight"]
     assert preflight["requester"]["sub"] == _OPERATOR.sub
     assert preflight["requester_denied"] is False
-    assert fake.auth.jwt.login_calls == []
+    # The only login is the sink lookup for the card; the source is not read.
+    assert _roles(fake) == ["role-dst"]
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/b"]
+    assert fake.secrets.kv.v2.put_calls == []
 
 
 @pytest.mark.parametrize(
@@ -251,6 +254,7 @@ async def test_an_agents_approved_move_checks_the_agent_again(
 
     parked = await _ask(agent, {"from": _SRC, "to": _DST})
     assert parked.status == "awaiting_approval", parked
+    fake.auth.jwt.login_calls.clear()  # the sink lookup for the card
     (row,) = await _approval_rows()
     assert dict(row.proposed_effect)["permission_preflight"]["requester"]["sub"] == agent.sub
     if deny_while_waiting:

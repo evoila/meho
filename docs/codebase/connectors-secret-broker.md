@@ -160,13 +160,34 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   reads the secret, changes only the named field, and writes it back with
   check-and-set on the version it read (`cas=0` when the secret does not
   exist yet). If someone else changed the secret in between, Vault
-  refuses the write and the move fails. If the latest version is deleted
-  or destroyed, the move fails and writes nothing
+  refuses the write and the move fails. MEHO then reads the version again
+  and tells the caller which case it is: the secret changed
+  (`SecretMergeChangedError`, run the move again) or Vault refused for
+  another reason (`SecretMergeRefusedError`; its message also says when
+  MEHO could not read the version again). Both messages are fixed MEHO
+  sentences, with no Vault text and no value. If the latest version is
+  deleted or destroyed, the move fails and writes nothing
   (`SecretMergeDeletedVersionError`). Without `merge`, a Vault sink
   replaces the whole secret. A sink kind without merge support makes the
   move fail before the source is read.
-- The approval preview names both targets and the merge flag. No value is
-  in the preview or in the audit row.
+- The approval preview names both sides and the merge flag. A
+  `vault-target` side shows the name as typed (`target`), the target it
+  points to (`target_id`, `target_name`) and that target's Vault role
+  (`vault_role`). The sink shows whether its secret exists
+  (`secret_exists`) and, with `merge`, whether the field exists
+  (`field_exists`): `"yes"`, `"no"` or `"not known"`. A Vault sink looks
+  this up at park time with the same checks and login as the write, and
+  only when both `vault-target` sides pass their checks. It keeps only
+  yes or no. Every other sink kind, and a failed lookup, says
+  `"not known"`. No value is in the preview or in the audit row.
+- The approved run of a move compares the target it finds for each
+  `vault-target` side with `target_id` on the approval
+  (`approved_preview("secret.move")`, checked in `check_access`). Another
+  target, or an approval without `target_id`, refuses the run with
+  `VaultTargetChangedError` before any Vault login. So the run acts on the
+  targets the approver saw, even when a name or alias points to another
+  target by then. An approval made before MEHO showed target ids is
+  refused too; the requester sends a new request.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.
@@ -596,7 +617,8 @@ the posture and relies on the existing gate). The policy refinement
   (`move_preview.py`, registered via `register_preview_builder("secret.move", …)`)
   populates `ApprovalRequest.proposed_effect` with a ref-only summary —
   the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`,
-  never the value. `secret.move` classifies `"other"` (so the
+  never the value. A `vault-target` side and the sink add the fields of
+  the section "Vault target refs and the merge option". `secret.move` classifies `"other"` (so the
   credential-class preview suppression does not fire) and carries no
   value in its params, so the summary is value-free by construction.
 - **Time-boxed scope.** The grant is the existing `AgentPermission`

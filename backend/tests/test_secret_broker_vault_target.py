@@ -244,21 +244,67 @@ async def test_merge_creates_a_missing_secret_with_cas_zero(
     assert kv.put_calls[0]["cas"] == 0
 
 
-async def test_merge_cas_conflict_is_an_error_without_the_value(
-    monkeypatch: pytest.MonkeyPatch, _env: None
+@pytest.mark.parametrize(
+    ("changed", "error_class", "hint"),
+    [
+        (True, "SecretMergeChangedError", "Run the move again"),
+        (False, "SecretMergeRefusedError", "does not help"),
+    ],
+)
+async def test_a_refused_merge_write_says_whether_the_secret_changed(
+    changed: bool, error_class: str, hint: str, monkeypatch: pytest.MonkeyPatch, _env: None
 ) -> None:
     fake = install_fake_client(
         monkeypatch,
         secret={"password": _SECRET_VALUE},
         put_exc=hvac.exceptions.InvalidRequest("check-and-set parameter did not match"),
     )
+    kv = fake.secrets.kv.v2
+    real_read = kv.read_secret_version
+
+    def read(path: str, **kwargs: Any) -> dict[str, Any]:
+        answer = real_read(path, **kwargs)
+        if changed and kv.put_calls:  # the read after the refused write
+            answer["data"]["metadata"]["version"] = kv.version + 1
+        return answer
+
+    monkeypatch.setattr(kv, "read_secret_version", read)
     result = await _move(
         {"from": "vault:secret/a#password", "to": "vault:secret/b#password", "merge": True}
     )
     assert result.status == "error"
-    assert result.error == "connector_error: VaultSecretRefError"
+    assert result.error == f"connector_error: {error_class}"
+    message = str((result.extras or {}).get("exception_message"))
+    assert hint in message
+    assert "check-and-set parameter" not in message  # no Vault text
     assert _SECRET_VALUE not in json.dumps(result.model_dump(mode="json"), default=str)
-    assert fake.secrets.kv.v2.put_calls  # the guarded write was tried once
+    assert len(kv.put_calls) == 1  # the guarded write was tried once
+
+
+async def test_a_refused_merge_write_that_cannot_be_checked_says_so(
+    monkeypatch: pytest.MonkeyPatch, _env: None
+) -> None:
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"password": _SECRET_VALUE},
+        put_exc=hvac.exceptions.InvalidRequest("refused"),
+    )
+    kv = fake.secrets.kv.v2
+    real_read = kv.read_secret_version
+
+    def read(path: str, **kwargs: Any) -> dict[str, Any]:
+        if kv.put_calls:
+            raise hvac.exceptions.Forbidden("permission denied")
+        return real_read(path, **kwargs)
+
+    monkeypatch.setattr(kv, "read_secret_version", read)
+    result = await _move(
+        {"from": "vault:secret/a#password", "to": "vault:secret/b#password", "merge": True}
+    )
+    assert result.error == "connector_error: SecretMergeRefusedError"
+    assert "could not read the sink secret again" in str(
+        (result.extras or {}).get("exception_message")
+    )
 
 
 async def test_merge_default_off_replaces_the_secret(

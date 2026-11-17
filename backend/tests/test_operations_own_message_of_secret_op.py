@@ -223,6 +223,11 @@ _MARKED_TYPES = {
     "SecretMergeDeletedVersionError",
     # secret.move: target name, op id and MEHO's policy reason; no vendor text.
     "VaultTargetRefusedError",
+    # secret.move: target names and ids, the approved one and the one found now.
+    "VaultTargetChangedError",
+    # secret.move: fixed sentences about a refused merge write; no Vault text.
+    "SecretMergeChangedError",
+    "SecretMergeRefusedError",
     "Rke2SnapshotNoSudoError",
     "Rke2WriteOwnMessageError",
 }

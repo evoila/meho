@@ -35,6 +35,14 @@ Before any Vault login, each read or write checks, in this order:
    ``vault.kv.patch`` for a sink with ``merge``. When a reviewer runs an
    approved move, the requester's policy is checked too.
 
+During the approved run of a ``secret.move``, step 2 also compares the
+target it finds with the target on the approval card (``target_id`` of the
+``source`` or ``sink`` side, see
+:mod:`~meho_backplane.connectors.secret.move_preview`). Another target, or
+a card without the id, refuses the run (:class:`VaultTargetChangedError`).
+So the approved run reads and writes only on the targets the approver saw,
+even when a name or alias points to another target by then.
+
 :func:`vault_target_move_preflight` runs checks 2 and 3 when ``secret.move``
 would wait for approval, so a move the caller may not make is refused
 before a person is asked to approve it.
@@ -61,6 +69,7 @@ from meho_backplane.connectors.vault.target_auth import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.operations._preview import approved_preview
 from meho_backplane.operations.secondary_target_policy import (
     SecondaryTargetWrite,
     requester_policy_preflight,
@@ -81,8 +90,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VAULT_TARGET_KIND",
+    "VaultTargetChangedError",
     "VaultTargetKvSecretEndpoint",
     "VaultTargetRefusedError",
+    "card_side_of",
     "check_vault_target_refs",
     "vault_target_move_preflight",
 ]
@@ -90,6 +101,7 @@ __all__ = [
 VAULT_TARGET_KIND = "vault-target"
 
 _VAULT_CONNECTOR_ID: Final = "vault-1.x"
+_MOVE_OP_ID: Final = "secret.move"
 _DOC_REF: Final = "docs/codebase/connectors-secret-broker.md#vault-target-refs-and-the-merge-option"
 
 
@@ -101,6 +113,44 @@ class VaultTargetRefusedError(VaultSecretRefError, ConnectorOwnMessage):
     the message (target name, op id, policy reason; never a value), so the
     caller sees it.
     """
+
+
+class VaultTargetChangedError(VaultTargetRefusedError):
+    """The approved run finds another Vault target than the approval card showed.
+
+    Or the card does not show the target id, so MEHO cannot tell which
+    target was approved. Raised before any Vault login.
+    """
+
+
+def card_side_of(op_id: str) -> str:
+    """The side of the approval card a ``vault.kv.*`` op works on: source or sink."""
+    return "source" if op_id == "vault.kv.read" else "sink"
+
+
+def _check_approved_target(target_name: str, row: TargetORM, op_id: str) -> None:
+    """Refuse an approved ``secret.move`` whose target is not the one on its card.
+
+    No card (an ordinary run) checks nothing.
+    """
+    card = approved_preview(_MOVE_OP_ID)
+    if card is None:
+        return
+    side_name = card_side_of(op_id)
+    side = card.get(side_name)
+    approved_id = side.get("target_id") if isinstance(side, dict) else None
+    if not isinstance(approved_id, str) or not approved_id:
+        raise VaultTargetChangedError(
+            f"the approval does not show which Vault target the {side_name} name "
+            f"{target_name!r} pointed to, so MEHO cannot tell what was approved. "
+            "Nothing was read or written. Send a new request"
+        )
+    if approved_id != str(row.id):
+        raise VaultTargetChangedError(
+            f"the {side_name} name {target_name!r} now points to Vault target "
+            f"{row.name!r} (id {row.id}), not to the target the approval showed "
+            f"(id {approved_id}). Nothing was read or written. Send a new request"
+        )
 
 
 def _policy_check(op_id: str) -> SecondaryTargetWrite:
@@ -151,8 +201,13 @@ class VaultTargetKvSecretEndpoint(VaultKvSecretEndpoint):
         return row
 
     async def check_access(self, operator: Operator, op_id: str) -> TargetORM:
-        """Find the target and check the caller's policy for *op_id* on it. No Vault call."""
+        """Find the target and check the caller's policy for *op_id* on it. No Vault call.
+
+        During the approved run of a ``secret.move``, the target must be the
+        one on the approval card (:class:`VaultTargetChangedError`).
+        """
         row = await self.resolve_vault_target(operator)
+        _check_approved_target(self._target_name, row, op_id)
         refusal = await secondary_target_refusal(operator, _policy_check(op_id), row)
         if refusal is not None:
             raise VaultTargetRefusedError(f"{refusal}. Nothing was read or written.")

@@ -9912,7 +9912,7 @@
           "agents"
         ],
         "summary": "Edit Agent",
-        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
+        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``. A new ``identity_ref``\nthat names an agent with no grant needs ``starting_grants`` while the\nswitch is not ``off``, the same rules and errors as a create (#6389).",
         "operationId": "edit_agent_api_v1_agents__name__patch",
         "parameters": [
           {
@@ -26789,6 +26789,10 @@
             "type": "boolean",
             "nullable": true,
             "title": "Enabled"
+          },
+          "starting_grants": {
+            "$ref": "#/components/schemas/StartingGrants",
+            "nullable": true
           }
         },
         "additionalProperties": false,
@@ -29994,6 +29998,19 @@
             "type": "boolean",
             "title": "Enabled",
             "default": false
+          },
+          "starting_grants": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Starting Grants",
+            "default": ""
+          },
+          "starting_grant_targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Starting Grant Targets"
           },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
@@ -43832,7 +43849,7 @@
         "properties": {
           "set": {
             "$ref": "#/components/schemas/StartingGrantSet",
-            "description": "'none': the agent runs nothing until an admin adds a grant. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': the same, but only on the targets in 'targets'."
+            "description": "'none': MEHO writes no grant. With AGENT_GRANT_REQUIRED='on' the agent then runs nothing until an admin adds a grant; with 'off' or 'observe' it can still run safe operations at once. 'read-everything': safe operations run at once on every target; everything else waits for a person's approval. 'read-targets': one grant for each target in 'targets'; safe operations run at once there. Only with 'on' does this keep the agent off other targets."
           },
           "targets": {
             "items": {

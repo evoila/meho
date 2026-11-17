@@ -348,6 +348,25 @@ def test_a_connection_string_value_runs_to_its_semicolon(line: str) -> None:
     assert [line[a:b] for a, b in spans] == ["made up long phrase"]
 
 
+@pytest.mark.parametrize(
+    "opening, closing",
+    [('"', '"'), ("'", "'"), ("{", "}")],
+)
+def test_a_quoted_connection_value_is_hidden_across_a_line_break(
+    opening: str, closing: str
+) -> None:
+    line = f"Server=db;pw={opening}made\nup{closing};Database=d"
+    assert [line[a:b] for a, b in COMMAND_SECRET.secret_spans(line)] == [
+        f"{opening}made\nup{closing}"
+    ]
+    answer = redact(line, get_default_policy()).redacted
+    trace, _ = scrub_content(line)
+    for out in (answer, trace):
+        assert "made" not in out
+        assert f"up{closing}" not in out
+        assert out.endswith(";Database=d")
+
+
 def test_the_trace_scrub_hides_what_the_answer_hides() -> None:
     line = f"exec mysql -u root -p{PW} appdb; User ID=u;{_PASSWORD_IS}{PW} x y;"
     answer = redact(line, get_default_policy()).redacted

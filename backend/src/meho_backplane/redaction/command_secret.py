@@ -479,30 +479,34 @@ _NEXT_FIELD: Final = re.compile(r";[ \t]*[A-Za-z][\w .-]{0,63}=")
 #: The closing character of a quoted connection string value. ODBC quotes a
 #: value with braces (``Pwd={x;y}``).
 _CLOSING: Final = {"'": "'", '"': '"', "{": "}"}
-#: The closing character or the end of the line, for each opening character.
-_CLOSING_OR_LINE_END: Final = {
-    opening: re.compile(f"[{re.escape(closing)}\n]") for opening, closing in _CLOSING.items()
+#: Longest quoted connection string value that is read across line breaks.
+_QUOTED_MAX: Final = 128
+#: A quoted value up to its closing mark, for each opening character. A doubled
+#: closing mark is part of the value. The groups are atomic, so a value that is
+#: never closed is read once and not tried again in another way.
+_QUOTED_VALUE: Final = {
+    opening: re.compile(
+        f"[{re.escape(opening)}](?>[^{re.escape(closing)}]++|{re.escape(closing * 2)})*+"
+        f"{re.escape(closing)}"
+    )
+    for opening, closing in _CLOSING.items()
 }
 
 
 def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
     """Span of a quoted connection string value; a doubled closing mark is part of it.
 
-    The search ends at the end of the line, so a value that is never closed
-    does not make each later label search to the end of the text.
+    A quoted value may hold line breaks. The search for the closing mark
+    stops after ``_QUOTED_MAX`` characters. A value that is not closed there
+    ends at the end of its first line, so it does not make each later label
+    search to the end of the text.
     """
-    closing = _CLOSING[text[start]]
-    stop = _CLOSING_OR_LINE_END[text[start]]
-    pos = start + 1
-    while True:
-        mark = stop.search(text, pos)
-        if mark is None or mark.group(0) == "\n":
-            return start, len(text) if mark is None else mark.start()
-        close = mark.start()
-        if text.startswith(closing, close + 1):
-            pos = close + 2
-            continue
-        return start, close + 1
+    limit = min(len(text), start + 1 + _QUOTED_MAX)
+    value = _QUOTED_VALUE[text[start]].match(text, start, limit)
+    if value is not None:
+        return start, value.end()
+    line_end = text.find("\n", start, limit)
+    return start, len(text) if line_end < 0 else line_end
 
 
 def _is_connection_field(text: str, match: re.Match[str], start: int, stop: int) -> bool:

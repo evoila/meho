@@ -42,9 +42,13 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import re
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -845,3 +849,62 @@ def test_operator_repr_excludes_raw_jwt() -> None:
     assert "raw_jwt" not in text, f"raw_jwt field name leaked into repr: {text!r}"
     # The field is still populated and accessible by name.
     assert op.raw_jwt == sentinel
+
+
+# ---------------------------------------------------------------------------
+# The autouse sweep sees structured log lines in a parallel run too (#6608)
+# ---------------------------------------------------------------------------
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+_SWEEP_CONFTEST = "from tests.conftest import _no_secret_leak_sweep  # noqa: F401\n"
+
+_SWEEP_TEST_FILE = """
+import structlog
+
+
+def test_clean_line():
+    structlog.PrintLogger().msg("nothing secret here")
+
+
+def test_secret_line_through_structured_logger():
+    structlog.configure(
+        processors=[structlog.processors.JSONRenderer()],
+        logger_factory=structlog.PrintLoggerFactory(),
+    )
+    structlog.get_logger().info("login", auth="Bearer " + "A" * 40)
+"""
+
+
+@pytest.mark.parametrize("workers", ["0", "2"], ids=["one-process", "parallel"])
+def test_sweep_fails_a_secret_line_from_the_structured_logger(tmp_path: Path, workers: str) -> None:
+    """A made-up secret-shaped line from structlog fails the sweep in every run kind.
+
+    The structured logger writes to stdout only. In a parallel run the
+    fd scan is off, so the sweep must still see the line through its
+    by the line scan. The check runs in a child pytest with the real sweep
+    fixture, once one-process and once with two xdist workers.
+    """
+    (tmp_path / "conftest.py").write_text(_SWEEP_CONFTEST)
+    (tmp_path / "test_probe.py").write_text(_SWEEP_TEST_FILE)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env["PYTHONPATH"] = str(_BACKEND_DIR)
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            "-o", "tmp_path_retention_policy=failed",
+            "--rootdir", str(tmp_path), "-n", workers, str(tmp_path),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )  # fmt: skip
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    # The sweep fails in the test's teardown, so pytest counts an error.
+    assert "2 passed" in out and "1 error" in out, out
+    assert "secret-leak pattern matched" in out, out
+    assert "ERROR test_probe.py::test_secret_line_through_structured_logger" in out, out

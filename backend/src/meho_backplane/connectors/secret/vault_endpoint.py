@@ -319,7 +319,9 @@ class VaultKvSecretEndpoint:
             kv.create_or_update_secret(
                 path=self._path, secret=body, cas=cas, mount_point=self._mount
             )
-        except hvac.exceptions.InvalidRequest as exc:
+        except (hvac.exceptions.InvalidRequest, hvac.exceptions.Forbidden) as exc:
+            # A failed check-and-set (400) or a policy that allows the read
+            # but not the write (403).
             raise self._merge_refusal(kv, cas) from exc
 
     def _merge_refusal(self, kv: Any, cas: int) -> VaultSecretRefError:

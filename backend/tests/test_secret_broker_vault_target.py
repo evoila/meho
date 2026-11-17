@@ -281,6 +281,30 @@ async def test_a_refused_merge_write_says_whether_the_secret_changed(
     assert len(kv.put_calls) == 1  # the guarded write was tried once
 
 
+async def test_a_merge_write_the_vault_policy_forbids_says_the_secret_did_not_change(
+    monkeypatch: pytest.MonkeyPatch, _env: None
+) -> None:
+    """The role may read the sink secret but not write it."""
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"password": _SECRET_VALUE},
+        put_exc=hvac.exceptions.Forbidden("permission denied"),
+    )
+    kv = fake.secrets.kv.v2
+    result = await _move(
+        {"from": "vault:secret/a#password", "to": "vault:secret/b#password", "merge": True}
+    )
+    assert result.status == "error"
+    assert result.error == "connector_error: SecretMergeRefusedError"
+    message = str((result.extras or {}).get("exception_message"))
+    assert "does not help" in message
+    assert "permission denied" not in message  # no Vault text
+    assert _SECRET_VALUE not in json.dumps(result.model_dump(mode="json"), default=str)
+    assert len(kv.put_calls) == 1
+    # The source read, the merge read, and the read again after the refused write.
+    assert [c["path"] for c in kv.read_calls] == ["secret/a", "secret/b", "secret/b"]
+
+
 async def test_a_refused_merge_write_that_cannot_be_checked_says_so(
     monkeypatch: pytest.MonkeyPatch, _env: None
 ) -> None:

@@ -568,7 +568,7 @@ and the one of `realm.update` is the realm card of
 `ops_write_realm_smtp.py` without `current_values`. The card builders of
 `client.update` and `protocol_mapper.create` get the switch with
 `register_preview_builder_switch`; it applies only when
-`PreviewContext.for_agent` is true. A call that waits for approval gives
+`PreviewContext.agent_preview` is true. A call that waits for approval gives
 the caller no card, only the request id. The MCP tools
 `meho_approvals_get` and `meho_approvals_list` follow the same switch:
 off, they show the params echo for `client.update` and
@@ -862,9 +862,8 @@ change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can
 change a person's email or user name, and `user.credential.delete` can
 remove their passkey or one-time code, so both change how a person signs
 in. For these three, the person the change is for never approves it. In
-MEHO's own login realm another admin must approve it; a person who may
-approve their own changes cannot approve these alone. In MEHO's own login
-realm, a role of the `realm-management` client (in any case) also needs a
+every realm another admin must approve it; a person who may approve their
+own changes cannot approve these alone. In MEHO's own login realm, a role of the `realm-management` client (in any case) also needs a
 platform admin as approver: it decides who may manage the realm. The same
 holds for `role_mapping.assign` and `client.assign` when a part of the
 named role, on any level, is such a role or a role that MEHO's login maps to

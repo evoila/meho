@@ -165,16 +165,21 @@ Your login group decides. MEHO reads it only from your signed login
 token, never from a request field or a command-line flag. The groups
 come from the [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-five-groups).
 
-| Your group | Your own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change |
-|---|---|---|---|
-| `MEHO-SA-Operators` | yes, at every risk level | yes | yes |
-| `MEHO-Admins` | yes, at every risk level | yes | yes |
-| `MEHO-Operators` | only a `caution` change that waited because you sent it with a token, with a click in the web interface | yes | no |
-| `MEHO-Approvers` | (you cannot run changes) | yes | no |
-| `MEHO-Readers` | (you cannot run changes) | no | no |
+| Your group | Your own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change | Another person's [change of rights](#changes-of-rights-need-another-admin) |
+|---|---|---|---|---|
+| `MEHO-SA-Operators` | yes, at every risk level, but never a change of rights | yes, but not a change of rights | yes, but not a change of rights | no |
+| `MEHO-Admins` | yes, at every risk level, but never a change of rights | yes | yes | yes |
+| `MEHO-Operators` | only a `caution` change that waited because you sent it with a token, with a click in the web interface | yes, but not a change of rights | no | no |
+| `MEHO-Approvers` | (you cannot run changes) | yes, but not a change of rights | no | no |
+| `MEHO-Readers` | (you cannot run changes) | no | no | no |
+
+A platform admin (`MEHO-Platform-Admins`) counts as an admin in every
+tenant, so a platform admin may approve another person's change of
+rights too.
 
 "SA" means self-approval. MEHO-Admins may approve their own changes in
-the same way. A MEHO-SA-Operator's or a MEHO-Admin's change still waits
+the same way. Self-approval never covers a change of rights (see
+[Changes of rights need another admin](#changes-of-rights-need-another-admin)). A MEHO-SA-Operator's or a MEHO-Admin's change still waits
 like any other. The same person then approves it, on purpose: with a click in
 the web interface, or on the command line after a fresh sign-in. The
 wait keeps three things: the approver sees exactly what will run, sees
@@ -213,24 +218,68 @@ To take back your *own* pending request, withdraw it:
 not run. A person, an agent or a service account can each withdraw its
 own request.
 
-## Changes of rights need a second person
+## Changes of rights need another admin
 
-A change that adds a login to a group, gives a login a role, or changes the
-attributes of a group follows more rules:
+A change of rights is a change that can give someone more rights. For
+such a change, these rules hold in every realm a Keycloak target
+manages, not only in MEHO's own login realm:
 
-- The login the change is for cannot approve it. This holds for every group.
-  A second login of the same person is not a second person. If you have two
-  logins, ask a colleague to approve.
-- A change of a group's attributes changes the rights of everyone in the
-  group. In MEHO's own login realm, a person in the group cannot approve it.
-- MEHO must know which login and which group the change is for. When a user
-  name or a group name could not be looked up when the request was made, or
-  when MEHO could not read who is in the group, nobody can approve the
-  request. Send a new one.
-- In MEHO's own login realm, a second person who is a tenant admin must
-  approve the change. For the platform admin group or role, a platform admin
-  must approve it. A MEHO-SA-Operator cannot approve such a change of their
-  own.
+- Another admin must approve it: a tenant admin (`MEHO-Admins`) or a
+  platform admin (`MEHO-Platform-Admins`).
+- The person who asked never approves it. This holds in every group, at
+  every risk level, and also with the break-glass switch on.
+- A MEHO-SA-Operator who is not an admin cannot approve it, also not
+  another person's change of rights.
+- A standing grant or a run approval never covers it. Each call waits
+  for its own approval, also the call of an agent or a service account.
+
+When you may not approve such a change, MEHO answers: "This is a change
+of rights. Another admin must approve it."
+
+These Keycloak writes are changes of rights:
+
+- **Who has which role or group:** give a user a realm role or a role of
+  a client, add a user to a group, or change the attributes of a group.
+- **Who may sign in, and how:** create a user, change a user's user name
+  or email, turn a login on, set a new password, remove a passkey or a
+  one-time code, or set the steps a user must do at the next sign-in.
+- **What a login token says:** create or change a realm, a client, a
+  client scope or a protocol mapper.
+- **How strong a sign-in is:** set up MEHO's approval sign-in, the touch
+  sign-in, or the step that skips the one-time code after a passkey.
+
+The exact list, with the reason for each write, is in
+[Writes that are changes of rights](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md#writes-that-are-changes-of-rights).
+A Keycloak write that only takes rights away (remove a user from a
+group, turn a login off, delete) is not a change of rights. A few other
+operations are changes of rights too, for example a policy import (see
+[the policy file guide](policy-file.md)).
+
+**An install with only one admin.** There is no other admin there, so
+that admin cannot get their own change of rights approved. Add a second
+admin in Keycloak itself (in `MEHO-Admins` or `MEHO-Platform-Admins`)
+before you run such a change. See the v0.47.0 notes in
+[Upgrades](../install/upgrades.md#version-specific-notes).
+
+### More rules for a change of one login or one group
+
+A change that adds a login to a group, gives a login a role, changes a
+user's details, removes a credential, or changes the attributes of a
+group has more rules:
+
+- The login the change is for cannot approve it. This holds for every
+  group. A second login of the same person is not a second person. If
+  you have two logins, ask a colleague to approve.
+- MEHO must know which login and which group the change is for. When a
+  user name or a group name could not be looked up when the request was
+  made, nobody can approve the request. Send a new one.
+- In MEHO's own login realm, a change of a group's attributes changes
+  the rights of everyone in the group. A person in the group cannot
+  approve it. When MEHO could not read who is in the group, nobody can
+  approve the request. Send a new one.
+- In MEHO's own login realm, a change of the platform admin group or
+  role, or a role of Keycloak's `realm-management` client, needs a
+  platform admin as the approver.
 
 The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group
@@ -265,7 +314,10 @@ The change applies at your next login. Then:
    approved your own change.
 
 This works at every risk level, also for `dangerous` and `destructive`
-changes. On the command line, `meho approvals approve <id>` does the
+changes. It never works for a change of rights: another admin must
+approve that (see
+[Changes of rights need another admin](#changes-of-rights-need-another-admin)).
+On the command line, `meho approvals approve <id>` does the
 same after a fresh sign-in, and prints a line that says it was a
 self-approval. The decision record shows `self_approved: true` and the
 rule `sa_operator_self_approval`.
@@ -621,8 +673,9 @@ pending. Add the missing line and try again. A reason can be at most
 |---|---|
 | Solo deploy, any change that waits | **MEHO-SA-Operator or MEHO-Admin** (Option 1) — you approve your own change on purpose, in the web interface |
 | Solo deploy, writes that run on a schedule | **Agent-requester** (Option 2) |
+| Solo deploy, a change of rights you asked for | **Add a second admin** first. No option on this page lets you approve your own change of rights. See [An install with only one admin](#changes-of-rights-need-another-admin) |
 | Genuine emergency, `safe` or `caution` change, and nobody in MEHO-SA-Operators or MEHO-Admins | **Break-glass** (Option 3), then turn it back off |
-| More than one operator | Another person approves; for a `dangerous` or `destructive` change, a MEHO-SA-Operator or a MEHO-Admin |
+| More than one operator | Another person approves; for a `dangerous` or `destructive` change, a MEHO-SA-Operator or a MEHO-Admin; for a change of rights, another admin |
 
 ## Troubleshooting
 

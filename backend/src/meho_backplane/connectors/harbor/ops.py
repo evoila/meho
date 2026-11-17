@@ -153,6 +153,20 @@ _HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Default is push and pull. Delete is not offered."
             ),
         },
+        "vault_target": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^vault:.+#.+$",
+            "description": (
+                "Optional. Where MEHO stores the new robot secret, as "
+                "'vault:<path>#<field>' (a Vault KV path and the field that gets "
+                "the secret). An existing value in that field is replaced; the "
+                "other fields of that Vault item stay. When set, the "
+                "secret is never returned: the answer has only its fingerprint "
+                "and length. Agents must set it, because an agent cannot see the "
+                "secret."
+            ),
+        },
     },
     "required": ["name", "project", "duration"],
     "additionalProperties": False,
@@ -177,11 +191,29 @@ _HARBOR_ROBOT_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Minted robot credential. Returned ONLY on creation — "
                 "Harbor does not expose it again after this call. "
-                "Store it immediately and treat it as a password."
+                "Store it immediately and treat it as a password. "
+                "Absent when vault_target is set."
             ),
         },
+        "status": {
+            "type": "string",
+            "const": "stored",
+            "description": "Only with vault_target: the secret was written to Vault.",
+        },
+        "stored_to": {
+            "type": "object",
+            "description": "Only with vault_target: the Vault item that holds the secret.",
+        },
+        "value_fingerprint": {
+            "type": "string",
+            "description": "Only with vault_target: keyed fingerprint of the secret.",
+        },
+        "length": {
+            "type": "integer",
+            "description": "Only with vault_target: length of the secret in bytes.",
+        },
     },
-    "required": ["id", "name", "secret"],
+    "required": ["id", "name"],
 }
 
 _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -193,7 +225,13 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "that is returned ONLY once and cannot be retrieved later. The caller receives "
         "the full response including the secret; the broadcast feed does NOT "
         "(credential_mint classification keeps it aggregate-only). "
-        "Store the secret immediately after this call."
+        "Store the secret immediately after this call. "
+        "AN AGENT MUST SET vault_target ('vault:<path>#<field>'): MEHO then writes "
+        "the secret to Vault itself and returns only its fingerprint and length, "
+        "so nobody sees the secret. Without it an agent cannot read the secret and "
+        "the robot is useless. If the Vault write would be denied, the call is "
+        "refused before it waits for approval. If the write fails, MEHO deletes "
+        "the new robot again. A person approves each call."
     ),
     "parameter_hints": {
         "name": (
@@ -213,11 +251,21 @@ _HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS: dict[str, Any] = {
             "Choose the least access the robot needs. The approval request "
             "shows this value."
         ),
+        "vault_target": (
+            "Optional but required for an agent. 'vault:<path>#<field>', for example "
+            "'vault:tenants/<tenant_id>/ci/harbor#secret'. The path must be inside "
+            "the tenant's Vault path. The field is written to that Vault item: an "
+            "existing value in it is replaced, the other fields stay."
+        ),
     },
     "output_shape": (
         "On success: {id: <int>, name: 'robot$<project>+<name>', secret: '<minted-secret>'}. "
         "The secret is a one-time value — save it immediately. "
-        "On failure: a connector_error OperationResult with "
+        "With vault_target: {id, name, status: 'stored', stored_to: {kind, mount, path, "
+        "field, version}, value_fingerprint, length} and no secret. "
+        "When the Vault write fails: error_code 'robot_secret_not_stored' with "
+        "robot_id and robot_deleted (true when MEHO deleted the new robot). "
+        "On another failure: a connector_error OperationResult with "
         "extras.exception_class naming the failure class."
     ),
 }

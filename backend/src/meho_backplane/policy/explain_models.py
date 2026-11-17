@@ -68,8 +68,19 @@ class ExplainApprovers(_Frozen):
     groups: list[str]
     rule: str | None = Field(
         default=None,
-        description="default, rights_change, or a routing entry such as tenant:routing[0]. "
+        description="default, rights_change, or the routing entries that fit, the install's "
+        "first, such as install:routing[0], tenant:routing[1]. category_not_stored when MEHO "
+        "does not know the category the install's policy gives the change (it gives it two "
+        "categories, or a waiting request started before MEHO stored it) and an install entry "
+        "that matches on a category could fit it; then no group may approve it. "
         "Null for a caller who is not a tenant admin or a platform admin.",
+    )
+    floor: str | None = Field(
+        default=None,
+        description="The install's routing entry that fits, such as install:routing[0]. It is "
+        "a floor: a tenant's routing can only narrow it. For a waiting request it is the "
+        "install's routing as it is now, as at the approve click. Null when no install entry "
+        "fits, and for a caller who is not a tenant admin or a platform admin.",
     )
 
 
@@ -155,5 +166,11 @@ class PolicyExplainResponse(_Frozen):
     )
     classification: ExplainClassification | None = None
     request: ExplainStoredRequest | None = None
+    not_checked: list[str] | None = Field(
+        default=None,
+        description="Each check after the policy gate that explain does not ask "
+        "and that can still refuse the call, by a fixed name. Empty for deny. "
+        "Null for a stored approval request and for an error.",
+    )
     error: str | None = None
     extras: dict[str, Any] | None = None

@@ -7,7 +7,7 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.op_classes import declare_op_classes, declare_per_call_approval
 
 declare_op_classes(
     # Takes the realm's SMTP password as a reference
@@ -33,3 +33,9 @@ declare_op_classes(
         "keycloak.authflow.ensure_approval_touch",
     ),
 )
+
+# Takes client roles away from a login. No standing grant and no run
+# approval covers it: a person approves each call. The writes that are
+# changes of rights get this mark when they are registered
+# (:mod:`.rights_changes`), so they are not listed here.
+declare_per_call_approval(("keycloak.role_mapping.client.remove",))

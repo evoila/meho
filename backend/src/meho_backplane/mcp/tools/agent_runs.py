@@ -52,6 +52,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
@@ -351,9 +352,7 @@ async def _list_runs_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    work_ref = arguments.get("work_ref")
-    if work_ref is not None and not isinstance(work_ref, str):
-        raise McpInvalidParamsError("work_ref must be a string when supplied")
+    work_ref = work_ref_argument(arguments.get("work_ref"))
     agent_name = arguments.get("agent_name")
     if agent_name is not None and not isinstance(agent_name, str):
         raise McpInvalidParamsError("agent_name must be a string when supplied")
@@ -425,8 +424,8 @@ register_mcp_tool(
             "started_at, ended_at}]}; "
             "agent_definition_id / agent_name are null for an ad-hoc run "
             "or a definition deleted after the run. Filter by "
-            "work_ref (exact-match external change-ticket reference, e.g. "
-            "'gh:evoila/meho#11'), status, and/or agent_name (exact-match "
+            "work_ref (the whole ticket id, e.g. 'gh:evoila/meho#11'; white "
+            "space at both ends is ignored), status, and/or agent_name (exact-match "
             "agent definition name — an unknown name returns an empty "
             "list, not an error); page with limit (1..500, default 100) + "
             "offset. Tenant-isolated server-side — only your tenant's runs "
@@ -438,8 +437,11 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "description": (
-                        "Exact-match external change-ticket reference filter, "
-                        "e.g. 'gh:evoila/meho#11'."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#11'). White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused."
                     ),
                 },
                 "agent_name": {

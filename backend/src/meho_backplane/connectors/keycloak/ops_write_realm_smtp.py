@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
+from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
@@ -128,8 +128,8 @@ async def _refuse_inline_smtp_password(ctx: PreviewContext) -> str | None:
 def _realm_label(ctx: PreviewContext) -> str | None:
     """The realm the update targets: the ``realm`` param, else the managed realm."""
     explicit = ctx.params.get("realm")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+    if isinstance(explicit, str) and explicit:
+        return explicit
     if ctx.target is None:
         return None
     try:
@@ -149,7 +149,7 @@ async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
     redacted = _redact_echoed_params(
         {
-            "representation": redact_secret_fields(
+            "representation": redact_preview_fields(
                 representation if isinstance(representation, dict) else {}
             )
         },

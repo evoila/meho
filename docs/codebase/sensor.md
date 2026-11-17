@@ -209,6 +209,10 @@ probe that changes the target's version shows in the next list.
 - The match is `connectors.resolver.connector_serves_target`: the
   resolver's own candidate filter (product equal, version inside the
   connector's `supported_version_range`). No second version check exists.
+- The connector also fits when the resolver picks a subclass of its class
+  for the target. The subclass runs the same operations, as the dispatcher
+  does (for example a Sensor on `vault-1.x` and an OpenBao 2.x target,
+  served by `OpenBaoConnector`).
 - The connector named in the warning is the one `resolve_connector_or_label`
   picks for the target, when it is another connector. The resolver returns
   a class, and a class can also be registered as a fallback that accepts
@@ -573,6 +577,17 @@ A Dashboard and its Sensors can move to another site as one JSON file
   `unknown` forever. That is the expected shape on a Vault deploy; on a
   `credentialBackend=gsm` deploy using per-operator WIF it is the failure
   mode `checkRunner.*` exists to fix (see `docs/deploying.md` § GSM).
+- **A Sensor with no login on an SSH `about` read says "no login".** With
+  no check-runner login, the call has no token and cannot read the
+  target's secret. The `about` read of each SSH connector (`linux`,
+  `bind9`, `hyperv`, `msad`, `pfsense`, `rke2`, `windows_dns`, `winsrv`,
+  `wsfc`) then fails with `ConnectorLoginRequiredError`, and the Sensor
+  reads `unknown` / `reason: dispatch_not_ok` with
+  `dispatch_error: connector_error: ConnectorLoginRequiredError`. A real
+  network failure or a failed sign-in is still
+  `ConnectorUnreachableError`. The probe route is unchanged: it answers
+  `reachable=false` either way. The fix for the Sensor is to give the
+  check runner a login (see above).
 - **A connector that refuses to execute must fail the dispatch, not
   return a reading.** The runner synthesizes only `unknown`, so a
   connector that answers `status="ok"` with a plausible-looking payload

@@ -27,6 +27,8 @@
     is_admin        -- bool: caller is tenant_admin (gates Reassign)
     error_message   -- str | None: inline alert (NotRunAssigneeError,
                        empty-reason guard, verify/terminal errors)
+    failure_message -- str | None: why the failed step failed (shown in
+                       the failed-step banner; autoescaped)
     csrf_token      -- str: double-submit token echoed via hx-headers
 
   hx-headers note: every control echoes ``X-CSRF-Token`` from
@@ -134,6 +136,12 @@
                 <span class="badge badge-sm badge-outline mr-1">operation_call</span>
                 <code class="font-mono">{{ verify.op_id }}</code>
               </p>
+              {% if verify.params %}
+                <div>
+                  <span class="opacity-60">Params:</span>
+                  <pre class="overflow-x-auto text-xs"><code>{{ verify.params | tojson(indent=2) }}</code></pre>
+                </div>
+              {% endif %}
               {% if verify.expect %}
                 <div>
                   <span class="opacity-60">Expect:</span>
@@ -152,10 +160,14 @@
         <span aria-hidden="true">&#10007;</span>
         <div>
           <h2 class="font-semibold">This step failed its verify</h2>
+          {% if failure_message %}
+            <p class="text-sm font-mono break-words">{{ failure_message }}</p>
+          {% endif %}
           <p class="text-sm">
             The verify gate for this step did not pass (you answered
             <strong>no</strong> / <strong>escalate</strong>, or an
-            operation-call verify did not match). Fix the cause, then use
+            operation-call verify did not match or its call did not run).
+            Fix the cause, then use
             <strong>Try this step again</strong>, or <strong>Abort</strong>
             the run below (with a reason). Earlier attempts stay on record.
           </p>

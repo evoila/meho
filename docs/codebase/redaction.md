@@ -257,16 +257,79 @@ The name rule is the shared `broadcast.events.is_secret_param_name`
 broadcast scrub and the approval echo use. The full word list:
 
 - anywhere in the name: `password`, `passwords`, `passwd`, `pwd`,
-  `passphrase`, `passphrases`, `apikey`, `kubeconfig`;
+  `passphrase`, `passphrases` (also written `pass_phrase`), `apikey`,
+  `kubeconfig`;
 - at the end of the name: `secret`, `secrets`, `token`, `credential`,
   `credentials`, `psk` (the pre-shared key of a VPN session);
 - the pairs `api_key`, `access_key`, `private_key`, `encryption_key`,
   `license_key`, `licence_key`, `license_keys`, `licence_keys`,
-  `product_key`, `secret_id`, `secret_value`, `secret_data` anywhere in
-  the name;
+  `product_key`, `secret_id`, `secret_value`, `secret_data`, `pass_phrase`
+  anywhere in the name;
 - the pairs `secret_key`, `shared_key`, `preshared_key`,
   `connection_string`, `connection_strings` only at the end of the name
   (`secret_key_ref` is the name of a Kubernetes Secret and stays plain).
+  `pre_shared_key` ends in `shared_key`, and `license_key` counts
+  anywhere;
+- the device and protocol key pairs `authentication_key` and
+  `privacy_key` (the SNMP keys), `auth_key`, `priv_key`,
+  `community_string`, `community_strings`, `tacacs_key`, `radius_key`,
+  `hmac_key`, `signing_key`, `store_key`, `application_key`,
+  `snmp_community` at the end of the name, or right before a last word
+  `ref` (`auth_key_ref` is hidden; `auth_key_id` and
+  `authentication_key_id` stay plain). The list is
+  `_SECRET_KEY_FINAL_TOKEN_PAIRS`;
+- the pair `shared_secret` anywhere in the name (`shared_secret_ref`);
+- a name in capitals has no word boundary (`AUTHKEY`, `LICENSEKEY`), so a
+  pair written as one word counts too: a final pair as the last word, any
+  other pair as any word;
+- a bare `community` field in an SNMP place
+  (`broadcast.events.is_snmp_community_key`): next to a sibling field
+  whose name has an `snmp` word (`snmp_version`, `snmpPort`), or anywhere
+  under a key with an `snmp` word (`{"snmp": {"community": ...}}`,
+  `{"snmpCommunities": [{"community": ...}]}`). Every walk over data
+  asks it next to the name rule and carries the SNMP place down. The text
+  step sees no parent or sibling, so it hides `snmp_community` but not a
+  bare `community` key;
+- the `value` of a name/value pair named `community`
+  (`[{"name": "community", "value": ...}]`), in data and in text
+  (`broadcast.events.is_secret_pair_name`): such a list gives the pair no
+  SNMP sibling, and a setting named `community` there is the SNMP
+  community;
+- never hidden, whatever the rules say: `primary_key`, `partition_key`,
+  `sort_key`, `key_id`, `public_key` (plain identifiers that end in a key
+  word; the list is `_PLAIN_KEY_NAMES`).
+
+A name whose last word is `ref` has no rule of its own. It follows the
+rules above, so it is hidden when the rest of the name is a secret name
+(`password_ref`, `apiKeyRef`, `private_key_ref`) and stays when it is not
+(`secret_ref`). This change only hides more: every name that the rule
+hid before is still hidden.
+
+The rule is one table test, `test_secret_name_new_fields.py`: each secret
+name in four spellings and with an SNMP prefix, each name that ends in
+`ref` and is hidden (`_SECRET_REF_NAMES`) in four spellings, each plain
+name in four spellings, checked in every place below and in the Keycloak
+scrub. A new name is one new row.
+
+The same rule serves the places that had a list of their own:
+
+- The Keycloak approval previews and its trace
+  (`connectors/keycloak/redaction.py`, `redact_preview_fields` and
+  `redact_trace_fields`) hide the Keycloak field names and every name the
+  shared rule marks (a flag or a number stays).
+- The Keycloak read results (`redact_secret_fields`) hide only the Keycloak
+  field names. The dispatcher hides the shared names in the normal answer
+  and keeps their values, so `reveal_secret: true` still returns them.
+- The secret query names of a link (`redaction/url_secret.py::is_secret_query_name`)
+  are its own last words plus every name the shared rule marks.
+- The pfSense config read (`connectors/pfsense/redaction_names.py`)
+  checks the shared rule first, then its own lists for pfSense element
+  names. It keeps its own lists because pfSense writes many secrets
+  under names that no other place uses (`ipsecpsk`, `ldap_bindpw`).
+- The secret check of an uploaded session file
+  (`session_store/secret_check.py`) sends a file to quarantine when a
+  JSON field, a name/value pair or a quoted pair in text has a name the
+  shared rule marks, and also for its own words in `name=value` text.
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number
@@ -546,6 +609,11 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   counts as a committed row: the call then returns its answer, also the
   hidden values of a reveal, and the short row holds the reveal choice but
   not the answer.
+  A short row has a small `error` object that MEHO builds itself. It holds
+  only `error_code` and, for a call that waits for approval or was refused,
+  `approval_request_id` (a UUID). It never holds an error text, so no text of
+  the target reaches it (`operations/audit_row_safe.py:236-252`; the full
+  list is in [audit_query.md](audit_query.md#text-the-table-cannot-store-and-the-short-row-6452)).
 - **Stored audit copy** (`fingerprint_hidden_values`). For **every** op,
   the dispatcher walks the raw answer and the default view side by side.
   Each leaf or subtree that the view hides (Tier-1 redaction, the name

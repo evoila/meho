@@ -339,6 +339,11 @@ managed realm), adds the name `meho-approve` (level 2) to the realm's
 sign-in levels, and makes the flow the browser flow of `meho-cli-approve`. It waits
 for approval
 ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
+It is a change of rights: another admin (a tenant admin or a platform
+admin) approves it, never the person who asked. So an install needs two
+admins before it runs this call. Add the second admin in Keycloak itself
+(Step 6, and put them in `MEHO-Admins` or `MEHO-Platform-Admins`).
+With the built-in Keycloak, `helm upgrade` adds the flow without this call.
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
@@ -510,7 +515,11 @@ Keycloak reads the chart's realm file only when it makes the realm.
 The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 `keycloak.authflow.ensure_approval_touch` instead. It waits for
-approval.
+approval. It is a change of rights: another admin (a tenant admin or a
+platform admin) approves it, never the person who asked. So an install
+needs two admins before it runs this call. Add the second admin in
+Keycloak itself (Step 6, and put them in `MEHO-Admins` or
+`MEHO-Platform-Admins`).
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch \
@@ -976,6 +985,12 @@ adds them to a running realm at the next upgrade.
    Only the client ID and the name differ.
 2. Give neither client a fixed tenant or role. A person gets their tenant
    and role from their group, as with `meho-mcp`.
+3. Give MEHO's Keycloak admin client the realm-management role
+   `manage-users`. With the switch on, the account page of the web
+   console shows "Your tools", and its "Sign out this tool" button needs
+   this role to list and end the signed-in person's logins. Without the
+   role, the button shows an error that names it. On the built-in
+   Keycloak, `meho-admin` already has the role.
 
 **Then turn the switch on.** Set `MCP_CLIENT_PER_TOOL_KIND=true` on the
 backplane (Helm: `config.mcpClientPerToolKind: "true"`).
@@ -1259,8 +1274,8 @@ chart's realm finishing job cannot change realm settings either: its
 account `meho-admin` may only manage clients and users. So a realm that
 already runs gets these settings once, in one of two ways:
 
-- **Through MEHO**, with `keycloak.realm.update` (it waits for
-  approval). Put the values in a file, for example `realm-login.json`:
+- **Through MEHO**, with `keycloak.realm.update` (it waits until
+  another admin approves). Put the values in a file, for example `realm-login.json`:
 
     ```json
     {
@@ -1286,8 +1301,8 @@ realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.
 
-MEHO adds the step with one operation. It waits for approval
-([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
+MEHO adds the step with one operation. It waits until another admin
+approves ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
 because it changes how every person of the realm logs in:
 
 ```bash

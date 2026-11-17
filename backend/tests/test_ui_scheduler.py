@@ -67,6 +67,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE as _DEFAULT_AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _DEFAULT_ISSUER
@@ -496,6 +497,57 @@ def test_list_empty_kind_and_status_filters_are_200_unfiltered() -> None:
     assert str(tid) in response.text
 
 
+# A ticket id that is valid only after cleaning: 256 characters with
+# spaces around it, and 130 decomposed letters (260 before NFC, 130 after).
+_PADDED_LONG_REF = "  " + "x" * 256 + "  "
+_DECOMPOSED_REF = "A\u0308" * 130
+
+
+def _list_with_work_ref(work_ref: str) -> Any:
+    client, mock, _ = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    try:
+        return client.get("/ui/scheduler", params={"work_ref": work_ref})
+    finally:
+        mock.stop()
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [(_PADDED_LONG_REF, "x" * 256), (_DECOMPOSED_REF, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_list_work_ref_filter_counts_length_after_cleaning(typed: str, stored: str) -> None:
+    """The search box cleans first, then checks the length, like the REST filter."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    matching = _seed_trigger(tenant_id=_TENANT_A, work_ref=stored)
+    other = _seed_trigger(tenant_id=_TENANT_A, work_ref="gh:evoila/meho#99")
+    response = _list_with_work_ref(typed)
+    assert response.status_code == 200, response.text
+    assert str(matching) in response.text
+    assert str(other) not in response.text
+
+
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [("CHG\u200b1", "control or invisible characters"), ("x" * 257, "at most 256 characters")],
+    ids=["invisible", "too-long"],
+)
+def test_list_work_ref_filter_refuses_a_bad_ticket_id(typed: str, message: str) -> None:
+    """A refused value is a 422 page that shows the rule and lists no trigger."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    trigger_id = _seed_trigger(tenant_id=_TENANT_A)
+    response = _list_with_work_ref(typed)
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "data-work-ref-refused" in response.text
+    assert message in response.text
+    assert str(trigger_id) not in response.text
+
+
 def test_list_is_tenant_isolated() -> None:
     """A trigger in tenant B never appears in tenant A's list."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -829,6 +881,58 @@ def test_create_submit_one_off_utc_fire_at_persists_instant() -> None:
     if stored.tzinfo is None:
         stored = stored.replace(tzinfo=UTC)
     assert stored == datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
+
+
+def _load_trigger_work_refs(tenant_id: uuid.UUID) -> list[str | None]:
+    from sqlalchemy import select
+
+    async def _do() -> list[str | None]:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            stmt = select(ScheduledTrigger.work_ref).where(ScheduledTrigger.tenant_id == tenant_id)
+            return list((await session.execute(stmt)).scalars().all())
+
+    return asyncio.run(_do())
+
+
+def _post_create_with_work_ref(work_ref: str) -> Any:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        return client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "cron",
+                "agent_definition_id": str(_AGENT_ID),
+                "cron_expr": "0 9 * * *",
+                "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
+                "in_flight_policy": "fail_into_audit",
+                "work_ref": work_ref,
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+
+def test_create_submit_cleans_the_ticket_id_of_the_form() -> None:
+    """The create form strips the ticket id like every other door."""
+    response = _post_create_with_work_ref("  CHG1  ")
+    assert response.status_code == 204, response.text
+    assert _load_trigger_work_refs(_TENANT_A) == ["CHG1"]
+
+
+def test_create_submit_refuses_a_bad_ticket_id_before_a_trigger_is_stored() -> None:
+    """An invisible character in the ticket id re-renders the modal; nothing is stored."""
+    response = _post_create_with_work_ref("CHG\u200b1")
+    assert response.status_code == 200, response.text
+    assert "alert-error" in response.text
+    assert "control or invisible characters" in response.text
+    assert _trigger_count(_TENANT_A) == 0
 
 
 def test_create_submit_invalid_cron_rerenders_modal_with_error() -> None:

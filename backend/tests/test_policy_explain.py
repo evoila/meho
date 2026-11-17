@@ -36,7 +36,7 @@ from meho_backplane.main import app
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy.classification import ClassificationEntry
-from meho_backplane.policy.explain import FILE_NEEDS_CLASSIFICATION, _wait_path
+from meho_backplane.policy.explain import FILE_NEEDS_CLASSIFICATION, _entry_view, _wait_path
 from meho_backplane.policy.explain_asker import READ_ONLY_CANNOT_CALL
 from meho_backplane.settings import get_settings
 
@@ -186,6 +186,7 @@ async def test_wait_names_who_may_approve(client: TestClient, embedding: AsyncMo
     assert token_call["approvers"] == {
         "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
         "rule": "default",
+        "floor": None,
     }
     assert token_call["evaluator"]["verdict"] == "wait"
     assert token_call["evaluator"]["floor"]["rule_id"] == "token_runs_only_safe"
@@ -349,6 +350,44 @@ def test_the_wait_names_the_rule_that_causes_it_not_an_overridden_one() -> None:
     assert _wait_path(matched) == "tenant:classifications[0]"
     assert _wait_path([install_group, install_op]) is None
     assert _wait_path([install_group, tenant_connector]) == "install:classifications[0]"
+
+
+def test_an_entry_does_not_show_a_label_that_breaks_the_rule() -> None:
+    entry = ClassificationEntry(
+        ref="install:classifications[0]",
+        scope="install",
+        op="explapi.vm.list",
+        labels={"team": "ops", "note": "x" * 256, "line": "two\nlines", "k" * 64: "x"},
+    )
+    assert _entry_view(entry).labels == {"team": "ops"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("shadow", "classification")
+async def test_the_answer_does_not_show_a_stored_label_that_breaks_the_rule(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    """A label stored before the rule (or written around it) stays out of the answer."""
+    await _setup(embedding)
+    labels = {"team": "ops", "note": "x" * 256, "line": "two\nlines", "k" * 64: "x"}
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=_TENANT,
+                document={"classifications": [{"match": {"op": _SAFE}, "labels": labels}]},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    key = make_rsa_keypair("kid-expl-labels")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = _ask(client, _token(key), **_groups(_SAFE, "Operators")).json()
+    assert body["status"] == "ok", body
+    classification = body["classification"]
+    assert [entry["path"] for entry in classification["entries"]] == ["tenant:classifications[0]"]
+    assert classification["entries"][0]["labels"] == {"team": "ops"}
+    assert classification["labels"] == {"team": "ops"}
 
 
 @pytest.mark.asyncio

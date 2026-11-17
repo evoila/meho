@@ -219,6 +219,19 @@ def test_a_marked_http_error_stays_hidden() -> None:
 #: so each new one is seen in review.
 _MARKED_TYPES = {
     "LinuxWriteOwnMessageError",
+    # secret.move: a fixed sentence about a deleted sink version.
+    "SecretMergeDeletedVersionError",
+    # secret.move: target name, op id and MEHO's policy reason; no vendor text.
+    "VaultTargetRefusedError",
+    # secret.move: target names and ids, the approved one and the one found now.
+    "VaultTargetChangedError",
+    # secret.move: the target name as typed; no vendor text.
+    "VaultTargetNotFoundError",
+    # secret.move: a fixed sentence with the field name at most; no Vault text.
+    "SecretSinkChangedError",
+    # secret.move: fixed sentences about a refused merge write; no Vault text.
+    "SecretMergeChangedError",
+    "SecretMergeRefusedError",
     "Rke2SnapshotNoSudoError",
     "Rke2WriteOwnMessageError",
 }

@@ -195,7 +195,7 @@ func TestPrintGrants(t *testing.T) {
 	scope := "33333333-3333-3333-3333-333333333333"
 	g := sampleGrant(0)
 	g.TargetScope = &scope
-	PrintGrants(&buf, "agent:bot", []api.AgentGrantRead{sampleGrant(1), g}, nil)
+	PrintGrants(&buf, "created", "agent:bot", []api.AgentGrantRead{sampleGrant(1), g}, nil)
 	out := buf.String()
 	if !strings.Contains(out, "grants of agent:bot:") || !strings.Contains(out, "target=every target") ||
 		!strings.Contains(out, "target="+scope) {
@@ -203,15 +203,22 @@ func TestPrintGrants(t *testing.T) {
 	}
 
 	buf.Reset()
-	PrintGrants(&buf, "agent:bot", nil, nil)
+	PrintGrants(&buf, "created", "agent:bot", nil, nil)
 	if !strings.Contains(buf.String(), "grants of agent:bot: none") {
 		t.Errorf("empty output: %q", buf.String())
 	}
 
 	buf.Reset()
-	PrintGrants(&buf, "agent:bot", nil, errors.New("HTTP 500"))
-	if !strings.Contains(buf.String(), "could not be read") || strings.Contains(buf.String(), ": none") {
+	PrintGrants(&buf, "created", "agent:bot", nil, errors.New("HTTP 500"))
+	if !strings.Contains(buf.String(), "the agent was created, but its grants could not be read") ||
+		strings.Contains(buf.String(), ": none") {
 		t.Errorf("failed read output: %q", buf.String())
+	}
+
+	buf.Reset()
+	PrintGrants(&buf, "changed", "agent:bot", nil, errors.New("HTTP 500"))
+	if !strings.Contains(buf.String(), "the agent was changed, but its grants could not be read") {
+		t.Errorf("failed read output after an edit: %q", buf.String())
 	}
 }
 

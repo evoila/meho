@@ -130,6 +130,99 @@ boundary redaction:
   — the two steps that move a secret to another MEHO instance. See the
   next section.
 
+## Vault target refs and the merge option
+
+Kind `vault-target` (`vault_target_endpoint.py`) is the Vault kind that
+acts through a registered Vault target. Ref: `<target>/<path>#<field>`,
+for example `vault-target:vault-prod/secret/app/db#password`.
+
+- The adapter finds the target by name in the caller's tenant, and logs
+  in to Vault under that target's role (`extras["vault_role"]`). A target
+  that is not a Vault target, or a Vault target without its own
+  `vault_role`, is refused before any Vault login.
+- The tenant path rule of the `vault:` kind also applies to `vault-target:`
+  refs: a source or sink path outside the caller's tenant path is refused
+  before any Vault login.
+- The caller needs rights on the named target. MEHO checks the caller's
+  policy for `vault.kv.read` (source), `vault.kv.put` (sink) or
+  `vault.kv.patch` (sink with `merge`) on that target, with
+  `operations/secondary_target_policy.py`. A `deny` refuses. When the move
+  would wait for approval, the permission check
+  (`vault_target_move_preflight`) refuses it at once instead, so no person
+  is asked to approve a move that cannot run. When a reviewer runs an
+  approved move, the requester's policy is checked again.
+- The move checks the sink path and both `vault-target` sides before it
+  reads the source.
+- Source and sink each name their own target. They can use different
+  roles in one move. The plain `vault:` kind is unchanged and always uses
+  the operator's own Vault role.
+- `merge: true` on `secret.move` is a sink option, off by default. The sink
+  reads the secret, changes only the named field, and writes it back with
+  check-and-set on the version it read (`cas=0` when the secret does not
+  exist yet). If someone else changed the secret in between, Vault
+  refuses the write and the move fails. MEHO then reads the version again
+  and tells the caller which case it is: the secret changed
+  (`SecretMergeChangedError`, run the move again) or Vault refused for
+  another reason, for example a Vault policy that allows the read but
+  not the write (`SecretMergeRefusedError`; its message also says when
+  MEHO could not read the version again). Both messages are fixed MEHO
+  sentences, with no Vault text and no value. If the latest version is
+  deleted or destroyed, the move fails and writes nothing
+  (`SecretMergeDeletedVersionError`). Without `merge`, a Vault sink
+  replaces the whole secret. A sink kind without merge support makes the
+  move fail before the source is read.
+- The approval preview names both sides and the merge flag. A
+  `vault-target` side shows the name as typed (`target`), the target it
+  points to (`target_id`, `target_name`), that target's Vault role
+  (`vault_role`) and its Vault login mount (`vault_mount`: the target's
+  `extras.vault_mount`, or the deployment's `VAULT_OIDC_MOUNT_PATH`). No
+  value is in the preview or in the audit row. The agent's own
+  `preview_operation` shows only the refs (`kind`, `ref` and, for a
+  `vault-target` side, `target`) and makes no lookup.
+- The sink shows whether its secret exists (`secret_exists`) and, with
+  `merge`, whether the field exists (`field_exists`). MEHO reads this
+  when the request is made, not when the move runs. The lookup uses only
+  the write right on the sink: the same tenant path rule, MEHO policy
+  check and Vault login as the write, and only when both `vault-target`
+  sides pass their checks. It needs no other right. The answer holds
+  only `"yes"`, `"no"` or `"not known"`; the read data is dropped at
+  once. Only a Vault sink can say yes or no. Every other sink kind, and
+  a failed lookup, says `"not known"`.
+- The approved run holds a Vault sink to a `"no"` on the approval
+  (`_approved_sink_expectation` in `vault_endpoint.py`):
+  - `secret_exists: "no"`, without `merge`: the write uses `cas=0`, so
+    Vault refuses it if the secret exists by then.
+  - `secret_exists: "no"`, with `merge`: a secret found by the run's read
+    refuses the write; the write uses `cas=0`, so a secret made after
+    that read is refused too.
+  - `field_exists: "no"` (with `merge`): the field found by the run's
+    read refuses the write; the check-and-set on the read version covers
+    the time up to the write.
+  - Each refusal is `SecretSinkChangedError`: the sink changed since the
+    approval, nothing was written, send a new request. The fields of a
+    sink secret that exists by then stay as they are.
+  - `"yes"` and `"not known"` bind nothing: the run writes as an ordinary
+    move does (without `merge` it replaces the secret; with `merge` it
+    keeps the other fields, guarded by check-and-set).
+  - The check is atomic: only a Vault sink says yes or no, and Vault
+    refuses the guarded write itself (check-and-set). No sink kind
+    without check-and-set gives an answer that binds the run.
+- The approved run of a move compares the target it finds for each
+  `vault-target` side with the approval (`approved_preview("secret.move")`,
+  checked in `check_access`): `target_id`, `vault_role` and `vault_mount`.
+  Another target, another Vault role or login mount, or an approval
+  without one of them, refuses the run with `VaultTargetChangedError`
+  before any Vault login. So the run acts on the targets the approver
+  saw, with the role and the mount the approver saw, even when a name or
+  alias points to another target by then. A name that finds no target
+  (or more than one) refuses the run with `VaultTargetNotFoundError`,
+  before any Vault login; nothing is read or written. An approval made
+  before MEHO showed target ids is refused too; the requester sends a new
+  request.
+- `secret.handoff.export` refuses a `vault-target:` source (its params
+  check and its handler). Move the secret to a `vault:` place first.
+- `meho secret move --merge` sends `merge: true`.
+
 ## Move a secret to another MEHO instance (handoff)
 
 `secret.move` works inside one MEHO: both sides use this instance's own
@@ -555,7 +648,8 @@ the posture and relies on the existing gate). The policy refinement
   (`move_preview.py`, registered via `register_preview_builder("secret.move", …)`)
   populates `ApprovalRequest.proposed_effect` with a ref-only summary —
   the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`,
-  never the value. `secret.move` classifies `"other"` (so the
+  never the value. A `vault-target` side and the sink add the fields of
+  the section "Vault target refs and the merge option". `secret.move` classifies `"other"` (so the
   credential-class preview suppression does not fire) and carries no
   value in its params, so the summary is value-free by construction.
 - **Time-boxed scope.** The grant is the existing `AgentPermission`

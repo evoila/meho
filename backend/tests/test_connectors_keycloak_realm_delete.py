@@ -355,16 +355,29 @@ async def test_malformed_read_after_delete_is_not_deleted_true(
 
 
 async def test_realm_name_is_encoded_in_the_path(kc: KeycloakConnector) -> None:
-    """A realm name cannot climb out of /admin/realms/{realm}."""
+    """A dot in a realm name stays inside its one path segment."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        get_route = mock.get("/admin/realms/a%2F..%2Fb".replace(".", "%2E")).respond(404)
-        result = await _run({"realm": "a/../b"})
+        get_route = mock.get("/admin/realms/a%2Eb").respond(404)
+        result = await _run({"realm": "a.b"})
     assert result["status"] == "ok", result
     assert get_route.call_count == 1
 
 
-@pytest.mark.parametrize("realm", [_ADMIN_REALM, _MANAGED_REALM, "MASTER", " Meho "])
+@pytest.mark.parametrize("realm", ["a/../b", "..", " Meho ", "name?x=", "name#"])
+async def test_realm_delete_refuses_a_realm_that_is_not_a_plain_name(
+    kc: KeycloakConnector, realm: str
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        route = mock.route().respond(200, json={})
+        result = await _run({"realm": realm})
+    assert result["status"] == "error", result
+    assert "plain realm name" in str(result)
+    assert not route.called
+
+
+@pytest.mark.parametrize("realm", [_ADMIN_REALM, _MANAGED_REALM, "MASTER", "MEHO"])
 async def test_realm_delete_refuses_the_target_realms(kc: KeycloakConnector, realm: str) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)

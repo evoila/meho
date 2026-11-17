@@ -100,8 +100,22 @@ grant never clears its wait; `credential_read_grant_reason`), an op with a param
 gives; a grant never covers the address, so a person approves each call,
 and grant create refuses such a grant — `caller_address_grant_reason`), and an
 op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
-`msad.group.add-member`, `msad.group.remove-member` and `secret.move`): a person approves each
+`msad.group.add-member`, `msad.group.remove-member`, `secret.move` and every
+operation registered as a change of rights, such as the Keycloak writes that
+change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
+At call time one function gives these refusals: `never_covered_reason` in
+`service_grants.py`. It returns the kind and the reason of the first that
+holds: a credential read, per-call approval, a caller-address field,
+always wait, a delete sign. The run approval gate uses the same function
+([run-approvals.md](run-approvals.md)). Only a delete sign leaves room for
+a sandbox delete grant.
+A call that sets a param a connector marks with `declare_wait_when_set`
+(`op_classes.py`; today `secret_field_map` and `flight_recorder_capture`
+of `targets.register`) waits for a person too: the dispatcher marks that
+call as always waiting (`operations/wait_when_set.py`), so no grant and
+no run approval clears it. A call without these params keeps the rules of
+the op.
 Parking is not refusal: a service principal can still propose a
 destructive op and read its result after a human approves. The steps are in
 [`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
@@ -394,7 +408,8 @@ parent's audit id when a child step was cleared). Details:
 A standing grant covers one operation for good. A **run approval** covers
 the operation list of one automation run: the add-on asks, a person
 approves the list once, and it ends with the run. The gate checks it after
-the standing grants, with the same delete rule. See
+the standing grants, with the same delete rule and the same credential
+read rule. See
 [run-approvals.md](run-approvals.md).
 
 ## Read scope: limit a service principal's reads to named targets (#4992)

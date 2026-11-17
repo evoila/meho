@@ -17,6 +17,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -141,7 +142,8 @@ func newBulkImportCmd() *cobra.Command {
 			"rejects the entire batch (no partial apply). Re-running the " +
 			"same file is a per-row no-op — the idempotent annotate " +
 			"upsert path matches the single-edge contract. Requires " +
-			"tenant_admin.\n\n" +
+			"tenant_admin. A --dry-run runs at once.\n\n" +
+			dispatch.RESTWriteApprovalNote +
 			"`from` and `to` accept either a bare string (the common " +
 			"case) or a `{name, kind}` map when an endpoint is " +
 			"ambiguous and the operator wants to pin the kind. `kind` " +
@@ -205,6 +207,11 @@ func runBulkImport(cmd *cobra.Command, opts bulkImportOptions) error {
 	resp, statusCode, body, err := postBulkImport(cmd.Context(), backplaneURL, doc, opts.DryRun)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode == http.StatusAccepted {
+		if parked, err := dispatch.RenderRESTParked(cmd.OutOrStdout(), body, opts.JSONOut); parked {
+			return err
+		}
 	}
 	if statusCode != http.StatusOK {
 		// Special-case 422 invalid_bulk: surface the structured per-

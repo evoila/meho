@@ -100,6 +100,11 @@ EXPECTED_WRITE_OP_IDS: tuple[str, ...] = (
     "keycloak.realm.delete",
     "keycloak.user.disable",
     "keycloak.user.enable",
+    "keycloak.client_scope.protocol_mapper.update",
+    "keycloak.role_mapping.client.assign",
+    "keycloak.role_mapping.client.remove",
+    "keycloak.user.update",
+    "keycloak.user.credential.delete",
 )
 
 #: Expected (safety_level, requires_approval) per op — the registration
@@ -130,6 +135,11 @@ EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.realm.delete": "destructive",
     "keycloak.user.disable": "dangerous",
     "keycloak.user.enable": "dangerous",
+    "keycloak.client_scope.protocol_mapper.update": "dangerous",
+    "keycloak.role_mapping.client.assign": "dangerous",
+    "keycloak.role_mapping.client.remove": "dangerous",
+    "keycloak.user.update": "caution",
+    "keycloak.user.credential.delete": "dangerous",
 }
 
 
@@ -276,10 +286,10 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_write_ops_registration_set() -> None:
-    """WRITE_OPS carries the twenty write ops (the eighteen before, plus disable and enable)."""
+    """WRITE_OPS carries 25 write ops (24 from before, plus the scope mapper write)."""
     op_ids = {op.op_id for op in WRITE_OPS}
     assert op_ids == set(EXPECTED_WRITE_OP_IDS)
-    assert len(WRITE_OPS) == 20
+    assert len(WRITE_OPS) == 25
 
 
 def test_write_ops_safety_levels_and_approval() -> None:
@@ -362,6 +372,7 @@ async def test_role_mapping_assign_resolves_username_and_role(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/example/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/example/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
         mock.get("/admin/realms/example/roles/tenant_admin").respond(200, json=_REALM_ROLE)
         post_route = mock.post(
             f"/admin/realms/example/users/{_USER_UUID}/role-mappings/realm"
@@ -472,6 +483,7 @@ async def test_user_reset_password_resolves_username_and_no_leak(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/example/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/example/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
         put_route = mock.put(f"/admin/realms/example/users/{_USER_UUID}/reset-password").respond(
             204
         )

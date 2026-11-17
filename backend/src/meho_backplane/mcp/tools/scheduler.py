@@ -67,6 +67,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools._work_ref_argument import validation_error_text, work_ref_argument
 from meho_backplane.scheduler.schemas import (
     ScheduledTriggerCreate,
     ScheduledTriggerRead,
@@ -137,7 +138,7 @@ async def _list_handler(
     )
     kind = arguments.get("kind")
     status = arguments.get("status")
-    work_ref = arguments.get("work_ref")
+    work_ref = work_ref_argument(arguments.get("work_ref"))
     limit_raw = arguments.get("limit", 100)
     offset_raw = arguments.get("offset", 0)
     # The inputSchema does first-pass shape + bounds; the int() cast is
@@ -149,7 +150,7 @@ async def _list_handler(
         operator.tenant_id,
         kind=kind if isinstance(kind, str) else None,
         status=status if isinstance(status, str) else None,
-        work_ref=work_ref if isinstance(work_ref, str) else None,
+        work_ref=work_ref,
         limit=limit,
         offset=offset,
     )
@@ -170,7 +171,7 @@ register_mcp_tool(
             "meho_scheduler_cancel) alongside the model-native `id`. "
             "Optional filters: kind ('cron'|'one_off'|'event'), "
             "status ('active'|'paused'|'cancelled'|'fired'), "
-            "work_ref (exact-match change-ticket reference). "
+            "work_ref (the whole ticket id; white space at both ends is ignored). "
             "Tenant-scoped via the JWT; cross-tenant listing is not "
             "exposed on the MCP transport."
         ),
@@ -189,10 +190,12 @@ register_mcp_tool(
                 },
                 "work_ref": {
                     "type": "string",
-                    "maxLength": 256,
                     "description": (
-                        "Optional exact-match filter on the trigger's "
-                        "change-ticket reference (e.g. 'gh:evoila/meho#13')."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#13'). White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused."
                     ),
                 },
                 "limit": {
@@ -233,7 +236,7 @@ async def _create_handler(
     try:
         payload = ScheduledTriggerCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {validation_error_text(exc)}") from exc
     # Cross-tenant admin: a payload.tenant_id naming a *different* tenant
     # crosses the tenant boundary, which is a platform-level capability --
     # not something tenant-admin *rank* confers. Reuse the REST route's

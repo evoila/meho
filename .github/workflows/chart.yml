@@ -1495,12 +1495,27 @@ jobs:
             sleep 4
           done
           [ -n "$failed" ] || { echo "::error::the broken release did not fail its start"; exit 1; }
-          log=$(kubectl -n meho-test logs deploy/meho-test -c backplane --previous --tail=300 || true)
+          # The log of the crashed container can be empty or short for a
+          # second or two after the restart. Read it again (every 2 seconds,
+          # up to 30 seconds) until both expected lines are there.
+          log=""
+          for _ in $(seq 1 15); do
+            log=$(kubectl -n meho-test logs deploy/meho-test -c backplane --previous --tail=300 || true)
+            if grep -q 'operation_catalog_test_failure' <<<"$log" \
+              && grep -q 'operation_catalog_unchanged' <<<"$log"; then
+              break
+            fi
+            sleep 2
+          done
           grep -E 'operation_catalog_test_failure|operation_catalog_unchanged' <<<"$log" || true
-          grep -q 'operation_catalog_test_failure' <<<"$log" \
-            || { echo "::error::the broken release did not reach its failure after registration"; exit 1; }
-          grep -q 'operation_catalog_unchanged' <<<"$log" \
-            || { echo "::error::the broken release did not log that it changed no row"; exit 1; }
+          if ! grep -q 'operation_catalog_test_failure' <<<"$log" \
+            || ! grep -q 'operation_catalog_unchanged' <<<"$log"; then
+            echo "::group::last lines of the previous backplane log"
+            tail -n 40 <<<"$log"
+            echo "::endgroup::"
+            echo "::error::the previous backplane log has no operation_catalog_test_failure line, or no operation_catalog_unchanged line, after 30 seconds"
+            exit 1
+          fi
           changed=$(grep -oE 'rows_changed["=: ]+[0-9]+' <<<"$log" | grep -oE '[0-9]+$' | head -1)
           [ "${changed:-0}" -gt 0 ] \
             || { echo "::error::the broken release changed no row before it failed (rows_changed=${changed:-none})"; exit 1; }

@@ -89,7 +89,6 @@ from meho_backplane.broadcast import (
     TTL_DEFAULT_MINUTES,
     TTL_MAX_MINUTES,
     TTL_MIN_MINUTES,
-    WORK_REF_MAX_CHARS,
     AnnouncementClaimError,
     AnnouncementFilter,
     AnnounceRateLimitError,
@@ -116,6 +115,7 @@ from meho_backplane.mcp.tools._short_tool_texts import (
     BROADCAST_RECENT_SHORT,
     BROADCAST_WATCH_SHORT,
 )
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.work_ref import WorkRefError, normalize_work_ref
 
 __all__: list[str] = []
@@ -159,10 +159,10 @@ def _extract_filter(arguments: dict[str, Any]) -> AnnouncementFilter:
         ("principal", principal),
         ("target", target),
         ("actor_sub", actor_sub),
-        ("work_ref", work_ref),
     ):
         if value is not None and not isinstance(value, str):
             raise McpInvalidParamsError(f"filter.{name}: must be a string when provided")
+    work_ref = work_ref_argument(work_ref, name="filter.work_ref")
     active_only = filter_obj.get("active_only", False)
     if not isinstance(active_only, bool):
         raise McpInvalidParamsError("filter.active_only: must be a boolean when provided")
@@ -297,14 +297,16 @@ register_mcp_tool(
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": WORK_REF_MAX_CHARS,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It groups every "
+                                "event tied to one ticket -- an "
+                                "announcement's declared 'work_ref' OR an "
+                                "audit-driven operation's projected lineage "
+                                "'work_ref'."
                             ),
                         },
                         "active_only": {
@@ -320,7 +322,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "limit": {
@@ -973,14 +977,16 @@ register_mcp_tool(
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": WORK_REF_MAX_CHARS,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It groups every "
+                                "event tied to one ticket -- an "
+                                "announcement's declared 'work_ref' OR an "
+                                "audit-driven operation's projected lineage "
+                                "'work_ref'."
                             ),
                         },
                         "active_only": {
@@ -996,7 +1002,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "timeout_ms": {

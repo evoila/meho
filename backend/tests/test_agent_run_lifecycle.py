@@ -241,7 +241,7 @@ async def test_list_runs_returns_tenant_runs_newest_first() -> None:
 
 @pytest.mark.asyncio
 async def test_list_runs_filters_by_work_ref_exact_match() -> None:
-    """``work_ref`` narrows to the runs under that exact change ticket."""
+    """``work_ref`` narrows to the runs under that change ticket."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         tenant_id = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")

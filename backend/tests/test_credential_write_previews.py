@@ -84,7 +84,10 @@ async def test_keycloak_user_reset_password_shows_user_and_vault_path() -> None:
         },
     )
     assert preview["resource"] == "user_password"
-    assert preview["username"] == "alice"
+    # No live connector here, so the card cannot show the stored user name.
+    assert "username" not in preview
+    assert preview["requested_username"] == "alice"
+    assert preview["user_available"] is False
     assert preview["realm"] == "ops"
     assert preview["password_source"] == "vault"
     assert preview["password_secret_ref"] == "tenants/acme/alice"

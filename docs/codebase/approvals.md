@@ -804,6 +804,20 @@ model, or resume endpoint):
      waits. MEHO does not try to tell who is behind a token, because an
      AI tool can use a person's login.
 
+   The REST target writes (`POST`, `PATCH`, `DELETE /api/v1/targets`)
+   and the four REST topology graph writes follow the same rule. A
+   person's token call goes to the matching `targets.*` or `topology.*`
+   operation through the dispatcher and answers 202 with the approval
+   request id (`api/v1/_wait_for_approval.py`); the console writes at
+   once. See [targets.md](targets.md) and [topology.md](topology.md).
+   `meho targets import` sends one write per row, so each row makes its
+   own approval request. For a large file, a person imports it in the web
+   console, or runs the import with `--work-ref`. Then a person goes
+   through all its rows with
+   `meho approvals approve --filter-work-ref <ref> --in-order`, which asks
+   for a yes at each row. The person who ran the import can approve its
+   rows this way only after a fresh approval sign-in.
+
    Only `verify_access_token_with_refresh`
    (`backend/src/meho_backplane/ui/auth/refresh.py`) sets
    `web_session=True`. No token claim, header or request field can set
@@ -1097,8 +1111,12 @@ login client (see the `client` block in [audit_query.md](audit_query.md)):
 ## Changes of rights: the login is never its own approver
 
 `operations/grant_approval.py` checks the Keycloak writes that change who
-has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign` and
-`keycloak.group.update_attributes`. The connector registers them
+has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign`,
+`keycloak.role_mapping.client.assign` and `keycloak.group.update_attributes`.
+It also checks two writes that change how a login signs in:
+`keycloak.user.update` (a new email or user name) and
+`keycloak.user.credential.delete` (a passkey or one-time code removed).
+The connector registers them
 (`connectors/keycloak/ops_write_grant.py`) and adds a `grant` block to the
 preview of the waiting request:
 
@@ -1111,7 +1129,10 @@ preview of the waiting request:
 - `login_realm`: the target manages a realm of MEHO's own login, see
   `_backplane_login_realms()`.
 - `platform_admin`: the group the handler will change is the platform
-  admin group, or the roles include the platform admin role.
+  admin group, the roles include the platform admin role, or the change
+  gives a role of the `realm-management` client (in any case). For a role
+  change in the login realm, the parts of the role count too (see "A role
+  is judged by what it really gives" below).
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
@@ -1162,7 +1183,41 @@ same check refuses the run:
   refused too;
 - when the change now needs a stricter approval than the one it got: the
   live card says login realm or platform admin where the saved one said
-  no, or cannot say which it is.
+  no, or cannot say which it is;
+- for an operation registered with `bound_ids` (a card key and a refusal),
+  when the live card lists other ids under that key than the saved card.
+  `keycloak.user.credential.delete` uses it for `will_remove`, so the run
+  removes only the credentials the approver saw. This check runs before the
+  handler reads the system again, so the handler also compares its own
+  read with the approved card (`approved_preview`) before it deletes.
+
+### A role is judged by what it really gives
+
+A role can be made of other roles, and those can be made of more roles.
+For `keycloak.role_mapping.assign` and `keycloak.role_mapping.client.assign`
+in the login realm, the connector reads the parts of every named role, on
+every level (`ops_write_effective_roles.py`), and puts them on the card as
+`effective_roles`. Each entry has `id`, `name`, `client_id` (`None` for a
+realm role), `realm_management` and `login_role`. `realm_management` marks
+a role of the `realm-management` client. `login_role` marks a realm role
+that MEHO's login turns into platform admin rights. As at login, that is
+only the realm role whose name is exactly `JWT_PLATFORM_ADMIN_ROLE_NAME`
+(same case). When the setting is unset, no role has this mark.
+
+If any part has one of these marks, `platform_admin` is true, so a platform
+admin must approve. If no part has a mark, `platform_admin` is false. The
+name of the role that was asked for does not decide. If MEHO cannot read all the parts (a read fails, a role is
+missing, more than 500 roles, nesting deeper than 10 levels),
+`effective_roles` is `None` and `platform_admin` is the strict case.
+Outside the login realm the list is empty and nothing changes.
+
+The run is bound to the list. Both ops are registered with `bound_ids` on
+`effective_roles`: if the live list has other role ids than the approved
+one, the run is refused and a new request is needed. A request parked
+before this rule has no list, so it is refused at the run too, in every
+realm. Both ops are also registered with `bound_ids_missing`, so this
+refusal says plainly: "This request was made before MEHO read what a role
+gives. Send it again."
 
 ## The rights-change mark: another admin must approve
 
@@ -1196,8 +1251,22 @@ decides: not the requester, a person in a chosen tenant, and an admin
 - An operation registered with `register_rights_change_op` is a rights
   change on every request. `policy.classify` (a change of a category,
   labels or the "always wait" mark, see
-  [policy-classification.md](policy-classification.md)) is one.
+  [policy-classification.md](policy-classification.md)) is one. The
+  Keycloak connector registers every write that is a change of rights this
+  way, also the group, role and login writes above (`GRANT_OPS` in
+  `connectors/keycloak/ops_write_grant.py`), so they carry the mark in
+  every realm. The login-realm checks above come on top.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
+
+**No grant and no run approval covers a registered change of rights.**
+`register_grant_op` and `register_rights_change_op` also mark the
+operation with `declare_per_call_approval`. So making a standing grant for
+it is refused, a stored grant row does not clear a call, and a run approval
+list that names it is refused. This is one rule in the core: a connector
+that registers a change of rights needs no second mark. The Keycloak
+writes that are changes of rights are listed in
+[connectors-keycloak.md](connectors-keycloak.md), "Writes that are
+changes of rights".
 
 A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
@@ -1300,16 +1369,32 @@ works out who may approve it and stores it on the request:
   example `["SA-Operators", "Admins"]`. Group kinds only, never people.
   MEHO stores no members, so the requester is never in it. Whether the
   requester may approve their own change is today's rule (below).
-- `approver_rule` (text): the routing entry that set them
-  (`tenant:routing[0]`, `install:routing[2]`), or `default`.
-- Migration `0167` adds both columns, nullable.
+- `approver_rule` (text): the routing entries that set them, the
+  install's first (`install:routing[2]`, `tenant:routing[0]`,
+  `install:routing[0], tenant:routing[1]`), or `default`.
+- `approver_category` (text): the category the tenant's entries used (the
+  category the classification gave the change).
+- `approver_install_category` (text): the category that the install's
+  policy alone gives the change. The install's entries used it, and the
+  click routes the request again with it (below). A tenant can move an
+  operation to another category for its own rules; the install's routing
+  still applies with this one.
+- Both categories are the empty text on a request that had stored kinds
+  before migration `0173`: MEHO does not know them.
+- Migration `0167` adds the first two columns, migration `0173` the other
+  two. All are nullable.
 
 How the kinds are found:
 
-1. The tenant's routing entries, then the install's. The first entry whose
-   `match` fits wins. A `match` can name a `category`, a `connector`
-   pattern and a `risk` level; all that it names must fit.
-2. The entry's kinds are cut to the kinds that may approve the change
+1. The install's routing is a floor. The first install entry whose
+   `match` fits counts, then the first tenant entry whose `match` fits.
+   An install entry matches on the install's category, a tenant entry on
+   the tenant's.
+   The kinds are the kinds that both name, so a tenant entry can only
+   narrow the install's ([policy.md](policy.md), "The install's routing is
+   a floor"). A `match` can name a `category`, a `connector` pattern and a
+   `risk` level; all that it names must fit.
+2. The kinds are cut to the kinds that may approve the change
    today (`today_kinds`, the same rule as `approver_groups` in
    `policy/evaluate.py`): a `dangerous` or `destructive` change only
    SA-Operators and Admins; a lower one also Operators and Approvers; an
@@ -1324,15 +1409,45 @@ The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
 (`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
 `apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
-dispatcher and the step gate pass it to `create_pending_request`. A request
+install's category is `EndpointDescriptor.policy_install_category`: the
+category from the install's classification entries and overrides alone.
+When those entries give the operation two categories, it is the empty
+text: MEHO does not know it (an operation registered after the install's
+import can match two such entries). Then no group may approve the change
+when an install entry that matches on a `category` could fit it (rule
+`category_not_stored`); the click refuses it and explain shows no group.
+The dispatcher and the step gate pass both to `create_pending_request`. A request
 without a category fits only entries without `category`.
 
 **At the click** (`_load_pending_for_approval`) today's checks run first,
 in their order: a person only, the read-only check, still pending, the
 deadline, the rights-change and group rules (also the rules on own
-changes), the role floor. Then `_check_routed_approver`: the person's
+changes), the role floor. Then `_check_install_floor`
+(`install_floor_refusal` in `policy/routing_floor.py`): MEHO routes the
+request again with the install's file as it is now, the stored risk level
+and the stored `approver_install_category`. A request without stored
+kinds (it started to wait while the switch was off) is not checked here:
+it keeps today's rule until it is decided or expires. When an install
+entry fits and the
+person's kind is not in it, `ApprovalRoutingError` with one sentence, for
+example "The install's routing (`install:routing[0]`) lets only
+MEHO-SA-Operators or MEHO-Admins approve this change. You are in
+MEHO-Operators. A tenant's routing can only narrow it." An install routing
+that is not valid refuses the click. A request whose category is the
+empty text (stored before migration `0173`, or the install's entries
+gave the change two categories) is refused when an install entry that
+matches on a `category` could fit it: MEHO cannot check who may approve
+it, so it must be rejected. When no such
+entry could fit, the category does not change the answer. A change of
+rights is not checked here. `meho policy explain --request` uses the same
+install routing (`install_floor`), so it names the groups the click
+allows now. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
-Readers) must be in the stored kinds. If not, `ApprovalRoutingError` (a
+Readers) must be in the stored kinds. `kind_of` reads the role and the
+approve flags, and a binding of the policy file can set those flags
+([policy-bindings.md](policy-bindings.md)). So a binding can set the kind
+that the routing checks: a person whose group is bound to `SA-Operators`
+approves a change routed to SA-Operators. If not, `ApprovalRoutingError` (a
 subclass of `ApprovalGroupForbiddenError`, so every approve route answers
 403) with one sentence that names who may approve, for example: "Only
 MEHO-SA-Operators or MEHO-Admins may approve this change (routing rule
@@ -1348,9 +1463,13 @@ console sign, the REST fields `may_approve` / `may_approve_reason`, the
 "may approve" compares the evaluator with today's answer before routing.
 
 **When the routing changes.** A waiting request keeps the group kinds it
-stored when it started to wait. A policy file that is imported later
-applies only to new requests, not to the ones already waiting. Run
-approvals are different: they store no kinds, so they use the policy that
+stored when it started to wait. A tenant file that is imported later
+applies only to new requests, not to the ones already waiting. The
+install's file is different: the click always checks the install's
+current routing too, so a narrower install file counts at once for the
+requests that already wait. `approve_right` (the console sign, the push
+recipients) uses only the stored kinds, so in that case the sign can say
+"may approve" and the click still refuses. Run approvals are different: they store no kinds, so they use the policy that
 is stored at the moment of the click.
 
 **Audit rows.** When a request has stored kinds, its audit rows carry
@@ -1369,7 +1488,10 @@ warn for each such entry, and `/ready` shows the same sentence under
 `features.policy.notes`.
 
 **Old requests and the switch.** A request without stored kinds (made while
-the switch was off, or before migration `0167`) keeps today's rule. With
+the switch was off, or before migration `0167`) keeps today's rule until it
+is decided or expires: the click does not check the install's routing for
+it. A request with stored kinds from before migration `0173` has the empty
+text as category (see the click above). With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail
@@ -1395,7 +1517,9 @@ the policy that is stored at the moment a person approves it
 Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
 `tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
 `tests/test_web_push_send.py`,
-`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`.
+`tests/test_policy_routing_floor.py`,
+`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`,
+`tests/migrations/test_migration_0173_add_approval_request_approver_category.py`.
 
 **Not yet:** a team is a group kind. Bindings that give a login group
 categories come later. The "separated duties" file
@@ -1621,7 +1745,11 @@ early-return, and the group rules for another person's change apply
 MEHO-Admin). The full subject/actor lineage stays intact (the
 decision audit row records the human approver; the request row records
 the agent requester). Since #3980 every agent request above `safe`
-waits for a person, also a `dangerous` or `destructive` one.
+waits for a person, also a `dangerous` or `destructive` one. There are
+two exceptions. A matching `deny` grant refuses the request in every
+state of the switch. And with `AGENT_GRANT_REQUIRED` `on`, a request
+that no grant covers is refused (`agent_no_grant`). In both cases the
+request never waits.
 
 ### How the agent becomes the requester
 
@@ -1662,8 +1790,13 @@ and it is the difference between the two agent-run entry points in
 
 1. **Register the agent principal** —
    [`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)
-   (`meho agent-principal register <name>` → a `agent:<name>`
-   `client_credentials` client carrying `principal_kind=agent`).
+   (`meho agent-principal register <name> --grants none` → a `agent:<name>`
+   `client_credentials` client carrying `principal_kind=agent`). Then
+   give it one grant for the write, on the one target:
+   `meho agent grant create --principal agent:<name> --op <write-op-id>
+   --target <target-uuid> --verdict needs-approval`. With the switch
+   `AGENT_GRANT_REQUIRED` `on`, an agent with no grant is refused, so
+   the write would never wait. The grant never lets it run alone.
 2. **Author an agent definition whose `identity_ref` is that client** —
    [`agent-definition.md`](agent-definition.md); `identity_ref` is
    validated against `agent_principal.keycloak_client_id`, and
@@ -2535,6 +2668,21 @@ The per-op preview is opt-in via a builder registry in
   `async (PreviewContext) -> dict | None` callable for an op-id.
   `PreviewContext` carries the resolved connector instance + descriptor +
   operator + target + params.
+  `register_preview_builder_switch(op_id, enabled)` (core only, not in
+  the connector kit) puts the builder behind a switch for the caller's
+  side only: with `enabled()` false, the preview the caller gets back
+  (`preview_operation`, `PreviewContext.for_agent` true) is the one of an
+  op with no builder. The approval request a person reads always uses the
+  builder. A new card for an op that agents already see goes behind a
+  switch this way.
+  `register_person_only_preview_keys(op_id, enabled, keys)` (core only)
+  names the keys a builder adds for the person only. The MCP tools
+  `meho_approvals_get` and `meho_approvals_list` read the stored request
+  through `proposed_effect_for_agent`: with the switch off, an op behind
+  a builder switch shows the generic params echo of its stored params,
+  and an op with person-only keys shows its preview without them. So the
+  caller gets the same answer there as from `preview_operation`. The REST
+  approvals API and the console show the stored card.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as
@@ -2604,7 +2752,11 @@ Three invariants make the hook safe to wire on the park path:
    `credential_mint` / `credential_write`) — the generic echo can only do
    generic key-name / value-shape redaction and is not trusted to scrub a
    connector-specific secret shape, so a credential-class op with no
-   bespoke builder collapses to the identifier-only default. A **bespoke
+   bespoke builder collapses to the identifier-only default. For an
+   ingested op, the class stored on its row by a connector floor counts
+   too (`resolve_op_class`): a stored `credential_read` hides the
+   parameters, and the request and its audit row carry that class
+   ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)). A **bespoke
    builder is the deliberate exception (#1857)**: like the
    permission-preflight hook, it is trusted to own its own field
    discipline and runs even for a credential-class op (e.g. the keycloak
@@ -2658,8 +2810,11 @@ way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{cascade_resources}` from read-only GETs against the live
 Application / AppProject — wired in
 `connectors/argocd/ops_write_preview.py`. The `secret.move` broker op
-populates a ref-only `{action, source, sink}` summary with no store I/O
-(#1580, `connectors/secret/move_preview.py`). The 8 vmware write
+populates a ref-only `{action, source, sink, merge}` summary with no store
+I/O (#1580, `connectors/secret/move_preview.py`). `source` and `sink` are
+`{kind, ref}`; a `vault-target` side also has `target`, the name of the
+Vault target whose role does that read or write. `merge` is `true` when
+the sink keeps the other fields of the secret. The 8 vmware write
 composites register builders in
 `connectors/vmware_rest/composites/_write_preview.py` (#1608): the
 fan-out composites (`vm.power.bulk`, `host.evacuate`,
@@ -3353,6 +3508,13 @@ the parent's (#4646). The gate binds the step's result for its own call
 only, so the parent operation's own audit row keeps the parent's result. Before #3542 the verdict was only a
 warning and the op parked anyway; rows parked then still carry
 `write_capability_warning`, which the console modal shows as a banner.
+
+`target_warnings` is a list of plain lines about a setting of the target
+that is allowed but risky, for example a Keycloak target that manages the
+realm MEHO itself signs in with
+(`targets/keycloak_realm_warnings.py`). The dispatcher stamps it onto the
+card when there is at least one line, and the console modal shows it as a
+"Check the target" box.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
@@ -4324,13 +4486,25 @@ forgotten first). The limit is kept in memory, per process.
 **Order.** The steps of one request go out in the order they happened. Each
 step waits until the step before it of the same request was sent. So a
 first message that was slow can never arrive after the result and replace
-it. The order is kept in memory, per process.
+it. The order is kept in memory, per process. So with `replicaCount`
+above 1 the rate limit and the order hold only inside one copy; the
+user guide (`docs-site/guides/phone-and-laptop.md`) and
+`docs/deploying.md` (`webPush.*`) say so where the feature is turned on.
+
+**Network.** MEHO needs outbound HTTPS to the hosts of the allow-list
+(`web_push/endpoints.py`). The install docs list them for firewall teams:
+`docs-site/install/index.md`, "Push services for approval notifications".
+Why web push, and what leaves the network:
+[the decision record](../decisions/2026-11-15-approval-notifications-through-web-push.md).
 
 **Where messages go.** Only to the browser makers' push services: the
 endpoint is checked again before each send, not only when it was stored.
 Redirects are not followed, and each send has a 10 second timeout. A push
 service that answers 404 or 410 (the browser dropped the subscription)
-gets the row deleted. Other errors are logged and the row stays. Logs name
+gets the row deleted. When that delete fails (the database is down),
+MEHO logs `web_push_gone_not_removed` and the other sends of the step go
+on; the row goes at the next 404 or 410. Other errors are logged and the
+row stays. Logs name
 the row id, the person, the push service and the status or the error type.
 Never the endpoint or a key.
 
@@ -4769,7 +4943,7 @@ never approves. The rule is recorded in
 
 | Principal kind | Destructive op | Code |
 |---|---|---|
-| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
+| `agent` | Waits for a person's approval. It needs a matching preview hash first. No grant lets it run without a person: the grant limit is `needs-approval`. With no matching grant, it waits while `AGENT_GRANT_REQUIRED` is `off` (the default) or `observe`, and is refused (`agent_no_grant`) with `on`. Agents never approve. | `auth/permissions.py:134` `_SAFETY_DEFAULT` + `:150` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:825` `policy_gate` |
 | `service` | Waits for approval. No grant can approve it in advance, except a delete grant on an instance in sandbox mode (see [service-principal-grants.md](service-principal-grants.md)). | `operations/_validate.py` `_non_agent_park_reason` (the `destructive` branch, called by `_non_agent_verdict`); `operations/service_grants.py:1272` `consult_and_record_grant` refuses the tier before any grant lookup |
 | `user` | Waits for approval. | `operations/_validate.py:724` `_non_agent_verdict` |
 

@@ -17,6 +17,14 @@ With the ``MCP_SHORT_TOOL_TEXTS`` switch on, the biggest tools send a
 short text (:mod:`meho_backplane.mcp.short_texts`), and the whole list
 must stay under the lower limit :data:`MAX_CHARS_TOTAL_SHORT`.
 
+A session that asks for a tool profile (#4172) with the short texts
+(#4714) gets a lean list. Here the whole ``tools/list`` entry counts, as
+UTF-8 bytes of compact JSON: name, description, input schema and output
+schema (the short texts send none), so the limit holds for every client,
+also one that shows the output schema to the model. Each lean profile
+must stay under :data:`MAX_BYTES_LEAN_PROFILE` (6,000 tokens at 4 bytes
+per token) and ``query_topology`` under :data:`MAX_BYTES_QUERY_TOPOLOGY`.
+
 If a test here fails, shorten the text: keep what the tool is for, when to
 call it, its arguments and the rules that stop wrong calls. Move the rest
 to the error text the tool returns, or to ``docs/codebase/mcp.md``. Raise
@@ -30,6 +38,7 @@ import json
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.profiles import TOOL_PROFILES
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, all_tools_for
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -55,6 +64,15 @@ MAX_CHARS_TOTAL_SHORT = 47_000
 #: With the switch on, the list must be at least this much smaller.
 MIN_SHORT_SAVING = 0.30
 
+#: Most bytes a tool profile's whole list may use with the short texts:
+#: 6,000 tokens at 4 bytes per token. When this limit was set, ``investigate``
+#: used 14,340 bytes and ``operate`` 21,243 (down from 34,494 and 49,620).
+MAX_BYTES_LEAN_PROFILE = 24_000
+
+#: Most bytes the ``query_topology`` entry may use with the short texts.
+#: It used 3,272 when this limit was set, down from 13,034.
+MAX_BYTES_QUERY_TOPOLOGY = 6_000
+
 
 def tool_text_size(definition: ToolDefinition) -> int:
     """Return the characters a tool's text uses in a ``tools/list`` answer."""
@@ -69,7 +87,13 @@ def tools_over_limit(definitions: list[ToolDefinition], limit: int) -> dict[str,
     return {name: size for name, size in sizes.items() if size > limit}
 
 
-def _default_session_tools() -> list[ToolDefinition]:
+def tool_wire_bytes(definition: ToolDefinition) -> int:
+    """Return the UTF-8 bytes of the tool's whole ``tools/list`` entry as compact JSON."""
+    wire = json.dumps(definition.to_wire(), separators=(",", ":"), ensure_ascii=False)
+    return len(wire.encode("utf-8"))
+
+
+def _default_session_tools(profile: str | None = None) -> list[ToolDefinition]:
     """Return the tools a default session lists (docs add-on on, no ``mcp:admin``)."""
     operator = Operator(
         sub="op-test",
@@ -80,6 +104,7 @@ def _default_session_tools() -> list[ToolDefinition]:
         tenant_role=TenantRole.TENANT_ADMIN,
         capabilities=frozenset({"meho-docs"}),
         scopes=frozenset(),
+        mcp_tool_profile=profile,
     )
     return all_tools_for(operator)
 
@@ -137,3 +162,42 @@ def test_check_fails_when_a_description_grows_past_the_limit(extra: int) -> None
         "query_topology": MAX_CHARS_PER_TOOL + extra
     }
     assert tools_over_limit([base], MAX_CHARS_PER_TOOL) == {}
+
+
+def _short_texts(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if on else "false")
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("profile", sorted(TOOL_PROFILES))
+def test_lean_profile_stays_under_6000_tokens(
+    monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    _short_texts(monkeypatch, on=True)
+    tools = _default_session_tools(profile)
+    assert {d.name for d in tools} == TOOL_PROFILES[profile]
+    total = sum(tool_wire_bytes(d) for d in tools)
+    assert total <= MAX_BYTES_LEAN_PROFILE, (
+        f"profile {profile!r} with short texts uses {total} bytes, "
+        f"limit {MAX_BYTES_LEAN_PROFILE} (6,000 tokens). Shorten the largest tools."
+    )
+
+
+def test_short_query_topology_stays_under_6000_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _short_texts(monkeypatch, on=True)
+    topology = next(d for d in _default_session_tools() if d.name == "query_topology")
+    size = tool_wire_bytes(topology)
+    assert size <= MAX_BYTES_QUERY_TOPOLOGY, (
+        f"query_topology with short texts uses {size} bytes, limit {MAX_BYTES_QUERY_TOPOLOGY}."
+    )
+
+
+def test_wire_bytes_count_the_output_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the switch off, the output schema is sent and counted, so the check catches it."""
+    _short_texts(monkeypatch, on=False)
+    topology = next(d for d in _default_session_tools() if d.name == "query_topology")
+    assert topology.outputSchema is not None
+    without = topology.model_copy(update={"outputSchema": None})
+    schema = json.dumps(topology.outputSchema, separators=(",", ":"), ensure_ascii=False)
+    assert tool_wire_bytes(topology) > tool_wire_bytes(without) + len(schema.encode("utf-8"))
+    assert tool_wire_bytes(topology) > MAX_BYTES_QUERY_TOPOLOGY

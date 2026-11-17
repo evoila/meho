@@ -84,6 +84,7 @@ from meho_backplane.mcp.tools._search_classification import (
 )
 from meho_backplane.mcp.tools._short_tool_texts import (
     CALL_OPERATION_SHORT,
+    LIST_OPERATION_GROUPS_SHORT,
     SEARCH_OPERATIONS_SHORT,
 )
 from meho_backplane.operation_picks.recorder import (
@@ -429,6 +430,7 @@ register_mcp_tool(
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",
+        for_settings=with_short_text(LIST_OPERATION_GROUPS_SHORT),
     ),
     handler=_list_operation_groups_handler,
 )

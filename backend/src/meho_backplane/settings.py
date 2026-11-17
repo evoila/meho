@@ -1552,9 +1552,10 @@ class Settings(BaseModel):
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
-        (:mod:`meho_backplane.mcp.short_texts`). The inputs a tool accepts
-        stay the same. A small model keeps more of its context window for
-        the job. It stays off until model tests show it helps. Env
+        (:mod:`meho_backplane.mcp.short_texts`), and no tool sends an
+        output schema. The inputs a tool accepts stay the same. A small
+        model keeps more of its context window for the job. It stays off
+        until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
     mcp_reveal_fetch:
         Off by default. When on, ``call_operation`` on MCP takes an

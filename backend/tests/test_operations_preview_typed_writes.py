@@ -122,11 +122,11 @@ async def _preview(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 async def test_caution_write_without_requires_approval_previews(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``targets.register`` runs at once only from the web interface, and it still previews."""
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    """A caution write that needs no approval still previews."""
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
     params = {"name": "lab-a", "product": "demo"}
 
-    envelope = await _preview("targets.register", params)
+    envelope = await _preview("demo.lab.create", params)
 
     assert envelope["status"] == "ok"
     assert envelope["method"] == "COMPOSITE"

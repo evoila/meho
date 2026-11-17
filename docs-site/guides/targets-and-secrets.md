@@ -36,8 +36,10 @@ Create, edit and delete on REST are for people only. A service login
 gets `403 human_principal_required`, also with the **tenant_admin**
 role. It registers a target with the `targets.register` operation,
 changes one with `targets.update` and removes one with `targets.remove`
-(connector `targets-registry-1.x`). MEHO checks them against the
-approval rules.
+(connector `targets-registry-1.x`). Each new target and each change waits
+for a person's approval: no standing grant, run approval or agent grant
+covers it. The approval card shows the target's values, also its
+`extras`.
 
 **The CLI and REST wait for approval.** A change made with your login
 token (`meho targets add`, `update`, `delete`, `import`, or a script on
@@ -52,8 +54,8 @@ targets (`list_targets`). A session that asked for the `mcp:admin`
 scope also has `meho_targets_register` and `meho_targets_update`
 (tenant_admin only). Through `call_operation`, the connector
 `targets-registry-1.x` offers `targets.register`, `targets.update`,
-`targets.remove` and `targets.probe`; an agent's register and every update
-wait for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
+`targets.remove` and `targets.probe`; every register and every update
+waits for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`

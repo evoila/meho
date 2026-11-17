@@ -276,9 +276,10 @@ file yet.
   tenant, also when its token carries the platform-admin claim: the same
   rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
   `tests/test_tenant_scope_person_only.py`.
-- Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
-  command line writes at once or waits for someone to approve it, as the
-  target routes do for a call made with a token. Today it writes at once.
+- Each target the file creates or changes waits for a person's approval,
+  also when a person imports with a token (CLI or API). Making or changing
+  a target always waits for a person ([targets.md](targets.md)). The rest
+  of the file is written at once.
 
 ## Endpoints
 
@@ -313,7 +314,8 @@ may not import, 413 for a body over 4 MiB):
   "diff": null,
   "applied": false,
   "revision_id": null,
-  "failed": []
+  "failed": [],
+  "waiting_for_approval": []
 }
 ```
 
@@ -332,22 +334,35 @@ When there are no mistakes, `diff` holds one entry per section — `tenants`,
 Runs the same checks. With any mistake it answers 422 with the preview's
 body and writes nothing. Otherwise it adds or updates, never deletes:
 
-- One database transaction, in this order: tenants (`ensure_tenant`),
-  policies, conventions, targets.
+- **Targets wait for a person.** First, each target the file creates or
+  changes goes to the dispatcher as one `targets.register` or
+  `targets.update` call, as the person who imports
+  (`instance_settings/target_requests.py`). Each call waits for approval;
+  the import writes no target. `waiting_for_approval` lists one entry per
+  target: `{path, name, op_id, approval_request_id}`. The approval card
+  shows the values: the new target's fields, or the old and the new value
+  of each changed field (also `extras`). A person approves each request in
+  the console or with `meho approvals approve <id>`; then MEHO writes the
+  target. A file that creates or changes no target makes no request. A
+  target in a tenant that the same file creates is not sent: its tenant
+  does not exist yet. `failed` says to import the file again.
+- Then one database transaction, in this order: tenants (`ensure_tenant`),
+  policies, conventions.
 - A savepoint per item, so one failed item does not spoil the whole import.
   Items that could not be written are listed in `failed` (one sentence
   each), and `ok` is then `false`; everything else is written.
 - The writes go through the same code as the REST routes:
   `tenancy/policies.py` for the tenant columns (`announce_gate_enabled` has
   no route of its own and is written there, audited), `ConventionsService`
-  for conventions, and `create_target` / `update_target` for targets.
+  for conventions, and the `targets.register` / `targets.update` operations
+  for targets.
 - One `audit_log` row covers the whole import (`op_id=settings.import`). Its
   `op_class` is `write` only when something is written; a refused or
   unchanged file leaves a `read` row. The revision row keeps its id. Every
   `tenant_convention_history` row the import writes keeps the import's
   `request_id` (convention history no longer points at `audit_log`, #3747).
-- `diff` in the answer is what actually changed; `revision_id` is the new
-  revision.
+- `diff` in the answer is what actually changed (the targets that wait are
+  not in it); `revision_id` is the new revision.
 - An unchanged file gives an empty diff and writes no revision.
 
 ### `POST /api/v1/settings/conventions-drift`

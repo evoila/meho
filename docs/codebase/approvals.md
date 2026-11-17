@@ -307,6 +307,21 @@ A request without a card object (no blast radius) is not checked. The
 re-run path reports the three checks as `target_changed`,
 `preview_changed` and `object_changed`.
 
+## Making or changing a target always waits for a person
+
+`targets.register` and `targets.update` both need approval
+(`requires_approval`), and their `host` and `fqdn` carry the address
+marker (`x-meho-caller-address: true`). So every call of them waits until
+a person with `tenant_admin` approves it, whoever makes it: an agent (also
+with an agent grant), a service login (also with a standing grant, or in a
+run with a run approval) and a person with a token. A settings import
+sends each target it creates or changes as one such call. Only a person in
+the web console writes a target at once. The approval card shows the
+values the person must see: for a new target every sent field, also each
+`extras` key and value; for a change the old and the new value of each
+sent field. Values under a secret-like name are hidden. Details:
+[targets.md](targets.md) and [settings.md](settings.md).
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:

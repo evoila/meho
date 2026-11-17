@@ -11431,16 +11431,19 @@ type SessionUploadResultState string
 // and “after“) and “not_in_file“ lists. It is “null“ when the file has
 // mistakes. On an apply, “diff“ is what actually changed, “failed“ lists
 // the items that could not be written (the rest were), and “revision_id“ is
-// the new revision (“null“ when nothing changed).
+// the new revision (“null“ when nothing changed). “waiting_for_approval“
+// lists each target the file creates or changes: it is not written yet, and
+// a person approves each one (“meho approvals“, or the console).
 type SettingsImportResponse struct {
-	Applied    *bool                   `json:"applied,omitempty"`
-	Diff       *map[string]interface{} `json:"diff"`
-	Failed     *[]string               `json:"failed,omitempty"`
-	Mistakes   []string                `json:"mistakes"`
-	Ok         bool                    `json:"ok"`
-	Preview    bool                    `json:"preview"`
-	RevisionId *openapi_types.UUID     `json:"revision_id"`
-	Warnings   []string                `json:"warnings"`
+	Applied            *bool                    `json:"applied,omitempty"`
+	Diff               *map[string]interface{}  `json:"diff"`
+	Failed             *[]string                `json:"failed,omitempty"`
+	Mistakes           []string                 `json:"mistakes"`
+	Ok                 bool                     `json:"ok"`
+	Preview            bool                     `json:"preview"`
+	RevisionId         *openapi_types.UUID      `json:"revision_id"`
+	WaitingForApproval *[]SettingsTargetRequest `json:"waiting_for_approval,omitempty"`
+	Warnings           []string                 `json:"warnings"`
 }
 
 // SettingsRevision One “instance_settings_revision“ row, with its diff worked out on read.
@@ -11454,6 +11457,14 @@ type SettingsRevision struct {
 	Id           openapi_types.UUID      `json:"id"`
 	Summary      map[string]interface{}  `json:"summary"`
 	Ts           time.Time               `json:"ts"`
+}
+
+// SettingsTargetRequest A target of the file that waits for a person's approval.
+type SettingsTargetRequest struct {
+	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
+	Name              string             `json:"name"`
+	OpId              string             `json:"op_id"`
+	Path              string             `json:"path"`
 }
 
 // ShowTemplateResponse Full template surface returned by “meho_runbook_show_template“.

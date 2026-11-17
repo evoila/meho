@@ -13,6 +13,8 @@ Covers the acceptance criteria that run in-process:
 * The preview diff names every change, including "not in file".
 * The apply records a revision with the person who did it; ``history`` lists
   it. Importing the same file again gives an empty diff and no second revision.
+* Each target the file creates or changes waits for a person's approval and
+  is written only after it (``waiting_for_approval``).
 * No token -> 401 on all four endpoints. Wrong role / other tenant -> 403.
 * An export carries no JWT, password or PEM-key pattern; a file with a
   secret-shaped value is refused without showing the value.
@@ -58,6 +60,7 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from ._settings_target_approvals import approve_waiting, targets_ops_registered
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _insert_target,
@@ -70,6 +73,8 @@ _TENANT = uuid.UUID(DEFAULT_TENANT_ID)
 _OTHER = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 #: The CI check that greps an export for JWT, password and PEM-key patterns.
+pytestmark = pytest.mark.usefixtures(targets_ops_registered.__name__)
+
 _EXPORT_SECRET_CHECK = (
     Path(__file__).resolve().parents[2] / "scripts" / "ci" / "check-settings-export-secrets.sh"
 )
@@ -331,6 +336,8 @@ async def test_round_trip_spec_is_byte_identical(client: TestClient) -> None:
         assert body["ok"] is True, body
         assert body["applied"] is True
         assert body["revision_id"]
+        assert sorted(w["name"] for w in body["waiting_for_approval"]) == ["prom", "vc-01"]
+        await approve_waiting(body, _TENANT)
 
         second = _export(client, token)
     assert _spec_yaml(second) == _spec_yaml(first)
@@ -353,6 +360,9 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
         first = _import(client, token, changed)
         assert first.status_code == 200, first.text
         assert first.json()["applied"] is True
+        (waiting,) = first.json()["waiting_for_approval"]
+        assert (waiting["name"], waiting["op_id"]) == ("nsx-01", "targets.register")
+        await approve_waiting(first.json(), _TENANT)
 
         again_preview = _import(client, token, changed, preview=True).json()
         again = _import(client, token, changed).json()
@@ -367,7 +377,8 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
     assert len(revisions) == 1
     (revision,) = revisions
     assert revision.actor_sub == "dana"
-    assert revision.summary["targets"] == {"added": 1, "changed": 0}
+    # The new target is written by its approved request, not by the import.
+    assert revision.summary["targets"] == {"added": 0, "changed": 0}
     assert revision.summary["policies"] == {"added": 0, "changed": 1}
     audit = [row for row in await _rows(AuditLog) if row.id == revision.audit_id]
     assert len(audit) == 1 and audit[0].payload.get("op_class") == "write"
@@ -376,7 +387,7 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
     (entry,) = history.json()
     assert entry["id"] == str(revision.id)
     assert entry["actor_sub"] == "dana"
-    assert [a["key"] for a in entry["diff"]["targets"]["added"]] == ["nsx-01"]
+    assert entry["diff"]["targets"]["added"] == []
     assert entry["diff"]["policies"]["changed"] == [
         {
             "tenant": str(_TENANT),
@@ -777,7 +788,8 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
         await _wipe_tenant_settings()
         restored = _import(client, token, first)
         assert restored.status_code == 200, restored.text
-        assert restored.json()["applied"] is True
+        assert len(restored.json()["waiting_for_approval"]) == 1
+        await approve_waiting(restored.json(), _TENANT)
         assert _spec_yaml(_export(client, token)) == _spec_yaml(first)
 
         # The file holds the whole map: an entry it leaves out is removed.
@@ -786,14 +798,14 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
         )
         preview = _import(client, token, changed, preview=True).json()
         applied = _import(client, token, changed)
-        history = client.get("/api/v1/settings/history", headers=_auth(token)).json()
+        assert applied.status_code == 200, applied.text
+        (waiting,) = applied.json()["waiting_for_approval"]
+        assert waiting["op_id"] == "targets.update"
+        await approve_waiting(applied.json(), _TENANT)
 
     (change,) = preview["diff"]["targets"]["changed"]
     assert change["before"] == {"secret_field_map": {"username": "user", "password": "pw"}}
     assert change["after"] == {"secret_field_map": {"password": "pass"}}
-    assert applied.status_code == 200, applied.text
-    assert applied.json()["diff"]["targets"]["changed"] == [change]
-    assert history[0]["diff"]["targets"]["changed"] == [change]
     (row,) = [t for t in await _rows(Target) if t.name == "mapped"]
     assert row.secret_field_map == {"password": "pass"}
 
@@ -861,6 +873,7 @@ async def test_replacing_a_large_field_map_stays_within_the_limit(client: TestCl
         preview = _import(client, token, content, preview=True)
         refused = _import(client, token, too_many)
         applied = _import(client, token, content)
+        await approve_waiting(applied.json(), _TENANT)
 
     assert preview.status_code == 200, preview.text
     assert preview.json()["mistakes"] == []

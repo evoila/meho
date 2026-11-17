@@ -32,6 +32,7 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from ._settings_target_approvals import approve_waiting, targets_ops_registered
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _insert_target,
@@ -109,6 +110,7 @@ async def test_the_preview_refuses_a_bad_realm_like_the_apply(
     assert await _target_names() == set()
 
 
+@pytest.mark.usefixtures(targets_ops_registered.__name__)
 async def test_a_new_target_on_the_admin_realm_carries_the_warning(client: TestClient) -> None:
     preview, applied = _preview_and_apply(client, _file("{managed_realm: master}"))
     assert preview.status_code == 200, preview.text
@@ -116,8 +118,9 @@ async def test_a_new_target_on_the_admin_realm_carries_the_warning(client: TestC
     assert warning.startswith("`spec.tenants[0].targets[0]` (kc-01): ")
     assert "admin realm of this Keycloak" in warning
     assert applied.status_code == 200, applied.text
-    assert applied.json()["applied"] is True
     assert applied.json()["warnings"] == [warning]
+    assert await _target_names() == set()
+    await approve_waiting(applied.json(), _TENANT)
     assert await _target_names() == {"kc-01"}
 
 

@@ -1891,7 +1891,7 @@
           "settings"
         ],
         "summary": "Import Settings",
-        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing.",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. Each target the file creates or changes waits for a\nperson's approval (``waiting_for_approval``).",
         "operationId": "import_settings_api_v1_settings_import_post",
         "parameters": [
           {
@@ -44013,6 +44013,14 @@
             "type": "array",
             "title": "Failed",
             "default": []
+          },
+          "waiting_for_approval": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsTargetRequest"
+            },
+            "type": "array",
+            "title": "Waiting For Approval",
+            "default": []
           }
         },
         "type": "object",
@@ -44024,7 +44032,7 @@
           "diff"
         ],
         "title": "SettingsImportResponse",
-        "description": "The preview and the apply answer: plain JSON, the mistakes and the diff.\n\n``diff`` has one entry per section (``tenants``, ``policies``,\n``conventions``, ``targets``), each with ``added``, ``changed`` (``before``\nand ``after``) and ``not_in_file`` lists. It is ``null`` when the file has\nmistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists\nthe items that could not be written (the rest were), and ``revision_id`` is\nthe new revision (``null`` when nothing changed)."
+        "description": "The preview and the apply answer: plain JSON, the mistakes and the diff.\n\n``diff`` has one entry per section (``tenants``, ``policies``,\n``conventions``, ``targets``), each with ``added``, ``changed`` (``before``\nand ``after``) and ``not_in_file`` lists. It is ``null`` when the file has\nmistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists\nthe items that could not be written (the rest were), and ``revision_id`` is\nthe new revision (``null`` when nothing changed). ``waiting_for_approval``\nlists each target the file creates or changes: it is not written yet, and\na person approves each one (``meho approvals``, or the console)."
       },
       "SettingsRevision": {
         "properties": {
@@ -44086,6 +44094,36 @@
         ],
         "title": "SettingsRevision",
         "description": "One ``instance_settings_revision`` row, with its diff worked out on read."
+      },
+      "SettingsTargetRequest": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "op_id",
+          "approval_request_id"
+        ],
+        "title": "SettingsTargetRequest",
+        "description": "A target of the file that waits for a person's approval."
       },
       "ShowTemplateResponse": {
         "properties": {
@@ -45127,7 +45165,7 @@
               "minLength": 1
             },
             "type": "object",
-            "maxProperties": 50,
+            "maxProperties": 100,
             "nullable": true,
             "title": "Secret Field Map"
           },

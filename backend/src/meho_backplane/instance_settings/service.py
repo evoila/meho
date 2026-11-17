@@ -8,19 +8,23 @@
   reads the database and nothing else: no write, no outside system. The
   preview is exactly this.
 * :func:`apply_import` runs :func:`build_plan` and, when the file has no
-  mistakes, adds or updates (never deletes) in the request's one transaction,
-  in the order tenants, policies, conventions, targets, with a savepoint per
-  item so one failed item does not spoil the rest. One ``audit_log`` row
-  covers the whole import and the revision keeps its id; each convention
-  history row keeps the import's ``request_id``. An unchanged file writes no revision.
+  mistakes, sends each target it creates or changes for approval
+  (:mod:`meho_backplane.instance_settings.target_requests`): a person
+  approves each target before MEHO writes it. Then it adds or updates (never
+  deletes) the rest in the request's one transaction, in the order tenants,
+  policies, conventions, with a savepoint per item so one failed item does
+  not spoil the rest. One ``audit_log`` row covers the whole import and the
+  revision keeps its id; each convention history row keeps the import's
+  ``request_id``. A file that changes nothing but targets writes no revision.
 * :func:`list_history` returns the revisions, newest first, each with its
   diff worked out on read.
 
 Writes reuse the existing paths so the file cannot do anything the routes
 cannot: :mod:`meho_backplane.tenancy.policies` for the tenant columns,
 :class:`~meho_backplane.conventions.service.ConventionsService` for
-conventions, and the ``create_target`` / ``update_target`` handlers (with
-their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
+conventions, and the ``targets.register`` / ``targets.update`` operations
+(with their product, impl-id, ``secret_ref`` scope and TLS checks) for
+targets.
 """
 
 from __future__ import annotations
@@ -49,8 +53,6 @@ from meho_backplane.api.v1.targets import (
     _to_full,
     _validate_preferred_impl_id,
     _validate_update_body_fields,
-    create_target,
-    update_target,
 )
 from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, is_human_principal
@@ -78,6 +80,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     parse_settings_file,
 )
+from meho_backplane.instance_settings.target_requests import TargetWrite, ask_for_target_writes
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.secret_field_map import merge_secret_field_map
@@ -353,6 +356,8 @@ class _TenantPlan:
     )
     #: (index, name, TargetCreate | TargetUpdate)
     targets: list[tuple[int, str, TargetCreate | TargetUpdate]] = field(default_factory=list)
+    #: The stored id of each existing target the file changes, by name.
+    target_ids: dict[str, uuid.UUID] = field(default_factory=dict)
 
 
 @dataclass
@@ -629,6 +634,7 @@ def _plan_targets(
         desired[entry.name], update_body = planned
         if update_body is not None:
             plan.targets.append((i, entry.name, update_body))
+            plan.target_ids[entry.name] = row.id
             _add_realm_warnings(path, desired[entry.name], warnings)
     return [desired[name] for name in sorted(desired)]
 
@@ -757,6 +763,9 @@ class ImportResult:
     revision_id: uuid.UUID | None = None
     diff: dict[str, Any] | None = None
     failed: list[str] = field(default_factory=list)
+    #: One entry per target that waits for approval (``path``, ``name``,
+    #: ``op_id``, ``approval_request_id``).
+    waiting: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def _apply_tenant_rows(
@@ -844,25 +853,20 @@ async def _apply_conventions(
             failed.append(f"`{path}` ({slug}) could not be written{reason}.")
 
 
-async def _apply_targets(
-    session: AsyncSession,
-    operator: Operator,
-    tenant_plan: _TenantPlan,
-    failed: list[str],
-) -> None:
-    for i, name, body in tenant_plan.targets:
-        path = f"spec.tenants[{tenant_plan.index}].targets[{i}]"
-        try:
-            async with session.begin_nested():
-                if isinstance(body, TargetCreate):
-                    await create_target(body=body, operator=operator, session=session)
-                else:
-                    await update_target(name=name, body=body, operator=operator, session=session)
-        except HTTPException as exc:
-            failed.append(_detail_sentence(path, exc.detail))
-        except Exception as exc:
-            _log.warning("settings_import_target_failed", name=name, error=str(exc))
-            failed.append(f"`{path}` ({name}) could not be written.")
+def _target_writes(plan: ImportPlan) -> dict[uuid.UUID, list[TargetWrite]]:
+    return {
+        tenant_plan.tenant_id: [
+            TargetWrite(
+                path=f"spec.tenants[{tenant_plan.index}].targets[{i}]",
+                name=name,
+                body=body,
+                target_id=tenant_plan.target_ids.get(name),
+                tenant_exists=tenant_plan.exists,
+            )
+            for i, name, body in tenant_plan.targets
+        ]
+        for tenant_plan in plan.tenants
+    }
 
 
 async def apply_import(
@@ -873,14 +877,25 @@ async def apply_import(
     """Apply *content*: add or update, never delete. See the module docstring.
 
     Writes nothing when the file has mistakes (``result.plan.mistakes``) or
-    changes nothing (empty diff, no revision). The caller's session dependency
-    commits the one transaction after the route returns.
+    changes nothing (empty diff, no revision). Each target the file creates or
+    changes waits for approval (``result.waiting``) and is not written here.
+    The caller's session dependency commits the one transaction after the
+    route returns.
     """
     plan = await build_plan(session, operator, content)
     result = ImportResult(plan=plan)
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff
         return result
+
+    # Before any write of this import, so a request never waits on this
+    # transaction (the dispatcher writes the request in its own session).
+    asks = await ask_for_target_writes(
+        {tp.tenant_id: _operator_for(operator, tp.tenant_id) for tp in plan.tenants},
+        _target_writes(plan),
+    )
+    result.waiting = asks.waiting
+    result.failed.extend(asks.failed)
 
     audit_id = uuid.uuid4()
     bind_preallocated_audit_id(audit_id)
@@ -898,11 +913,6 @@ async def apply_import(
             tenant_plan,
             result.failed,
         )
-    for tenant_plan in live:
-        await _apply_targets(
-            session, _operator_for(operator, tenant_plan.tenant_id), tenant_plan, result.failed
-        )
-
     await session.flush()
     after = await load_tenant_blocks(session, tenant_ids)
     actual = diff_specs(plan.before, after)
@@ -933,12 +943,14 @@ async def apply_import(
         audit_settings_tenant_ids=[str(t) for t in tenant_ids],
         audit_settings_summary=summary,
         audit_settings_failed=len(result.failed),
+        audit_settings_waiting=len(result.waiting),
     )
     _log.info(
         "settings_imported",
         revision_id=str(result.revision_id) if result.revision_id else None,
         tenants=len(tenant_ids),
         failed=len(result.failed),
+        waiting=len(result.waiting),
         summary=summary,
     )
     return result

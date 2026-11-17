@@ -3030,12 +3030,14 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "x-meho-caller-address": true
           },
           "host": {
             "maxLength": 512,
             "minLength": 1,
-            "type": "string"
+            "type": "string",
+            "x-meho-caller-address": true
           },
           "name": {
             "maxLength": 200,

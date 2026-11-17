@@ -30,29 +30,28 @@ write front (``meho_targets_register``) through
 :func:`~meho_backplane.operations.dispatcher.dispatch` puts it behind
 :func:`~meho_backplane.operations._validate.policy_gate` — the single
 seam where a ``caution``-level write waits for approval as a durable
-:class:`~meho_backplane.db.models.ApprovalRequest`. An agent's call and a
-person's call made with a token wait; only a person in the web interface
-runs it at once. REST ``POST /api/v1/targets`` with a token becomes a call
-of this op. The web console calls the service function directly.
+:class:`~meho_backplane.db.models.ApprovalRequest`. Every call of this op
+waits for a person. REST ``POST /api/v1/targets`` with a token becomes a
+call of this op. The web console calls the service function directly, so
+a person in the browser makes a target at once.
 
-Approval posture — the load-bearing dial (mirrors ``topology.*`` #2537):
+Approval posture (the same as ``targets.update``):
 
-* ``safety_level="caution"`` + ``requires_approval=False``: an agent's
-  call and a person's call made with a token wait for approval; a person
-  in the web interface runs it at once.
-* A call that sets ``secret_field_map`` or ``flight_recorder_capture``
-  waits for a person on every call, whoever makes it. No standing grant
-  and no run approval covers it (``declare_wait_when_set`` in the package
-  ``__init__``). A call without these two fields keeps the rules above.
+* ``safety_level="caution"`` + ``requires_approval=True``: every call
+  waits until a person with ``tenant_admin`` approves it. ``host`` and
+  ``fqdn`` are addresses MEHO connects to (``x-meho-caller-address``), and
+  a connector can read rules from ``extras``. So no standing grant, no
+  run approval and no agent grant covers a call: a person sees the new
+  target's values on the approval card
+  (:func:`build_targets_register_preview`) before MEHO stores it.
 * The role floor is ``tenant_admin``, the same as REST ``POST
   /api/v1/targets`` and the MCP tool. It is registered below with
   :func:`~meho_backplane.operations.role_floors.register_role_floor`, so
   the policy gate refuses a person with a lower role on every path
   (``call_operation``, the REST dispatch route, the CLI), and the
   approval queue refuses an approver with a lower role.
-* NOT ``requires_approval=True`` — that would make the web interface wait too.
 * NOT ``safety_level="dangerous"`` — that would DENY agents by default
-  rather than park them. Target registration is reversible
+  rather than let them ask. Target registration is reversible
   (``DELETE /api/v1/targets`` + the soft-delete tombstone), so caution
   fits; dangerous does not.
 
@@ -88,6 +87,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from meho_backplane.api.v1.targets import (
     count_graph_node_refs,
@@ -104,7 +104,9 @@ from meho_backplane.connectors.targets.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PermissionVerdict
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._audit import policy_decision_var
+from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.sandbox_mode import sandbox_mode_active
@@ -120,6 +122,7 @@ __all__ = [
     "TARGETS_REGISTER_OP_ID",
     "TARGETS_REGISTRY_CONNECTOR_ID",
     "TARGETS_REMOVE_OP_ID",
+    "build_targets_register_preview",
     "build_targets_remove_preview",
     "register_targets_registry_operations",
     "targets_register",
@@ -146,8 +149,8 @@ _GROUP_WHEN_TO_USE = (
     "a target's fields, or remove a target whose system is gone. Use "
     "when onboarding a system the agent must later drive — an rke2 "
     "cluster, a vCenter, a DNS server — or when cleaning up after it. "
-    "A registration from an agent principal, and every change, waits for a "
-    "person to approve it; a removal always waits for a second person. "
+    "Every registration and every change waits for a person to approve "
+    "it; a removal always waits for a second person. "
     "Target reads live on list_targets / query_topology, not here."
 )
 
@@ -159,8 +162,8 @@ _DESCRIPTION = (
     "Tenant-scoped automatically — no `tenant_id` argument (cross-tenant "
     "registration is structurally impossible). `fingerprint` is "
     "server-managed and rejected. Needs the `tenant_admin` role, like the "
-    "REST route. Agent-principal calls park as approval "
-    "requests; human tenant_admin calls execute immediately."
+    "REST route. Every call waits for a person's approval; the approval "
+    "card shows the new target's values."
 )
 
 _LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -172,7 +175,7 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "preconditions": (
         "A person needs the `tenant_admin` role; any lower role is refused. "
-        "An agent's call waits until a person with that role approves it."
+        "Each call waits until a person with that role approves it."
     ),
     "parameter_hints": {
         "name": "Required. Unique within the tenant; the dispatch handle.",
@@ -186,6 +189,7 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": "{'target_id', 'name', 'product', 'host', 'tenant_id', 'next_step'}",
     "next_step": (
+        "The call waits for approval and then runs with the same params. "
         "The new target is not probed yet. Call targets.probe with its name, "
         "so MEHO detects the product and version and picks the right "
         "connector implementation."
@@ -245,6 +249,47 @@ async def targets_register(
     }
 
 
+async def build_targets_register_preview(ctx: PreviewContext) -> dict[str, Any]:
+    """Show the new target ``targets.register`` would store, without storing it.
+
+    ``target`` holds every sent field: the name, product, host, ``fqdn``,
+    port, ``extras`` (each key and value) and the rest. Values under a
+    secret-like name are hidden the same way the generic parameter echo
+    hides them; ``secret_ref`` is a Vault path, not a secret, so it shows.
+    When a live target of the caller's tenant has the name already, the
+    preview says the call would fail. Reads only.
+    """
+    shown = _redact_echoed_params(
+        dict(ctx.params),
+        connector_id=ctx.connector_id,
+        tenant=str(ctx.operator.tenant_id),
+        op_id=TARGETS_REGISTER_OP_ID,
+    )
+    preview: dict[str, Any] = {
+        "action": TARGETS_REGISTER_OP_ID,
+        "target": shown,
+        "fields": sorted(ctx.params),
+        "result_if_run": "created",
+    }
+    name = ctx.params.get("name")
+    if isinstance(name, str) and await _name_taken(ctx.operator.tenant_id, name):
+        preview["result_if_run"] = "fails"
+        preview["note"] = "a live target with this name exists in your tenant"
+    return preview
+
+
+async def _name_taken(tenant_id: uuid.UUID, name: str) -> bool:
+    async with get_sessionmaker()() as session:
+        found = await session.scalar(
+            select(TargetORM.id).where(
+                TargetORM.tenant_id == tenant_id,
+                TargetORM.name == name,
+                TargetORM.deleted_at.is_(None),
+            )
+        )
+    return found is not None
+
+
 def _probe_next_step(name: str) -> str:
     """Tell the caller how to detect the product and version of a new target.
 
@@ -292,10 +337,9 @@ async def register_targets_registry_operations(
     ``embedding_service`` kwarg is the test seam every connector registrar
     carries.
 
-    ``safety_level="caution"`` + ``requires_approval=False`` is the
-    agents-park / humans-immediate combination — see the module docstring
-    for why neither ``requires_approval=True`` nor
-    ``safety_level="dangerous"`` fits.
+    ``safety_level="caution"`` + ``requires_approval=True``: every call
+    waits for a person (see the module docstring). ``requires_approval=True``
+    is also what the address marker on ``host`` and ``fqdn`` sets.
     """
     await register_typed_operation(
         product="targets",
@@ -311,7 +355,7 @@ async def register_targets_registry_operations(
         response_schema=TARGETS_REGISTER_RESPONSE_SCHEMA,
         tags=["targets", "write", "registry"],
         safety_level="caution",
-        requires_approval=False,
+        requires_approval=True,
         llm_instructions=_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

@@ -25,13 +25,30 @@ optional `aliases`, `version`, `port`, `fqdn`, `secret_ref`,
 `auth_model`, `verify_tls`, `tls_ca_pin`, `tls_server_name`,
 `vpn_required`, `extras`, `notes`, `preferred_impl_id`,
 `secret_field_map`, `flight_recorder_capture`. Any other field
-is refused. A call that sets `secret_field_map` or
-`flight_recorder_capture` waits for a person on every call, whoever makes
-it: no standing grant and no run approval covers it
-(`declare_wait_when_set` in `connectors/targets/__init__.py`). A call
-without these two fields keeps the usual rules. These two fields do not
-open the agent's `preview_operation`: with `PREVIEW_TYPED_WRITES` off,
-the preview of `targets.register` stays `unavailable`. `vpn_required` (boolean, default `false`) records that a
+is refused.
+
+**Making a target always waits for a person**, like changing one
+(`targets.update`). `targets.register` is `caution` with
+`requires_approval`, and its `host` and `fqdn` carry the address marker
+(`x-meho-caller-address: true`). So every call waits until a person with
+`tenant_admin` approves it: an agent's call (also with an agent grant), a
+service login's call (also with a standing grant, or in a run with a run
+approval), and a person's call made with a token. No standing grant, run
+approval or agent grant covers it. Only a person in the web console (the
+target form and the console target import) makes a target at once. The
+approval card (`build_targets_register_preview`) shows every sent field
+under `target`: name, product, host, `fqdn`, port and each `extras` key
+and value, with values under a secret-like name hidden; `result_if_run`
+says `fails` when a live target of the tenant has the name already. The
+agent's own `preview_operation` gets this card only with
+`PREVIEW_TYPED_WRITES` on; off, it gets the generic parameter echo. A
+settings import sends each target it creates or changes as one of these
+calls ([settings.md](settings.md)). The guard
+`tests/test_targets_register_always_waits.py` fails when an operation of
+the target registry that makes or changes a target can be covered by a
+standing grant, a run approval or an agent grant.
+
+`vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every
 `target` argument elsewhere resolves
@@ -46,8 +63,7 @@ checks the **per-op role floor** (`operations/role_floors.py`;
 `connectors/targets/ops.py` registers it at import): a person with a
 lower role gets `denied`, nothing is written, and the audit row says
 `denied`. `preview_operation` shows the same verdict. An agent's call
-still waits for approval; a service login's call still waits or runs
-under a grant. The approval queue checks the approver against the same
+and a service login's call wait for approval. The approval queue checks the approver against the same
 floor at the decision: a person below it cannot approve the request, so
 the approved call, run by the agent itself or by the person from an
 approvals surface, was approved by a `tenant_admin`. The dispatcher
@@ -363,9 +379,10 @@ from Vault there.
   a 422 alert. The `targets.probe` operation gives the same result as a
   call, with its `error_code`.
 - **A machine login gets only the own path, unless a person approves.**
-  A call of `targets.register` from an agent, a service login or a
-  runner can run with no person, under a standing grant or an approved
-  multi-step run. Such a call may store only the new target's own path
+  Every call of `targets.register` waits for a person, so a machine
+  login's call runs only after approval. The handler still checks a
+  machine login's call that runs with no person's approval: it may store
+  only the new target's own path
   `tenants/<tenant_id>/<name>`, or no path (`secret_ref: null`). MEHO
   also refuses the own path when another target of the tenant, live or
   removed, already stores it. MEHO compares the paths as it reads them:
@@ -679,8 +696,10 @@ with a token becomes a call of this op.
 - **Risk level.** `caution` with `requires_approval`: every call waits
   until a person with `tenant_admin` approves it. `host` and `fqdn` are
   marked as addresses MEHO connects to (`x-meho-caller-address: true`), and
-  the call can change `secret_ref`. Only the web console changes a target
-  at once.
+  the call can change `secret_ref` and `extras` (a connector can read rules
+  from `extras`). So a call that changes only `extras` waits too, also
+  under a standing grant, and its card shows the old and the new `extras`.
+  Only the web console changes a target at once.
 - **Result.** `{target_id, name, product, version, host, updated_fields}`.
 - **Errors.** An unknown id, a target of another tenant, or a failed check
   give an error that names the cause; nothing changes.

@@ -285,15 +285,14 @@ async def test_the_preview_says_denied_for_a_person_below_the_floor(
     assert await _target_rows() == []
 
 
-async def test_a_tenant_admin_runs_at_once(_registered_ops: None) -> None:
-    # In the web interface; with a token the call waits for approval (#3980).
+async def test_a_tenant_admin_in_the_web_interface_waits_too(_registered_ops: None) -> None:
+    # Making a target always waits for a person; only the console form writes at once.
     admin = _person(TenantRole.TENANT_ADMIN).model_copy(update={"web_session": True})
     result = await _register(admin)
 
-    assert result.status == "ok", result
-    (row,) = await _target_rows()
-    assert row.name == "new-system"
-    assert await _approval_rows() == []
+    assert result.status == "awaiting_approval", result
+    assert len(await _approval_rows()) == 1
+    assert await _target_rows() == []
 
 
 async def test_a_tenant_admin_with_a_token_waits_for_approval(_registered_ops: None) -> None:

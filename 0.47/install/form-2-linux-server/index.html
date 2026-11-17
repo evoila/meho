@@ -1132,6 +1132,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#a-person-lost-the-one-time-code-app" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A person lost the one-time code app
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#get-help-from-support" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3606,6 +3617,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#a-person-lost-the-one-time-code-app" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A person lost the one-time code app
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#get-help-from-support" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4244,6 +4266,34 @@ checks. See
 IPv4 range or one address. <code>none</code> closes SSH from every address, so only
 the console of the machine works. Over SSH, the command asks first when
 the new range does not hold your own address.</p>
+<h3 id="a-person-lost-the-one-time-code-app">A person lost the one-time code app<a class="headerlink" href="#a-person-lost-the-one-time-code-app" title="Permanent link">&para;</a></h3>
+<p>Use this only in an emergency: when a person of a local account (the
+first admin or the second person) lost the phone with the one-time code
+app and also the recovery codes, so they cannot log in any more.</p>
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>reset-second-factor<span class="w"> </span>&lt;user&gt;
+</code></pre></div>
+<p><code>&lt;user&gt;</code> is the person's user name in MEHO's login (realm <code>meho</code>). The
+command:</p>
+<ul>
+<li>removes the person's one-time code and recovery codes;</li>
+<li>makes the next login of the person ask for a new password and a new
+  one-time code app, and then show twelve new recovery codes;</li>
+<li>writes one row into the MEHO audit for each tenant of the person. It
+  names your Linux user (the one behind <code>sudo</code>), this server, the person's
+  user name and the time. An admin of each of these tenants finds it with
+  <code>meho audit query --op-id meho-host.reset-second-factor</code>.</li>
+</ul>
+<p>It prints what it removed. An unknown user name changes nothing, and the
+command ends with exit code 1. Run as another user than root, it changes
+nothing and ends with exit code 2. When the command cannot write the
+audit row, it does not report success. When Keycloak does not answer a
+change in time, the change may still have happened: the command says so,
+writes the audit row with it, and ends with exit code 1. Run it again; a
+second run is safe.</p>
+<p>Give the person a new temporary password in a safe way, for example in
+the Keycloak admin console (see <a href="../login/local-users/">Local users</a>). It
+does not apply to people who log in through your company login: their
+second factor belongs to the company login.</p>
 <h3 id="get-help-from-support">Get help from support<a class="headerlink" href="#get-help-from-support" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>support-bundle
 </code></pre></div>

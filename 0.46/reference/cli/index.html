@@ -18078,11 +18078,13 @@
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--disabled</code> — disable (park) the definition</li>
 <li><code>--enabled</code> — enable the definition</li>
+<li><code>--grants</code> — the agent's first grants: none, read-everything or read-targets. none: no grant; with AGENT_GRANT_REQUIRED=on the agent runs nothing until an admin adds a grant. read-everything: safe operations run at once on every target; everything else waits for a person's approval. read-targets: safe operations run at once on the targets you name with --target; with AGENT_GRANT_REQUIRED=on, only there. Note: with AGENT_GRANT_REQUIRED off (the default) or observe, the agent can also run safe operations that no grant covers, on any target</li>
 <li><code>--identity-ref</code> — new identity reference</li>
 <li><code>--json</code> — emit raw AgentDefinitionRead JSON instead of the human summary</li>
 <li><code>--model-tier</code> — new model tier: standard | fast | deep</li>
 <li><code>--output-schema</code> — new output schema as a JSON object: inline JSON, @<path>, or @-</li>
 <li><code>--system-prompt</code> — new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)</li>
+<li><code>--target</code> — a target name for --grants read-targets; repeat the flag for more targets</li>
 <li><code>--toolset</code> — new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/</li>
 <li><code>--turn-budget</code> — new turn budget (1..1000)</li>
 </ul>

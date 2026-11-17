@@ -174,6 +174,9 @@ def _mount_token(mock: respx.MockRouter) -> None:
 # ---------------------------------------------------------------------------
 
 _GROUP_UUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+_CLIENT_UUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+_VIEWER_ROLE_UUID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+_CLIENT_VIEWER_ROLE_UUID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 _USERS_PATH = f"/admin/realms/{_REALM}/users"
 _USER_OP_PARAMS: dict[str, dict[str, Any]] = {
     "keycloak.user.disable": {},
@@ -234,8 +237,32 @@ def _mount_user_write(mock: respx.MockRouter) -> tuple[respx.Route, respx.Route]
     mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
     mock.get(_CREDENTIALS_PATH).respond(200, json=[_OTP_CREDENTIAL])
     mock.get(_ACTIONS_PATH).respond(200, json=[_TOTP_ACTION])
+    _mount_plain_viewer_roles(mock)
     writes = mock.route(method__in=["PUT", "POST", "DELETE"]).respond(204)
     return user_read, writes
+
+
+def _mount_plain_viewer_roles(mock: respx.MockRouter) -> None:
+    """The realm and client role "viewer" give nothing more, so a tenant admin approves."""
+    mock.get(f"/admin/realms/{_REALM}/roles/viewer").respond(
+        200, json={"id": _VIEWER_ROLE_UUID, "name": "viewer", "composite": False}
+    )
+    mock.get(f"/admin/realms/{_REALM}/clients").respond(
+        200, json=[{"id": _CLIENT_UUID, "clientId": "event-app"}]
+    )
+    mock.get(f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}").respond(
+        200, json={"id": _CLIENT_UUID, "clientId": "event-app"}
+    )
+    mock.get(f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}/roles/viewer").respond(
+        200,
+        json={
+            "id": _CLIENT_VIEWER_ROLE_UUID,
+            "name": "viewer",
+            "clientRole": True,
+            "containerId": _CLIENT_UUID,
+            "composite": False,
+        },
+    )
 
 
 async def _park(op_id: str, params: dict[str, Any]) -> uuid.UUID:

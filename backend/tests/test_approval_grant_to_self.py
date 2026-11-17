@@ -844,7 +844,15 @@ async def test_the_connector_marks_the_platform_admin_group_and_role(
     role = await _grant_block(
         _ctx(_ROLES, {"id": _USER, "roles": ["platform_admin"]}, realm=_REALM)
     )
-    plain = await _grant_block(_ctx(_ROLES, {"id": _USER, "roles": ["viewer"]}, realm=_REALM))
+    connector = KeycloakConnector()
+
+    async def _find_role(_t: Any, _r: str, name: str, *, operator: Any) -> dict[str, Any]:
+        return {"id": "role-1", "name": name}
+
+    connector._find_realm_role = _find_role  # type: ignore[method-assign]
+    plain = await _grant_block(
+        _ctx(_ROLES, {"id": _USER, "roles": ["viewer"]}, realm=_REALM, connector=connector)
+    )
 
     assert group["platform_admin"] is True
     assert role["platform_admin"] is True

@@ -14,6 +14,8 @@ import re
 from collections.abc import Collection, Iterable
 from typing import Final
 
+from meho_backplane.broadcast.events import is_secret_param_name
+
 __all__ = [
     "NAME_NOISE_RE",
     "SECRET_ELEMENT_NAMES",
@@ -269,6 +271,10 @@ _ACME_DNS_NAME_RE: Final[re.Pattern[str]] = re.compile(
     r"^dns_.+(?:key|password|secret|token|pwd|pw)$"
 )
 
+#: The only names of :data:`_NOT_SECRET_NAMES` that skip the shared name
+#: rule. Lowercased, exact match. Every other name it hides stays hidden.
+_SHARED_RULE_EXCEPTIONS: Final[frozenset[str]] = frozenset({"password_type", "hide_secrets"})
+
 NAME_NOISE_RE: Final[re.Pattern[str]] = re.compile(r"[-_.]")
 
 
@@ -299,8 +305,16 @@ def is_secret_name_in(name: str, open_names: Collection[str]) -> bool:
     *open_names* holds the lowercased local names of the enclosing elements;
     the scan keeps it up to date as elements open and close.
     """
+    # The shared name rule of every other place comes first, so this list
+    # hides at least the names it hides, except the two plain settings of
+    # :data:`_SHARED_RULE_EXCEPTIONS`. A namespace prefix counts too:
+    # ``password:x`` is as secret as ``password``.
+    if any(
+        part.lower() not in _SHARED_RULE_EXCEPTIONS and is_secret_param_name(part)
+        for part in name.split(":")
+    ):
+        return True
     lowered = name.lower()
-    # A namespace prefix counts too: ``password:x`` is as secret as ``password``.
     if any(_name_part_is_secret(part) for part in lowered.split(":")):
         return True
     local = lowered.rsplit(":", 1)[-1]

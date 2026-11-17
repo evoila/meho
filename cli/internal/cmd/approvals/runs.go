@@ -313,9 +313,26 @@ func printRunApproval(w io.Writer, run *api.RunApprovalRead) {
 		fmt.Fprintf(w, "  Approved by:  %s\n", output.SafeText(*run.ApprovedBySub))
 	}
 	fmt.Fprintf(w, "  Operations (%d):\n", len(run.Entries))
-	for _, entry := range run.Entries {
+	waits := runEntriesThatWait(run)
+	for index, entry := range run.Entries {
 		fmt.Fprintf(w, "    - %s  %s  %s\n", output.SafeText(entry.ConnectorId), output.SafeText(entry.OpId), describeRunEntryTarget(entry))
+		if reason, ok := waits[index]; ok {
+			fmt.Fprintf(w, "      waits for a person: %s\n", output.SafeText(reason))
+		}
 	}
+}
+
+// runEntriesThatWait maps the position of each entry the run approval never
+// covers to the reason the server gives.
+func runEntriesThatWait(run *api.RunApprovalRead) map[int]string {
+	waits := map[int]string{}
+	if run.EntriesThatWait == nil {
+		return waits
+	}
+	for _, note := range *run.EntriesThatWait {
+		waits[note.Entry] = note.Reason
+	}
+	return waits
 }
 
 func describeRunEntryTarget(entry api.RunApprovalEntry) string {

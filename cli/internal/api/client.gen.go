@@ -6670,9 +6670,11 @@ type EventSourceUpdate struct {
 
 // ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
 type ExplainApprovers struct {
+	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. For a waiting request it is the install's routing as it is now, as at the approve click. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
+	Floor  *string  `json:"floor"`
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. category_not_stored when MEHO does not know the category the install's policy gives the change (it gives it two categories, or a waiting request started before MEHO stored it) and an install entry that matches on a category could fit it; then no group may approve it. Null for a caller who is not a tenant admin or a platform admin.
 	Rule *string `json:"rule"`
 }
 
@@ -9876,21 +9878,24 @@ type RunApprovalListResponse struct {
 
 // RunApprovalRead One run approval with its status.
 type RunApprovalRead struct {
-	ApprovedAt    *time.Time            `json:"approved_at"`
-	ApprovedBySub *string               `json:"approved_by_sub"`
-	EndedAt       *time.Time            `json:"ended_at"`
-	Entries       []RunApprovalEntry    `json:"entries"`
-	ExpiresAt     time.Time             `json:"expires_at"`
-	Id            openapi_types.UUID    `json:"id"`
-	PrincipalSub  string                `json:"principal_sub"`
-	Reason        string                `json:"reason"`
-	RequestedAt   time.Time             `json:"requested_at"`
-	RevokedAt     *time.Time            `json:"revoked_at"`
-	RevokedBySub  *string               `json:"revoked_by_sub"`
-	RevokedReason *string               `json:"revoked_reason"`
-	Status        RunApprovalReadStatus `json:"status"`
-	TenantId      openapi_types.UUID    `json:"tenant_id"`
-	WorkRef       string                `json:"work_ref"`
+	ApprovedAt    *time.Time         `json:"approved_at"`
+	ApprovedBySub *string            `json:"approved_by_sub"`
+	EndedAt       *time.Time         `json:"ended_at"`
+	Entries       []RunApprovalEntry `json:"entries"`
+
+	// EntriesThatWait Entries that wait for a person; the reason says which calls. Filled by request, show and approve; null in list, revoke and end.
+	EntriesThatWait *[]RunApprovalWaitNote `json:"entries_that_wait"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	Id              openapi_types.UUID     `json:"id"`
+	PrincipalSub    string                 `json:"principal_sub"`
+	Reason          string                 `json:"reason"`
+	RequestedAt     time.Time              `json:"requested_at"`
+	RevokedAt       *time.Time             `json:"revoked_at"`
+	RevokedBySub    *string                `json:"revoked_by_sub"`
+	RevokedReason   *string                `json:"revoked_reason"`
+	Status          RunApprovalReadStatus  `json:"status"`
+	TenantId        openapi_types.UUID     `json:"tenant_id"`
+	WorkRef         string                 `json:"work_ref"`
 }
 
 // RunApprovalReadStatus defines model for RunApprovalRead.Status.
@@ -9899,6 +9904,21 @@ type RunApprovalReadStatus string
 // RunApprovalRevoke Body of “POST /api/v1/service-principals/run-approvals/{id}/revoke“.
 type RunApprovalRevoke struct {
 	Reason *string `json:"reason"`
+}
+
+// RunApprovalWaitNote An entry the run approval never covers; each of its calls waits for a person.
+//
+// The list keeps the entry (the request is not refused), and this note
+// says so to the add-on that asks and to the person who approves.
+type RunApprovalWaitNote struct {
+	ConnectorId string `json:"connector_id"`
+
+	// Entry The position of the entry in ``entries``, from 0.
+	Entry int    `json:"entry"`
+	OpId  string `json:"op_id"`
+
+	// Reason Why each call of this entry waits for a person.
+	Reason string `json:"reason"`
 }
 
 // RunCompletedResponse Returned by “meho_runbook_next“ when the previous step was the last.

@@ -42,6 +42,12 @@ Rules that never change:
 * An operation that a connector marks for per-call approval
   (:func:`~meho_backplane.op_classes.needs_per_call_approval`) is never
   covered either.
+* An operation that reads a credential (the ``credential_read`` class,
+  :func:`~meho_backplane.operations.service_grants.credential_read_grant_reason`)
+  is never covered either: each call waits for a person. A request that
+  lists one is accepted, and the answer names the entry in
+  ``entries_that_wait``
+  (:func:`~meho_backplane.operations.run_approval_notes.with_wait_notes`).
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
 * One run (tenant, token subject, run reference) has at most one open
@@ -68,6 +74,7 @@ from meho_backplane.db.models import EndpointDescriptor, RunApproval, Tenant
 from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.run_approval_notes import with_wait_notes
 from meho_backplane.operations.run_approval_schemas import (
     RunApprovalCreate,
     RunApprovalEntry,
@@ -326,6 +333,7 @@ async def _check_routed_entry(
         op_id=entry.op_id,
         level=descriptor.safety_level,
         category=descriptor.policy_category,
+        install_category=descriptor.policy_install_category,
     )
     routed.append(
         {
@@ -466,6 +474,7 @@ class RunApprovalService:
             await session.commit()
             await session.refresh(row)
             read = _read(row, now)
+        read = await with_wait_notes(read)
         _log.info(
             "run_approval_requested",
             tenant_id=str(operator.tenant_id),
@@ -473,6 +482,7 @@ class RunApprovalService:
             principal_sub=operator.sub,
             work_ref=payload.work_ref,
             entry_count=len(payload.entries),
+            entries_that_wait=len(read.entries_that_wait or []),
         )
         return read
 
@@ -504,7 +514,8 @@ class RunApprovalService:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await _load(session, tenant_id, run_approval_id)
-            return _read(row, datetime.now(UTC))
+            read = _read(row, datetime.now(UTC))
+        return await with_wait_notes(read)
 
     async def approve(self, operator: Operator, run_approval_id: uuid.UUID) -> RunApprovalRead:
         """A person approves a ``pending`` request; the whole list at once."""
@@ -526,6 +537,7 @@ class RunApprovalService:
             row.approved_by_sub = operator.sub
             await session.commit()
             read = _read(row, now)
+        read = await with_wait_notes(read)
         _log.info(
             "run_approval_approved",
             tenant_id=str(operator.tenant_id),

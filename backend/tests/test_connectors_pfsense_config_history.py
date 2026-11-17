@@ -4,8 +4,11 @@
 """Tests for the safe pfSense read ``pfsense.config.history`` (#4989).
 
 All data is synthetic: made-up users, descriptions and passwords. The
-listing text has the shape the firewall command prints: a ``@@FILE`` line,
-the ``<revision>`` block, and a ``@@BACKUPCOUNT`` line at the end.
+listing text has the shape the firewall command prints: a ``@@FILE`` line
+(name, read status, size), the ``<revision>`` block, and a ``@@BACKUPCOUNT``
+line (read status, value) at the end. The tests at the end run the real
+listing command with ``/bin/sh`` over the files in
+``tests/fixtures/pfsense_config_history/``.
 
 Coverage:
 
@@ -19,24 +22,29 @@ Coverage:
   the answer, but the section is flagged; nothing leaks in the error text;
 * failures: a failed listing, an empty listing, a failed file read, a file
   that cannot be parsed raise an error and never return an empty answer;
+* a save between the listing and the file read;
 * the parameter checks and the op metadata.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from jsonschema import Draft202012Validator
 
-import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.connector import _WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.pfsense.ops_config_history import (
+    _LIST_CMD,
     DEFAULT_BACKUP_COUNT,
     MAX_DIFF_CHARS,
     PfSenseConfigHistoryError,
@@ -84,7 +92,7 @@ def _revision_block(time: int, user: str, description: str) -> str:
     return (
         "\t<revision>\n"
         f"\t\t<time>{time}</time>\n"
-        f"\t\t<description><![CDATA[{description}]]></description>\n"
+        f"\t\t<description>{description}</description>\n"
         f"\t\t<username><![CDATA[{user}]]></username>\n"
         "\t</revision>\n"
     )
@@ -136,8 +144,8 @@ def _listing(files: dict[str, str], backup_count: str = "") -> str:
     for name, text in files.items():
         start = text.index("\t<revision>")
         end = text.index("</revision>") + len("</revision>\n")
-        out += f"@@FILE {name} {len(text)}\n" + text[start:end]
-    return out + f"@@BACKUPCOUNT {backup_count}\n"
+        out += f"@@FILE {name} 0 {len(text)}\n" + text[start:end]
+    return out + f"@@BACKUPCOUNT 0 {backup_count}\n"
 
 
 def _shell(files: dict[str, str], backup_count: str = "") -> Any:
@@ -207,7 +215,7 @@ async def test_since_after_every_revision_is_an_empty_list_not_an_error() -> Non
 
 
 def test_a_backup_without_a_revision_block_takes_its_time_from_the_file_name() -> None:
-    output = f"@@FILE backup/config-{_T_OLD}.xml 120\n@@BACKUPCOUNT \n"
+    output = f"@@FILE backup/config-{_T_OLD}.xml 0 120\n@@BACKUPCOUNT 0 \n"
     revisions, _count = parse_history_listing(output)
     assert [(r.time, r.user, r.description) for r in revisions] == [(_T_OLD, None, None)]
 
@@ -462,3 +470,207 @@ async def test_real_answers_match_the_response_schema() -> None:
     validator = Draft202012Validator(_op().response_schema)
     for params in ({}, {"revision": _T_NEW}, {"revision": _T_OLD}, {"revision": _T_MID}):
         validator.validate(await _call(params))
+
+
+# ---------------------------------------------------------------------------
+# A failed read inside the listing is an error, not a file without a block
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "@@FILE config.xml 1 \n@@BACKUPCOUNT 0 \n",
+        "@@FILE config.xml 0 \n@@BACKUPCOUNT 0 \n",
+        f"@@FILE config.xml 0 900\n@@FILE backup/config-{_T_OLD}.xml 1 900\n@@BACKUPCOUNT 0 \n",
+        "@@FILE config.xml 0 900\n@@BACKUPCOUNT 1 \n",
+        "@@FILE config.xml 0 900\n",
+    ],
+    ids=[
+        "live-file-not-read",
+        "live-file-size-missing",
+        "backup-not-read",
+        "backup-count-not-read",
+        "answer-stops-early",
+    ],
+)
+def test_a_failed_read_in_the_listing_raises(output: str) -> None:
+    with pytest.raises(PfSenseConfigHistoryError, match=r"could not read|stopped early"):
+        parse_history_listing(output)
+
+
+def test_a_read_file_without_a_revision_block_is_not_an_error() -> None:
+    output = f"@@FILE config.xml 0 900\n@@FILE backup/config-{_T_OLD}.xml 0 800\n@@BACKUPCOUNT 0 \n"
+    revisions, count = parse_history_listing(output)
+    assert [(r.time, r.current) for r in revisions] == [(_T_OLD, False)]
+    assert count is None
+
+
+# ---------------------------------------------------------------------------
+# A save between the listing and the file read
+# ---------------------------------------------------------------------------
+
+_T_SAVED = _T_NEW + 60
+
+
+def _shell_with_save(files: dict[str, str], after_save: dict[str, str]) -> Any:
+    """The listing sees *files*; every ``cat`` after it sees *after_save*."""
+
+    async def run(target: Any, command: str, operator: Any = None) -> Any:
+        if command.startswith("cd /cf/conf"):
+            return _proc(_listing(files))
+        name = command.removeprefix("cat /cf/conf/")
+        if name not in after_save:
+            return _proc("", exit_status=1)
+        return _proc(after_save[name])
+
+    return run
+
+
+async def _call_with_save(params: dict[str, Any], after_save: dict[str, str]) -> Any:
+    connector = PfSenseConnector()
+    with patch.object(
+        connector,
+        "_run_command",
+        new=AsyncMock(side_effect=_shell_with_save(_FILES, after_save)),
+    ):
+        return await connector.config_history(_TARGET, params)
+
+
+@pytest.mark.asyncio
+async def test_a_save_after_the_listing_reads_the_live_revision_from_its_backup() -> None:
+    """pfSense moved the listed live file to backup/config-<time>.xml and wrote a new one."""
+    after_save = dict(_FILES)
+    after_save[f"backup/config-{_T_NEW}.xml"] = _FILES["config.xml"]
+    after_save["config.xml"] = _config(
+        _T_SAVED, "mallory", "Firewall: Rules: deleted", rules=(), hash_=FAKE_BCRYPT
+    )
+    result = await _call_with_save({"revision": _T_NEW}, after_save)
+    assert result == await _call({"revision": _T_NEW})
+    assert result["user"] == "alice@192.0.2.10 (Local Database)"
+    assert "allow dns" in result["diff"]
+    assert "mallory" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_a_save_after_the_listing_without_the_backup_raises() -> None:
+    after_save = dict(_FILES)
+    after_save["config.xml"] = _config(
+        _T_SAVED, "mallory", "Firewall: Rules: deleted", rules=(), hash_=FAKE_BCRYPT
+    )
+    with pytest.raises(PfSenseConfigHistoryError, match="saved again"):
+        await _call_with_save({"revision": _T_NEW}, after_save)
+
+
+@pytest.mark.asyncio
+async def test_a_backup_that_holds_another_revision_raises() -> None:
+    after_save = dict(_FILES)
+    after_save[f"backup/config-{_T_MID}.xml"] = _FILES[f"backup/config-{_T_OLD}.xml"]
+    with pytest.raises(PfSenseConfigHistoryError, match="saved again"):
+        await _call_with_save({"revision": _T_NEW}, after_save)
+
+
+# ---------------------------------------------------------------------------
+# The real listing command over files in the pfSense on-disk format
+# ---------------------------------------------------------------------------
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "pfsense_config_history"
+_FX_T1 = 1762000000
+_FX_T2 = 1762090000
+_FX_T3 = 1762180000
+_SH = shutil.which("sh")
+
+
+def _fixture_files() -> dict[str, str]:
+    return {
+        str(path.relative_to(_FIXTURE_DIR)): path.read_text()
+        for path in sorted(_FIXTURE_DIR.rglob("*.xml"))
+    }
+
+
+def _run_list_cmd(conf_dir: Path) -> subprocess.CompletedProcess[str]:
+    assert _SH is not None
+    command = _LIST_CMD.replace("/cf/conf", str(conf_dir))
+    return subprocess.run(
+        [_SH, "-c", command], capture_output=True, text=True, check=False, timeout=30
+    )
+
+
+def _conf_dir(tmp_path: Path) -> Path:
+    conf = tmp_path / "conf"
+    shutil.copytree(_FIXTURE_DIR, conf)
+    return conf
+
+
+@pytest.mark.skipif(_SH is None, reason="needs a POSIX sh")
+def test_the_real_listing_command_reads_the_fixture_files(tmp_path: Path) -> None:
+    proc = _run_list_cmd(_conf_dir(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    revisions, count = parse_history_listing(proc.stdout)
+    assert count == 10
+    files = _fixture_files()
+    assert [(r.time, r.file, r.current, r.size) for r in revisions] == [
+        (_FX_T3, "config.xml", True, len(files["config.xml"].encode())),
+        (_FX_T2, f"backup/config-{_FX_T2}.xml", False, len(files[f"backup/config-{_FX_T2}.xml"])),
+        (_FX_T1, f"backup/config-{_FX_T1}.xml", False, len(files[f"backup/config-{_FX_T1}.xml"])),
+    ]
+    assert revisions[0].user == "operator@198.51.100.21 (Local Database)"
+    assert revisions[0].description == (
+        "operator@198.51.100.21 (Local Database): Updated user admin and DNS servers"
+    )
+    assert revisions[2].user == "admin@198.51.100.20 (Local Database)"
+
+
+@pytest.mark.skipif(_SH is None, reason="needs a POSIX sh")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a file without read permission")
+def test_the_real_listing_command_reports_a_file_it_cannot_read(tmp_path: Path) -> None:
+    conf = _conf_dir(tmp_path)
+    unreadable = conf / "backup" / f"config-{_FX_T1}.xml"
+    unreadable.chmod(0)
+    try:
+        proc = _run_list_cmd(conf)
+    finally:
+        unreadable.chmod(0o600)
+    assert f"@@FILE backup/config-{_FX_T1}.xml 1" in proc.stdout
+    with pytest.raises(PfSenseConfigHistoryError, match=f"could not read backup/config-{_FX_T1}"):
+        parse_history_listing(proc.stdout)
+
+
+async def _call_on_fixture_dir(conf: Path, params: dict[str, Any]) -> Any:
+    """Run the op with the listing from the real command and ``cat`` from the files."""
+
+    async def run(target: Any, command: str, operator: Any = None) -> Any:
+        if command.startswith("cd /cf/conf"):
+            proc = _run_list_cmd(conf)
+            return _proc(proc.stdout, proc.returncode)
+        path = conf / command.removeprefix("cat /cf/conf/")
+        return _proc(path.read_text()) if path.is_file() else _proc("", 1)
+
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new=AsyncMock(side_effect=run)):
+        return await connector.config_history(_TARGET, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(_SH is None, reason="needs a POSIX sh")
+async def test_the_fixture_diffs_show_the_rule_and_hide_the_password(tmp_path: Path) -> None:
+    conf = _conf_dir(tmp_path)
+
+    added_rule = await _call_on_fixture_dir(conf, {"revision": _FX_T2})
+    assert added_rule["previous_revision"] == _FX_T1
+    assert [s["section"] for s in added_rule["changed_sections"]] == ["filter"]
+    assert added_rule["changed_sections"][0]["removed"] == 0
+    assert "+\t\t\t<descr>Allow DNS</descr>" in added_rule["diff"]
+    assert "+\t\t\t\t<port>53</port>" in added_rule["diff"]
+
+    password = await _call_on_fixture_dir(conf, {"revision": _FX_T3})
+    assert password["previous_revision"] == _FX_T2
+    assert password["user"] == "operator@198.51.100.21 (Local Database)"
+    system = password["changed_sections"][0]
+    assert (system["section"], system["added"], system["removed"]) == ("system", 2, 1)
+    assert "+\t\t<backupcount>10</backupcount>" in password["diff"]
+    assert "bcrypt-hash" not in password["diff"]
+    assert "-\t\t<dnsserver>192.0.2.53</dnsserver>" in password["diff"]
+    assert "+\t\t<dnsserver>192.0.2.54</dnsserver>" in password["diff"]
+    dumped = json.dumps(password) + json.dumps(added_rule)
+    assert "$2y$10$" not in dumped

@@ -594,13 +594,16 @@ pfSense keeps every saved configuration as a revision: the live
 `/cf/conf/backup/config-<unix time>.xml`. Each file has a top-level
 `<revision>` block with `time`, `description` and `username`. The firewall
 keeps `<system><backupcount>` backups (30 when it is not set).
-`pfsense.config.show` cannot answer "who changed this": its one text value is
-larger than a stored result can return in one read, and one text value cannot
-be read in parts.
+`pfsense.config.show` cannot answer "who changed this": it returns only the
+live file, so it has no older revisions to compare with.
 
 - **List (no `revision`).** One fixed `sh` loop prints, for each file, its
-  name, its size and its first `<revision>` block, then the stored
-  `backupcount`. The answer is `{rows, total, kept, backup_count,
+  name, a read status (`0` when the file was read), its size and its first
+  `<revision>` block, then the read status and the stored `backupcount`.
+  Each read is checked by itself. A failed read of any file or of the backup
+  count, or an answer that stops before the backup count line, raises an
+  error. So a failed read never looks like a file without a `<revision>`
+  block. The answer is `{rows, total, kept, backup_count,
   backup_count_is_default}`; each row is `{time, time_utc, user, description,
   size, current}`, newest first, `current` true for the live file. `since` (a
   unix time) keeps only revisions from that time on; `kept` still counts all
@@ -624,6 +627,13 @@ be read in parts.
   `diff_omitted` is true; the caller asks again with `section` for the diff of
   one changed section (if that one is also longer, it is left out too).
   The oldest kept revision has no previous one and says so.
+- **A save during the read.** Each file that is read must still hold the
+  revision the listing named (its `<revision><time>`). pfSense saves the old
+  live file as `backup/config-<its time>.xml` before it writes a new one. So
+  when the live file holds a newer revision, the op reads that backup
+  instead. Any other change raises an error that asks the caller to list
+  the history again. A diff is never labelled with the wrong revision or
+  user.
 - **Checks.** `revision`, `since` are whole unix times, `section` matches
   `[A-Za-z0-9_.:#-]{1,64}` and needs `revision`; the file name that reaches
   `cat` is one the listing printed and matches a fixed pattern. A failed read,

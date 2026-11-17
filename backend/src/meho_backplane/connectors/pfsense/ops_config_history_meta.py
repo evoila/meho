@@ -27,8 +27,8 @@ _WHEN_TO_USE = (
     "revisions, newest first (time, user, description, size); ``since`` keeps only "
     "revisions from that unix time on. Then call it with one revision's ``time`` "
     "to see what that revision changed against the one before it. "
-    "Never use ``pfsense.config.show`` for this: its one text value is too large "
-    "to read in parts."
+    "Do not use ``pfsense.config.show`` for this: it returns only the live file, "
+    "with no older revisions to compare."
 )
 
 _ROW_SCHEMA: dict[str, Any] = {

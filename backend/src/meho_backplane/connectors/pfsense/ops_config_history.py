@@ -32,6 +32,11 @@ does not show in the diff. A section whose only change is a hidden value is
 still listed, with ``only_hidden_values_changed: true`` and no diff lines.
 That flag is the only thing the comparison of the raw text adds to the answer.
 
+A save can happen between the listing and the file reads. So each file that
+is read must still hold the revision the listing named; when the live file
+moved into its backup, that backup is read instead. Any other change is an
+error, so a diff is never labelled with the wrong revision or user.
+
 Every error text is fixed text. It never quotes a file.
 """
 
@@ -78,21 +83,28 @@ _CONTEXT_LINES = 2
 _SECTION_RE = re.compile(r"[A-Za-z0-9_.:#-]{1,64}")
 _FILE_RE = re.compile(r"config\.xml|backup/config-\d{1,12}\.xml")
 _FILE_TIME_RE = re.compile(r"config-(\d{1,12})\.xml")
+_REVISION_BLOCK_RE = re.compile(r"<revision>.*?</revision>", re.DOTALL)
 _FILE_MARK = "@@FILE "
 _COUNT_MARK = "@@BACKUPCOUNT "
 
 # One fixed command, no caller text in it. For the live file and each backup:
-# the file name, its size, and the first <revision> block (at most 12 lines).
-# Then the backup count of the live file.
+# a line with the file name, a read status (0 = read) and its size, then its
+# first <revision> block (at most 12 lines). Then the read status and the
+# backup count of the live file. Each read is checked by itself, so a failed
+# read is reported and never looks like a file without a revision block.
 _LIST_CMD = (
     "cd /cf/conf || exit 1; "
     "for f in config.xml backup/config-*.xml; do "
     '[ -f "$f" ] || continue; '
-    'echo "@@FILE $f $(wc -c < "$f" | tr -d \' \')"; '
-    "sed -n '/<revision>/,/<\\/revision>/p' \"$f\" | head -n 12; "
+    "rc=0; "
+    'n=$(wc -c < "$f") || rc=1; '
+    "b=$(sed -n '/<revision>/,/<\\/revision>/p' \"$f\") || rc=1; "
+    'echo "@@FILE $f $rc $n"; '
+    '[ -z "$b" ] || printf \'%s\\n\' "$b" | head -n 12; '
     "done; "
-    "echo \"@@BACKUPCOUNT $(sed -n 's:.*<backupcount>\\(.*\\)</backupcount>.*:\\1:p' "
-    'config.xml | head -n 1)"'
+    "rc=0; "
+    "c=$(sed -n 's:.*<backupcount>\\(.*\\)</backupcount>.*:\\1:p' config.xml) || rc=1; "
+    'echo "@@BACKUPCOUNT $rc $(printf \'%s\\n\' "$c" | head -n 1)"'
 )
 
 
@@ -140,6 +152,49 @@ def _parse_revision_block(block: str) -> tuple[int | None, str | None, str | Non
     return time_value, _clean(root.findtext("username")), _clean(root.findtext("description"))
 
 
+def _read_failed(what: str) -> PfSenseConfigHistoryError:
+    return PfSenseConfigHistoryError(f"the firewall could not read {what}; no history was returned")
+
+
+def _file_line(rest: str) -> tuple[str, int]:
+    """Parse ``<name> <read status> <size>``; raise when the read failed."""
+    parts = rest.split()
+    name = parts[0] if parts else ""
+    what = name if _FILE_RE.fullmatch(name) else "a configuration file"
+    if len(parts) < 3 or parts[1] != "0" or not parts[2].isdigit():
+        raise _read_failed(what)
+    return name, int(parts[2])
+
+
+def _count_line(rest: str) -> int | None:
+    """Parse ``<read status> [<backup count>]``; raise when the read failed."""
+    parts = rest.split()
+    if not parts or parts[0] != "0":
+        raise _read_failed("the backup count")
+    text = parts[1] if len(parts) > 1 else ""
+    return int(text) if text.isdigit() and 0 < len(text) <= 6 else None
+
+
+def _revision_of(name: str, size: int, block_lines: list[str]) -> _Revision | None:
+    """Build the revision of one listed file, or ``None`` when it has no time."""
+    if not _FILE_RE.fullmatch(name):
+        return None
+    time_value, user, description = _parse_revision_block("\n".join(block_lines))
+    if time_value is None:
+        match = _FILE_TIME_RE.search(name)
+        if match is None:
+            return None  # the live file without a revision time: nothing to list
+        time_value = int(match.group(1))
+    return _Revision(
+        time=time_value,
+        file=name,
+        size=size,
+        user=user,
+        description=description,
+        current=name == "config.xml",
+    )
+
+
 def parse_history_listing(output: str) -> tuple[list[_Revision], int | None]:
     """Parse the output of the listing command.
 
@@ -148,47 +203,35 @@ def parse_history_listing(output: str) -> tuple[list[_Revision], int | None]:
     ``None`` when the config does not set it.
 
     Raises :class:`PfSenseConfigHistoryError` when the output holds no file
-    at all, so a broken read never looks like "no history".
+    at all, when a file or the backup count could not be read, or when the
+    output stops before the backup count line. So a broken read never looks
+    like "no history" or like a file without a revision block.
     """
-    entries: list[tuple[str, int | None, list[str]]] = []
+    entries: list[tuple[str, int, list[str]]] = []
     backup_count: int | None = None
+    count_seen = False
     for line in output.splitlines():
         if line.startswith(_FILE_MARK):
-            parts = line[len(_FILE_MARK) :].split()
-            name = parts[0] if parts else ""
-            size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-            entries.append((name, size, []))
+            entries.append((*_file_line(line[len(_FILE_MARK) :]), []))
         elif line.startswith(_COUNT_MARK):
-            text = line[len(_COUNT_MARK) :].strip()
-            backup_count = int(text) if text.isdigit() and 0 < len(text) <= 6 else None
+            backup_count = _count_line(line[len(_COUNT_MARK) :])
+            count_seen = True
         elif entries:
             entries[-1][2].append(line)
     if not entries:
         raise PfSenseConfigHistoryError(
             "the firewall returned no configuration files; no history was returned"
         )
+    if not count_seen:
+        raise PfSenseConfigHistoryError(
+            "the firewall answer stopped early; no history was returned"
+        )
 
     by_time: dict[int, _Revision] = {}
-    for name, size, block_lines in entries:
-        if not _FILE_RE.fullmatch(name):
-            continue
-        time_value, user, description = _parse_revision_block("\n".join(block_lines))
-        if time_value is None:
-            match = _FILE_TIME_RE.search(name)
-            if match is None:
-                continue  # the live file without a revision time: nothing to list
-            time_value = int(match.group(1))
-        by_time.setdefault(
-            time_value,
-            _Revision(
-                time=time_value,
-                file=name,
-                size=size,
-                user=user,
-                description=description,
-                current=name == "config.xml",
-            ),
-        )
+    for entry in entries:
+        rev = _revision_of(*entry)
+        if rev is not None:
+            by_time.setdefault(rev.time, rev)
     revisions = sorted(by_time.values(), key=lambda rev: rev.time, reverse=True)
     return revisions, backup_count
 
@@ -325,16 +368,54 @@ async def _read_listing(
 
 
 async def _read_file(
-    self: PfSenseConnector, target: Any, rev: _Revision, operator: Operator | None
+    self: PfSenseConnector, target: Any, name: str, time: int, operator: Operator | None
 ) -> str:
-    if not _FILE_RE.fullmatch(rev.file):  # cannot happen: parse_history_listing checked it
+    if not _FILE_RE.fullmatch(name):  # cannot happen: the names are checked or built here
         raise PfSenseConfigHistoryError("a revision file name is not valid")
-    proc = await self._run_command(target, f"cat /cf/conf/{rev.file}", operator=operator)
+    proc = await self._run_command(target, f"cat /cf/conf/{name}", operator=operator)
     raw = proc.stdout or ""
     stdout = raw if isinstance(raw, str) else ""
     if proc.exit_status != 0 or not stdout.strip():
-        raise RuntimeError(f"reading revision {rev.time} failed: exit {proc.exit_status}")
+        raise RuntimeError(f"reading revision {time} failed: exit {proc.exit_status}")
     return stdout
+
+
+def _file_revision_time(text: str) -> int | None:
+    """Return the ``<time>`` of the first ``<revision>`` block of a config text."""
+    match = _REVISION_BLOCK_RE.search(text)
+    if match is None:
+        return None
+    time_value, _user, _description = _parse_revision_block(match.group(0))
+    return time_value
+
+
+async def _read_revision(
+    self: PfSenseConnector, target: Any, rev: _Revision, operator: Operator | None
+) -> str:
+    """Read the file of *rev* and check that it still holds that revision.
+
+    A save between the listing and this read moves the live revision into
+    ``backup/config-<its time>.xml`` and writes a new live file. Then the live
+    file is read from that backup. Any other change is an error, so a diff is
+    never labelled with the wrong revision.
+    """
+    text = await _read_file(self, target, rev.file, rev.time, operator)
+    found = _file_revision_time(text)
+    if found == rev.time or (found is None and not rev.current):
+        return text
+    if rev.current:
+        try:
+            text = await _read_file(
+                self, target, f"backup/config-{rev.time}.xml", rev.time, operator
+            )
+        except RuntimeError:
+            text = ""
+        if text and _file_revision_time(text) == rev.time:
+            return text
+    raise PfSenseConfigHistoryError(
+        f"the configuration was saved again while revision {rev.time} was read; "
+        "list the history again and retry"
+    )
 
 
 async def _clean_text(raw: str) -> str:
@@ -419,8 +500,8 @@ async def _changed_sections(
     new_rev: _Revision,
 ) -> list[dict[str, Any]]:
     """Read both files, remove the known secrets, and compare them section by section."""
-    new_raw = await _read_file(self, target, new_rev, operator)
-    old_raw = await _read_file(self, target, old_rev, operator)
+    new_raw = await _read_revision(self, target, new_rev, operator)
+    old_raw = await _read_revision(self, target, old_rev, operator)
     new_clean = await _clean_text(new_raw)
     old_clean = await _clean_text(old_raw)
     return await asyncio.to_thread(

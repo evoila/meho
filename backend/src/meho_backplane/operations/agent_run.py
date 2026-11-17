@@ -389,10 +389,10 @@ async def list_runs(
         session: Open :class:`AsyncSession` (read-only; no commit).
         tenant_id: The tenant whose runs to list.
         work_ref: When supplied, narrows to runs whose ``work_ref``
-            matches this external change ticket exactly
-            (``"gh:evoila/meho#11"``). ``None`` applies no work_ref
-            filter (runs with and without a ticket are returned). An
-            empty string is a legitimate exact-match value, distinct
+            is this external change ticket, the whole id
+            (``"gh:evoila/meho#11"``; :func:`work_ref_filter_values`).
+            ``None`` applies no work_ref filter (runs with and without a
+            ticket are returned). An empty string is a value, distinct
             from ``None`` -- so the filter is applied whenever the
             argument is not ``None``.
         status: When supplied, narrows to runs in this lifecycle state.

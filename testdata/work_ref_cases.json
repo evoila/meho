@@ -1,5 +1,5 @@
 {
- "_comment": "Shared cases for the ticket id rule. Read by backend/tests/test_work_ref_rule.py and cli/internal/api/workref_test.go. A case with repeat holds raw repeated that many times. The Go test skips invalid_python_only (Go text cannot hold a lone surrogate). A valid case with cli_refuses is cleaned by the backend, but the CLI refuses it on purpose: a control character at the end of a flag or variable value is most likely a mistake.",
+ "_comment": "Shared cases for the ticket id rule. Read by backend/tests/test_work_ref_rule.py and cli/internal/api/workref_test.go. A case with repeat holds raw repeated that many times. The Go test skips invalid_python_only (Go text cannot hold a lone surrogate). Both tests expect the same cleaned value and the same accept or refuse for every case.",
  "valid": [
   {
    "name": "plain ticket",
@@ -24,8 +24,7 @@
   {
    "name": "tab and line break at both ends",
    "raw": "\tCHG1\n",
-   "clean": "CHG1",
-   "cli_refuses": true
+   "clean": "CHG1"
   },
   {
    "name": "no-break space at both ends",
@@ -35,8 +34,17 @@
   {
    "name": "unit separator at both ends",
    "raw": "\u001fCHG1\u001f",
-   "clean": "CHG1",
-   "cli_refuses": true
+   "clean": "CHG1"
+  },
+  {
+   "name": "next line and line separator at both ends",
+   "raw": "\u0085CHG1\u2028",
+   "clean": "CHG1"
+  },
+  {
+   "name": "paragraph separator at both ends",
+   "raw": "\u2029CHG1\u2029",
+   "clean": "CHG1"
   },
   {
    "name": "space inside",

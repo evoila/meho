@@ -29,7 +29,13 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector
+
+# The connector loads ops_user_required_actions late and it adds its card builder when
+# it loads. Load it at collection, so the test setup keeps the builder for every test.
+from meho_backplane.connectors.keycloak import (
+    KeycloakConnector,
+    ops_user_required_actions,  # noqa: F401
+)
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -546,18 +552,39 @@ async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         user_read, writes = _mount_user_write(mock)
         request_id = await _park(op_id, params)
+        # The card must hold the user, or the run would refuse for a missing id instead.
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            assert _USER_UUID in str(row.proposed_effect.get("preview")), row.proposed_effect
         user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
         resumed = await _approve_and_resume(request_id)
-    assert_refused_without_write(resumed, writes)
+    # With a username in the request the run refuses the pair; by id it refuses the card.
+    text = (
+        "belong to different users"
+        if "username" in params
+        else "is not the name on the approval card"
+    )
+    assert_refused_without_write(resumed, writes, text)
 
 
-def assert_refused_without_write(resumed: Any, writes: respx.Route) -> None:
-    """The approved run was refused, and nothing was written."""
+def assert_refused_without_write(
+    resumed: Any, writes: respx.Route, text: str | None = None
+) -> None:
+    """The approved run was refused, and nothing was written.
+
+    With *text*, the refusal says it where the op shows it. An op that sends a
+    secret withholds the vendor text, and a stop one step earlier has its own.
+    """
     assert resumed.status != "ok"
     # Some ops withhold the error text, so the check is on the error class. A
     # rights change can stop one step earlier: its card cannot be checked again.
     dumped = str(resumed.model_dump(mode="json"))
     assert "ValueError" in dumped or "object_changed_since_approval" in dumped, dumped
+    if text is not None and "object_changed_since_approval" not in dumped:
+        withheld = "<vendor text withheld" in dumped
+        message = resumed.extras["exception_message"]
+        assert withheld or text in message, dumped
     assert not writes.called
 
 
@@ -573,7 +600,7 @@ async def test_a_request_whose_card_shows_no_stored_name_is_refused_when_it_runs
         user_read.respond(200, json=_user(True))
         # A rights change for a user MEHO could not read needs a platform admin.
         resumed = await _approve_and_resume(request_id, platform_admin=True)
-    assert_refused_without_write(resumed, writes)
+    assert_refused_without_write(resumed, writes, "shows no user")
 
 
 async def test_a_username_request_is_refused_when_the_user_is_renamed(
@@ -668,6 +695,7 @@ async def test_card_does_not_show_the_sent_name_when_the_user_cannot_be_read(
     assert "username" not in card
     assert card["requested_username"] == "event-guest"
     assert card["user_available"] is False
+    assert "could not read this user" in card["user_note"]
 
 
 async def test_card_of_a_member_change_shows_the_stored_name(kc: KeycloakConnector) -> None:

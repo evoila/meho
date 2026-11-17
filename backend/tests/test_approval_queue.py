@@ -594,10 +594,10 @@ async def test_create_pending_request_work_ref_null_when_unbound(
 
 @pytest.mark.asyncio
 async def test_list_pending_filters_by_work_ref(session: AsyncSession) -> None:
-    """``list_pending(work_ref=...)`` returns only exact-match requests.
+    """``list_pending(work_ref=...)`` returns only the requests of that ticket id.
 
     work_ref I2-T1 #1659 AC2 (service layer behind ``meho approvals list
-    --work-ref``): an exact ``work_ref`` filter narrows to the matching
+    --work-ref``): a ``work_ref`` filter narrows to the matching
     requests; an unrelated ref returns none.
     """
     operator = _make_operator()

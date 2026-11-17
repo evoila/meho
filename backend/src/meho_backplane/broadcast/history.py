@@ -137,7 +137,7 @@ def _target_matches(event: BroadcastEvent | AgentAnnouncementEvent, target: str)
 
 
 def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: str) -> bool:
-    """Exact-match the ``work_ref`` filter against either event kind.
+    """Match the ``work_ref`` filter (the whole ticket id) against either event kind.
 
     Two event kinds now carry a ``work_ref``: an
     :class:`AgentAnnouncementEvent`'s declared change-ticket reference

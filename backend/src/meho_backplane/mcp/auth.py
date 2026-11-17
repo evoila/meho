@@ -180,6 +180,9 @@ async def verify_mcp_jwt(
             expected_audience=expected_audience,
             requested_tenant=header_value(meho_tenant),
             allow_unchosen=True,
+            # #6099: a profile token is allowed here; the dispatcher then
+            # takes it only at ``?profile=`` with the same name.
+            allow_mcp_profile=True,
         )
     except HTTPException as exc:
         if exc.status_code != 401:

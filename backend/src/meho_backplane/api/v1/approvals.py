@@ -951,7 +951,7 @@ async def list_approvals(
     ``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every
     state (the same sentinel ``meho_approvals_list`` accepts), and by
     change ticket via
-    ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
+    ``?work_ref=gh:evoila/meho#1`` (whole id, see the work_ref parameter). Returns newest-first
     (``created_at DESC``) by default; ``?order=oldest`` returns
     oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
     requests under one change ticket reads in the order it was sent

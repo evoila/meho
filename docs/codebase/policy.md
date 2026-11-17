@@ -289,7 +289,9 @@ is decided or expires: the install's routing is not checked for it.
 **A change of the install's file.** The preview of an install import
 (`meho policy diff --scope install`) lists the tenants whose stored
 routing no longer fits: the diff key `routing_floor` (one item per tenant,
-with `tenant_id` and `entries`) and one warning per entry. The key is
+with `tenant_id` and `entries`) and one warning per entry. It lists also
+the entries a tenant import only warns about (an earlier entry fits first,
+or two connector patterns MEHO cannot compare). The key is
 there only while `POLICY_APPROVER_ROUTING` is on. Those entries
 stay stored, but where they are wider they do not count.
 

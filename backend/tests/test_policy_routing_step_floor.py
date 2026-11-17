@@ -376,6 +376,47 @@ async def test_the_import_plan_of_a_tenant_shows_the_warning() -> None:
     assert any("`routing[0]` comes first" in warning for warning in plan.warnings)
 
 
+@pytest.mark.asyncio
+async def test_the_install_diff_also_lists_a_tenant_the_import_only_warns_about() -> None:
+    await _store(
+        _tenant(
+            {
+                "match": {"connector": "*-4.x", "risk": "caution"},
+                "approvers": ["Operators", "Admins"],
+            }
+        ),
+        _TENANT,
+    )
+    content = (
+        b"policy: v1\n"
+        b"routing:\n"
+        b"  - {match: {connector: nsx-*, risk: caution}, approvers: [Admins]}\n"
+    )
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(session, scope="install", tenant_id=None, content=content)
+
+    assert plan.diff is not None
+    [item] = plan.diff["routing_floor"]
+    assert item["tenant_id"] == str(_TENANT)
+    [entry] = item["entries"]
+    assert entry.startswith("`routing[0]` lets MEHO-Operators approve changes")
+    assert "MEHO cannot tell whether the two connector patterns" in entry
+    assert any(warning.startswith(f"Tenant {_TENANT}: ") for warning in plan.warnings)
+
+
+@pytest.mark.asyncio
+async def test_the_install_diff_also_lists_an_entry_an_earlier_one_fits_first() -> None:
+    await _store(_SHADOWED, _TENANT)
+    content = b"policy: v1\nrouting:\n  - {match: {category: network}, approvers: [Admins]}\n"
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(session, scope="install", tenant_id=None, content=content)
+
+    assert plan.diff is not None
+    [item] = plan.diff["routing_floor"]
+    [entry] = item["entries"]
+    assert "`routing[0]` comes first" in entry
+
+
 def test_with_the_switch_off_the_import_has_no_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     _switch(monkeypatch, "POLICY_APPROVER_ROUTING", False)
 

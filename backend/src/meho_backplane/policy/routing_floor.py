@@ -295,8 +295,11 @@ async def tenants_wider(
     """The tenants whose stored routing is wider than *install_document*.
 
     One item per tenant: ``tenant_id`` and ``entries`` (one sentence each).
-    Empty while the switch is off. A tenant whose stored routing is not
-    valid gets one sentence that says so.
+    It lists every finding of :func:`wider_findings`, also the ones a
+    tenant import only warns about: the install's change can still take
+    approval rights from a group of the tenant. Empty while the switch is
+    off. A tenant whose stored routing is not valid gets one sentence that
+    says so.
     """
     if not routing_enabled():
         return []
@@ -307,7 +310,8 @@ async def tenants_wider(
     found: list[dict[str, Any]] = []
     for row in rows.scalars():
         try:
-            sentences = wider_entries(_routes(row.document, "tenant", install=False), install)
+            tenant = _routes(row.document, "tenant", install=False)
+            sentences = [found.text for found in wider_findings(tenant, install)]
         except ValueError as exc:
             sentences = [f"The stored routing is not valid: {exc}"]
         if sentences:

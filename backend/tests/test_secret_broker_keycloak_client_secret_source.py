@@ -32,7 +32,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import respx
@@ -54,12 +54,14 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakTargetLike,
 )
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.secret.move_preview import check_secret_move_realms
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
@@ -359,3 +361,49 @@ async def test_keycloak_source_to_vault_move_reads_secret_server_side(
     row = move_rows[0]
     assert _SENTINEL not in json.dumps(row.payload)
     assert _SENTINEL not in json.dumps(row.raw_payload)
+
+
+# ---------------------------------------------------------------------------
+# One realm per target — a ref on another realm is refused
+# ---------------------------------------------------------------------------
+
+_OTHER_REALM = "other-realm"
+
+
+@pytest.mark.asyncio
+async def test_client_secret_source_on_another_realm_is_refused_when_the_move_runs(
+    keycloak_source_env: KeycloakConnector,
+) -> None:
+    """The source refuses a ref on another realm than the managed one; nothing reaches Keycloak."""
+    endpoint = KeycloakClientSecretSourceEndpoint(
+        f"{_TARGET_NAME}/{_OTHER_REALM}/clients/{_CLIENT_ID}#secret"
+    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_admin_token(mock)
+        with pytest.raises(KeycloakSecretRefError, match=f"works on the realm '{_REALM}' only"):
+            await endpoint.read_secret(_OPERATOR)
+    assert not mock.calls, "a ref on another realm must send nothing to Keycloak"
+
+
+@pytest.mark.asyncio
+async def test_client_secret_source_on_another_realm_is_refused_before_approval(
+    keycloak_source_env: KeycloakConnector,
+) -> None:
+    """The park check of secret.move refuses a source on another realm and names no param value."""
+    params = {
+        "from": f"keycloak:{_TARGET_NAME}/{_OTHER_REALM}/clients/{_CLIENT_ID}#secret",
+        "to": f"vault:tenants/{_OPERATOR_TENANT_ID}/apps/launcher#client_secret",
+    }
+    ctx = PreviewContext(
+        descriptor=cast(Any, None),
+        connector_instance=None,
+        operator=_OPERATOR,
+        target=None,
+        params=params,
+    )
+    problem = await check_secret_move_realms(ctx)
+    assert problem is not None
+    assert f"works on the realm '{_REALM}' only" in problem
+    assert _OTHER_REALM not in problem
+    ctx.params["from"] = f"keycloak:{_TARGET_NAME}/{_REALM}/clients/{_CLIENT_ID}#secret"
+    assert await check_secret_move_realms(ctx) is None

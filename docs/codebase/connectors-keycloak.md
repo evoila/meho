@@ -1696,6 +1696,12 @@ deletes only the managed realm of its target. `check_realm_guards` still
 refuses `master`, the target's admin realm and MEHO's own login realm. Its
 approval card names the realm, with the user, client and group counts.
 Every other op takes no realm value and always acts on the managed realm.
+The secret broker refs follow the same fence: `managed_realm_problem`
+(`secret_endpoint.py`) refuses a `keycloak:` ref whose `<realm>` is not the
+managed realm of its target. `check_secret_move_realms`
+(`connectors/secret/move_preview.py`) is the park check of `secret.move`, so
+the move is refused before it waits for approval; the sink and the source
+refuse it again when the move runs, before any call to Keycloak.
 
 **Every answer names the realm.** `answer_realm.py` (`name_the_realm`,
 applied to `KeycloakConnector`) wraps each op handler. With the switch

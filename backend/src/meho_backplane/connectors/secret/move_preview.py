@@ -71,6 +71,16 @@ It checks the named Vault target (it must have its own role) and the
 caller's policy on it. When it says no, the dispatcher refuses the call and
 makes no approval card.
 
+A ``keycloak:`` side on another realm
+====================================
+
+A Keycloak target works on one realm only, its managed realm.
+:func:`check_secret_move_realms` is the op's check before the wait for
+approval (:func:`~meho_backplane.operations._park_check.register_park_check`):
+it refuses a ``keycloak:`` ref whose realm is not the managed realm of its
+target, so no approval card is made. The endpoint refuses it again when the
+move runs.
+
 A ``linux:`` sink the path check refuses
 ========================================
 
@@ -86,6 +96,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.keycloak.secret_endpoint import (
+    KeycloakSecretRefError,
+    keycloak_ref_realm_problem,
+)
 from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
 from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
@@ -97,18 +111,20 @@ from meho_backplane.connectors.secret.vault_target_endpoint import (
     login_of,
     vault_target_move_preflight,
 )
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_permission_preflight,
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
+from meho_backplane.targets.resolver import TargetNotFoundError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.secret.endpoints import SecretRef
 
-__all__ = ["build_secret_move_preview", "check_secret_move_sink"]
+__all__ = ["build_secret_move_preview", "check_secret_move_realms", "check_secret_move_sink"]
 
 
 def _ref_only(spec: SecretRef) -> dict[str, str]:
@@ -212,6 +228,32 @@ def check_secret_move_sink(params: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+async def check_secret_move_realms(ctx: PreviewContext) -> str | None:
+    """Check before the wait for approval: each ``keycloak:`` ref names its target's managed realm.
+
+    A malformed ref or a target that does not exist is left to the run,
+    which reports it. The reason names the target's managed realm, never a
+    param value.
+    """
+    for key in ("from", "to"):
+        raw = ctx.params.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            spec = parse_secret_ref(raw)
+        except ValueError:
+            continue
+        if spec.kind != "keycloak":
+            continue
+        try:
+            problem = await keycloak_ref_realm_problem(ctx.operator, spec.ref)
+        except (KeycloakSecretRefError, TargetNotFoundError):
+            continue
+        if problem is not None:
+            return problem
+    return None
+
+
 async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Build the ref-only ``proposed_effect`` preview for ``secret.move``.
 
@@ -257,8 +299,9 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 def _register_secret_move_preview_builder() -> None:
-    """Wire the ``secret.move`` preview builder, permission check and params check. Import-time."""
+    """Wire the ``secret.move`` preview builder and its checks. Import-time."""
     register_preview_builder("secret.move", build_secret_move_preview)
+    register_park_check("secret.move", check_secret_move_realms)
     register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
 

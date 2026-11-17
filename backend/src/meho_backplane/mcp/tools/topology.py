@@ -116,6 +116,7 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.mcp.profiles import profile_connectors, profile_target_denial
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -1600,6 +1601,10 @@ async def _list_targets_handler(
 
     The page is returned through :func:`_reduce_target_page`, so a page
     over the JSONFlux threshold comes back as a result handle.
+
+    A session whose MCP profile has a connector list sees only the targets
+    whose connector is in the profile (#6099). Such a page can hold fewer
+    targets than ``limit`` and still have a ``next_cursor``.
     """
     tenant_id_arg = arguments.get("tenant_id")
     legacy_tenant_arg = arguments.get("tenant")
@@ -1611,13 +1616,15 @@ async def _list_targets_handler(
     tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
     scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
 
-    stmt = select(
-        TargetORM.id,
-        TargetORM.name,
-        TargetORM.aliases,
-        TargetORM.product,
-        TargetORM.host,
-    ).where(
+    # #6099: a profile with a connector list needs the whole row, so the
+    # resolver can pick each target's connector.
+    limited = profile_connectors(operator.mcp_tool_profile) is not None
+    columns: tuple[Any, ...] = (
+        (TargetORM,)
+        if limited
+        else (TargetORM.id, TargetORM.name, TargetORM.aliases, TargetORM.product, TargetORM.host)
+    )
+    stmt = select(*columns).where(
         TargetORM.tenant_id == scope_tenant_id,
         TargetORM.deleted_at.is_(None),
     )
@@ -1637,11 +1644,16 @@ async def _list_targets_handler(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(stmt)
-        rows = result.all()
+        rows: list[Any] = list(result.scalars().all() if limited else result.all())
 
     if not rows and connector_id:
         await _reject_unknown_connector(scope_tenant_id, connector_id)
 
+    # A full page implies there *may* be more rows; surface the last
+    # name as the keyset cursor. A short page is definitively the end.
+    # The cursor counts the rows read, so a page that the profile made
+    # shorter still points to the next one.
+    next_cursor = rows[-1].name if len(rows) == limit else None
     targets = [
         {
             "id": str(t.id),
@@ -1651,10 +1663,8 @@ async def _list_targets_handler(
             "host": t.host,
         }
         for t in rows
+        if not limited or await profile_target_denial(operator.mcp_tool_profile, t) is None
     ]
-    # A full page implies there *may* be more rows; surface the last
-    # name as the keyset cursor. A short page is definitively the end.
-    next_cursor = targets[-1]["name"] if len(targets) == limit else None
     return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
 
 

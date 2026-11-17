@@ -376,6 +376,17 @@ def test_mcp_block_client_per_tool_kind_is_off_by_default() -> None:
     assert build_features_block(_settings_with())["mcp"]["client_per_tool_kind"] is False
 
 
+@pytest.mark.parametrize("on", [False, True])
+def test_mcp_block_names_no_connector_profile(on: bool) -> None:
+    """``/ready`` needs no login: it says whether the switch is on, never the profile names."""
+    profiles = '{"secret-team": {"tools": "investigate", "connectors": ["kubernetes"]}}'
+    block = build_features_block(
+        _settings_with(mcp_profile_connector_lists=on, mcp_connector_profiles=profiles)
+    )
+    assert block["mcp"]["profile_connector_lists"] is on
+    assert "secret-team" not in repr(block)
+
+
 # ---------------------------------------------------------------------------
 # approval_custody (#3712)
 # ---------------------------------------------------------------------------

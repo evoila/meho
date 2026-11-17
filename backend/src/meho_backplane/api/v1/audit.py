@@ -14,7 +14,7 @@ Mounts six routes. Five dispatch through the T1
 * ``GET /api/v1/audit/who-touched/{target}`` — pre-canned shortcut
   bound to ``target=<path>``.
 * ``GET /api/v1/audit/by-work-ref/{ref}`` — pre-canned shortcut bound
-  to ``work_ref=<path>`` (exact match); the "show every write
+  to ``work_ref=<path>`` (whole ticket id); the "show every write
   authorised by change-ticket X" lookup (work_ref I1-T1 #1655).
 * ``GET /api/v1/audit/my-recent`` — pre-canned shortcut bound to
   ``principal_sub=<operator.sub>`` (exact match on the user id).
@@ -311,10 +311,11 @@ async def by_work_ref(
 
     Pre-canned shortcut over :func:`query_audit` with the ``work_ref``
     filter bound to the path param (work_ref I1-T1 #1655) — the headline
-    "show every write authorised by ticket X" lookup. The match is
-    **exact**: ``ref`` is an opaque identifier (e.g. ``gh:evoila/meho#1``),
-    not a search term, so a non-matching value returns an empty result,
-    never an error.
+    "show every write authorised by ticket X" lookup. ``ref`` is the whole
+    ticket id (e.g. ``gh:evoila/meho#1``), not a search term. White space at
+    both ends is ignored. A value with control or invisible characters, or
+    longer than 256 characters, is refused with an error. A valid value that
+    matches no row returns an empty result.
 
     Unlike :func:`who_touched` / :func:`my_recent`, ``since`` has **no**
     default window: a change-ticket lookup wants the whole governed history

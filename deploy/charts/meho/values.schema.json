@@ -526,6 +526,15 @@
           "enum": ["true", "false"],
           "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
         },
+        "mcpProfileConnectorLists": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "The profiles of `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use only the connectors of that profile. Rendered into `MCP_PROFILE_CONNECTOR_LISTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpConnectorProfiles": {
+          "type": "string",
+          "description": "Extra MCP tool profiles as one JSON object, each with a base tool list and a connector list. Rendered into `MCP_CONNECTOR_PROFILES`. Empty means none; a bad value stops the start. Read only when `mcpProfileConnectorLists` is `\"true\"`. See `docs/codebase/mcp.md`."
+        },
         "mcpClientPerToolKind": {
           "type": "string",
           "enum": ["true", "false"],
@@ -1734,6 +1743,26 @@
           "minLength": 1,
           "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
           "description": "Namespace label value selecting the ingress controller. Must match RFC 1123 label syntax."
+        },
+        "ingressControllerEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Labels of the ingress controller Pods in ingressControllerNamespace. Empty: no rule."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The Pod port of the HTTPS entry point of the ingress controller (Traefik: 8443)."
+            }
+          },
+          "description": "An egress rule to the ingress controller Pods, so the backplane can reach its own console address (the first-start certificate check). Rendered only when podLabels is not empty."
         },
         "postgresCIDR": {
           "type": "string",

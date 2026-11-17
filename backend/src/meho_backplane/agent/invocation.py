@@ -1719,7 +1719,7 @@ class AgentInvoker:
 
         Reads the durable ``agent_run`` rows, tenant-isolated to the
         operator's tenant. ``work_ref`` (when not ``None``) narrows to
-        runs whose external change-ticket reference matches exactly;
+        runs of that external change ticket (the whole id);
         ``status`` (when not ``None``) narrows to one lifecycle state;
         ``agent_name`` (when not ``None``) narrows to runs produced by
         that agent definition. An ``agent_name`` that matches no

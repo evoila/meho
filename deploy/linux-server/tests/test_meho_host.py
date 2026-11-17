@@ -887,7 +887,7 @@ class SupportBundleTests(HostTestCase):
         )
 
     def test_a_header_token_an_address_password_and_an_sql_password_are_removed(self) -> None:
-        # None of these values is in a Secret, so only the three rules for
+        # None of these values is in a Secret, so only the rules for
         # these forms can remove them.
         bearer = "eyJhbGciOiJSUzI1NiJ9.fake-bearer-4b7c"
         basic = "ZmFrZTpiYXNpYy04ZDJl"
@@ -899,6 +899,10 @@ class SupportBundleTests(HostTestCase):
         sql_pass = "Fake-Sql-Pass-5f0d"
         quoted_pass = "it''s-fake-8b4c"
         lower_pass = "fake-lower-pass-3a6e"
+        json_sql_pass = "fake-json-sql-pass-9d2f"
+        json_quoted_pass = "fake-json-quoted-4e7a"
+        query_pass = "fake-query-pass-6b1c"
+        escaped_pass = "fake-escaped-pass-2d8e"
         # The address is built from parts, so the secret scan of the repo
         # does not read the made-up addresses below as real ones.
         db_user = "postgresql://" + "meho"
@@ -913,6 +917,10 @@ class SupportBundleTests(HostTestCase):
             sql_pass,
             quoted_pass,
             lower_pass,
+            json_sql_pass,
+            json_quoted_pass,
+            query_pass,
+            escaped_pass,
         )
         self.host.answer(
             "kube_logs",
@@ -926,6 +934,11 @@ class SupportBundleTests(HostTestCase):
             f"2026-10-23T11:00:04Z ALTER ROLE meho WITH PASSWORD '{sql_pass}' VALID UNTIL x\n"
             f"2026-10-23T11:00:05Z alter role meho password '{quoted_pass}';\n"
             f'2026-10-23T11:00:06Z CREATE ROLE app Password "{lower_pass}" LOGIN\n'
+            f'{{"event": "ALTER ROLE app PASSWORD \\"{json_sql_pass}\\";"}}\n'
+            f'{{"event": "CREATE ROLE b PASSWORD \\"x\\"\\"{json_quoted_pass}\\" LOGIN"}}\n'
+            f"connect {db_user}:{query_pass}@meho-postgres?application_name=worker@service#a@b\n"
+            "connect https://meho-postgres?application_name=worker@service\n"
+            f'{{"body": "{{\\"password\\": \\"{escaped_pass}\\", \\"user\\": \\"app\\"}}"}}\n'
             "2026-10-23T11:00:07Z open http://meho-keycloak:8080/auth as admin\n",
         )
 
@@ -944,6 +957,13 @@ class SupportBundleTests(HostTestCase):
         self.assertIn("ALTER ROLE meho WITH PASSWORD '[removed]' VALID UNTIL x", log)
         self.assertIn("alter role meho password '[removed]';", log)
         self.assertIn('CREATE ROLE app Password "[removed]" LOGIN', log)
+        self.assertIn('{"event": "ALTER ROLE app PASSWORD \\"[removed]\\";"}', log)
+        self.assertIn('{"event": "CREATE ROLE b PASSWORD \\"[removed]\\" LOGIN"}', log)
+        self.assertIn(
+            f"connect {db_user}:[removed]@meho-postgres?application_name=worker@service#a@b", log
+        )
+        self.assertIn("connect https://meho-postgres?application_name=worker@service", log)
+        self.assertIn('{"body": "{\\"password\\": \\"[removed]\\", \\"user\\": \\"app\\"}"}', log)
         self.assertIn("open http://meho-keycloak:8080/auth as admin", log)
 
     def test_the_bundle_is_written_when_rke2_is_down(self) -> None:

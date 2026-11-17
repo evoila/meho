@@ -244,7 +244,8 @@ too. Output that is not this JSON gives one red doctor line. See
    - The value of any variable whose name holds PASSWORD, TOKEN, SECRET or
      KEY, in any case, written as `NAME=value`, `NAME: value` (with or
      without the space) or as the JSON pair `"name": "value"` (MEHO's own
-     logs are JSON lines), becomes `[removed]`. `key` counts when it ends
+     logs are JSON lines, and a JSON line can hold JSON as a string:
+     `\"name\": \"value\"`), becomes `[removed]`. `key` counts when it ends
      the name or when a digit, `_`, `.` or `-` follows it (`api_key`,
      `apiKey`, `unseal-key`, `KEY_ID`), so `keycloak` is not a key name and
      Keycloak's addresses and image names stay readable.
@@ -255,10 +256,12 @@ too. Output that is not this JSON gives one red doctor line. See
      - The password in an address, `://user:password@host`, becomes
        `://user:[removed]@host`. The user and the host stay, so support can
        still read the address. The password runs to the last `@` before the
-       path, so a password with an `@` in it goes as a whole.
+       path, the query (`?`) or the fragment (`#`), so a password with an
+       `@` in it goes as a whole, and an `@` in the query stays.
      - SQL's `PASSWORD '<value>'` and `PASSWORD "<value>"` become
        `PASSWORD '[removed]'`. A quote mark written twice inside the value
-       (`'it''s'`) stays part of the value.
+       (`'it''s'`) stays part of the value. The double-quoted form also
+       counts in a JSON log line, where each quote mark is `\"`.
    - Every known secret value becomes `[removed]` wherever it appears, for
      example in a log line. The values come from the core's Secrets in
      namespace `meho`: `kubectl get secrets -o go-template=...` decodes

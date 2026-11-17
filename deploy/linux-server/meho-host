@@ -969,8 +969,9 @@ secret_values() {
 # logs are JSON lines), and every value of secret_values, wherever it
 # appears. Three more forms lose their secret: the token of an
 # "Authorization: Bearer" or "Basic" header, the password of an address
-# such as ://user:password@host (the user and the host stay), and
-# the value of SQL's PASSWORD 'value'. The rules go into a sed script file
+# such as ://user:password@host (the user, the host and the query stay),
+# and the value of SQL's PASSWORD 'value'. The JSON forms count too, also
+# JSON inside a JSON string. The rules go into a sed script file
 # for root only, never on sed's command line: every user on the machine
 # can read the arguments of a running process.
 scrub_bundle() {
@@ -987,14 +988,19 @@ scrub_bundle() {
     password=$(any_case password)
     {
         printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
+        # The pair also counts in JSON inside a JSON string: \"name\": \"value\".
+        printf '%s\n' "s/(\\\\\"${name}\\\\\"[[:space:]]*:[[:space:]]*)\\\\\"([^\"\\\\]|\\\\[^\"])*\\\\\"/\\1\\\\\"[removed]\\\\\"/g"
         printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
         printf '%s\n' "s/(${auth})[^[:space:]\\\",]+/\\1[removed]/g"
-        # The password runs to the last "@" before the path, so a password
-        # with an "@" in it goes as a whole.
-        printf '%s\n' "s#(://[^/:@[:space:]\"]*:)[^/[:space:]\"]+@#\\1[removed]@#g"
+        # The password runs to the last "@" before the path, the query or
+        # the fragment, so a password with an "@" in it goes as a whole and
+        # an "@" in the query (?name=worker@service) stays.
+        printf '%s\n' "s|(://[^/?#:@[:space:]\"]*:)[^/?#[:space:]\"]+@|\\1[removed]@|g"
         # SQL writes a quote mark inside a value twice: 'it''s'.
         printf '%s\n' "s/(${password}[[:space:]]+')([^']|'')*'/\\1[removed]'/g"
         printf '%s\n' "s/(${password}[[:space:]]+\")([^\"]|\"\")*\"/\\1[removed]\"/g"
+        # The same in JSON, where each quote mark of the SQL is \".
+        printf '%s\n' "s/(${password}[[:space:]]+\\\\\")([^\"\\\\]|\\\\[^\"]|\\\\\"\\\\\")*\\\\\"/\\1[removed]\\\\\"/g"
         while IFS= read -r value; do
             [[ -n $value ]] || continue
             printf 's/%s/[removed]/g\n' "$(regex_literal "$value")"

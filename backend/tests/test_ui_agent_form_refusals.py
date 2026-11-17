@@ -7,6 +7,9 @@
   like a done change, and no grant is written.
 * The ``#agents-modal-container`` hook swaps the 422 answer into the
   modal on the list page and on the detail page, so the errors show.
+  It swaps only MEHO's own HTML form answer, never a JSON 422.
+* A system prompt or turn budget that is too long for the form route
+  answers a JSON 422; the form caps both fields in the browser.
 * The audit row of a console create names the agent that gets the
   grants (``starting_grant_agent``).
 
@@ -148,8 +151,21 @@ def test_the_modal_container_swaps_a_422_answer_in(
     assert refused.status_code == 422, refused.text
 
     cases = [
-        {"name": "edit422", "status": 422, "verb": "patch", "body": refused.text},
+        {
+            "name": "edit422",
+            "status": 422,
+            "verb": "patch",
+            "body": refused.text,
+            "contentType": refused.headers["content-type"],
+        },
         {"name": "create422", "status": 422, "verb": "post", "body": "<dialog>422</dialog>"},
+        {
+            "name": "json422",
+            "status": 422,
+            "verb": "post",
+            "body": '{"detail": []}',
+            "contentType": "application/json",
+        },
         {"name": "ok200", "status": 200, "verb": "get", "body": "<dialog>ok</dialog>"},
         {"name": "get404", "status": 404, "verb": "get", "body": "not found"},
         {"name": "post500", "status": 500, "verb": "post", "body": "boom"},
@@ -166,6 +182,9 @@ def test_the_modal_container_swaps_a_422_answer_in(
     assert result["edit422"]["swapped"] is True
     assert 'data-error-for="starting_grants"' in result["edit422"]["container"]
     assert result["create422"]["swapped"] is True
+    # A JSON 422 (a field too long for the form route) is not MEHO's form:
+    # the open form and the person's text stay.
+    assert result["json422"]["swapped"] is False
     assert result["ok200"]["swapped"] is True
     # Other errors keep htmx's default: no swap.
     assert result["get404"]["swapped"] is False

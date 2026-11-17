@@ -8,10 +8,12 @@ create form (``forms.py``) both ask the person for the agent's first
 grants. The three choices come from
 :class:`~meho_backplane.agents.grant_sets.StartingGrantSet`. Their help
 text follows ``AGENT_GRANT_REQUIRED``: only ``on`` makes "None" and "Read
-some targets" limit safe operations. No choice is
-selected at first. While ``AGENT_GRANT_REQUIRED`` is not ``off`` the
-choice is required in the form; the service checks it again and its
-error text shows next to the field.
+some targets" limit safe operations. No choice is selected at first.
+While ``AGENT_GRANT_REQUIRED`` is not ``off`` the register form marks the
+choice required. The agent definition forms do not: the service asks for
+the pick only when the agent has no live grant yet, and its error text
+shows next to the field. Those forms also show the agent's live grants
+next to the pick (:mod:`~meho_backplane.ui.routes.agents.live_grants`).
 
 After a pick that writes grants, the console opens the agent grants
 page filtered to the agent, so the person sees the grants that were

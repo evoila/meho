@@ -365,6 +365,36 @@ IPv4 range or one address. `none` closes SSH from every address, so only
 the console of the machine works. Over SSH, the command asks first when
 the new range does not hold your own address.
 
+### A person lost the one-time code app
+
+Use this only in an emergency: when a person of a local account (the
+first admin or the second person) lost the phone with the one-time code
+app and also the recovery codes, so they cannot log in any more.
+
+```bash
+sudo meho-host reset-second-factor <user>
+```
+
+`<user>` is the person's user name in MEHO's login (realm `meho`). The
+command:
+
+- removes the person's one-time code and recovery codes;
+- makes the next login of the person ask for a new password and a new
+  one-time code app, and then show twelve new recovery codes;
+- writes one row into the MEHO audit. It names your Linux user (the one
+  behind `sudo`), this server, the person's user name and the time. You
+  find it with `meho audit query --op-id meho-host.reset-second-factor`.
+
+It prints what it removed. An unknown user name changes nothing, and the
+command ends with exit code 1. Run as another user than root, it changes
+nothing and ends with exit code 2. When the command cannot write the
+audit row, it does not report success.
+
+Give the person a new temporary password in a safe way, for example in
+the Keycloak admin console (see [Local users](login/local-users.md)). It
+does not apply to people who log in through your company login: their
+second factor belongs to the company login.
+
 ### Get help from support
 
 ```bash

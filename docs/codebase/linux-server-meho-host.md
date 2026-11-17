@@ -1,4 +1,4 @@
-# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638, #4738)
+# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638, #4738, #4746)
 
 ## Overview
 
@@ -11,7 +11,7 @@ customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
 and the form-2 design, section 5, the `meho-host` table (the internal
 form-2 design note).
 
-This version has eight commands:
+This version has nine commands:
 
 - **`meho-host check [--json]`** prints a red/green list of the built-in
   Kubernetes (RKE2): the node, the pods, the disk and RKE2's certificates.
@@ -58,6 +58,11 @@ This version has eight commands:
   OpenBao and wait for the result.
 - **`meho-host unseal`** (#4738) unseals OpenBao by hand in keyholder mode
   and says `unsealed` or `sealed`.
+- **`meho-host reset-second-factor <user>`** (#4746) is the emergency way
+  back in for a person of a local account who lost the one-time code app
+  and the recovery codes. It removes both from the user in realm `meho`,
+  makes the next login ask for a new password and a new code app, and
+  writes one audit row.
 
 `keyholder` and `unseal` read the unseal key from a hidden prompt, or one
 line of standard input when it is not a terminal. The key is never an
@@ -89,6 +94,7 @@ the operating system against the CIS Linux benchmark, is not built yet
 | `tests/test_meho_host.py` | The tests of `check`, `support-bundle`, `admin-network`, `log-server` and `uninstall`, of each check line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
 | `tests/fake_cluster.py`, `tests/cluster_harness.py` | A fake `kubectl` that keeps state: the Secrets of namespace `meho` and the one OpenBao pod, with its seal state, its uid and the chart's unseal helper. `ClusterHost` is the fake machine with it. |
 | `tests/test_meho_host_certificate.py` | The tests of `certificate`. |
+| `tests/test_meho_host_second_factor.py` | The tests of `reset-second-factor`: root only (exit code 2 otherwise), the call into the core pod, and the exit codes it passes on. The reset module itself is tested in `backend/tests/test_core_reset_second_factor.py`, with saved Keycloak answers. |
 | `tests/test_meho_host_unseal.py` | The tests of `keyholder on`, `keyholder off` and `unseal`, and of the unseal key, which never appears in a command line, the output or a file. |
 | `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network`, `log-server` and `uninstall` tests start from it. |
 
@@ -573,6 +579,57 @@ unsealed.
    when the key is wrong.
 
 `unseal` never creates the Secret, so it does not switch the mode.
+
+### `reset-second-factor`
+
+The work runs in the core, not in bash: `meho-host` runs
+`python -m meho_backplane.core.reset_second_factor --by <linux user>
+--host <host> -- <user>` in the `backplane` container of the Deployment
+`meho` with `kubectl exec` (`backend/src/meho_backplane/core/reset_second_factor.py`).
+Why there:
+
+- The container already has the `meho-admin` login for the Keycloak Admin
+  REST API (`KEYCLOAK_ADMIN_URL`, `KEYCLOAK_ADMIN_CLIENT_ID`,
+  `KEYCLOAK_ADMIN_CLIENT_SECRET`). So the secret never leaves the cluster,
+  is in no command line and is never printed.
+- It writes the audit row with the backplane's own database access and
+  the `AuditLog` model. No other host command writes an audit row.
+
+Steps of the module:
+
+1. Log in as `meho-admin` (`client_credentials`).
+2. Find the user: `GET /admin/realms/meho/users?username=<user>&exact=true`,
+   then keep only the user whose name matches without case (Keycloak
+   ignores case in user names). None: `[FAIL]`, nothing changed.
+3. Read the user, and the user's groups: the tenant of the audit row is
+   the one tenant that the groups' `meho_tenant` attribute names. With no
+   tenant or more than one, the row has no tenant.
+4. Check that the database answers (`SELECT 1`). If not: `[FAIL]`, nothing
+   changed.
+5. `GET .../users/{id}/credentials`, and `DELETE .../credentials/{id}` for
+   each of type `otp` and `recovery-authn-codes`. A 404 means it is gone
+   already.
+6. `PUT .../users/{id}`: the user read in step 3 with `UPDATE_PASSWORD`
+   and `CONFIGURE_TOTP` added to `requiredActions` (PUT replaces the whole
+   list, so the other actions stay).
+7. Write one `audit_log` row: class `operation_execution`, `operator_sub`
+   `system:meho-host`, method `INTERNAL`, path and `payload["op_id"]`
+   `meho-host.reset-second-factor`, and in `payload` the Linux user, the
+   host, the Keycloak user name and id, the removed credential types, the
+   required actions set and `result`.
+
+When step 5 or 6 fails after something changed, the row is still written,
+with `result: error` and status 500, and the command fails. When the row
+cannot be written, the command fails after the lines of what changed: it
+never reports success without the row. A second run is safe: it finds no
+code to remove and the actions set already.
+
+Exit codes: the module ends with 0 (done) or 3 (failed, after a `[FAIL]`
+line). `meho-host` turns 3 into its own 1, and any other code (the pod
+does not answer, kubectl fails) into a `[FAIL]` line of its own and 1. Run
+as another user than root, `meho-host` changes nothing and exits 2. The
+Linux user is `SUDO_USER`, or `root` without sudo. kubectl's request
+timeout is 2 minutes for this call, not RKE2's usual 10 seconds.
 
 ### The unseal key stays out of sight
 

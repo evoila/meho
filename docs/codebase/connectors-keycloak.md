@@ -1748,12 +1748,19 @@ admin realm (`master` by default), or the realm MEHO itself signs in with
   (`TargetWriteResult`); `meho targets add` / `update` print each line on
   stderr.
 - `targets.register` and `targets.update` add `warnings` to their answer,
-  only when there is one.
+  only when there is one. A call made with a token waits for approval, so
+  its card shows the lines first: each op registers a card-warnings builder
+  (`register_card_warnings`, `targets_register_card_warnings` and
+  `targets_update_card_warnings`), and the dispatcher stamps the lines as
+  `target_warnings`. They come from the target as it will be after the
+  write: the sent `product` and `extras`, else the stored ones. A call with
+  no warning has a card without the part.
 - The console create and edit forms show the lines after the save
   (`_saved_warning_modal.html`, from `forms_realm.saved_with_warnings`)
   instead of going straight back to the targets list.
 - The settings file import puts each line, with the path of the target
-  entry, in the `warnings` of the preview and of the apply.
+  entry, in the `warnings` of the preview and of the apply. The import
+  writes at once and has no approval card.
 - The dispatcher stamps the lines as `target_warnings` on the approval
   card of every write on such a target; the console shows them as a
   "Check the target" box.

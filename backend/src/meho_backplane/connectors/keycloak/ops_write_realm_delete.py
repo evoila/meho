@@ -10,13 +10,16 @@ once, so this op follows the other governed deletes
 (:mod:`~meho_backplane.connectors.keycloak.ops_write_delete`):
 
 1. **Check the guards.** The caller must name the realm; the op never falls
-   back to the target's managed realm. Some realms are never deleted through
-   MEHO (refused with the ``protected_realm`` code):
+   back to the target's managed realm. A target works on one realm only, so
+   the realm must be the target's managed realm
+   (:func:`~meho_backplane.connectors.keycloak.realm_params.realm_param`):
+   another realm is refused, and nothing is sent to Keycloak. Some realms
+   are never deleted through MEHO (refused with the ``protected_realm``
+   code):
 
    * ``master``, Keycloak's own admin realm, and the target's
      ``admin_realm`` when it is set to another realm: the target logs in
      there;
-   * the target's ``managed_realm``: the realm this target exists to manage;
    * the realm behind this backplane's own login (``KEYCLOAK_ISSUER_URL``,
      and ``KEYCLOAK_ADMIN_URL`` when set). Deleting it locks every operator
      out of MEHO. This realm name is refused on every Keycloak target,
@@ -93,9 +96,9 @@ __all__ = [
 REALM_DELETE_OP: Final = "keycloak.realm.delete"
 
 
-def realm_name_param(params: dict[str, Any]) -> str:
-    """Return the required ``realm`` param. Blank is an error, and it must be a plain name."""
-    realm = realm_param(params, "realm", REALM_DELETE_OP)
+def realm_name_param(params: dict[str, Any], target: KeycloakTargetLike) -> str:
+    """Return the required ``realm`` param: a plain name, and the target's managed realm."""
+    realm = realm_param(params, "realm", REALM_DELETE_OP, target)
     if realm is None:
         raise ValueError(f"{REALM_DELETE_OP} requires 'realm' (the name of the realm to delete)")
     return realm
@@ -108,7 +111,6 @@ def check_realm_guards(target: KeycloakTargetLike, realm: str) -> None:
     reasons = (
         (DEFAULT_ADMIN_REALM, "Keycloak's own admin realm"),
         (realms.admin_realm, "the target's admin realm; the target logs in there"),
-        (realms.managed_realm, "the realm this target manages"),
         *((name, "the realm MEHO's own login uses") for name in _backplane_login_realms()),
     )
     for protected, why in reasons:
@@ -200,7 +202,7 @@ async def keycloak_realm_delete(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """Delete one realm (``DELETE /admin/realms/{realm}``). Op-id: ``keycloak.realm.delete``."""
-    realm = realm_name_param(params)
+    realm = realm_name_param(params, target)
     check_realm_guards(target, realm)
     result: dict[str, Any] = {"realm": realm}
     path = _realm_path(realm)

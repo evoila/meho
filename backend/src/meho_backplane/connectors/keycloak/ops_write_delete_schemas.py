@@ -249,12 +249,14 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
         description=(
             "DELETEs ``/admin/realms/{realm}``. Every user, client, group and "
             "session in the realm goes with it. ``realm`` is required; the op "
-            "never falls back to the target's managed realm. Refuses "
-            "(``protected_realm``) the target's admin realm, its managed realm, "
-            "and the realm MEHO's own login uses. The login realm is refused on "
-            "every Keycloak target, because MEHO cannot tell for sure that a "
-            "target is a different Keycloak. The approval card shows whether the "
-            "realm is enabled and how many users, clients and groups it has. " + _HOW_TO_RUN
+            "never falls back to the target's managed realm. A target works on "
+            "one realm only: ``realm`` must be its managed realm, and another "
+            "realm is refused before approval. Refuses (``protected_realm``) "
+            "master, the target's admin realm and the realm MEHO's own login "
+            "uses. The login realm is refused on every Keycloak target, because "
+            "MEHO cannot tell for sure that a target is a different Keycloak. "
+            "The approval card shows whether the realm is enabled and how many "
+            "users, clients and groups it has. " + _HOW_TO_RUN
         ),
         parameter_schema=_REALM_DELETE_SCHEMA,
         response_schema=_REALM_DELETE_RESULT_SCHEMA,
@@ -272,7 +274,9 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "target, even when the target is a different Keycloak. " + _HOW_TO_RUN
             ),
             "parameter_hints": {
-                "realm": "The exact name of the realm to delete. Required.",
+                "realm": (
+                    "The exact name of the realm to delete: the target's managed realm. Required."
+                ),
             },
             "output_shape": "``{realm, deleted, already_absent}``.",
         },

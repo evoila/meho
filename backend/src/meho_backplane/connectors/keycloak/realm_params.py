@@ -16,15 +16,14 @@ check a target's own realms pass. The value is never trimmed.
 the same values earlier: before the policy gate, so before a call waits
 for approval and before any call to Keycloak.
 
-A target works on one realm only, the managed realm it names. Three of the
-four ops (:data:`FENCED_OPS`) refuse a realm that is not the managed
-realm: the handler does (:func:`realm_param` with a *target*), and so does
-the check before the wait for approval (:func:`realm_fence_park_check`).
-The text says to use a target that names the other realm. It never repeats
-the value the caller gave. ``keycloak.realm.delete`` is not fenced: its
-``realm`` is the realm to remove, and a delete never removes the managed
-realm of the target (``check_realm_guards``), so the fence would make the
-op impossible. The card of a delete names the realm.
+A target works on one realm only, the managed realm it names. All four ops
+(:data:`FENCED_OPS`) refuse a realm that is not the managed realm: the
+handler does (:func:`realm_param` with a *target*), and so does the check
+before the wait for approval (:func:`realm_fence_park_check`). The text says
+to use a target that names the other realm. It never repeats the value the
+caller gave. So ``keycloak.realm.delete`` can only delete the managed realm
+of its target, and its other guards (``check_realm_guards``) still refuse
+master, the target's admin realm and MEHO's own login realm.
 """
 
 from __future__ import annotations
@@ -62,10 +61,8 @@ REALM_PARAM_OPS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-#: The ops that work on the managed realm only (all of the above but the delete).
-FENCED_OPS: Final[frozenset[str]] = frozenset(
-    {"keycloak.realm.create", "keycloak.realm.update", "keycloak.user.check_login"}
-)
+#: The ops that work on the managed realm only: all of the above.
+FENCED_OPS: Final[frozenset[str]] = frozenset(REALM_PARAM_OPS)
 
 
 def _value(params: dict[str, Any], path: str) -> Any:
@@ -169,5 +166,5 @@ for _op_id in REALM_PARAM_OPS:
     register_params_check(_op_id, check_realm_params(_op_id))
 
 
-for _op_id in ("keycloak.realm.create", "keycloak.user.check_login"):
+for _op_id in ("keycloak.realm.create", "keycloak.realm.delete", "keycloak.user.check_login"):
     register_park_check(_op_id, realm_fence_park_check(_op_id))

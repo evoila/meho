@@ -104,12 +104,14 @@ __all__ = [
     "approved_preview",
     "approved_preview_var",
     "blast_radius_missing_reason",
+    "build_card_warnings",
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
     "has_permission_preflight",
     "has_preview_builder",
     "preview_failure_reason",
+    "register_card_warnings",
     "register_permission_preflight",
     "register_preview_builder",
 ]
@@ -390,6 +392,16 @@ class PreviewBuilder(Protocol):
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
 
 
+class CardWarnings(Protocol):
+    """Gives the warning lines for the approval card of one op.
+
+    The lines are plain text for the approver. They name the target and the
+    setting, and hold no secret value. Return ``[]`` when there is none.
+    """
+
+    async def __call__(self, ctx: PreviewContext) -> list[str]: ...
+
+
 class PermissionPreflight(Protocol):
     """An op's opt-in park-time permission check.
 
@@ -412,6 +424,9 @@ class PermissionPreflight(Protocol):
 
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
 
+
+#: ``op_id`` -> builder of the warning lines on the approval card.
+_CARD_WARNINGS: dict[str, CardWarnings] = {}
 
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
@@ -442,6 +457,31 @@ def register_permission_preflight(op_id: str, preflight: PermissionPreflight) ->
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PERMISSION_PREFLIGHTS[op_id] = preflight
+
+
+def register_card_warnings(op_id: str, builder: CardWarnings) -> None:
+    """Register *builder*: the warning lines for the approval card of *op_id*.
+
+    Used by a write that changes a setting which is allowed but risky, so the
+    approver sees the warning before approving. Re-registration overwrites.
+    """
+    _CARD_WARNINGS[op_id] = builder
+
+
+async def build_card_warnings(ctx: PreviewContext) -> list[str]:
+    """The warning lines a registered builder gives for this call; ``[]`` for none.
+
+    A warning is a help for the approver. A builder that fails never blocks
+    the park: the failure is logged and the card has no such line.
+    """
+    builder = _CARD_WARNINGS.get(ctx.descriptor.op_id)
+    if builder is None:
+        return []
+    try:
+        return list(await builder(ctx))
+    except Exception:
+        _log.warning("card_warnings_failed", op_id=ctx.descriptor.op_id, exc_info=True)
+        return []
 
 
 def has_permission_preflight(op_id: str) -> bool:

@@ -3804,6 +3804,11 @@ Rows of the next release are in this table at once.</p>
 <td>With approval notifications on (<code>webPush.enabled: true</code>), MEHO now sends them. A browser that a person switched on before the upgrade gets its first message only after that person's next sign-in to the web console, or the next time they open the account page. Until then MEHO does not know their login groups for it. After that, a person whose last sign-in is more than 7 days old gets no message until they sign in again.</td>
 <td>Ask the people who use notifications to sign in to the web console once after the upgrade. Allow MEHO to reach the push services of the browser makers: see <a href="../#push-services-for-approval-notifications">Push services for approval notifications</a>.</td>
 </tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A person's REST write of a target or of the topology graph made with a token (the <code>meho</code> CLI, scripts) waits for approval. <code>POST</code>, <code>PATCH</code> and <code>DELETE /api/v1/targets</code>, <code>POST /api/v1/topology/edges</code>, <code>POST /api/v1/topology/edges/bulk</code>, <code>DELETE /api/v1/topology/edges/{edge_id}</code> and <code>DELETE /api/v1/topology/nodes/{node_id}</code> answer 202 with the id of the approval request. Nothing is written until a person approves it. Only a person in the web console writes at once.</td>
+<td><strong>Upgrade the <code>meho</code> CLI together with the backplane.</strong> An older CLI reads the 202 answer as done and reports the write, but nothing is written yet. Tell CLI and script users that target and topology writes wait for approval: they approve them in the web interface or with <code>meho approvals approve</code>. <code>meho targets import</code> makes one approval request per row.</td>
+</tr>
 </tbody>
 </table>
 <p>New rows come from one small file per row in

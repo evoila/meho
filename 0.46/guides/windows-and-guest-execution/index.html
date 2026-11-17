@@ -3502,6 +3502,8 @@ locally.</p>
 <span class="w">    </span><span class="nt">notes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">File server, Windows Server 2022.</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>import<span class="w"> </span>targets.yaml
+<span class="c1"># Each row waits for approval. Approve it before the probe:</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id-from-targets-import&gt;
 meho<span class="w"> </span>targets<span class="w"> </span>probe<span class="w"> </span>win-fs01
 </code></pre></div>
 <p>A green probe reports <code>vendor: microsoft</code>, the product it observed (for

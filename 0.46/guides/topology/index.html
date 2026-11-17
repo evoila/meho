@@ -3575,10 +3575,12 @@ non-k8s estates: until you annotate them, the graph has no edges to
 walk.</p>
 <div class="admonition warning">
 <p class="admonition-title">An <code>awaiting_approval</code> on a topology write is by design</p>
-<p>Curated writes carry <code>caution</code> classification. A <strong>human</strong>
-tenant_admin executes them immediately, but an <strong>agent</strong> principal's
-annotate parks in the approval queue like any other governed write —
-the gate lives in the dispatcher, not the front. See
+<p>Curated writes carry <code>caution</code> classification. A tenant_admin in
+the operator console runs them at once. A write made with a token
+waits in the approval queue: an <strong>agent</strong> principal's annotate, and
+also <code>meho topology annotate</code>, <code>unannotate</code> and <code>bulk-import</code> (a
+<code>--dry-run</code> runs at once). The command prints the approval id;
+approving the request makes the change. See
 <a href="../approvals-and-break-glass/">Approvals and break-glass</a>.</p>
 </div>
 <h2 id="what-can-go-wrong-here">What can go wrong here<a class="headerlink" href="#what-can-go-wrong-here" title="Permanent link">&para;</a></h2>

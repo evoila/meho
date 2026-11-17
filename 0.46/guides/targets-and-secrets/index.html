@@ -3484,9 +3484,16 @@ which is why this is the first guide.</p>
 </table>
 <p>Create, edit and delete on REST are for people only. A service login
 gets <code>403 human_principal_required</code>, also with the <strong>tenant_admin</strong>
-role. It registers a target with the <code>targets.register</code> operation and
-removes one with <code>targets.remove</code> (connector <code>targets-registry-1.x</code>).
-MEHO checks both against the approval rules.</p>
+role. It registers a target with the <code>targets.register</code> operation,
+changes one with <code>targets.update</code> and removes one with <code>targets.remove</code>
+(connector <code>targets-registry-1.x</code>). MEHO checks them against the
+approval rules.</p>
+<p><strong>The CLI and REST wait for approval.</strong> A change made with your login
+token (<code>meho targets add</code>, <code>update</code>, <code>delete</code>, <code>import</code>, or a script on
+REST) waits until a person approves it. The command prints the approval
+id and exits 0; approving the request makes the change. Find it with
+<code>meho approvals list</code>, or in the console under approvals. A change you
+make in the operator console runs at once.</p>
 <p><strong>Register targets on the operator surfaces above.</strong> Registration is an
 operator-trust decision. For agents, the default MCP tools only read
 targets (<code>list_targets</code>). A session that asked for the <code>mcp:admin</code>
@@ -3714,15 +3721,30 @@ meho<span class="w"> </span>targets<span class="w"> </span>import<span class="w"
 
 <span class="c1"># 2. Apply. Default mode aborts before any write if a name already exists:</span>
 meho<span class="w"> </span>targets<span class="w"> </span>import<span class="w"> </span>targets.yaml
-<span class="c1">#   Applied: 2 created, 0 updated.</span>
+<span class="c1">#   Applied: 0 created, 0 updated, 2 waiting for approval.</span>
+<span class="c1">#   Each target is created when a person approves its request.</span>
 
 <span class="c1"># 3. Iterate later with --update: PATCHes existing names, creates new ones.</span>
 <span class="c1">#    The PATCH is sparse — fields your YAML omits are left untouched.</span>
 meho<span class="w"> </span>targets<span class="w"> </span>import<span class="w"> </span>targets.yaml<span class="w"> </span>--update
 </code></pre></div>
-<p>Then probe. The probe invokes the connector matched to the target's
-<code>product</code>, live, and persists the resulting fingerprint:</p>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>probe<span class="w"> </span>lab-rke2
+<p>Each row of the file makes its own approval request, because the CLI
+calls with a token. A file with 50 rows makes 50 requests. For a large
+file, use one of these:</p>
+<ul>
+<li>Import the file in the operator console. A person in the console
+  writes at once.</li>
+<li>Give the import a change ticket. Then a person goes through all its
+  rows with one command. It shows each row and asks for a yes.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>--work-ref<span class="w"> </span>gh:acme/ops#42<span class="w"> </span>targets<span class="w"> </span>import<span class="w"> </span>targets.yaml
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>--filter-work-ref<span class="w"> </span>gh:acme/ops#42<span class="w"> </span>--in-order
+</code></pre></div>
+<p>Then probe. A target exists only after a person approved its request, so
+approve the rows first. The probe invokes the connector matched to the
+target's <code>product</code>, live, and persists the resulting fingerprint:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id-of-the-row&gt;
+meho<span class="w"> </span>targets<span class="w"> </span>probe<span class="w"> </span>lab-rke2
 </code></pre></div>
 <div class="highlight"><pre><span></span><code>vendor:        kubernetes
 product:       rke2

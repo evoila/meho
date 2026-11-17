@@ -3788,8 +3788,10 @@ writes below wait for your current approver, as before.</p>
 </ol>
 <p>The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
-with the person's own token:</p>
+with the person's own token. <code>meho targets add</code> waits for approval and
+prints an approval id, so approve it before you use the target:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>vault-main<span class="w"> </span>--product<span class="w"> </span>vault<span class="w"> </span>--host<span class="w"> </span>vault.example.com<span class="w"> </span>--no-secret-ref
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id-from-targets-add&gt;
 </code></pre></div>
 <p><strong>With the agent requester:</strong> give the agent its two grants now. A grant
 names its target by UUID: it is the <code>id:</code> line of <code>meho targets describe</code>.

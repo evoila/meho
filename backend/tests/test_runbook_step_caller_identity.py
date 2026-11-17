@@ -657,6 +657,8 @@ async def test_waiting_check_approval_request_names_real_caller(
     assert request.principal_sub == _AGENT_SUB
     assert request.principal_kind == "agent"
     assert request.principal_name == _AGENT_NAME
+    assert request.proposed_effect is not None
+    assert request.proposed_effect["client"]["azp"] == _AGENT_CLIENT
 
 
 @pytest.mark.asyncio

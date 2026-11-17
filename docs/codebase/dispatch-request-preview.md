@@ -82,6 +82,15 @@ sees, so it stays off until a before-and-after measurement shows it helps.
   - The `preview_operation` tool text says the new rule (full and short
     text). The registered text is the "off" text, so the reference docs
     show it.
+- **Params that make a call wait** (`declare_wait_when_set`) do not
+  change this rule. `preview_dispatch` decides whether the op previews
+  before it raises the descriptor for such params. So with the switch off,
+  `targets.register` with `flight_recorder_capture` stays `unavailable`.
+- **Approver and agent.** A preview builder gets `ctx.agent_preview=True`
+  when it runs for the agent's `preview_operation`, and `False` for the
+  approval request. A builder may show the approver more. Example: the
+  `changes` map of `targets.update` is always on the approval request,
+  and in the agent's preview only with the switch on.
 - **Code:** `_is_previewable` and `is_credential_builder_op` in
   `operations/_request_preview.py`; the tool text in
   `mcp/tools/_preview_typed_writes_text.py`. Tests:

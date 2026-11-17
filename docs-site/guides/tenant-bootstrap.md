@@ -406,10 +406,12 @@ writes below wait for your current approver, as before.
 
 The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
-with the person's own token:
+with the person's own token. `meho targets add` waits for approval and
+prints an approval id, so approve it before you use the target:
 
 ```bash
 meho targets add vault-main --product vault --host vault.example.com --no-secret-ref
+meho approvals approve <approval-id-from-targets-add>
 ```
 
 **With the agent requester:** give the agent its two grants now. A grant

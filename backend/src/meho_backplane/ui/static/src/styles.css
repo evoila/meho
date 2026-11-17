@@ -190,10 +190,17 @@ body::after {
 }
 
 /*
- * Layered card: subtle vertical sheen, 1px low-contrast border,
- * a hairline top highlight, and a slow lift on hover. Used alongside
- * DaisyUI's `card` behavior classes. color-mix against base tokens
- * keeps it correct in both themes.
+ * Layered card: a vertical sheen off base-300, a 1px low-contrast
+ * border, a hairline top highlight, and a slow lift on hover. Used
+ * alongside DaisyUI's `card` behavior classes.
+ *
+ * The sheen was switched off in the old light theme because that
+ * palette's base-300 was a near-white grey (oklch(95% 0 0)) and the
+ * gradient was invisible against base-100. The evoila palette makes it
+ * load-bearing again: base-300 is #B7D5EE, so the top of the card
+ * carries a soft blue wash (about #DFECF7) that fades to white by 38%.
+ * The box-shadow stays — on a light surface the card needs the lift
+ * that a dark surface got from the sheen alone.
  */
 .meho-card {
   position: relative;
@@ -205,10 +212,6 @@ body::after {
       color-mix(in oklch, var(--color-base-300) 45%, var(--color-base-100)),
       var(--color-base-100) 38%
     );
-}
-
-.meho-card {
-  background: var(--color-base-100);
   box-shadow: 0 1px 2px oklch(0% 0 0 / 0.04), 0 4px 16px -8px oklch(0% 0 0 / 0.06);
 }
 
@@ -224,10 +227,6 @@ body::after {
     color-mix(in oklch, var(--color-base-content) 20%, transparent),
     transparent
   );
-}
-
-.meho-card::before {
-  display: none;
 }
 
 a.meho-card,

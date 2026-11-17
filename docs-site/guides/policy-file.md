@@ -180,9 +180,13 @@ bindings:
   alone never gives or takes the right to approve: a person in the
   shipped approver group may approve only when the token also says
   `approver: true`, and a person with `approver: true` keeps that right in
-  the shipped readers group. So with the setting on and no stored
-  bindings, every person may approve exactly what they may approve with
-  the setting off.
+  the shipped readers group. So a shipped binding on its own gives or
+  takes no right to approve. Approver routing by category can still make
+  the list of people who may approve a change shorter.
+- A person in the shipped self-approval group and in one other shipped
+  group keeps the kind of the other group: an operator group gives
+  `SA-Operators`, as today, and any other group keeps its own kind. So
+  such a person can still log in.
 - A binding in your file (a stored binding) is your own choice. There the
   group alone gives the flags of the kind: a read-only person in a group
   bound to `Approvers` may approve, whatever the token says.

@@ -24,6 +24,9 @@
 #   keyholder on|off  switch OpenBao between "a keyholder unseals it" and
 #                     "it unseals itself" (#4738)
 #   unseal            unseal OpenBao by hand in keyholder mode (#4738)
+#   reset-second-factor <user>
+#                     remove the one-time code and the recovery codes of a
+#                     local account, and write an audit row (#4746)
 #
 # keyholder and unseal read the unseal key from a hidden prompt, or from
 # standard input when it is not a terminal. The key is never an argument of
@@ -41,7 +44,8 @@
 #   0  check: every line is ok or a warning; the other commands: done
 #   1  check: a line is red. Otherwise: the command failed, and the [FAIL]
 #      line says what to fix; or the admin answered a question with no
-#   2  wrong usage: an unknown command or option
+#   2  wrong usage: an unknown command or option; or reset-second-factor
+#      does not run as root
 #
 # The tests in tests/ run this script against a fake machine. See
 # docs/codebase/linux-server-meho-host.md.
@@ -195,6 +199,18 @@ readonly OPENBAO_WAIT_TRIES=60
 readonly OPENBAO_WAIT_SECONDS=5
 readonly OPENBAO_WAIT_TEXT="5 minutes"
 readonly UNSEAL_COMMAND="sudo meho-host unseal"
+# reset-second-factor (#4746) runs this module in the backplane container of
+# the core's Deployment. It logs in to Keycloak as meho-admin with the secret
+# the container already has, so the secret never leaves the cluster, and it
+# writes the audit row with the backplane's own database access. Its exit
+# code 3 means: it failed and printed a [FAIL] line.
+readonly CORE_DEPLOYMENT=meho
+readonly CORE_CONTAINER=backplane
+readonly RESET_MODULE=meho_backplane.core.reset_second_factor
+readonly RESET_FAILED=3
+# The module makes a few Keycloak calls and one database write. RKE2's own
+# kubectl call waits 10 seconds; this one may take longer.
+readonly RESET_TIMEOUT=2m
 # The MEHO appliance (install form 1): its build puts its pieces in this
 # folder, and a form-2 machine never has it. log-server works only on the
 # appliance: on a form-2 machine the OS and its logging belong to the customer.
@@ -252,6 +268,7 @@ Run it as root:
   sudo meho-host certificate --cert chain.pem --key key.pem
   sudo meho-host keyholder on
   sudo meho-host unseal
+  sudo meho-host reset-second-factor admin
 
 Commands:
   check [--json]    Check the built-in Kubernetes (RKE2) and the hardening
@@ -321,6 +338,14 @@ Commands:
                     Kubernetes and restarts OpenBao.
   unseal            Unseal OpenBao by hand in keyholder mode, with the key
                     from your key store. It prints unsealed or sealed.
+  reset-second-factor <user>
+                    For a person of a local account who lost the one-time
+                    code app and the recovery codes. It removes both from
+                    the user in realm meho, so the next login asks for a
+                    new password and a new code app. Use it only in an
+                    emergency: it writes an audit row with your Linux
+                    user, this host, the user and the time. An unknown
+                    user changes nothing.
   -h, --help        Show this help and stop.
 
 The unseal key: keyholder and unseal ask for it with a hidden prompt. When
@@ -332,7 +357,8 @@ Exit codes:
   0  check: every line is ok or a warning; the other commands: done
   1  check: a line is red. Otherwise: the command failed, and the [FAIL]
      line says what to fix; or you answered a question with no
-  2  wrong usage: an unknown command or option
+  2  wrong usage: an unknown command or option; or reset-second-factor
+     does not run as root
 HELP
 }
 
@@ -1941,6 +1967,33 @@ command_keyholder() {
     fi
 }
 
+# command_reset_second_factor <user>: the break-glass way back in for a
+# locked-out local account (#4746). Only root may run it: run as another
+# user it changes nothing and exits 2. The work is done in the core pod (see
+# RESET_MODULE above), which prints what it did. SUDO_USER names the person
+# behind sudo.
+command_reset_second_factor() {
+    if (($# != 1)) || [[ -z $1 || $1 == -* ]]; then
+        usage_error "reset-second-factor takes one user name, for example: sudo meho-host reset-second-factor admin"
+    fi
+    if [[ $(id -u) != 0 ]]; then
+        printf '[FAIL] meho-host does not run as root. Nothing was changed. Fix: run it with sudo: sudo meho-host reset-second-factor %s\n' "$1" >&2
+        exit 2
+    fi
+    local by=${SUDO_USER:-root} host rc=0
+    host=$(hostname 2>/dev/null) || host=unknown
+    rke2_kubectl --request-timeout="$RESET_TIMEOUT" -n "$MEHO_NAMESPACE" exec "deploy/$CORE_DEPLOYMENT" -c "$CORE_CONTAINER" -- \
+        python -m "$RESET_MODULE" --by "$by" --host "$host" -- "$1" || rc=$?
+    case $rc in
+        0) ;;
+        "$RESET_FAILED") exit 1 ;;
+        *)
+            fail "the reset did not run to its end in the MEHO core (exit code $rc)." \
+                "check the node and pods lines: sudo meho-host check. Then run the command again: it is safe to run twice. If it fails again, $SUPPORT_HINT"
+            ;;
+    esac
+}
+
 command_unseal() {
     (($# == 0)) ||
         usage_error "unseal takes no argument: it reads the unseal key from a hidden prompt or from standard input, never from the command line."
@@ -1987,6 +2040,7 @@ main() {
         certificate) command_certificate "$@" ;;
         keyholder) command_keyholder "$@" ;;
         unseal) command_unseal "$@" ;;
+        reset-second-factor) command_reset_second_factor "$@" ;;
         *) usage_error "unknown command: $COMMAND" ;;
     esac
 }

@@ -98,7 +98,8 @@ another case.
      another base level. So a person in groups of two base levels (for
      example two subgroups, `/MEHO-Operators/Network` and
      `/MEHO-Readers/Storage`, both bound) is refused, whatever role the
-     token carries.
+     token carries. The one exception is the shipped self-approval group
+     next to one other shipped group (see below).
    - One base level per login stays. Vault reads the `tenant_role` claim of
      the token, so a binding never changes the role. When the one kind
      that matches has another role than the token (for example `Admins`
@@ -106,7 +107,8 @@ another case.
      `policy_binding_other_base_level`. The login keeps today's kind.
    - A shipped binding counts only when its kind gives the same
      `approver` and `self_approver` flags as the token. Else it is left
-     out and logged as `policy_shipped_binding_other_flags`, and the login
+     out and logged as `policy_shipped_binding_other_flags` (at debug
+     level: it comes on every request of such a person), and the login
      keeps today's kind. So a shipped group alone never gives or takes the
      right to approve: a person in `/MEHO-Approvers` without the
      `approver` claim (or with `approver: false`) gets no approve right,
@@ -119,10 +121,15 @@ another case.
      category. A machine login never gets either flag. A token with a bad
      `meho_tenants` claim never gets `self_approver`.
    - The one exception to the two-kinds rule: when only shipped bindings
-     match, and they give `Operators` and `SA-Operators` (a person in an
-     operator group and in a renamed self-approval group), the login gets
-     `SA-Operators`. Today such a person is an operator who may approve
-     their own changes.
+     match and they give `SA-Operators` and one other kind (a person in a
+     role group and in a self-approval group that is not a role group),
+     the self-approval group does not make it two kinds. Next to
+     `Operators` the login gets `SA-Operators`: today such a person is an
+     operator who may approve their own changes. Next to any other kind
+     (for example `Admins` or `Readers`) that kind stays, as with the
+     switch off, where the role group decides. Two role groups never get
+     this far: the token parser refuses them first
+     (`multiple_role_groups`).
 6. A stored `bindings` section that cannot be read (changed outside MEHO)
    gives the login the kind with the fewest rights of its base level
    (`Readers`, `Operators` or `Admins`), no category and no flag. MEHO logs

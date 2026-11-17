@@ -645,6 +645,9 @@ It also removes the kernel settings file of RKE2, and the `etcd` user and
 group when the install created them. A restart of the machine brings
 back the kernel values of the operating system.
 
+It also removes the route that the pod network of RKE2 leaves on the
+machine. So you can run `install.sh` again right away, without a restart.
+
 The MEHO firewall stays on, so the machine is never without a firewall.
 The last lines of the command name the command that removes it. Turn on
 your own firewall first, then remove the MEHO firewall.

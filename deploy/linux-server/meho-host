@@ -987,10 +987,14 @@ scrub_bundle() {
     auth="$(any_case authorization)[\\\"]*[[:space:]]*:[[:space:]]*[\\\"]*($(any_case bearer)|$(any_case basic))[[:space:]]+"
     password=$(any_case password)
     {
-        printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"/\\1\"[removed]\"/g"
+        # A value runs to the first quote mark that no backslash escapes:
+        # "fake\"value" goes as a whole.
+        printf '%s\n' "s/(\"${name}\"[[:space:]]*:[[:space:]]*)\"([^\"\\\\]|\\\\.)*\"/\\1\"[removed]\"/g"
         # The pair also counts in JSON inside a JSON string: \"name\": \"value\".
-        printf '%s\n' "s/(\\\\\"${name}\\\\\"[[:space:]]*:[[:space:]]*)\\\\\"([^\"\\\\]|\\\\[^\"])*\\\\\"/\\1\\\\\"[removed]\\\\\"/g"
-        printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"[^\"]*\"|[^[:space:]\",}]+)/\\1[removed]/g"
+        # There each backslash of the inner JSON is \\, so an escaped quote
+        # mark in the value is \\\" and the value ends at the next \".
+        printf '%s\n' "s/(\\\\\"${name}\\\\\"[[:space:]]*:[[:space:]]*)\\\\\"([^\"\\\\]|\\\\[^\"\\\\]|\\\\\\\\([^\"\\\\]|\\\\.))*\\\\\"/\\1\\\\\"[removed]\\\\\"/g"
+        printf '%s\n' "s/(${name}[[:space:]]*(=|:)[[:space:]]*)(\"([^\"\\\\]|\\\\.)*\"|[^[:space:]\",}]+)/\\1[removed]/g"
         printf '%s\n' "s/(${auth})[^[:space:]\\\",]+/\\1[removed]/g"
         # The password runs to the last "@" before the path, the query or
         # the fragment, so a password with an "@" in it goes as a whole and

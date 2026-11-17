@@ -966,6 +966,31 @@ class SupportBundleTests(HostTestCase):
         self.assertIn('{"body": "{\\"password\\": \\"[removed]\\", \\"user\\": \\"app\\"}"}', log)
         self.assertIn("open http://meho-keycloak:8080/auth as admin", log)
 
+    def test_a_password_with_an_escaped_quote_mark_is_removed_as_a_whole(self) -> None:
+        # None of these values is in a Secret. Each holds a quote mark, which
+        # JSON writes as \" (and as \\\" in JSON inside a JSON string).
+        plain = 'fake"plain-quote-1a2b'
+        nested = 'fake"suffix-8765'
+        tail = "fake-tail-3c9d\\"
+        env = 'fake\\"env-quote-5e6f'
+        lines = (
+            json.dumps({"password": plain, "user": "app"}),
+            json.dumps({"body": json.dumps({"password": nested, "user": "app"})}),
+            json.dumps({"body": json.dumps({"password": tail, "user": "app"})}),
+            f'DB_PASSWORD="{env}" next=stays',
+        )
+        self.host.answer("kube_logs", "\n".join(lines) + "\n")
+
+        log = self.bundle()["pods/meho.meho-keycloak-0.log"]
+
+        for value in ("plain-quote-1a2b", "suffix-8765", "fake-tail-3c9d", "env-quote-5e6f"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, log)
+        self.assertIn('{"password": "[removed]", "user": "app"}', log)
+        self.assertIn('{"body": "{\\"password\\": \\"[removed]\\", \\"user\\": \\"app\\"}"}', log)
+        self.assertEqual(2, log.count('\\"user\\": \\"app\\"'))
+        self.assertIn("DB_PASSWORD=[removed] next=stays", log)
+
     def test_the_bundle_is_written_when_rke2_is_down(self) -> None:
         self.host.answer("kubectl_rc", "1")
 

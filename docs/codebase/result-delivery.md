@@ -114,9 +114,11 @@ and cut the work down. Wire ceilings run last, on the encoded response.
 `measure_delivered_wire_bytes` (`operations/delivery_budget.py`). An MCP
 `tools/call` result goes on the wire twice: as the JSON text block (a JSON
 string inside the JSON-RPC body, so quotes and non-ASCII characters are
-escaped again) and as `structuredContent`. The function runs the same
-encoders the transport runs and adds the lengths. It counts bytes, not
-tokens.
+escaped again) and as `structuredContent`. The text block is compact
+JSON. The function runs the same encoders the transport runs and adds the
+lengths. It counts bytes, not tokens. The ceilings count both copies also
+for a session that asked for `?results=structured` (see
+[`mcp.md`](mcp.md)), so every session gets the same result.
 
 **Delivery states of a completed call.** The operation already ran, so
 its status stays `ok`:

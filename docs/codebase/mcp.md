@@ -422,7 +422,8 @@ in Claude Desktop with a bare "Tool execution failed" while the server
 logged 200 and wrote its audit row (found by the #2666 Desktop smoke
 re-run; the third Anthropic-conformance class after #2644 and #2745).
 The text block stays alongside per the spec's backwards-compatibility
-recommendation, byte-identical to the structured object. Tools without
+recommendation. It holds the same JSON as the structured object, written
+compact (no space after `,` and `:`, #4716). Tools without
 an `outputSchema` get no `structuredContent` key — nothing to conform
 to, no wire bloat.
 
@@ -442,6 +443,72 @@ in prod**:
   that schema to a `oneOf` flat|replay union). It also covers the
   `list_targets` over-threshold page: a JSONFlux summary plus `handle`,
   with no inline `targets` (#3858, see [`targets.md`](targets.md)).
+
+### Each result once: `?results=structured` (#4716)
+
+A client that reads `structuredContent` can ask for each result once. It
+adds `?results=structured` to the MCP URL, for example
+`https://<meho-host>/mcp?results=structured`. It works with the other URL
+options: `?profile=operate&texts=short&results=structured`.
+
+What that session gets:
+
+- A successful result of a tool with an `outputSchema`: `content` holds
+  one short line, `The result is in structuredContent.`
+  (`STRUCTURED_ONLY_TEXT` in `operations/delivery_budget.py`).
+  `structuredContent` holds the full result, as before.
+- A tool without an `outputSchema`: the full text, as before. It has no
+  `structuredContent`.
+- A result with `isError: true`: the full text and `structuredContent`,
+  as before. Claude Code shows the model only the text of an error
+  result.
+
+The default is off. Without the parameter, or with an empty `results=`,
+nothing changes. Any value other than `structured` (not case-sensitive)
+is refused with HTTP 400 before the body is read, like an unknown
+profile.
+
+How it is built:
+
+- The MCP route reads the parameter (`_apply_url_options` in
+  `mcp/server.py`, `parse_tool_results` in `mcp/structured_results.py`)
+  and sets `mcp_structured_results` on the request's `Operator`. Only
+  this route sets it.
+- `handle_tools_call` passes `structured_only` to `tool_result_text`.
+- There is no server-wide switch on purpose. One MEHO serves many
+  clients, and a client that reads only the text (for example Cursor)
+  would lose every result. Only the client knows which copy it reads.
+- It is a URL option, not a tool profile. A profile picks the tools and
+  connectors of a session. Which copy a client reads is a property of
+  the client, and it combines with any profile.
+
+**What each client gives the model.** Checked in November 2026, from the
+client source code or its public bug reports:
+
+| Client | Successful result with both copies | Result with `isError: true` | Source |
+|---|---|---|---|
+| Claude Code | `structuredContent` only | the text only | anthropics/claude-code issues 79944, 86032, 103396 |
+| Claude Desktop, Code tab and Cowork | `structuredContent` only | the text only | anthropics/claude-code issue 79944, anthropics/claude-ai-mcp issue 1132 |
+| Claude Desktop and claude.ai chat | not documented; the reports say chat reads the full result. `structuredContent` must be there for a tool with an `outputSchema` (#2774) | not documented | anthropics/claude-ai-mcp issue 1132 |
+| Codex | `structuredContent` only, as compact JSON text | `structuredContent` only | openai/codex, `codex-rs/protocol/src/models.rs`, `as_function_call_output_payload` |
+| pydantic-ai `MCPToolset` (the model scoring runner, #4253) | `structuredContent` only, when every `content` block is text | `structuredContent` | `pydantic_ai/mcp.py`, `_map_mcp_call_tool_result` (2.53) |
+| Cursor (through the `mcp-remote` shim) | the text only | the text only | Cursor forum, August 2026 |
+| `meho` CLI | not an MCP client: it uses REST, which sends the result once | | `cli/` |
+
+So the clients we checked already give the model one copy. The switch
+saves bytes on the wire and in the client. It saves model tokens only
+for a client that gives the model both copies. Do not use it with a
+client that reads only the text: that client then sees only the short
+line. The benchmark measures the saving before the switch is
+recommended to anyone.
+
+**Size check.** `measure_delivered_wire_bytes(result, structured_only=True)`
+counts the short line plus `structuredContent`, which is what such a
+session sends. The delivery ceilings still measure both copies in every
+session. So every session gets the same result, and a structured-only
+session only sends fewer bytes.
+
+Tests: `tests/test_mcp_structured_results.py`.
 
 A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
@@ -557,8 +624,10 @@ Tests: `tests/test_mcp_call_operation_audit_status.py`.
 A completed `call_operation` response is also checked against a wire ceiling,
 `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
 on the real `tools/call` wire by `measure_delivered_wire_bytes`
-(`operations/delivery_budget.py`): the encoded text block plus the encoded
-`structuredContent` copy, escaping included. It is a byte count, not a token
+(`operations/delivery_budget.py`): the encoded text block (compact JSON)
+plus the encoded `structuredContent` copy, escaping included. It measures
+both copies also for a `?results=structured` session, so every session gets
+the same result. It is a byte count, not a token
 count. The MCP dispatcher builds the text block with the same
 `tool_result_text` function, so the measurement cannot drift from what is sent.
 

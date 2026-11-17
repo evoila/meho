@@ -61,6 +61,7 @@ from meho_backplane.untrusted_text import with_data_notice
 
 __all__ = [
     "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
+    "STRUCTURED_ONLY_TEXT",
     "bound_complete_response",
     "handle_is_readable",
     "measure_delivered_wire_bytes",
@@ -72,13 +73,22 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 
-def tool_result_text(result: Any) -> str:
+#: The text block of a structured-only result (#4716): the session asked for
+#: ``?results=structured``, so the result is sent once, in ``structuredContent``.
+STRUCTURED_ONLY_TEXT = "The result is in structuredContent."
+
+
+def tool_result_text(result: Any, *, structured_only: bool = False) -> str:
     """Return the ``content[0].text`` string for a ``tools/call`` result.
 
-    The MCP dispatcher builds the text block with this function, so the
+    The text is compact JSON, with no space after ``,`` and ``:`` (#4716).
+    With *structured_only* it is :data:`STRUCTURED_ONLY_TEXT` instead. The
+    MCP dispatcher builds the text block with this function, so the
     measurement below encodes exactly the string that is sent.
     """
-    return json.dumps(result)
+    if structured_only:
+        return STRUCTURED_ONLY_TEXT
+    return json.dumps(result, separators=(",", ":"))
 
 
 def _transport_encode(value: Any) -> bytes:
@@ -96,15 +106,24 @@ def _transport_encode(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def measure_delivered_wire_bytes(result: Any, *, structured: bool = True) -> int:
+def measure_delivered_wire_bytes(
+    result: Any, *, structured: bool = True, structured_only: bool = False
+) -> int:
     """Return the bytes *result* takes on the ``tools/call`` wire.
 
     Sums the encoded text block (the JSON text written as a JSON string,
     escaping included) and, when *structured* is true (the tool declares an
-    ``outputSchema``), the encoded ``structuredContent`` object. The fixed
+    ``outputSchema``), the encoded ``structuredContent`` object. With
+    *structured_only* as well (a ``?results=structured`` session, #4716),
+    the text block is the short :data:`STRUCTURED_ONLY_TEXT` line. The fixed
     JSON-RPC framing around them is small and is not counted.
+
+    The delivery ceilings measure with both copies in every session, so
+    every session gets the same result and a structured-only session only
+    sends fewer bytes.
     """
-    total = len(_transport_encode(tool_result_text(result)))
+    text = tool_result_text(result, structured_only=structured and structured_only)
+    total = len(_transport_encode(text))
     if structured:
         total += len(_transport_encode(result))
     return total

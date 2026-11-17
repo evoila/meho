@@ -642,12 +642,21 @@ async def handle_tools_call(
         # Schema; #2774) — Claude's frontend enforces this client-side, so
         # omitting it hard-fails every declaring tool in Claude Desktop
         # while the server logs 200. The text block is kept alongside per
-        # the spec's backwards-compatibility recommendation.
+        # the spec's backwards-compatibility recommendation. A session that
+        # asked for ``?results=structured`` (#4716) gets one short line as
+        # the text of a successful structured result, so the result is sent
+        # once. An error result keeps its text: some clients show the model
+        # only the text of an error.
+        is_error = _tool_result_is_error(name, result)
+        structured = defn.outputSchema is not None
+        structured_only = structured and operator.mcp_structured_results and not is_error
         response: dict[str, Any] = {
-            "content": [{"type": "text", "text": tool_result_text(result)}],
-            "isError": _tool_result_is_error(name, result),
+            "content": [
+                {"type": "text", "text": tool_result_text(result, structured_only=structured_only)}
+            ],
+            "isError": is_error,
         }
-        if defn.outputSchema is not None:
+        if structured:
             response["structuredContent"] = result
         return response
     except McpInvalidParamsError as exc:

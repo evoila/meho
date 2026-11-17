@@ -4541,7 +4541,12 @@ the realm. The audit row of an approval records the mode in force in
 managed realm), adds the name <code>meho-approve</code> (level 2) to the realm's
 sign-in levels, and makes the flow the browser flow of <code>meho-cli-approve</code>. It waits
 for approval
-(<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>).</p>
+(<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>).
+It is a change of rights: another admin (a tenant admin or a platform
+admin) approves it, never the person who asked. So an install needs two
+admins before it runs this call. Add the second admin in Keycloak itself
+(Step 6, and put them in <code>MEHO-Admins</code> or <code>MEHO-Platform-Admins</code>).
+With the built-in Keycloak, <code>helm upgrade</code> adds the flow without this call.</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>keycloak-admin-26.x<span class="w"> </span>keycloak.authflow.ensure_approval_flow<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--target<span class="w"> </span>&lt;keycloak-target&gt;
 </code></pre></div>
@@ -4765,7 +4770,11 @@ on.</p>
 The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 <code>keycloak.authflow.ensure_approval_touch</code> instead. It waits for
-approval.</p>
+approval. It is a change of rights: another admin (a tenant admin or a
+platform admin) approves it, never the person who asked. So an install
+needs two admins before it runs this call. Add the second admin in
+Keycloak itself (Step 6, and put them in <code>MEHO-Admins</code> or
+<code>MEHO-Platform-Admins</code>).</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>keycloak-admin-26.x<span class="w"> </span>keycloak.authflow.ensure_approval_touch<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--target<span class="w"> </span>&lt;keycloak-target&gt;
 </code></pre></div>
@@ -5688,8 +5697,8 @@ account <code>meho-admin</code> may only manage clients and users. So a realm th
 already runs gets these settings once, in one of two ways:</p>
 <ul>
 <li>
-<p><strong>Through MEHO</strong>, with <code>keycloak.realm.update</code> (it waits for
-  approval). Put the values in a file, for example <code>realm-login.json</code>:</p>
+<p><strong>Through MEHO</strong>, with <code>keycloak.realm.update</code> (it waits until
+  another admin approves). Put the values in a file, for example <code>realm-login.json</code>:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">"rememberMe"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"ssoSessionIdleTimeoutRememberMe"</span><span class="p">:</span><span class="w"> </span><span class="mi">2592000</span><span class="p">,</span>
@@ -5713,8 +5722,8 @@ one-time code after a passkey login. An upgrade does not add it to an older
 realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.</p>
-<p>MEHO adds the step with one operation. It waits for approval
-(<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>),
+<p>MEHO adds the step with one operation. It waits until another admin
+approves (<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>),
 because it changes how every person of the realm logs in:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>keycloak-admin-26.x<span class="w"> </span>keycloak.authflow.ensure_passkey_code_skip<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--target<span class="w"> </span>&lt;keycloak-target&gt;

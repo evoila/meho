@@ -1546,6 +1546,34 @@ call waits for approval. The `<realm>` segment of a secret broker ref
 (`<target>/<realm>/<username>#password`, `<target>/<realm>/clients/<id>#secret`)
 must be plain too.
 
+**A target works on one realm only.** The managed realm is a fence, not a
+default. `realm_params.py` (`FENCED_OPS`) refuses a realm value that is not
+the managed realm for three ops: `keycloak.realm.update` (`realm` and
+`representation.realm`), `keycloak.realm.create` (`realm` and
+`representation.realm`) and `keycloak.user.check_login` (`realm`). The
+refusal runs twice. `realm_fence_park_check` refuses before the call waits
+for approval (and in `preview_operation`), so nothing is stored and nothing
+is sent to Keycloak. `realm_param`, with the target, refuses again in the
+handler, for a call that does not wait for approval. The text says: use a
+target that names that realm as its managed realm. It never repeats the
+value the caller gave. The `realm` parameter stays so that a call that names
+the managed realm still works; it will be removed. `keycloak.realm.delete`
+is not fenced: its `realm` is the realm to remove, and `check_realm_guards`
+never lets it be the managed realm, so a fence would make the op impossible.
+Its approval card names the realm, with the user, client and group counts.
+Every other op takes no realm value and always acts on the managed realm.
+
+**Every answer names the realm.** `answer_realm.py` (`name_the_realm`,
+applied to `KeycloakConnector`) wraps each op handler. A dict answer gets
+the field `managed_realm` first, set to the realm the call acted on. A
+read answer, a write answer and a refused write show the same field. The
+approval card of a Keycloak write shows the realm in its first line: the
+dispatcher stamps `target_realm` on `proposed_effect`
+(`target_managed_realm` in `targets/keycloak_realm_warnings.py`) and the
+console renders it under "Proposed effect". `meho targets describe` shows a
+`realms:` line with the admin realm and the managed realm of a Keycloak
+target; `meho targets probe` shows both in its `extras` line.
+
 A Keycloak target with no managed realm, or a realm that is not a plain
 name, is refused like this:
 

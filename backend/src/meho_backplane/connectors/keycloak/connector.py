@@ -112,6 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.answer_realm import name_the_realm
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -327,6 +328,7 @@ class _CachedToken:
         return now < self.expires_at
 
 
+@name_the_realm
 class KeycloakConnector(HttpConnector):
     """Keycloak 26.x Admin REST API connector with admin-token Bearer auth.
 

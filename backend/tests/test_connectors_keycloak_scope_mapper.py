@@ -295,6 +295,7 @@ async def test_change_by_names_keeps_every_other_field(kc: KeycloakConnector) ->
         )
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "scope_id": _SCOPE_UUID,
         "scope_name": _SCOPE_NAME,
         "mapper_id": _MAPPER_UUID,

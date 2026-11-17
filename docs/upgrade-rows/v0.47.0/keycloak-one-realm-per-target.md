@@ -1,0 +1,5 @@
+## Note
+A Keycloak target now works on one realm only: the managed realm it names. A call that names another realm is refused before it waits for approval, and nothing is sent to Keycloak. This covers the `realm` value of `keycloak.realm.update` and `keycloak.user.check_login`, and the realm name of `keycloak.realm.create`. `keycloak.realm.delete` is not changed. Every Keycloak answer now has a `managed_realm` field that names the realm the call acted on. The approval card of every write shows the realm, and `meho targets describe` shows the admin realm and the managed realm of a Keycloak target together.
+
+## Action
+If you made calls that name another realm than the managed realm of the target, register a second target for that realm: `meho targets add <name> --product keycloak --host <host> --extra admin_realm=master --extra managed_realm=<realm>`. Then send the call to that target. A call that names the managed realm still works. The `realm` value stays for now, and it will be removed later: leave it out.

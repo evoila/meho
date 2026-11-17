@@ -204,7 +204,12 @@ async def test_logout_by_username_resolves_uuid(kc: KeycloakConnector) -> None:
         logout = mock.post(_LOGOUT_PATH).respond(204)
         result = await _run({"username": "event-guest"})
     assert result["status"] == "ok", result
-    assert result["result"] == {"id": _USER_UUID, "username": "event-guest", "logged_out": True}
+    assert result["result"] == {
+        "managed_realm": _REALM,
+        "id": _USER_UUID,
+        "username": "event-guest",
+        "logged_out": True,
+    }
     assert lookup.calls.last.request.url.params["username"] == "event-guest"
     assert lookup.calls.last.request.url.params["exact"] == "true"
     assert logout.call_count == 1
@@ -221,7 +226,12 @@ async def test_logout_by_id_skips_lookup_and_is_safe_to_run_twice(kc: KeycloakCo
         second = await _run({"id": _USER_UUID})
     for result in (first, second):
         assert result["status"] == "ok", result
-        assert result["result"] == {"id": _USER_UUID, "username": "event-guest", "logged_out": True}
+        assert result["result"] == {
+            "managed_realm": _REALM,
+            "id": _USER_UUID,
+            "username": "event-guest",
+            "logged_out": True,
+        }
     assert not lookup.called
     assert logout.call_count == 2
 
@@ -286,5 +296,10 @@ async def test_logout_waits_for_approval_then_runs(kc: KeycloakConnector) -> Non
                 operator=approver, request=row, params=None
             )
     assert resumed.status == "ok", resumed
-    assert resumed.result == {"id": _USER_UUID, "username": "event-guest", "logged_out": True}
+    assert resumed.result == {
+        "managed_realm": _REALM,
+        "id": _USER_UUID,
+        "username": "event-guest",
+        "logged_out": True,
+    }
     assert logout.call_count == 1

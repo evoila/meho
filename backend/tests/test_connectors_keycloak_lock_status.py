@@ -195,6 +195,7 @@ async def test_locked_user_by_id_shows_counts_and_no_ip(kc: KeycloakConnector) -
     assert user_read.called
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "userId": _USER_UUID,
         "locked": True,
         "numFailures": 5,
@@ -221,6 +222,7 @@ async def test_user_with_no_failures_is_not_locked(kc: KeycloakConnector) -> Non
     assert not user_read.called
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "userId": _USER_UUID,
         "locked": False,
         "numFailures": 0,
@@ -341,6 +343,7 @@ async def test_realm_lock_settings_copy_only_the_lock_fields(kc: KeycloakConnect
         result = await _run(_SETTINGS_OP, {})
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "realm": _REALM,
         "bruteForceProtected": True,
         "permanentLockout": False,

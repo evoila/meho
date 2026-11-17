@@ -447,6 +447,7 @@ async def test_user_delete_deletes_the_user_on_the_card(kc: KeycloakConnector) -
     assert card["username"] == "event-guest"
     assert resumed.status == "ok", resumed
     assert resumed.result == {
+        "managed_realm": _REALM,
         "realm": _REALM,
         "id": _USER_UUID,
         "username": "event-guest",

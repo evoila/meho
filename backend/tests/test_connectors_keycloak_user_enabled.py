@@ -225,6 +225,7 @@ async def test_disable_by_username_keeps_every_other_field(kc: KeycloakConnector
         result = await _run(_DISABLE, {"username": "event-guest"})
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "id": _USER_UUID,
         "username": "event-guest",
         "enabled": False,

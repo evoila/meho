@@ -395,6 +395,7 @@ async def test_events_config_returns_the_six_fields_and_default_list(
         result = await _run(_EVENTS_OP, {})
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "realm": _REALM,
         "eventsEnabled": False,
         "eventsExpiration": 0,

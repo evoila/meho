@@ -216,6 +216,7 @@ async def test_get_by_id_returns_state_and_credential_type_and_date(kc: Keycloak
         result = await _run(_GET_OP, {"id": _USER_UUID})
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "id": _USER_UUID,
         "username": "event-guest",
         "enabled": True,
@@ -303,6 +304,7 @@ async def test_sessions_return_times_ip_and_client_names_only(kc: KeycloakConnec
         result = await _run(_SESSIONS_OP, {"id": _USER_UUID})
     assert result["status"] == "ok", result
     assert result["result"] == {
+        "managed_realm": _REALM,
         "userId": _USER_UUID,
         "count": 1,
         "sessions": [
@@ -326,7 +328,12 @@ async def test_sessions_by_username_and_none_is_count_zero(kc: KeycloakConnector
         mock.get(_SESSIONS_PATH).respond(200, json=[])
         result = await _run(_SESSIONS_OP, {"username": "event-guest"})
     assert result["status"] == "ok", result
-    assert result["result"] == {"userId": _USER_UUID, "count": 0, "sessions": []}
+    assert result["result"] == {
+        "managed_realm": _REALM,
+        "userId": _USER_UUID,
+        "count": 0,
+        "sessions": [],
+    }
 
 
 async def test_sessions_unknown_user_is_not_found(kc: KeycloakConnector) -> None:

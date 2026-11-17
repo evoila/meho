@@ -289,6 +289,7 @@ async def test_add_keeps_the_other_required_actions(kc: KeycloakConnector) -> No
     assert body["attributes"] == {"team": ["ops"]}
     assert body["firstName"] == "Eve"
     assert result["result"] == {
+        "managed_realm": _REALM,
         "id": _USER_UUID,
         "username": "event-guest",
         "realm": _REALM,
@@ -746,6 +747,7 @@ async def test_status_empty_realm_and_missing_actions_field(kc: KeycloakConnecto
         )
         brief = await _run(_OTP_OP_ID, {})
     assert empty["result"] == {
+        "managed_realm": _REALM,
         "rows": [],
         "total": 0,
         "unknown": 0,

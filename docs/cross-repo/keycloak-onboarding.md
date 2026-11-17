@@ -27,6 +27,15 @@ connector cannot reach it: the sign-in and the probe fail. This page
 works only with a Keycloak that serves at the root path, such as your
 own Keycloak with no `http-relative-path` set.
 
+**One target, one realm.** A Keycloak target works on the managed realm it
+names, and on no other. Every answer has a `managed_realm` field with that
+realm, and the approval card of a write shows it first. A call that names
+another realm in its `realm` value (`keycloak.realm.update`,
+`keycloak.realm.create`, `keycloak.user.check_login`) is refused before it
+waits for approval. To work on another realm, register a second target
+that names it. The `realm` value stays for now, and it will be removed:
+leave it out.
+
 ## What this surface is
 
 The `keycloak-admin-26.x` connector is a **typed** connector: hand-coded

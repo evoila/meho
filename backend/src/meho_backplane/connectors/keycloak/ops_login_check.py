@@ -295,7 +295,7 @@ async def keycloak_user_check_login(
     password or a token.
     """
     managed_realm = resolve_realm_config(target).managed_realm
-    realm = realm_param(params, "realm", CHECK_LOGIN_OP_ID) or managed_realm
+    realm = realm_param(params, "realm", CHECK_LOGIN_OP_ID, target) or managed_realm
     username = str(params["username"]).strip()
     client_id = _opt_str(params.get("client_id")) or _DEFAULT_CLIENT_ID
     password = await _read_password_from_vault(operator, target, params)

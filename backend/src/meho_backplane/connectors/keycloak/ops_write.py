@@ -312,8 +312,8 @@ async def keycloak_realm_create(
     """
     representation = dict(params["representation"])
     realm_name = (
-        realm_param(params, "representation.realm", "keycloak.realm.create")
-        or realm_param(params, "realm", "keycloak.realm.create")
+        realm_param(params, "representation.realm", "keycloak.realm.create", target)
+        or realm_param(params, "realm", "keycloak.realm.create", target)
         or ""
     )
     representation.setdefault("realm", realm_name)
@@ -352,7 +352,9 @@ async def keycloak_realm_update(
     if has_inline_smtp_password(params):
         raise ValueError(f"keycloak.realm.update: {inline_smtp_password_reason()}")
     realms = resolve_realm_config(target)
-    realm_name = realm_param(params, "realm", "keycloak.realm.update") or realms.managed_realm
+    realm_name = (
+        realm_param(params, "realm", "keycloak.realm.update", target) or realms.managed_realm
+    )
     representation = dict(params["representation"])
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
@@ -361,7 +363,9 @@ async def keycloak_realm_update(
         representation["smtpServer"] = with_smtp_password(
             representation.get("smtpServer"), password
         )
-    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
+    new_name = (
+        realm_param(params, "representation.realm", "keycloak.realm.update", target) or realm_name
+    )
     check = await read_merge_write(
         self,
         operator,

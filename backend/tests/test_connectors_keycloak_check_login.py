@@ -72,7 +72,7 @@ _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-check-login"
 _KC_HOST = "keycloak-check-login.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
-_REALM = "master"
+_REALM = "meho"
 _TOKEN_PATH = f"/realms/{_REALM}/protocol/openid-connect/token"
 _LOGOUT_PATH = f"/realms/{_REALM}/protocol/openid-connect/logout"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000005229")
@@ -291,6 +291,7 @@ async def test_accepted_login_ends_the_session_at_once(
         result = await _run(_PARAMS)
     assert result.status == "ok", result.error
     assert result.result == {
+        "managed_realm": _REALM,
         "result": "accepted",
         "http_status": 200,
         "error": None,

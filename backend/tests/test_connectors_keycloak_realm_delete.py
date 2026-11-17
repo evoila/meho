@@ -272,7 +272,12 @@ async def test_realm_delete_reports_deleted_only_after_404(kc: KeycloakConnector
         del_route = mock.delete(_REALM_PATH).respond(204)
         result = await _run({"realm": _REALM})
     assert result["status"] == "ok", result
-    assert result["result"] == {"realm": _REALM, "deleted": True, "already_absent": False}
+    assert result["result"] == {
+        "managed_realm": _MANAGED_REALM,
+        "realm": _REALM,
+        "deleted": True,
+        "already_absent": False,
+    }
     assert del_route.call_count == 1
     assert get_route.call_count == 2  # the read before, then the 404 check
 
@@ -285,7 +290,12 @@ async def test_realm_delete_already_gone_is_success(kc: KeycloakConnector) -> No
         del_route = mock.delete(_REALM_PATH).respond(204)
         result = await _run({"realm": _REALM})
     assert result["status"] == "ok", result
-    assert result["result"] == {"realm": _REALM, "deleted": False, "already_absent": True}
+    assert result["result"] == {
+        "managed_realm": _MANAGED_REALM,
+        "realm": _REALM,
+        "deleted": False,
+        "already_absent": True,
+    }
     assert not del_route.called
 
 
@@ -296,7 +306,12 @@ async def test_realm_delete_404_on_delete_is_already_absent(kc: KeycloakConnecto
         mock.delete(_REALM_PATH).respond(404)
         result = await _run({"realm": _REALM})
     assert result["status"] == "ok", result
-    assert result["result"] == {"realm": _REALM, "deleted": False, "already_absent": True}
+    assert result["result"] == {
+        "managed_realm": _MANAGED_REALM,
+        "realm": _REALM,
+        "deleted": False,
+        "already_absent": True,
+    }
 
 
 async def test_realm_still_readable_after_delete_is_an_error(kc: KeycloakConnector) -> None:
@@ -666,5 +681,10 @@ async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConn
                 operator=approver, request=row, params=None
             )
     assert resumed.status == "ok", resumed
-    assert resumed.result == {"realm": _REALM, "deleted": True, "already_absent": False}
+    assert resumed.result == {
+        "managed_realm": _MANAGED_REALM,
+        "realm": _REALM,
+        "deleted": True,
+        "already_absent": False,
+    }
     assert del_route.call_count == 1

@@ -918,6 +918,7 @@
   "tests/test_policy_classification_shown.py": 0.88,
   "tests/test_policy_document.py": 2.43,
   "tests/test_policy_evaluate.py": 1.69,
+  "tests/test_policy_evaluate_parity.py": 102.7,
   "tests/test_policy_import_diff.py": 0.4,
   "tests/test_policy_install_risk_floor.py": 2.86,
   "tests/test_policy_install_wait_binding.py": 1.44,

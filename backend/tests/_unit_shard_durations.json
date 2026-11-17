@@ -918,6 +918,7 @@
   "tests/test_policy_classification_shown.py": 0.88,
   "tests/test_policy_document.py": 2.43,
   "tests/test_policy_evaluate.py": 1.69,
+  "tests/test_policy_evaluate_parity.py": 102.7,
   "tests/test_policy_import_diff.py": 0.4,
   "tests/test_policy_install_risk_floor.py": 2.86,
   "tests/test_policy_install_wait_binding.py": 1.44,
@@ -954,6 +955,7 @@
   "tests/test_release_security_sheet.py": 6.52,
   "tests/test_request_body_limit.py": 0.4,
   "tests/test_request_usage.py": 13.0,
+  "tests/test_rest_token_writes_wait_for_approval.py": 46.77,
   "tests/test_result_catalog.py": 0.39,
   "tests/test_result_document_path.py": 1.94,
   "tests/test_result_handle_always_hint.py": 0.38,
@@ -1062,6 +1064,7 @@
   "tests/test_targets_probe_op.py": 2.57,
   "tests/test_targets_register_machine_secret_ref.py": 11.61,
   "tests/test_targets_register_vault_login_extras.py": 5.41,
+  "tests/test_targets_register_wait_when_set.py": 8.01,
   "tests/test_targets_remove_op.py": 4.87,
   "tests/test_targets_resolver.py": 1.81,
   "tests/test_targets_schemas.py": 1.47,
@@ -1222,6 +1225,7 @@
   "tests/test_web_push_service_worker.py": 0.0,
   "tests/test_well_known.py": 0.19,
   "tests/test_work_item_signing.py": 0.53,
+  "tests/test_work_ref_doors.py": 5.96,
   "tests/test_work_ref_rule.py": 1.34
  }
 }

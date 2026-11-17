@@ -105,6 +105,7 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "has_permission_preflight",
     "has_preview_builder",
     "preview_failure_reason",
     "register_permission_preflight",
@@ -350,6 +351,10 @@ class PreviewContext:
             the generic params-echo default. ``None`` (the default) falls
             back to the conservative connector-boundary default policy --
             the same behaviour as an unmatched override.
+        agent_preview: ``True`` when the agent's own ``preview_operation``
+            asks, ``False`` (the default) for the approval request. A
+            builder may show the approver more than the agent; what the
+            agent gets beyond that follows ``PREVIEW_TYPED_WRITES``.
     """
 
     descriptor: EndpointDescriptor
@@ -358,6 +363,7 @@ class PreviewContext:
     target: Any
     params: dict[str, Any]
     connector_id: str | None = None
+    agent_preview: bool = False
 
 
 class PreviewBuilder(Protocol):
@@ -426,6 +432,11 @@ def register_permission_preflight(op_id: str, preflight: PermissionPreflight) ->
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PERMISSION_PREFLIGHTS[op_id] = preflight
+
+
+def has_permission_preflight(op_id: str) -> bool:
+    """True when *op_id* has a park-time permission check registered."""
+    return op_id in _PERMISSION_PREFLIGHTS
 
 
 async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:

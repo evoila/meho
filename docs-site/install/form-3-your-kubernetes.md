@@ -117,6 +117,11 @@ networkPolicy:
 
 Every rule needs a `to` list. The chart refuses a rule without one.
 
+With approval notifications on (`webPush.enabled: true`), MEHO also needs
+HTTPS to the push services of Apple, Google, Microsoft and Mozilla. The
+host names are in
+[Push services for approval notifications](index.md#push-services-for-approval-notifications).
+
 **A target behind your ingress.** Kubernetes does not say whether a
 network rule is checked before or after the cluster redirects a
 connection. On Calico and Canal with kube-proxy (RKE2's default), it is

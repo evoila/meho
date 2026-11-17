@@ -843,6 +843,20 @@ model, or resume endpoint):
      waits. MEHO does not try to tell who is behind a token, because an
      AI tool can use a person's login.
 
+   The REST target writes (`POST`, `PATCH`, `DELETE /api/v1/targets`)
+   and the four REST topology graph writes follow the same rule. A
+   person's token call goes to the matching `targets.*` or `topology.*`
+   operation through the dispatcher and answers 202 with the approval
+   request id (`api/v1/_wait_for_approval.py`); the console writes at
+   once. See [targets.md](targets.md) and [topology.md](topology.md).
+   `meho targets import` sends one write per row, so each row makes its
+   own approval request. For a large file, a person imports it in the web
+   console, or runs the import with `--work-ref`. Then a person goes
+   through all its rows with
+   `meho approvals approve --filter-work-ref <ref> --in-order`, which asks
+   for a yes at each row. The person who ran the import can approve its
+   rows this way only after a fresh approval sign-in.
+
    Only `verify_access_token_with_refresh`
    (`backend/src/meho_backplane/ui/auth/refresh.py`) sets
    `web_session=True`. No token claim, header or request field can set
@@ -4394,13 +4408,25 @@ forgotten first). The limit is kept in memory, per process.
 **Order.** The steps of one request go out in the order they happened. Each
 step waits until the step before it of the same request was sent. So a
 first message that was slow can never arrive after the result and replace
-it. The order is kept in memory, per process.
+it. The order is kept in memory, per process. So with `replicaCount`
+above 1 the rate limit and the order hold only inside one copy; the
+user guide (`docs-site/guides/phone-and-laptop.md`) and
+`docs/deploying.md` (`webPush.*`) say so where the feature is turned on.
+
+**Network.** MEHO needs outbound HTTPS to the hosts of the allow-list
+(`web_push/endpoints.py`). The install docs list them for firewall teams:
+`docs-site/install/index.md`, "Push services for approval notifications".
+Why web push, and what leaves the network:
+[the decision record](../decisions/2026-11-15-approval-notifications-through-web-push.md).
 
 **Where messages go.** Only to the browser makers' push services: the
 endpoint is checked again before each send, not only when it was stored.
 Redirects are not followed, and each send has a 10 second timeout. A push
 service that answers 404 or 410 (the browser dropped the subscription)
-gets the row deleted. Other errors are logged and the row stays. Logs name
+gets the row deleted. When that delete fails (the database is down),
+MEHO logs `web_push_gone_not_removed` and the other sends of the step go
+on; the row goes at the next 404 or 410. Other errors are logged and the
+row stays. Logs name
 the row id, the person, the push service and the status or the error type.
 Never the endpoint or a key.
 

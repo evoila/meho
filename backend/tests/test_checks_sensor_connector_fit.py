@@ -36,6 +36,7 @@ from meho_backplane.connectors import (
     ProbeResult,
 )
 from meho_backplane.connectors import registry as connector_registry
+from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.connectors.resolver import connector_serves_target, resolve_connector_or_label
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Tenant
@@ -160,8 +161,12 @@ async def _seed_target(
     probed: str | None,
     product: str = _PRODUCT,
     tenant_id: uuid.UUID = _TENANT_A,
+    probed_product: str | None = None,
 ) -> uuid.UUID:
     target_id = uuid.uuid4()
+    fingerprint: dict[str, Any] | None = None if probed is None else {"version": probed}
+    if fingerprint is not None and probed_product is not None:
+        fingerprint["product"] = probed_product
     async with get_sessionmaker()() as session, session.begin():
         session.add(
             TargetORM(
@@ -171,7 +176,7 @@ async def _seed_target(
                 aliases=[],
                 product=product,
                 version=None,
-                fingerprint=None if probed is None else {"version": probed},
+                fingerprint=fingerprint,
                 host="appliance.example.test",
                 port=443,
                 fqdn=None,
@@ -396,6 +401,49 @@ async def test_list_does_not_leave_a_target_in_the_audit_context() -> None:
     context = structlog.contextvars.get_contextvars()
     assert "target_id" not in context
     assert "target_name" not in context
+
+
+@pytest.mark.asyncio
+async def test_create_vault_sensor_on_openbao_without_force() -> None:
+    """The Vault operations are stored under vault-1.x and run on OpenBao 2.x.
+
+    The resolver picks the OpenBao subclass for the target, so the Sensor on
+    vault-1.x fits and needs no force.
+    """
+    _eager_import_connectors()
+    await _seed()
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            EndpointDescriptor(
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.fit.check",
+                source_kind="typed",
+                method="GET",
+                path="",
+                parameter_schema={"type": "object", "properties": {}},
+                safety_level="safe",
+            )
+        )
+    await _seed_target("bao", probed="2.7.1", product="vault", probed_product="openbao")
+    await _seed_target("vault-2", probed="2.0.0", product="vault", probed_product="vault")
+
+    created = await SensorAdminService().create(
+        _TENANT_A,
+        "op-admin",
+        _payload("bao-sensor", "vault-1.x", "bao", op_id="vault.fit.check"),
+    )
+    assert created.connector_fit is not None
+    assert created.connector_fit.target_version == "2.7.1"
+    assert created.connector_fit.warning is None
+
+    with pytest.raises(SensorConnectorMismatchError):
+        await SensorAdminService().create(
+            _TENANT_A,
+            "op-admin",
+            _payload("vault-2-sensor", "vault-1.x", "vault-2", op_id="vault.fit.check"),
+        )
 
 
 # ---------------------------------------------------------------------------

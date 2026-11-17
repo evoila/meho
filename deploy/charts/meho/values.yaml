@@ -776,12 +776,14 @@ config:
   kbSharedTenantIds: ""
   # -- The weekly knowledge upkeep job. It merges duplicate entries,
   # retires expired ones and writes one report per tenant.
-  # `knowledgeUpkeepEnabled` is rendered into `KNOWLEDGE_UPKEEP_ENABLED`;
-  # `"false"` does not start the job. `knowledgeUpkeepIntervalSeconds` is
+  # `knowledgeUpkeepEnabled` is rendered into `KNOWLEDGE_UPKEEP_ENABLED`.
+  # Off by default (`"false"`): the job changes which entries knowledge
+  # search returns, so an operator turns it on with `"true"`.
+  # `knowledgeUpkeepIntervalSeconds` is
   # rendered into `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS`: how often it runs,
   # from 60 to 604800 seconds (one week, the default). See
   # `docs/codebase/kb.md`.
-  knowledgeUpkeepEnabled: "true"
+  knowledgeUpkeepEnabled: "false"
   knowledgeUpkeepIntervalSeconds: 604800
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
@@ -1074,8 +1076,8 @@ gsm:
   # and the SA-direct Phase-1 path runs unchanged.
   #
   # A per-operator-WIF install must also decide how *background* dispatch
-  # (sensor evaluations, scheduled topology refreshes, runbook verify
-  # dispatch — no calling operator, so no JWT to federate) gets an
+  # (sensor evaluations, scheduled topology refreshes — no calling
+  # operator, so no JWT to federate) gets an
   # identity: either an ambient pod identity (GKE Workload Identity), or
   # the `checkRunner` service principal below. Neither ⇒ credentialed
   # Sensors cannot evaluate. Connector `probe()` / `fingerprint()` are not

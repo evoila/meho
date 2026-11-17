@@ -50,6 +50,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.operations.approval_outcome import ResumeOutcome, resume_outcome
 from meho_backplane.operations.approval_outcome_check import (
     list_outcome_unknown,
@@ -260,12 +261,7 @@ async def _list_handler(
             ) from exc
     limit = int(arguments.get("limit", 50))
     offset = int(arguments.get("offset", 0))
-    work_ref_raw = arguments.get("work_ref")
-    work_ref_filter: str | None = None
-    if work_ref_raw is not None:
-        if not isinstance(work_ref_raw, str) or not work_ref_raw:
-            raise McpInvalidParamsError("work_ref must be a non-empty string when supplied")
-        work_ref_filter = work_ref_raw
+    work_ref_filter = work_ref_argument(arguments.get("work_ref"))
 
     outcome_unknown_only = arguments.get("outcome_unknown", False)
     if not isinstance(outcome_unknown_only, bool):

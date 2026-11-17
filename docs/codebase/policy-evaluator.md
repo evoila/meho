@@ -193,14 +193,63 @@ the answer is the one of a call without parameters.
 
 **What it answers.** The same steps as the preview, in the same order:
 target by name, descriptor and catalog choice (`_resolve_descriptor`),
-then `_governance_fields`, which calls `policy_gate(decide_only=True)` and
-the step checks of a multi-step operation. Then, only with
+then `governance_and_gate`, which calls `policy_gate(decide_only=True)` and
+the step checks of a multi-step operation. It also gives the gate's own
+answer, from before the step check of a multi-step operation. Then, only with
 `POLICY_ENGINE_SHADOW` on, `evaluate_call(decide_only=True)`. The gate's
 shadow keeps a rule; explain drops it (`forget_rule`).
 
+**Checks after the gate** (`policy/explain_checks.py`,
+`refusal_after_gate`). The policy gate is not the last check of a call.
+Which checks after the gate a call is asked comes from one function,
+`checks_after_gate` (`operations/_after_gate.py`). The dispatcher reads
+it before it asks the announce rule and before it asks the ingested check
+of a call that waits. Explain reads it too and asks each check with the
+same code the call uses. Both ask for the gate's own answer, from before
+the step check of a multi-step operation: the call checks the steps only
+when the operation runs. So a multi-step write that the gate lets run but
+whose step would wait is asked the announce rule.
+
+| Check | Code | Asked when the gate says |
+|---|---|---|
+| The announce rule of the tenant (`announce_required`): an agent or a service login, not a person | `announce_gate_blocks` (`broadcast/announce_gate.py`) | `run` only. A call that waits is not asked again after the approval. |
+| An ingested operation on a target whose connector does not take ingested operations (`ingested_ops_not_accepted`) | `_ingested_ops_refusal` (`operations/dispatcher.py`) | `run` (in the connector lookup) or `wait` |
+
+When one refuses, `answer` is `deny`, and `today` holds `deny` with the
+call's reason (`announce_required: ...` or
+`ingested_ops_not_accepted: ...`). The evaluator does not know these
+checks, so its `same_as_today` is then `false`. A call the gate denies is
+not asked again.
+
+**What explain does not check.** `not_checked` is a list of fixed names
+(`not_checked()` in `policy/explain_checks.py`). It names each check after
+the gate that explain does not ask and that can still refuse the call. A
+`run` or `wait` answer with an empty list would mean nothing after the
+gate can refuse the call.
+
+| Name | The call's refusal | Listed when the answer is |
+|---|---|---|
+| `connector_resolution` | `no_connector`, `ambiguous_connector`, `target_required` | `run`, `wait` (asked when the call runs, also after the approval) |
+| `operation_param_check` | `refused_before_approval` (`operations/_park_check.py`) | `wait`, when the operation has such a check |
+| `destructive_preview_binding` | `preview_binding_required` | `run` (a delete grant in sandbox mode) or `wait`, for a `destructive` operation |
+| `permission_preflight` | `write_capability_denied` (asks the vendor) | `wait`, when the operation has a preflight |
+| `idempotency_key` | `idempotency_key_conflict` | `wait` |
+
+`deny` gets an empty list. Not listed: a MEHO fault, such as a missing
+approval encryption key, and the checks done again after an approval with
+the same rules (the steps of a multi-step operation, the role of the
+person who runs it). The answer for a stored approval request has no
+list. The CLI prints the list last (`Not checked: a, b`).
+
+`tests/test_policy_explain_parity.py` runs a matrix of callers and
+operations through explain and through the real call (with the step that
+would send the call replaced). It fails on any difference that
+`not_checked` does not name.
+
 - `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
   off or in shadow mode, today's checks decide (`decided_by: today`).
-- `today`: the gate's verdict and reason.
+- `today`: the gate's verdict and reason. When a check after the gate
+  refuses the call, `today` holds `deny` with that check's reason.
 - `evaluator` (null while the switch is off): its verdict, the rule that
   decided, the floor that decided (when the rule is a `floor` or
   `role_floor`), every step in order (`Decision.steps`), and
@@ -213,8 +262,11 @@ shadow keeps a rule; explain drops it (`forget_rule`).
   that matches, least specific first, each with its place
   (`install:classifications[0]`, `tenant:classifications[2]`,
   `tenant:override`).
-- `approvers` (only when the answer is `wait`): the login groups that may
-  approve another person's call, and the rule. A change of rights: only
+- `approvers` (only when the answer is `wait`): the groups that may
+  approve another person's call, and the rule. The groups are MEHO group
+  kinds (`MEHO-<kind>`, from `policy/who_approves.py`), not the names of
+  the login groups of the install. Each login group of the install is
+  bound to one of these kinds. A change of rights: only
   `MEHO-Admins` (`rights_change`). With `POLICY_APPROVER_ROUTING` on: the
   first routing entry that fits (`tenant:routing[0]`). Else today's rule
   (`default`).
@@ -260,6 +312,105 @@ policy_shadow_mismatch kind=call op_id=<op-id> principal_kind=<kind>
 For an approval line, `today_may_approve` and `shadow_may_approve` are
 the two answers.
 
+## The parity test
+
+`backend/tests/test_policy_evaluate_parity.py` runs every case through
+today's code and through the evaluator. It fails on any difference. It
+runs in the normal unit test job, in about 90 seconds.
+
+- **Calls** (41,472 cases, one test per `AGENT_GRANT_REQUIRED` setting):
+  7 caller kinds (a person in the web interface, a person with a token,
+  an agent, a `read_only` agent, a service login, a runner, a hosted
+  agent run) x 6 logins (the five login groups, and a platform admin in
+  another tenant) x 4 risk levels x 32 combinations of five marks
+  (requires approval, write, shows a secret, connects to an address the
+  caller gives, needs the `tenant_admin` role) x the grants of the
+  caller kind. Today's side is `policy_gate`; the evaluator's side is
+  `evaluate_call`, with the same lookups. Both must give the same
+  verdict, the same reason class, the same approver groups and the same
+  `waits_because`.
+  - Grants of the agent rows (agent, `read_only` agent, hosted run): none,
+    an agent grant that runs, one that denies, one that needs approval,
+    and a wide grant that denies next to a narrower one that runs. These
+    rows run with `AGENT_GRANT_REQUIRED` set to `off`, `observe` and `on`.
+  - Grants of a service login: none, a standing grant, and a run approval
+    of the operations that do not show a secret.
+  - Grants of a person and a runner: none, and a standing grant.
+- **Grants that never clear**: a table that calls `evaluate` directly
+  with a standing grant and a run approval in `Lookups`, for an operation
+  that shows a secret, connects to an address the caller gives, needs
+  approval for every call, or always waits. The call must still wait.
+  The lookups of a real call drop such a grant first, so only this table
+  sees a change of `grant_may_clear`, `run_approval_may_clear` or
+  `NO_GRANT_MARKS`.
+- **Approvals** (9,600 cases): 5 approver kinds x 6 logins x own change
+  or not x 5 risk levels (also none) x token wait x role floor x pending
+  or decided x change of rights x the break-glass switch. Today's side is
+  `approve_right`; the evaluator's side is `may_approve`. Both must
+  allow or refuse, for the same reason.
+- **Routes and tools**: every REST route with a `require_role` check and
+  every MCP tool, for each of the six logins. The evaluator has no route
+  table, so the test checks that the evaluator reads the login the same
+  way: its role floor for an operation that needs the route's role gives
+  the same answer as the door.
+
+The "small team" file is checked in `test_policy_small_team_parity.py`:
+its export on a fresh install equals the file, and importing it changes
+no answer of any registered operation. That test compares today's answers
+before and after the import; it does not compare them with the evaluator.
+
+### How to read a failing case
+
+The test prints up to 20 differing cases, each like this:
+
+```
+caller=service login=Operators grant=standing agent_grant_required=off level=dangerous marks=[write]
+  today={'verdict': 'run', 'class': 'standing_grant', ...} reason='auto-granted by ...'
+  evaluator={'verdict': 'wait', 'class': 'wait', ...} trace=['default service.dangerous: wait', ...]
+```
+
+- The first line is the case: who asks, the login, the grant, the
+  `AGENT_GRANT_REQUIRED` setting, the risk level and the marks of the
+  operation.
+- `today` is what MEHO does now, with today's reason text. `evaluator`
+  is the evaluator's answer, with every step it took (`trace`).
+- The reason class says what let a call run (`default`,
+  `standing_grant`, `run_approval`, `agent_grant`) or what refused it
+  (`role_floor`, `read_scope`, `agent_no_grant`, `agent_rule`). Every
+  call that waits has the class `wait`.
+- `approvers` are the login groups that may approve another person's
+  call. On today's side they come from `approve_right`, one person of
+  each group.
+- Find the step in the trace where the two answers part. Then fix the
+  evaluator, or add today's rule to it. Never change today's code in the
+  same change: report a difference in today's code on its own issue.
+
+An approval case prints the approver, the request and both answers:
+today's `may_approve_reason` and rule, and the evaluator's rule.
+
+### What the table does not cover
+
+These are the places where the two answers can differ today. Each has
+its own issue; when it is fixed, its line goes away.
+
+- Sandbox mode with a preview hash (#6594). A service login's
+  `destructive` call in sandbox mode with a preview hash can differ:
+  today's gate checks the hash and what else the call affects before a
+  delete grant counts, and the evaluator's lookup finds the grant without
+  these checks. The sandbox cases without a hash are in
+  `test_policy_shadow.py`.
+- A change of rights on the call side (#6595). `Decision.approvers` does
+  not know it yet (only another admin approves it), so the call table
+  uses no such operation. The approval table covers it.
+- Approver routing (#6596). The evaluator does not know approver routing
+  (`POLICY_APPROVER_ROUTING`): `Decision.approvers` and `may_approve`
+  always use today's group rule. The test runs with routing off.
+
+Also not in this file:
+
+- Read scopes. The evaluator's read scope step is in
+  `test_policy_evaluate.py`.
+
 ## Cost
 
 The evaluator itself is a few dictionary and set checks. The added time
@@ -292,6 +443,8 @@ switch off and on.
   and `backend/tests/migrations/test_migration_0168_add_policy_rule_columns.py`:
   the rule on audit rows, approval requests and the console, and the
   migration on PostgreSQL with the append-only trigger (#6044).
+- `backend/tests/test_policy_evaluate_parity.py`: the parity test (see
+  "The parity test").
 - `backend/tests/test_policy_shadow_load.py`: the load check.
 - `backend/tests/test_policy_explain.py`: `meho policy explain`: one
   answer per verdict, the floor, the switch off, a file that is not

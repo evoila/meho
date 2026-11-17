@@ -489,9 +489,9 @@ async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_co
     approval also never covers an operation that runs a command as root.
 
     The one known difference: the gate refuses a call that the operation's
-    own requester check refuses (``policy.apply`` and ``policy.classify``
-    for a service login, registered only with the classification switch
-    on). The shadow evaluator has no requester check.
+    own requester check refuses for a service login (``tools.sign_out``,
+    plus ``policy.apply`` and ``policy.classify``, registered only with the
+    classification switch on). The shadow evaluator has no requester check.
     """
     await _seed_ingested_rows()
     rows = await _register_all()
@@ -540,7 +540,10 @@ async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_co
     finally:
         work_ref_var.reset(token)
     assert {"credential_read", "caller_address", "delete_shaped"} <= kinds_seen
-    assert requester_denied == ({"policy.apply", "policy.classify"} if classification else set())
+    expected_denied = {"tools.sign_out"}
+    if classification:
+        expected_denied |= {"policy.apply", "policy.classify"}
+    assert requester_denied == expected_denied
 
 
 @pytest.mark.asyncio

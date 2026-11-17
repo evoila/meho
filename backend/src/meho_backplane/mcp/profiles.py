@@ -34,6 +34,11 @@ rules:
 * A read-only profile has no MEHO write tools, and the policy gate refuses
   every operation that changes something
   (:func:`profile_denial`).
+* A call runs on the connector that its target resolves to, and that can
+  differ from the ``connector_id`` argument. So the policy gate and the
+  preview also refuse a target whose connector is outside the profile, or
+  whose connector cannot be found (:func:`profile_target_denial`), and
+  ``list_targets`` shows only the targets of the profile's connectors.
 
 A login token can carry the profile in the ``mcp_profile`` claim. MEHO then
 takes that token only at ``/mcp?profile=<the same name>``; see
@@ -42,7 +47,7 @@ takes that token only at ``/mcp?profile=<the same name>``; see
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
 from meho_backplane.mcp_profile_config import ConnectorProfile
 from meho_backplane.settings import get_settings
@@ -60,6 +65,8 @@ __all__ = [
     "profile_admits_connector",
     "profile_connectors",
     "profile_denial",
+    "profile_target_denial",
+    "target_connector_id",
 ]
 
 #: Read the systems and what the team knows. No preview, no broadcast.
@@ -233,4 +240,40 @@ def profile_denial(profile: str | None, connector_id: str | None, *, mutating: b
     configured = _configured_profiles().get(profile or "")
     if mutating and (configured is None or configured.read_only):
         return f"your {profile!r} profile is read-only; this operation changes something"
+    return None
+
+
+async def target_connector_id(target: Any) -> str | None:
+    """Return the ``connector_id`` that a call on *target* runs on, or ``None``.
+
+    The dispatcher picks the connector from the target, not from the
+    ``connector_id`` argument. This asks the same resolver, after the same
+    load of saved ingested connectors. ``None`` means no connector, or more
+    than one, fits the target.
+    """
+    # Imported here: the dispatcher imports the policy gate, which imports this module.
+    from meho_backplane.connectors import resolve_connector_or_label
+    from meho_backplane.operations.dispatcher import _restore_saved_ingest_profiles
+
+    await _restore_saved_ingest_profiles(target)
+    cls, _label, _message = resolve_connector_or_label(target)
+    if cls is None:
+        return None
+    base = cls.impl_id or cls.product
+    return f"{base}-{cls.version}" if cls.version else base
+
+
+async def profile_target_denial(profile: str | None, target: Any) -> str | None:
+    """Return why *profile* refuses a call on *target*, or ``None``.
+
+    A profile with a connector list refuses a target whose connector is
+    not in the list, and a target whose connector cannot be found. No
+    target, no profile and the built-in profiles refuse nothing here.
+    """
+    families = profile_connectors(profile)
+    if families is None or target is None:
+        return None
+    connector_id = await target_connector_id(target)
+    if connector_id is None or not connector_in_families(connector_id, families):
+        return f"the connector of the target is not in your {profile!r} profile"
     return None

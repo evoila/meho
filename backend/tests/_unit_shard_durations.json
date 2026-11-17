@@ -1227,6 +1227,9 @@
   "tests/test_well_known.py": 0.19,
   "tests/test_work_item_signing.py": 0.53,
   "tests/test_work_ref_doors.py": 5.96,
-  "tests/test_work_ref_rule.py": 1.34
+  "tests/test_work_ref_rule.py": 1.34,
+  "tests/test_mcp_profile_connectors.py": 38.31,
+  "tests/test_mcp_profile_targets.py": 9.18,
+  "tests/test_mcp_profile_token.py": 2.9
  }
 }

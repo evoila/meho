@@ -1022,7 +1022,7 @@ async def policy_gate(
     requester_denial = _requester_denial(operator, descriptor, params)
     if requester_denial is not None:
         return PermissionVerdict.DENY, requester_denial
-    profile_denial = _profile_denial(operator, descriptor, connector_id)
+    profile_denial = await _profile_denial(operator, descriptor, connector_id, target)
     if profile_denial is not None:
         return PermissionVerdict.DENY, profile_denial
     return await _verdict_with_shadow(
@@ -1036,18 +1036,25 @@ async def policy_gate(
     )
 
 
-def _profile_denial(
-    operator: Operator, descriptor: EndpointDescriptor, connector_id: str | None
+async def _profile_denial(
+    operator: Operator, descriptor: EndpointDescriptor, connector_id: str | None, target: Any
 ) -> str | None:
-    """Why the session's MCP profile refuses this call, or ``None`` (#6099)."""
+    """Why the session's MCP profile refuses this call, or ``None`` (#6099).
+
+    The connector that runs comes from the target, so the target's
+    connector is checked too, not only the ``connector_id`` argument.
+    """
     if operator.mcp_tool_profile is None:
         return None
     # Imported here: the ``mcp`` package imports this module.
-    from meho_backplane.mcp.profiles import profile_denial
+    from meho_backplane.mcp.profiles import profile_denial, profile_target_denial
 
-    return profile_denial(
+    denial = profile_denial(
         operator.mcp_tool_profile, connector_id, mutating=_is_mutating(descriptor)
     )
+    if denial is not None:
+        return denial
+    return await profile_target_denial(operator.mcp_tool_profile, target)
 
 
 async def _verdict_with_shadow(

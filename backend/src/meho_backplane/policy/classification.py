@@ -207,6 +207,13 @@ class Classification:
     ``conflict`` is the one-sentence reason when two entries of the same
     rank disagree; the operation then has no category and waits.
     ``labels`` holds only the labels that pass :func:`label_text_ok`.
+    ``install_category`` is the category that the install's entries alone
+    give the operation. The install's approver routing uses it, so a
+    tenant entry that moves the operation to another category does not
+    take it away from the install's routing. It is the empty text when
+    the install's entries give the operation two categories: the install's
+    routing then does not know the category (an operation registered after
+    the install's import can match two such entries).
     """
 
     category: str | None
@@ -215,6 +222,7 @@ class Classification:
     always_wait: bool
     rule_ref: str
     conflict: str | None = None
+    install_category: str | None = None
 
 
 def _top(entries: Sequence[ClassificationEntry], attr: str) -> list[ClassificationEntry]:
@@ -471,9 +479,14 @@ def classify(
     labels = _shown_labels(matched)
     conflict = category_conflict or label_conflict
     rule_ref = max(matched, key=lambda e: e.rank).ref if matched else DEFAULT_RULE_REF
+    install_category, install_conflict = _category(
+        coords, [e for e in matched if e.scope == "install"], taxonomy
+    )
+    if install_conflict is not None:
+        install_category = ""
     if conflict is not None:
-        return Classification(None, labels, risk, True, rule_ref, conflict)
-    return Classification(category, labels, risk, always_wait, rule_ref)
+        return Classification(None, labels, risk, True, rule_ref, conflict, install_category)
+    return Classification(category, labels, risk, always_wait, rule_ref, None, install_category)
 
 
 def check_no_conflict(

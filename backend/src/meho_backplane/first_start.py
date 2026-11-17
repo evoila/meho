@@ -17,7 +17,9 @@ checks are:
 * **Certificate** - MEHO opens a TLS connection to ``BACKPLANE_URL`` and
   checks the chain, the name and the end date (at least 30 days left).
 * **Clock** - the time of this process against the time Keycloak and
-  PostgreSQL report. Red above 60 seconds of difference.
+  PostgreSQL report. Red above 60 seconds of difference. Keycloak may answer
+  without a ``Date`` header (the core's Keycloak does). Then its time is not
+  compared, the line says so, and that alone does not make the line red.
 * **Reachability** - every system listed in the settings (the targets)
   answers the same fingerprint call that ``meho targets probe`` uses.
   Nothing is stored. The console page passes the signed-in person, so a
@@ -56,6 +58,7 @@ import ssl
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Literal
@@ -415,56 +418,127 @@ async def check_certificate(backplane_url: str, *, dns_ok: bool) -> FirstStartLi
 # --- Clock ------------------------------------------------------------------
 
 
-async def _keycloak_time() -> datetime | None:
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NoClockReading:
+    """Why a time source gave no time.
+
+    With ``red`` true the clock line is red, and ``message`` names the cause
+    and the fix. With ``red`` false the source is left out of the comparison,
+    and ``message`` says why. That alone does not make the line red.
+    """
+
+    message: str
+    red: bool = True
+
+
+ClockReading = datetime | NoClockReading
+ClockReader = Callable[[], Awaitable[ClockReading]]
+
+_DATABASE_UNREAD = NoClockReading(
+    message="MEHO could not read the time from PostgreSQL. Check that MEHO can reach it."
+)
+
+
+def _keycloak_url_setting() -> str:
+    """The setting that holds the Keycloak address MEHO reads the time from."""
+    return (
+        "KEYCLOAK_DISCOVERY_URL" if get_settings().keycloak_discovery_url else "KEYCLOAK_ISSUER_URL"
+    )
+
+
+def _http_date(value: str | None) -> datetime | None:
+    """An HTTP ``Date`` value as an aware UTC time. ``None`` when absent or not a date."""
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    # A ``-0000`` zone gives a naive value. It means UTC (RFC 5322 section 3.3),
+    # so it must not be read as the local time of this process.
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def _keycloak_time() -> ClockReading:
     """Keycloak's time, from the ``Date`` header of its discovery answer.
 
-    ``None`` unless the discovery answer is a success: an error page from a
-    proxy in front of Keycloak carries the proxy's time, not Keycloak's.
+    Only a success counts: an error page from a proxy in front of Keycloak
+    carries the proxy's time, not Keycloak's. Keycloak itself can answer with
+    no ``Date`` header. Then MEHO has no time that Keycloak gives, so Keycloak
+    is left out of the comparison instead of making the line red.
     """
     url = f"{get_settings().keycloak_discovery_base}/.well-known/openid-configuration"
+    setting = _keycloak_url_setting()
     try:
         async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_S) as client:
             response = await client.get(url)
-        if not response.is_success:
-            return None
-        header = response.headers.get("date")
-        return parsedate_to_datetime(header).astimezone(UTC) if header else None
-    except (httpx.HTTPError, TypeError, ValueError):
-        return None
+    except httpx.TransportError:
+        return NoClockReading(
+            message="MEHO got no answer from Keycloak, so it could not read the time of Keycloak. "
+            f"Check that Keycloak is running and that MEHO can reach the address in {setting}."
+        )
+    except httpx.HTTPError:
+        return NoClockReading(
+            message="MEHO could not read the answer of Keycloak, so it could not read the time "
+            f"of Keycloak. Check that the address in {setting} is the Keycloak realm."
+        )
+    if not response.is_success:
+        return NoClockReading(
+            message=f"Keycloak answered with HTTP {response.status_code}, so MEHO could not read "
+            f"the time of Keycloak. Check that Keycloak is running and that the address in "
+            f"{setting} is the Keycloak realm."
+        )
+    reading = _http_date(response.headers.get("date"))
+    if reading is None:
+        return NoClockReading(
+            message="The time of Keycloak was not compared, because the answer of Keycloak "
+            "has no Date header that MEHO can read.",
+            red=False,
+        )
+    return reading
 
 
-async def _database_time() -> datetime | None:
-    """PostgreSQL's ``now()``. ``None`` when it cannot be read."""
+async def _database_time() -> ClockReading:
+    """PostgreSQL's ``now()``."""
     from meho_backplane.db.engine import get_sessionmaker
 
     try:
         async with get_sessionmaker()() as session:
             value = await asyncio.wait_for(session.scalar(text("SELECT now()")), _NETWORK_TIMEOUT_S)
     except Exception:
-        return None
+        return _DATABASE_UNREAD
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
-    return None
+    return _DATABASE_UNREAD
 
 
 async def check_clock(
     *,
-    keycloak_time: Callable[[], Awaitable[datetime | None]] | None = None,
-    database_time: Callable[[], Awaitable[datetime | None]] | None = None,
+    keycloak_time: ClockReader | None = None,
+    database_time: ClockReader | None = None,
 ) -> FirstStartLine:
-    """The backplane's time against the time Keycloak and PostgreSQL report."""
+    """The backplane's time against the time Keycloak and PostgreSQL report.
+
+    A source that gives no time makes the line red, unless its
+    :class:`NoClockReading` says to leave it out. A source that is left out
+    is named in the message, also on a green line.
+    """
     sources = {
         "Keycloak": keycloak_time or _keycloak_time,
         "PostgreSQL": database_time or _database_time,
     }
     readings = await asyncio.gather(*(read() for read in sources.values()))
+    compared: list[str] = []
     problems: list[str] = []
-    for (label, _read), reading in zip(sources.items(), readings, strict=True):
-        if reading is None:
-            problems.append(
-                f"MEHO could not read the time from {label}. Check that MEHO can reach it."
-            )
+    notes: list[str] = []
+    for label, reading in zip(sources, readings, strict=True):
+        if isinstance(reading, NoClockReading):
+            if reading.red:
+                problems.append(reading.message)
+            else:
+                notes.append(reading.message)
             continue
+        compared.append(label)
         skew = abs((datetime.now(UTC) - reading).total_seconds())
         if skew > CLOCK_MAX_SKEW_S:
             problems.append(
@@ -472,12 +546,13 @@ async def check_clock(
                 "Set up time sync (NTP) on the server or the cluster nodes."
             )
     if problems:
-        return _line("clock", "fail", " ".join(problems))
-    return _line(
-        "clock",
-        "ok",
-        f"The clock agrees with Keycloak and PostgreSQL within {int(CLOCK_MAX_SKEW_S)} seconds.",
+        return _line("clock", "fail", " ".join([*problems, *notes]))
+    if not compared:
+        return _line("clock", "skipped", " ".join(notes))
+    agreed = (
+        f"The clock agrees with {' and '.join(compared)} within {int(CLOCK_MAX_SKEW_S)} seconds."
     )
+    return _line("clock", "ok", " ".join([agreed, *notes]))
 
 
 # --- Reachability -----------------------------------------------------------

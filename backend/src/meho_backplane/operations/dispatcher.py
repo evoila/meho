@@ -512,6 +512,7 @@ from meho_backplane.redaction import (
     manifest_to_audit_payload,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import target_warnings
 
 _log = structlog.get_logger(__name__)
 
@@ -3353,6 +3354,11 @@ async def _build_proposed_effect(
             # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
+        # A setting of the target that is allowed but risky, for example a
+        # Keycloak target that manages MEHO's own sign-in realm.
+        risky_settings = target_warnings(target)
+        if risky_settings:
+            base["target_warnings"] = risky_settings
         # Stamp the reviewer-facing preview provenance onto every parked
         # op's envelope (#2332). ``preview_populated`` lets a caller
         # programmatically refuse to auto-approve an op-identity-only
@@ -3622,6 +3628,7 @@ async def _handle_needs_approval(
     preview_hash: str | None = None,
     idempotency_key: str | None = None,
     reveal_secret: bool = False,
+    wait_reason: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -3629,6 +3636,8 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+    *wait_reason* is the reason of the policy gate; the request audit row
+    keeps it.
 
     When the op's check before the wait for approval refuses the call
     (:func:`~meho_backplane.operations._park_check.park_check_refusal`), the
@@ -3807,6 +3816,8 @@ async def _handle_needs_approval(
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
                 category=descriptor.policy_category,
+                wait_reason=wait_reason,
+                install_category=descriptor.policy_install_category,
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -4369,6 +4380,7 @@ async def _dispatch_now(
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
                     reveal_secret=reveal_secret,
+                    wait_reason=gate_reason,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds

@@ -184,10 +184,39 @@ the first tenant's id and the two user names. Without `--first-tenant-id`,
 the id comes from an existing `values-place.yaml`, so a second run keeps the
 id Keycloak already uses; on a fresh machine it is a new UUID read once from
 `/proc/sys/kernel/random/uuid`. The chart reaches its built-in parts by pod
-label (#4047), so the file holds no network-policy range. Older installs
-wrote the pod range there as `networkPolicy.postgresCIDR` and `vaultCIDR`;
-the update writes the file again from the answers in `install.json`, which
-removes them. The file holds no secret.
+label (#4047), so the file holds no network-policy range for them. Older
+installs wrote the pod range there as `networkPolicy.postgresCIDR` and
+`vaultCIDR`; the update writes the file again from the answers in
+`install.json`, which removes them. The file holds no secret.
+
+The file also holds the outgoing rule of the MEHO pod, as
+`networkPolicy.extraEgress` (#6612, `render_egress_values`). The chart's
+NetworkPolicy lets the pod reach only the built-in parts and DNS. Without
+this rule, MEHO on form 2 reaches none of the systems it manages and not
+the AI service. The rule lets the pod reach **every address outside the
+built-in Kubernetes, on every port**: an `ipBlock` of `0.0.0.0/0` with
+`except` for the pod range (`--cluster-cidr`), the service range
+(`--service-cidr`) and each IPv4 address of this machine as a `/32`
+(`machine_addresses`). So the pod reaches no other pod through this rule,
+and none of RKE2's own ports on this machine (the Kubernetes API, the
+kubelet, etcd). An address inside the two ranges, such as the one of
+RKE2's `flannel.1` interface, is closed by its range already and is left
+out. Kubernetes says an `ipBlock` should name addresses outside the
+cluster; the `except` list keeps the cluster out.
+
+The pod reaches its own console address through a second rule, which the
+chart adds from `values-single-node.yaml`
+(`networkPolicy.ingressControllerEgress`, #6618; see
+[Network policies and Traefik](#network-policies-and-traefik)). The
+`ipBlock` rule cannot do it: a connection to this machine's address on
+port 443 reaches the Traefik pod, inside the pod range, before Calico
+checks the rules.
+
+The rule comes from the answers of the install, so the update writes it
+again with the ranges in `install.json`. When no address of this machine
+can be read, the rule is written without the `/32` entries, and a
+`[WARN]` line says that the ports of this machine are not closed to MEHO.
+The decision and the lab test are on #6612.
 
 `install_core` runs the download's Helm:
 
@@ -249,6 +278,8 @@ with Kubernetes tools.
 
 - Every run writes the file again: the install, `--from-disk` and the
   update. So it follows a certificate that changed in between.
+  `meho-host certificate` (#4738) writes it too, with the customer's CA
+  ([linux-server-meho-host.md](linux-server-meho-host.md), `certificate`).
 - A Secret without a CA certificate (the read fails, or the value has no
   `-----BEGIN CERTIFICATE-----` line) removes the file and gives a
   `[WARN]`. A file from an earlier run could name a CA that the console no
@@ -1146,6 +1177,12 @@ Tasks add in this folder are checked by the same job.
 
 ## Known issues
 
+- **The outgoing rule knows the addresses of this machine at the last run
+  of `install.sh`.** An address the machine gets later is not in the
+  `except` list until the next update, so the MEHO pod can reach the ports
+  of this machine on that address until then. The rules cover IPv4 only.
+  A second node that joins later (`--join-address`) is not in the list
+  either.
 - **The update is not proven on a real machine yet.** The tests here prove
   the order of the steps and what stays, against stub commands. The
   release test (#4742) runs the update from the previous version on a lab
@@ -1161,9 +1198,6 @@ Tasks add in this folder are checked by the same job.
 - **Two builds of `main` of the same day** compare by their commit id as
   text, so an update between them may be refused as "older". Releases and
   builds of different days compare correctly.
-- **`meho-host certificate` (#4738) does not write the console CA file.**
-  It changes the TLS Secret, and the file follows at the next run of
-  `install.sh`. Until then the file names the old CA.
 - **The Helm time limit is 15 minutes per operation:** the wait for the
   pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.

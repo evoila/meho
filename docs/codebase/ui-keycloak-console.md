@@ -281,8 +281,8 @@ login quick. How to set the two values on a running realm:
 - No protocol-mapper *read* verb exists — mappers are read via
   `keycloak.client.get` (they ride the `ClientRepresentation`); the scope ↔
   client relation view is read-only assembly over T1's reads.
-- Single managed realm per target (the connector resolves the realm from
-  the target's `managed_realm`); no realm selector.
+- Single managed realm per target (the connector reads the realm from
+  the target's `managed_realm`, which the target must name); no realm selector.
 - The role-assign picker collects free-text realm role names, not a
   dropdown. The connector has `keycloak.role.list`, but the console does
   not call it. Current realm roles are shown for context via

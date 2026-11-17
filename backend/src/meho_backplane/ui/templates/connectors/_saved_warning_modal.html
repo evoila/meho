@@ -1,0 +1,32 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Shown after the create or edit form saved a target that has warnings
+  (for example a Keycloak target whose managed realm is the admin realm,
+  or the realm MEHO itself signs in with). The target is already saved.
+  Swapped into ``#connectors-modal-container`` in place of the form; the
+  shared modal controller opens it. The lines are the same ones REST, the
+  CLI and the approval card show.
+
+  Context: ``target_name``, ``warnings`` (list of plain lines).
+-#}
+<dialog id="connectors-saved-warning-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg">
+      Target <span class="font-mono">{{ target_name }}</span> saved, with a warning
+    </h3>
+    <div class="alert alert-warning my-3" role="alert">
+      <ul class="list-disc pl-4 space-y-1">
+        {% for line in warnings %}
+        <li data-target-warning>{{ line }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="modal-action">
+      <a href="/ui/connectors" class="btn btn-sm btn-primary" data-action="saved-warning-continue">
+        View targets
+      </a>
+    </div>
+  </div>
+</dialog>

@@ -51,6 +51,7 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
+from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations.approval_outcome import ResumeOutcome, resume_outcome
 from meho_backplane.operations.approval_outcome_check import (
     list_outcome_unknown,
@@ -166,7 +167,14 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "op_id": row.op_id,
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
-        "proposed_effect": row.proposed_effect,
+        # A card behind a switch reads as ``preview_operation`` gives it.
+        "proposed_effect": proposed_effect_for_agent(
+            row.op_id,
+            row.proposed_effect,
+            params=row.params,
+            connector_id=row.connector_id,
+            tenant=str(row.tenant_id),
+        ),
         # True when the requester asked for the hidden values of the answer
         # (``reveal_secret: true``). The operation runs when the requester
         # gets the values, not on approve.

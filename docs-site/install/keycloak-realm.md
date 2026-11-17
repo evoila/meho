@@ -321,7 +321,9 @@ does now in `approvals.sign_in_level_in_force` (`off`, `observe` or
 `required`), and a warning in `approvals.sign_in_level_warning` whenever
 MEHO does not require the level (the value is `off` or `observe`, or it
 is `auto` and MEHO acts as `observe`), and also when MEHO could not read
-the realm. The audit row of an approval records the mode in force in
+the realm. The warning covers the console's approval client too (see
+[The console approval client](#the-console-approval-client-meho-web-approve)).
+The audit row of an approval records the mode in force in
 `level_in_force`.
 
 - With the default `auto`, MEHO requires the level as soon as the realm
@@ -330,9 +332,15 @@ the realm. The audit row of an approval records the mode in force in
   the command line and REST: the client then signs in through the
   realm's normal flow and gets `acr` `1`. `approvals.sign_in` names the
   cause.
-- Known limit: when MEHO requires the level, a person who has only a company account
-  (no MEHO password) cannot approve on the command line or in the web
-  interface. They approve with the passkey touch.
+- Known limit: when MEHO requires the level, a person who signs in only
+  through a company login (no MEHO password) cannot approve in the web
+  interface and not on the command line, until they have a MEHO password
+  and a one-time code. On the built-in Keycloak with the default `auto`,
+  this starts with the upgrade to v0.47.0: it adds the client
+  `meho-web-approve` and binds it, and from then on the console needs the
+  approval sign-in level. What you can do: give these approvers a MEHO
+  password and a one-time code, or set `APPROVAL_SIGN_IN_LEVEL=observe`
+  for now.
 - The web interface uses the same setting for its own approval client
   `meho-web-approve`. See
   [The console approval client](#the-console-approval-client-meho-web-approve).
@@ -373,9 +381,18 @@ What happens:
 
 A sign-in through a company login from the approval page does not run the
 approval flow's steps, so it gets no level, and MEHO refuses it under
-`required`. Keycloak still shows the company login's button on that page:
-it lists every identity provider on its password form and has no setting
-to hide one for a single client.
+`required`. Keycloak still shows the company login's button on that page.
+Keycloak can set a login theme for one client, and such a theme could
+hide the button; MEHO does not ship one yet.
+
+`/api/v1/health` shows this client's state in `approvals.web_sign_in`
+(the same states as `approvals.sign_in`) and what MEHO does for the
+console in `approvals.web_sign_in_level_in_force`. Under `auto` the two
+clients can differ: `approvals.sign_in_level_warning` also warns when the
+console does not require the level, or when MEHO could not read this
+client. When the console refuses an approve for a missing level, its
+message says: "An admin must check approvals.web_sign_in in
+/api/v1/health."
 
 The Keycloak that ships with the MEHO chart creates this client on the
 next upgrade. On your own Keycloak, create it by hand as above, then run

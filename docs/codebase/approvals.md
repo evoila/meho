@@ -1087,19 +1087,36 @@ only for the sign-in before an approve. Its redirect URI is
 - The `approval.decision` row records `channel` (`web` or `rest`),
   `acr` and `level_in_force` on both paths.
 
-Known limit: under `required`, a person who has only a company account
-(no MEHO password) cannot approve in the console either. A company login
-started from the approval page does not run the flow's steps, so its
-token has no level and MEHO refuses it. Such a person approves with the
-passkey touch. The approval page still shows the company login's button:
-Keycloak lists every identity provider on its password form, and it has
-no per-client setting to hide one.
+Known limit: once the console needs the level, a person who signs in
+only through a company login (no MEHO password) cannot approve in the
+console and not on the command line, until they have a MEHO password and
+a one-time code. On built-in Keycloak with the default `auto` this starts
+with the upgrade: it adds `meho-web-approve` and binds it. A company
+login started from the approval page does not run the flow's steps, so
+its token has no level and MEHO refuses it
+(`test_core_company_login_keycloak.py` proves it). What the operator can
+do: give these approvers a MEHO password and a one-time code, or set
+`APPROVAL_SIGN_IN_LEVEL=observe` for now. The approval page still shows
+the company login's button. Keycloak can set a login theme for one
+client, and such a theme could hide the button; MEHO does not ship one
+yet.
 
 `/api/v1/health` shows the value in `approvals.sign_in_level`,
 what is in force in `approvals.sign_in_level_in_force`, and
 `approvals.sign_in_level_warning` whenever the level is not required in
 practice, and its own warning when the read failed ("MEHO could not
-check the approval sign-in of the realm ..."). When MEHO has no admin
+check the approval sign-in of the realm ..."). The console's approval
+client has its own state and level in `approvals.web_sign_in` and
+`approvals.web_sign_in_level_in_force`
+(`approval_sign_in_flow.read_web_approval_sign_in`; an empty
+`UI_KEYCLOAK_APPROVE_CLIENT_ID` is `not_bound`). Under `auto` the two
+clients can differ, so the warning also says when the console does not
+require the level ("The console does not require the approval level
+...") or MEHO could not read the console's client ("MEHO could not
+check the console approval client ..."); the sentences of both clients
+are joined. A console refusal for a missing level names
+`approvals.web_sign_in` ("An admin must check approvals.web_sign_in in
+/api/v1/health."). When MEHO has no admin
 client, or the admin client may not read, the warning names that fix:
 the admin client settings, or the realm-management role `view-realm`
 (`view-clients` for `no_right_to_read_clients`). `meho doctor` shows the last two in its line `approval level`.

@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.result_handle_store import result_profile_scope
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import OperationRun, OperationRunStatus
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -160,7 +161,10 @@ async def poll_call(
     also match the ``connector_id`` and ``op_id`` of this call, and must have
     been started by the caller; an unknown, other-tenant, mismatched or
     other-person run gives the same ``unknown_run`` error, so the answer
-    tells nothing about other runs. With ``wait_seconds`` above 0 the check
+    tells nothing about other runs. A run started under another MCP tool
+    profile, or under no profile, is unknown to a session whose profile has
+    a connector list, the same rule as a stored result (#6099). With
+    ``wait_seconds`` above 0 the check
     waits up to that long for the run to end; the run is checked against the
     call first, so a wrong ``run_id`` is refused at once. The tool's
     ``inputSchema`` keeps ``wait_seconds`` between 0 and the limit.
@@ -179,6 +183,7 @@ async def poll_call(
         row.connector_id != arguments["connector_id"]
         or row.op_id != op_id
         or not run_result_visible_to(row, operator)
+        or row.mcp_profile != result_profile_scope(operator.mcp_tool_profile)
     ):
         raise _unknown_run(raw_run_id)
     if wait_seconds > 0:

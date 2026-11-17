@@ -426,7 +426,7 @@ class ListRunsFilter(BaseModel):
     (matching the storage-level ``CheckConstraint`` on
     ``runbook_runs.state``); :attr:`template_slug` to a single
     template (across all versions); :attr:`work_ref` to a single
-    external change ticket (exact match, across all templates) -- "show
+    external change ticket (whole id, see the work_ref field, across all templates) -- "show
     me every run started under ``gh:evoila/meho#9``" (work_ref I3-T1
     #1661).
     """

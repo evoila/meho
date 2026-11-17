@@ -152,7 +152,7 @@ class AuditEntry(BaseModel):
     * ``agent_session_id`` ← ``audit_log.agent_session_id`` (MCP session; #1009)
     * ``work_ref`` ← ``audit_log.work_ref`` (external change-ticket reference;
       work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat
-      ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.
+      ``work_ref`` filter on :class:`AuditQueryFilters` takes the whole id (see its field).
     * ``principal_name`` ← ``payload['principal_name']`` when set. The MCP
       audit-write helper (``write_mcp_audit_row``) populates it from
       ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain

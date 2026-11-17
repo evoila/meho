@@ -44,8 +44,8 @@ func newListCmd() *cobra.Command {
 			"the triggers in the operator's tenant, newest-first. " +
 			"--kind narrows to cron|one_off|event; --status narrows to " +
 			"active|paused|cancelled|fired. --filter-work-ref narrows to triggers " +
-			"carrying that exact change-ticket reference (e.g. " +
-			"gh:evoila/meho#13). --tenant is a tenant_admin-" +
+			"carrying that ticket id (whole id; white space at the ends is " +
+			"ignored; e.g. gh:evoila/meho#13). --tenant is a tenant_admin-" +
 			"only filter that targets another tenant; operator role " +
 			"calling with --tenant lands as 403 insufficient_role. " +
 			"--limit caps the page size (1..500, server default 100). " +
@@ -72,7 +72,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&status, "status", "",
 		"filter by trigger status: active | paused | cancelled | fired")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
-		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#13)")
+		"filter by ticket id (whole id; white space at the ends is ignored)")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (tenant_admin only; operator role is locked to its own tenant)")
 	cmd.Flags().IntVar(&limit, "limit", 0,

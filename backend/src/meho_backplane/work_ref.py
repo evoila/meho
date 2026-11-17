@@ -56,7 +56,7 @@ WORK_REF_MAX_CHARS: Final[int] = 256
 WORK_REF_FIELD_DESCRIPTION: Final[str] = (
     "Ticket id. White space at both ends is removed; it must not be blank, "
     f"must not hold control or invisible characters, and is at most {WORK_REF_MAX_CHARS} "
-    "characters."
+    "characters after cleaning (white space removed, one Unicode form)."
 )
 
 #: The rule in one line, for the description of a ``work_ref`` search filter.
@@ -65,7 +65,7 @@ WORK_REF_FILTER_DESCRIPTION: Final[str] = (
     "removed and in Unicode form NFC, and also the text exactly as typed. "
     "A blank value, control or "
     f"invisible characters, or more than {WORK_REF_MAX_CHARS} characters after "
-    "removing the white space are refused."
+    "cleaning (white space removed, one Unicode form) are refused."
 )
 
 # Cc: control (NUL, tab, line break). Cf: format (zero-width, direction

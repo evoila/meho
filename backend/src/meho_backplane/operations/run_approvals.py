@@ -42,6 +42,9 @@ Rules that never change:
 * An operation that a connector marks for per-call approval
   (:func:`~meho_backplane.op_classes.needs_per_call_approval`) is never
   covered either.
+* An operation that reads, makes or sends a secret is never covered either,
+  also when only its row stores that class (the same check as the standing
+  grants, :func:`~meho_backplane.operations.service_grants.secret_grant_reason`).
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
 * One run (tenant, token subject, run reference) has at most one open
@@ -78,6 +81,7 @@ from meho_backplane.operations.service_grants import (
     always_wait_grant_reason,
     caller_address_grant_reason,
     delete_grant_reason,
+    secret_grant_reason,
 )
 from meho_backplane.policy.routing import approver_set_for, routing_enabled, routing_refusal
 
@@ -221,6 +225,7 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     reason = (
         caller_address_grant_reason(descriptor)
         or always_wait_grant_reason(descriptor)
+        or secret_grant_reason(entry.op_id, getattr(descriptor, "op_class", None))
         or delete_grant_reason(
             entry.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
         )

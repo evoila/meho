@@ -91,8 +91,12 @@ When none covers the call, it calls `consult_and_record_run_approval`:
   standing grants, `service_grants.delete_grant_reason`: the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
   delete name or pattern), an operation that connects to an address the
-  caller gives, or an operation that runs a command as root on the host.
-  Those wait for a person on each call.
+  caller gives, an operation that runs a command as root on the host, or
+  an operation that reads, makes or sends a secret (the same check as the
+  standing grants, `service_grants.secret_grant_reason`; it also reads the
+  class stored on the row). Those wait for a person on each call. A
+  request that lists one of them is refused, with a message that a person
+  approves each call.
 - It looks for a live row: same tenant, same token subject (`sub`), same
   run reference, approved, not revoked, not ended, before `expires_at`.
   The key is the `sub`, never a client name.

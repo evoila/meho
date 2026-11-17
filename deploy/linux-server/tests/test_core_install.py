@@ -42,11 +42,42 @@ def mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def egress_values(
+    pod_range: str = "10.42.0.0/16",
+    service_range: str = "10.43.0.0/16",
+    addresses: tuple[str, ...] = ("10.0.0.5",),
+) -> str:
+    """The outgoing rules of the MEHO pod in values-place.yaml."""
+    closed = "".join(f'              - "{address}/32"\n' for address in addresses)
+    return (
+        "networkPolicy:\n"
+        "  extraEgress:\n"
+        "    - to:\n"
+        "        - ipBlock:\n"
+        '            cidr: "0.0.0.0/0"\n'
+        "            except:\n"
+        f'              - "{pod_range}"\n'
+        f'              - "{service_range}"\n'
+        f"{closed}"
+        "    - to:\n"
+        "        - namespaceSelector:\n"
+        "            matchLabels:\n"
+        "              kubernetes.io/metadata.name: kube-system\n"
+        "          podSelector:\n"
+        "            matchLabels:\n"
+        "              app.kubernetes.io/name: rke2-traefik\n"
+        "      ports:\n"
+        "        - port: 8443\n"
+        "          protocol: TCP\n"
+    )
+
+
 def place_values(
     hostname: str = "meho.example.com",
     tenant_id: str = TENANT_ID,
     admin: str = "admin",
     approver: str = "approver",
+    pod_range: str = "10.42.0.0/16",
 ) -> str:
     return textwrap.dedent(f"""\
         # Written by MEHO install.sh: the answers of this place. A later run of
@@ -59,7 +90,7 @@ def place_values(
           firstLogin:
             adminUsername: "{admin}"
             approverUsername: "{approver}"
-        """)
+        """) + egress_values(pod_range=pod_range)
 
 
 class CoreInstallTests(InstallTestCase):
@@ -129,6 +160,7 @@ class CoreInstallTests(InstallTestCase):
             tenant_id="9b4d2a7e-3f1c-4e2a-8c1f-5d6e7f8a9b0c",
             admin="first.admin",
             approver="second@example.org",
+            pod_range="172.30.0.0/16",
         )
         self.assertEqual(expected, self.machine.host_path(PLACE_VALUES).read_text())
 

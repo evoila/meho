@@ -184,10 +184,36 @@ the first tenant's id and the two user names. Without `--first-tenant-id`,
 the id comes from an existing `values-place.yaml`, so a second run keeps the
 id Keycloak already uses; on a fresh machine it is a new UUID read once from
 `/proc/sys/kernel/random/uuid`. The chart reaches its built-in parts by pod
-label (#4047), so the file holds no network-policy range. Older installs
-wrote the pod range there as `networkPolicy.postgresCIDR` and `vaultCIDR`;
-the update writes the file again from the answers in `install.json`, which
-removes them. The file holds no secret.
+label (#4047), so the file holds no network-policy range for them. Older
+installs wrote the pod range there as `networkPolicy.postgresCIDR` and
+`vaultCIDR`; the update writes the file again from the answers in
+`install.json`, which removes them. The file holds no secret.
+
+The file also holds the outgoing rules of the MEHO pod, as
+`networkPolicy.extraEgress` (#6612, `render_egress_values`). The chart's
+NetworkPolicy lets the pod reach only the built-in parts and DNS. Without
+these rules, MEHO on form 2 reaches none of the systems it manages, not the
+AI service and not its own console address. There are two rules:
+
+- **Every address outside the built-in Kubernetes, on every port:** an
+  `ipBlock` of `0.0.0.0/0` with `except` for the pod range
+  (`--cluster-cidr`), the service range (`--service-cidr`) and each IPv4
+  address of this machine as a `/32` (`machine_addresses`). So the pod
+  reaches no other pod through this rule, and none of RKE2's own ports on
+  this machine (the Kubernetes API, the kubelet, etcd). Kubernetes says an
+  `ipBlock` should name addresses outside the cluster; the `except` list
+  keeps the cluster out.
+- **Its own console address:** the Traefik pods in `kube-system` (label
+  `app.kubernetes.io/name: rke2-traefik`) on port 8443. A connection to
+  this machine's address on port 443 is sent to the Traefik pod on its
+  container port 8443 before Calico checks the rule. The first-start list
+  fetches MEHO's certificate this way.
+
+The rules come from the answers of the install, so the update writes them
+again with the ranges in `install.json`. When no address of this machine
+can be read, the rules are written without the `/32` entries, and a
+`[WARN]` line says that the ports of this machine are not closed to MEHO.
+The decision and the lab test are on #6612.
 
 `install_core` runs the download's Helm:
 
@@ -1146,6 +1172,12 @@ Tasks add in this folder are checked by the same job.
 
 ## Known issues
 
+- **The outgoing rules know the addresses of this machine at the last run
+  of `install.sh`.** An address the machine gets later is not in the
+  `except` list until the next update, so the MEHO pod can reach the ports
+  of this machine on that address until then. The rules cover IPv4 only.
+  A second node that joins later (`--join-address`) is not in the list
+  either.
 - **The update is not proven on a real machine yet.** The tests here prove
   the order of the steps and what stays, against stub commands. The
   release test (#4742) runs the update from the previous version on a lab

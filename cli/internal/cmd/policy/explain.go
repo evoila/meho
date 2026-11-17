@@ -251,12 +251,15 @@ func printApprovers(w io.Writer, a api.ExplainApprovers) {
 	if len(a.Groups) > 0 {
 		groups = strings.Join(a.Groups, ", ")
 	}
-	// Only a tenant admin or a platform admin gets the rule.
+	// Only a tenant admin or a platform admin gets the rule and the floor.
 	if rule := deref(a.Rule); rule != "" {
 		fmt.Fprintf(w, "Who may approve: %s (rule: %s)\n", sanitize(groups), sanitize(rule))
-		return
+	} else {
+		fmt.Fprintf(w, "Who may approve: %s\n", sanitize(groups))
 	}
-	fmt.Fprintf(w, "Who may approve: %s\n", sanitize(groups))
+	if floor := deref(a.Floor); floor != "" {
+		fmt.Fprintf(w, "Install's floor: %s (a tenant's routing can only narrow it)\n", sanitize(floor))
+	}
 }
 
 func ruleLine(r api.ExplainRule) string {

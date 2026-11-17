@@ -1922,9 +1922,12 @@ for the person who asked, not a run. The code is in
 - **An approve in order stops at a change that has not happened.**
   `ApprovalRequestView.reveal_changes_something` is `true` when such a
   request may change something when it runs (`is_write_reveal`). Only
-  an op of class `read` or `credential_read` counts as a read. Every
-  other class counts as a change: a credential write, a token create,
-  and also class `other` (for example an apply, a scale or a reboot).
+  an op of class `read` or `credential_read` counts as a read, and both
+  the class of its op id and the class stored on the request must say
+  so. Every other class counts as a change: a credential write, a token
+  create, and also class `other` (for example an apply, a scale or a
+  reboot). So a hand-written `safe` operation whose op id says `other`
+  counts as a change, also when its request stores `read`.
   The console in-order page and `meho approvals approve --in-order` stop
   at such a step, so the steps after it do not run before it. After a
   read they go on: a read changes nothing. On a later in-order run, a
@@ -1984,7 +1987,11 @@ for the person who asked, not a run. The code is in
   `secret_reveal` in the reducer context, and the reducer returns the
   answer whole, with no handle, also when it is over the JSONFlux limit.
   The audit row of the run keeps
-  fingerprints only, as for every reveal. Each fetch attempt writes one
+  fingerprints only, as for every reveal. The same holds for every
+  approved run of a `credential_mint` operation (its class stored on the
+  row or given by its op id), also without `reveal_secret`: the person
+  who approved gets the new credential in the answer of the run, and
+  `resume_result` has no answer (`persist_resume_result`). Each fetch attempt writes one
   `approval.reveal` audit row with its outcome (`run` or the refusal
   code).
 - A refused fetch answers 409 with `detail` `reveal_<code>: <message>`.
@@ -2633,7 +2640,14 @@ Three invariants make the hook safe to wire on the park path:
    ingested op, the class stored on its row by a connector floor counts
    too (`resolve_op_class`): a stored `credential_read` hides the
    parameters, and the request and its audit row carry that class
-   ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)). A **bespoke
+   ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)).
+   So for an operation with a stored secret class (`credential_read`,
+   `credential_mint`, `credential_write`) the approval request shows the
+   operation and the target, and no body of the call. The `op_class` of
+   the request is the class of the run, so a new request of a
+   hand-written operation says `read` or `write`, not `other`. It is a
+   label only: no rule reads it alone (the in-order check reads the op id
+   class too, `is_write_reveal`). A **bespoke
    builder is the deliberate exception (#1857)**: like the
    permission-preflight hook, it is trusted to own its own field
    discipline and runs even for a credential-class op (e.g. the keycloak

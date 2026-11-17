@@ -144,6 +144,9 @@ key and never uploads.
 - the secret `MEHO_OS_PACKAGES_SIGNING_KEY`: the signing key, an armored
   secret key without a passphrase. It is an environment secret, not a
   repository secret, so no other run can read it.
+- the secrets `MEHO_RELEASE_GCP_WIF_PROVIDER` and
+  `MEHO_RELEASE_GCP_SERVICE_ACCOUNT` for the Google Cloud sign-in (see
+  below).
 
 **Signing the OS-package file.** A release run (`MEHO_RELEASE=1`) reads the
 key only from `MEHO_OS_PACKAGES_SIGNING_KEY`, never from a file. It stops
@@ -155,11 +158,14 @@ other than the real one can sign.
 
 **Google Cloud sign-in.** The publish job signs in with workload identity
 federation (`google-github-actions/auth`): GitHub's sign-in token, no
-stored key file. The repository variables `MEHO_RELEASE_GCP_WIF_PROVIDER`
-(the workload identity provider) and `MEHO_RELEASE_GCP_SERVICE_ACCOUNT`
-(the service account) name them. The service account may only create and
-read objects in the release bucket (for example the role "Storage Object
-Creator" plus "Storage Object Viewer" on that bucket only), nothing else.
+stored key file. Two secrets of the environment `release` name them:
+`MEHO_RELEASE_GCP_WIF_PROVIDER` (the workload identity provider) and
+`MEHO_RELEASE_GCP_SERVICE_ACCOUNT` (the service account). They are
+secrets, not variables: the job log is public and shows the inputs of
+each step, and GitHub hides only secrets there. The service account may
+only create and read objects in the release bucket (for example the role
+"Storage Object Creator" plus "Storage Object Viewer" on that bucket
+only), nothing else.
 
 **The upload step.** `deploy/appliance/upload-release.sh` copies the OVA,
 the OS-package file, `SHA256SUMS` and its bundle to the folder of the

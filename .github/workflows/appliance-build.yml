@@ -334,13 +334,15 @@ jobs:
 
       - name: Sign in to Google Cloud
         # Workload identity federation: no stored key. The provider and the
-        # service account come from repository variables. The service
-        # account may only create and read objects in the release bucket.
+        # service account are secrets of the environment "release", not
+        # variables: the job log prints the inputs of an action, and GitHub
+        # masks only secrets there. The service account may only create and
+        # read objects in the release bucket.
         if: ${{ env.RELEASE_RUN == '1' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
         with:
-          workload_identity_provider: ${{ vars.MEHO_RELEASE_GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.MEHO_RELEASE_GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.MEHO_RELEASE_GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.MEHO_RELEASE_GCP_SERVICE_ACCOUNT }}
 
       - name: Upload the files to the release bucket
         # The script stops with a plain message when the bucket is not set

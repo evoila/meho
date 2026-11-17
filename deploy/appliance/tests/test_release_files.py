@@ -26,6 +26,7 @@ from pathlib import Path
 APPLIANCE = Path(__file__).resolve().parents[1]
 OS_PACKAGES = APPLIANCE / "os-packages.sh"
 UPLOAD = APPLIANCE / "upload-release.sh"
+WORKFLOW = APPLIANCE.parents[1] / ".github" / "workflows" / "appliance-build.yml"
 LINUX_SERVER = APPLIANCE.parent / "linux-server"
 VERSION = "0.38.0"
 TEST_UID = "MEHO TEST KEY - NEVER FOR A RELEASE <test-key@example.invalid>"
@@ -656,6 +657,21 @@ class UploadTests(ReleaseFilesCase):
 
         verbs = {line.split()[1] for line in self.log.read_text().splitlines()}
         self.assertEqual({"ls", "cp"}, verbs)
+
+
+class GoogleCloudSignInTest(unittest.TestCase):
+    """The job log is public and prints the inputs of each action. GitHub
+    masks only secrets there, so the sign-in inputs must be secrets."""
+
+    def test_the_sign_in_inputs_are_secrets(self) -> None:
+        text = WORKFLOW.read_text()
+        for name in ("workload_identity_provider", "service_account"):
+            lines = [
+                line.strip() for line in text.splitlines() if line.strip().startswith(f"{name}:")
+            ]
+            self.assertEqual(1, len(lines), name)
+            self.assertRegex(lines[0], r"\$\{\{ secrets\.MEHO_RELEASE_GCP_[A-Z_]+ \}\}$")
+        self.assertNotIn("vars.MEHO_RELEASE_GCP_", text)
 
 
 if __name__ == "__main__":

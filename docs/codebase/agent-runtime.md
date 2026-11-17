@@ -186,7 +186,11 @@ JSON-shaped (so it can grow without a migration):
   base class two connectors share), module-level functions, and the steps of
   a multi-step operation. The refusal comes right after the
   `target_connector_mismatch` check, before the policy gate: one audit row,
-  no approval request, nothing sent. Test:
+  no approval request, nothing sent. A call that waits for approval stores
+  the list on its request (`approval_request.allowed_connectors`, migration
+  `0174`). `_dispatch_resume_with_bound_context` binds it again for the run,
+  so a person who approves after the agent stopped waiting runs the call and
+  its steps with the same list. Test:
   `tests/test_agent_target_connector_limit.py`.
   This keeps the "connector-ops ∩ identity permissions" intersection honest
   without putting vendor identifiers in tool names (postulate 5). Per-op RBAC

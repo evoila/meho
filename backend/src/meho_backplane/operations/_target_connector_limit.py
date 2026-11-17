@@ -16,7 +16,11 @@ connector:
   target-to-connector check, before the policy gate: the refusal writes
   one audit row, makes no approval request, sends nothing to the target
   and publishes no broadcast. A step of a multi-step operation runs in the
-  same context, so its target is checked too.
+  same context, so its target is checked too. A call that waits for
+  approval stores the list on its request (:func:`stored_connector_limit`).
+  The run after the approval binds it again
+  (:func:`restored_connector_limit`), also when a person approves the
+  request after the agent stopped waiting.
 * **A standing grant of a service login.** A grant names one connector.
   :func:`target_picks_other_connector` tells the grant lookup when the
   target picks another connector, so the grant does not clear the call.
@@ -47,6 +51,8 @@ __all__ = [
     "connector_limit",
     "not_allowed_preview_envelope",
     "refuse_target_connector_not_allowed",
+    "restored_connector_limit",
+    "stored_connector_limit",
     "target_picks_other_connector",
 ]
 
@@ -64,6 +70,25 @@ def connector_limit(allowed: frozenset[str] | None) -> Iterator[None]:
         yield
     finally:
         allowed_connectors_var.reset(token)
+
+
+def stored_connector_limit() -> list[str] | None:
+    """The bound limit as the sorted list an approval request stores, or ``None``."""
+    allowed = allowed_connectors_var.get()
+    return sorted(allowed) if allowed is not None else None
+
+
+@contextmanager
+def restored_connector_limit(stored: list[str] | None) -> Iterator[None]:
+    """Bind the limit an approval request stored while its approved run runs.
+
+    A request without a stored list keeps the limit that is bound already.
+    """
+    if stored is None:
+        yield
+        return
+    with connector_limit(frozenset(stored)):
+        yield
 
 
 def connector_id_of(cls: type[Connector]) -> str:

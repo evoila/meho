@@ -50,6 +50,7 @@ from meho_backplane.operations._target_connector_limit import (
     allowed_connectors_var,
     connector_limit,
 )
+from meho_backplane.operations.approval_queue import _dispatch_resume_with_bound_context
 from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
 from meho_backplane.settings import get_settings
 
@@ -192,6 +193,11 @@ async def _register(op_id: str, handler: Any, *, requires_approval: bool = False
 
 async def _add_descriptor(op_id: str, **fields: Any) -> None:
     now = datetime.now(UTC)
+    columns: dict[str, Any] = {
+        "safety_level": "safe",
+        "requires_approval": False,
+        **fields,
+    }
     async with get_sessionmaker()() as s:
         s.add(
             EndpointDescriptor(
@@ -207,15 +213,13 @@ async def _add_descriptor(op_id: str, **fields: Any) -> None:
                 parameter_schema={"type": "object"},
                 response_schema=None,
                 llm_instructions=None,
-                safety_level="safe",
-                requires_approval=False,
                 is_enabled=True,
                 embedding=[0.1] * 384,
                 custom_description=None,
                 custom_notes=None,
                 created_at=now,
                 updated_at=now,
-                **fields,
+                **columns,
             )
         )
         await s.commit()
@@ -228,13 +232,15 @@ async def _add_api_file_op(op_id: str) -> None:
     )
 
 
-async def _add_composite(op_id: str) -> None:
+async def _add_composite(op_id: str, *, requires_approval: bool = False) -> None:
     await _add_descriptor(
         op_id,
         source_kind="composite",
         method=None,
         path=None,
         handler_ref=f"{__name__}._HostConnector.check_both",
+        safety_level="caution" if requires_approval else "safe",
+        requires_approval=requires_approval,
     )
 
 
@@ -256,14 +262,18 @@ async def _audit_statuses(op_id: str) -> list[Any]:
     return [row.payload.get("result_status") for row in rows]
 
 
-async def _approval_rows() -> int:
+async def _approval_requests() -> list[ApprovalRequest]:
     async with get_sessionmaker()() as s:
         rows = (
             (await s.execute(select(ApprovalRequest).where(ApprovalRequest.tenant_id == _TENANT)))
             .scalars()
             .all()
         )
-    return len(rows)
+    return list(rows)
+
+
+async def _approval_rows() -> int:
+    return len(await _approval_requests())
 
 
 def _assert_refused(result: Any, picked: str | None) -> None:
@@ -361,6 +371,61 @@ async def test_step_of_a_multi_step_operation_is_checked() -> None:
     assert result.status == "ok", result.error
     assert result.result == {"own": "ok", "other": "error", "other_code": CONNECTOR_NOT_ALLOWED}
     assert _RUNS == ["uptime:hostos-target-a", "check_both:hostos-target-a"]
+
+
+# --- a call that waits for approval ----------------------------------------
+
+
+def _reviewer() -> Operator:
+    return Operator(
+        sub="user:reviewer",
+        name="Reviewer",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+        client_id="meho-cli",
+    )
+
+
+@pytest.mark.asyncio
+async def test_approved_run_outside_the_agent_keeps_the_list() -> None:
+    """A person approves after the agent stopped waiting: the steps keep the list."""
+    await _register("hostos.uptime", _HostConnector.uptime)
+    await _add_composite("hostos.check_both", requires_approval=True)
+    target = _Target("hostos")
+    with connector_limit(_ONLY_HOST):
+        parked = await _call("hostos.check_both", target)
+    assert parked.status == "awaiting_approval", parked.error
+    [request] = await _approval_requests()
+    assert request.allowed_connectors == [_HOST]
+
+    assert allowed_connectors_var.get() is None
+    result = await _dispatch_resume_with_bound_context(
+        operator=_reviewer(), request=request, resolved_target=target, effective_params={}
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"own": "ok", "other": "error", "other_code": CONNECTOR_NOT_ALLOWED}
+    assert _RUNS == ["uptime:hostos-target-a", "check_both:hostos-target-a"]
+    assert allowed_connectors_var.get() is None
+
+
+@pytest.mark.asyncio
+async def test_approved_run_without_a_list_runs_every_step() -> None:
+    await _register("hostos.uptime", _HostConnector.uptime)
+    await _add_composite("hostos.check_both", requires_approval=True)
+    target = _Target("hostos")
+    parked = await _call("hostos.check_both", target)
+    assert parked.status == "awaiting_approval", parked.error
+    [request] = await _approval_requests()
+    assert request.allowed_connectors is None
+
+    result = await _dispatch_resume_with_bound_context(
+        operator=_reviewer(), request=request, resolved_target=target, effective_params={}
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"own": "ok", "other": "ok", "other_code": None}
 
 
 # --- what does not change ---------------------------------------------------

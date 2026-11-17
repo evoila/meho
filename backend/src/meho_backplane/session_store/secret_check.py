@@ -40,7 +40,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Final
 
+from meho_backplane.broadcast.events import (
+    has_snmp_word,
+    is_secret_name_value_pair,
+    is_secret_param_name,
+    is_snmp_community_key,
+)
 from meho_backplane.redaction.patterns import MASK_CHARS, get_pattern, secret_spans
+from meho_backplane.redaction.secret_fields import iter_quoted_secret_fields
 
 __all__ = ["CheckedPart", "check_part", "ends_inside_private_key"]
 
@@ -111,10 +118,27 @@ def _replace_known(text: str) -> tuple[str, dict[str, int]]:
     return text, counts
 
 
+def _is_a_value(value: str) -> bool:
+    return len(value) >= 6 and not _NOT_A_VALUE.match(value)
+
+
+def _holds_a_value(node: object) -> bool:
+    """Whether *node*, or any string inside a list or object of it, is a value."""
+    if isinstance(node, str):
+        return _is_a_value(node)
+    if isinstance(node, list):
+        return any(_holds_a_value(item) for item in node)
+    if isinstance(node, dict):
+        return any(_holds_a_value(item) for item in node.values())
+    return False
+
+
 def _has_unclear_secret(text: str) -> bool:
+    """A ``name=value`` pair of :data:`_UNCLEAR_SECRET`, or a quoted pair whose
+    name the shared name rule hides (:func:`iter_quoted_secret_fields`)."""
     return any(
         not _NOT_A_VALUE.match(match.group("value")) for match in _UNCLEAR_SECRET.finditer(text)
-    )
+    ) or any(_is_a_value(found.value) for found in iter_quoted_secret_fields(text))
 
 
 #: One line with its ``\n``, or the last line without one.
@@ -142,21 +166,27 @@ class _JsonWalk:
             self.unclear = True
         return cleaned
 
-    def walk(self, node: object) -> object:
+    def walk(self, node: object, *, in_snmp: bool = False) -> object:
+        """Check *node*. A name counts as secret by :data:`_SECRET_NAME` or by
+        the shared name rule of every other place (``is_secret_param_name``,
+        a bare ``community`` in an SNMP place, the ``value`` of a name/value
+        pair with a secret name)."""
         if isinstance(node, str):
             return self.text(node)
         if isinstance(node, list):
-            return [self.walk(item) for item in node]
+            return [self.walk(item, in_snmp=in_snmp) for item in node]
         if isinstance(node, dict):
             result: dict[str, object] = {}
+            secret_pair = is_secret_name_value_pair(node)
             for key, value in node.items():
-                checked = self.walk(value)
-                if (
+                checked = self.walk(value, in_snmp=in_snmp or has_snmp_word(key))
+                secret_name = (
                     _SECRET_NAME.search(key)
-                    and isinstance(checked, str)
-                    and len(checked) >= 6
-                    and not _NOT_A_VALUE.match(checked)
-                ):
+                    or is_secret_param_name(key)
+                    or is_snmp_community_key(node, key, in_snmp=in_snmp)
+                    or (secret_pair and key == "value")
+                )
+                if secret_name and _holds_a_value(checked):
                     self.unclear = True
                 result[key] = checked
             return result

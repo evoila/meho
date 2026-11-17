@@ -48,7 +48,7 @@ Two of these ops carry secret material in their request params:
 * A client/user representation may also carry a ``secret`` field.
 
 Each builder runs the representation through
-:func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`
+:func:`~meho_backplane.connectors.keycloak.redaction.redact_preview_fields`
 — the *same* single-sourced scrub the read ops use — which replaces the
 Keycloak representation secret fields (``secret`` / ``credentials`` /
 ``value`` / ``secretData`` / ``credentialData``) **and** the generic
@@ -151,7 +151,7 @@ from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     register_user_write,
     with_stored_user,
 )
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
+from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
@@ -216,7 +216,7 @@ async def _realm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "resource": "realm",
         "realm": realm_name or None,
-        "representation": redact_secret_fields(representation),
+        "representation": redact_preview_fields(representation),
     }
 
 
@@ -226,7 +226,7 @@ async def _user_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     Hoists the username (``UserRepresentation.username``) and the target
     realm to top-level keys so the reviewer reads who is being created and
     where. The UserRepresentation is echoed with
-    :func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`
+    :func:`~meho_backplane.connectors.keycloak.redaction.redact_preview_fields`
     applied, so an inline password (carried in
     ``representation.credentials[].value``) shows as ``***REDACTED***`` while
     the visible identity fields (username / email / enabled / attributes)
@@ -240,7 +240,7 @@ async def _user_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "resource": "user",
         "username": username or None,
         "realm": _managed_realm(ctx),
-        "representation": redact_secret_fields(representation),
+        "representation": redact_preview_fields(representation),
     }
     secret_ref = ctx.params.get("password_secret_ref")
     if isinstance(secret_ref, str) and secret_ref.strip():
@@ -342,7 +342,7 @@ async def _group_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     Hoists the group name, the parent (if nested), and the target realm so
     the reviewer reads "creating group ``role-tenant-2`` in realm ``meho``".
     The full attribute map is echoed through
-    :func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`
+    :func:`~meho_backplane.connectors.keycloak.redaction.redact_preview_fields`
     (attributes are not secrets, but a stray ``password``-keyed attribute is
     scrubbed for defence in depth), plus a keys-only ``attribute_keys`` list
     for a quick read of which attributes are set.
@@ -353,7 +353,7 @@ async def _group_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "parent_id": _opt_str(ctx.params.get("parent_id")),
         "realm": _managed_realm(ctx),
         "attribute_keys": _attribute_keys(ctx),
-        "attributes": redact_secret_fields(ctx.params.get("attributes") or {}),
+        "attributes": redact_preview_fields(ctx.params.get("attributes") or {}),
     }
 
 
@@ -452,7 +452,7 @@ async def _group_update_attributes_preview(ctx: PreviewContext) -> dict[str, Any
     durable approval row bounded. The actual (non-secret) values remain
     visible as scrubbed key→value maps: ``current_attributes`` (before) and
     ``attributes`` (the incoming payload / after values), both through
-    ``redact_secret_fields`` so a stray ``password``-keyed attribute is
+    ``redact_preview_fields`` so a stray ``password``-keyed attribute is
     ``***REDACTED***``. When the current state cannot be read,
     ``current_attributes_available`` is ``false`` and the preview degrades to
     the incoming-only view.
@@ -466,7 +466,7 @@ async def _group_update_attributes_preview(ctx: PreviewContext) -> dict[str, Any
         "realm": _managed_realm(ctx),
         "replace": replace,
         "attribute_keys": _attribute_keys(ctx),
-        "attributes": redact_secret_fields(ctx.params.get("attributes") or {}),
+        "attributes": redact_preview_fields(ctx.params.get("attributes") or {}),
     }
 
     current = await _fetch_current_group_attributes(ctx)
@@ -488,7 +488,7 @@ async def _group_update_attributes_preview(ctx: PreviewContext) -> dict[str, Any
         resulting_keys = current_keys | incoming_keys
 
     preview["current_attributes_available"] = True
-    preview["current_attributes"] = redact_secret_fields(current)
+    preview["current_attributes"] = redact_preview_fields(current)
     preview["current_attribute_keys"] = sorted(current_keys)
     preview["resulting_attribute_keys"] = sorted(resulting_keys)
     preview["added_keys"] = sorted(added_keys)

@@ -500,6 +500,14 @@ guide, and the `user_write` blurb tells the agent not to put `tenant_*`
 on the user (Keycloak's default user profile drops unmanaged
 attributes) but to add the user to one role group.
 
+`role_mapping.assign` and `group.member.add` also wait for a person on
+every call (`declare_per_call_approval` in `op_classes.py`). No standing
+grant of a service account and no run approval covers them, and a grant
+made before this rule does not cover a call. `role_mapping.assign` gives a
+role and every part of it. `group.member.add` gives the new member the
+roles of the group. MEHO does not yet judge a group by the roles it gives,
+so waiting for a person each time is the safe rule.
+
 Four load-bearing properties (of the original nine; the group ops layer
 their own idempotency above):
 
@@ -733,7 +741,15 @@ in. For these three, the person the change is for never approves it. In
 MEHO's own login realm another admin must approve it; a person who may
 approve their own changes cannot approve these alone. In MEHO's own login
 realm, a role of the `realm-management` client (in any case) also needs a
-platform admin as approver: it decides who may manage the realm. In another
+platform admin as approver: it decides who may manage the realm. The same
+holds for `role_mapping.assign` and `client.assign` when a part of the
+named role, on any level, is such a role or a role that MEHO's login maps to
+platform admin rights. The card lists them as `effective_roles`, and the run
+is refused when the parts change before it (`ops_write_effective_roles.py`).
+A request that waited from before MEHO read the parts has no
+`effective_roles` on its card. Its run is refused in every realm with "This
+request was made before MEHO read what a role gives. Send it again."
+(`bound_ids_missing` in `operations/grant_approval.py`). In another
 realm these writes are not a change of rights: the normal approval rules of
 their risk level apply, and only the person the change is for is refused.
 
@@ -1423,7 +1439,7 @@ use:
 | `keycloak.realm.create` | `{resource, realm, representation}` |
 | `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
 | `keycloak.user.reset_password` | `{resource, username, id, realm, password_source, password_secret_ref, temporary[, password_secret_mount, password_secret_key]}` |
-| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles, effective_roles}` |
 | `keycloak.group.create` | `{resource, name, parent_id, realm, attribute_keys, attributes}` |
 | `keycloak.group.update_attributes` | `{resource, id, name, realm, replace, attribute_keys, attributes}` |
 | `keycloak.group.member.add` / `.member.remove` | `{resource, action, user_id, username, group_id, group_name, realm}` |

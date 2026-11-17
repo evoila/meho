@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations.approval_queue import (
     approve_request,
     reject_request,
@@ -290,3 +290,74 @@ async def test_retry_after_step_approval_uses_the_multi_step_result(
     assert state.state == "verified"
     assert state.verify_response is not None
     assert state.verify_response["actual"] == {"ok": True}
+
+
+async def _approval_audit_rows(session: AsyncSession, path: str) -> list[AuditLog]:
+    return list(
+        (
+            await session.scalars(
+                select(AuditLog).where(AuditLog.method == "APPROVAL", AuditLog.path == path)
+            )
+        ).all()
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_request_row_names_run_and_step(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The ``approval.request`` row of a waiting check has the run id and the step id."""
+    _service, run_id, request_id = await _wait_for_approval(db_session, stub_embedding_service)
+    state = await _step_state(db_session, run_id)
+
+    rows = await _approval_audit_rows(db_session, "approval.request")
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.run_id == run_id
+    assert row.step_id == state.step_id
+    assert row.payload["run_id"] == str(run_id)
+    assert row.payload["step_id"] == state.step_id
+    assert row.payload["approval_request_id"] == str(request_id)
+    assert row.operator_sub == _person().sub
+
+
+@pytest.mark.asyncio
+async def test_approval_result_row_names_run_and_step(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The ``approval.result`` row of a retry has the run id and the step id."""
+    service, run_id, _ = await _wait_for_approval(db_session, stub_embedding_service)
+    state = await _step_state(db_session, run_id)
+    await _retry_waiting(service, run_id)
+
+    rows = await _approval_audit_rows(db_session, "approval.result")
+
+    assert len(rows) == 1
+    assert rows[0].run_id == run_id
+    assert rows[0].step_id == state.step_id
+    assert rows[0].payload["run_id"] == str(run_id)
+    assert rows[0].payload["step_id"] == state.step_id
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_row_has_no_run_or_step(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The approver's decision row is not in the runbook step, so it has neither id."""
+    _, _, request_id = await _wait_for_approval(db_session, stub_embedding_service)
+    await _approve_and_run(request_id)
+
+    rows = await _approval_audit_rows(db_session, "approval.decision")
+
+    assert len(rows) == 1
+    assert rows[0].run_id is None
+    assert rows[0].step_id is None
+
+
+async def _retry_waiting(service: RunbookRunService, run_id: uuid.UUID) -> None:
+    with pytest.raises(PreviousStepFailedError, match="awaiting_approval"):
+        await _retry(service, run_id)

@@ -64,7 +64,7 @@ from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     register_user_write,
     with_stored_user,
 )
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
+from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
 from meho_backplane.connectors.keycloak.session import quote_segment
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -201,7 +201,7 @@ async def _user_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "id": opt_str(ctx.params.get("id")),
         "realm": _managed_realm(ctx),
         "current": await _current_user(ctx),
-        "changes": redact_secret_fields(changes) if isinstance(changes, dict) else {},
+        "changes": redact_preview_fields(changes) if isinstance(changes, dict) else {},
     }
 
 

@@ -186,6 +186,7 @@ async def test_wait_names_who_may_approve(client: TestClient, embedding: AsyncMo
     assert token_call["approvers"] == {
         "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
         "rule": "default",
+        "floor": None,
     }
     assert token_call["evaluator"]["verdict"] == "wait"
     assert token_call["evaluator"]["floor"]["rule_id"] == "token_runs_only_safe"

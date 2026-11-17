@@ -76,6 +76,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm, _opt_str
 from meho_backplane.connectors.keycloak.ops_write_user_identity import (
+    USER_NOT_READ_NOTE,
     read_user_for_write,
     refuse_other_user_check,
 )
@@ -571,13 +572,13 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     remove = _names(ctx.params.get("remove"))
     preview: dict[str, Any] = {
         "resource": "user_required_actions",
-        "username": None,
         "id": _opt_str(ctx.params.get("id")),
         "realm": _managed_realm(ctx),
         "add": add,
         "remove": remove,
         "current_available": False,
         "user_available": False,
+        "user_note": USER_NOT_READ_NOTE,
     }
     requested = _opt_str(ctx.params.get("username"))
     if requested is not None:
@@ -616,6 +617,7 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
         preview["username"] = stored
         preview["user_available"] = True
         preview.pop("requested_username", None)
+        preview.pop("user_note", None)
     preview["current_available"] = True
     preview["current_required_actions"] = current
     preview["resulting_required_actions"] = _apply(current, add, remove)

@@ -831,7 +831,7 @@ func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
 		"empty":        "",
 		"blank":        "   ",
 		"line break":   "OPS-123\nX-Other: 1",
-		"carriage ret": "OPS-123\r",
+		"carriage ret": "OPS-123\rX-Other: 1",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeOperationsClient{}

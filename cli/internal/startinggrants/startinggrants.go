@@ -224,6 +224,35 @@ func PrintGrants(w io.Writer, outcome, principalSub string, grants []api.AgentGr
 	}
 }
 
+// LiveNote is the sentence the CLI prints above the live grants of an
+// agent when MEHO asked for no starting grant pick.
+const LiveNote = "This agent already has these grants; no starting grant is needed."
+
+// PrintLiveGrants writes the live grants of the agent from a create or
+// edit answer. It writes nothing when the agent has no live grant. A cut
+// list says so and names the command that shows them all.
+func PrintLiveGrants(w io.Writer, principalSub string, grants []api.LiveGrant, truncated bool) {
+	if len(grants) == 0 {
+		return
+	}
+	fmt.Fprintln(w, LiveNote)
+	fmt.Fprintf(w, "live grants of %s:\n", principalSub)
+	for _, g := range grants {
+		target := g.TargetScope
+		if g.TargetName != nil && *g.TargetName != "" {
+			target = *g.TargetName
+		}
+		ends := "never"
+		if g.ExpiresAt != nil {
+			ends = g.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z")
+		}
+		fmt.Fprintf(w, "  op=%s target=%s verdict=%s ends=%s\n", g.OpPattern, targetLabel(&target), g.Verdict, ends)
+	}
+	if truncated {
+		fmt.Fprintf(w, "the agent has more grants; run `meho agent grant list --principal %s`\n", principalSub)
+	}
+}
+
 func targetLabel(scope *string) string {
 	if scope == nil || *scope == "" || *scope == "*" {
 		return "every target"

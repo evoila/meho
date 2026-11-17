@@ -50,7 +50,8 @@ Filter coverage
   per-session replay query
   (:func:`~meho_backplane.audit_query.replay.replay_session`).
 * ``work_ref`` is a real column (work_ref I1-T1 #1655, migration ``0039``).
-  The filter narrows to ``audit_log.work_ref = :work_ref`` — exact match (an
+  The filter narrows to ``audit_log.work_ref IN (cleaned id, text as typed)``
+  (:func:`~meho_backplane.work_ref.work_ref_filter_values`; an
   opaque change-ticket reference such as ``"gh:evoila/meho#1"`` is an
   identifier, not a search term, so the predicate is deterministic equality
   per #1177, not ``ILIKE``); the column is also surfaced on every returned

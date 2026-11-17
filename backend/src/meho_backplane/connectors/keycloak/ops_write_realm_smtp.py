@@ -128,8 +128,8 @@ async def _refuse_inline_smtp_password(ctx: PreviewContext) -> str | None:
 def _realm_label(ctx: PreviewContext) -> str | None:
     """The realm the update targets: the ``realm`` param, else the managed realm."""
     explicit = ctx.params.get("realm")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+    if isinstance(explicit, str) and explicit:
+        return explicit
     if ctx.target is None:
         return None
     try:

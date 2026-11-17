@@ -1,0 +1,5 @@
+## Note
+**Action needed.** The Keycloak connector has no built-in managed realm any more. A Keycloak target must name its realm in `extras.managed_realm`. Without it, MEHO refuses every operation on that target before any call to Keycloak, `meho targets probe` reports it, and a create or update of the target is refused with HTTP 422. The admin realm still defaults to `master`.
+
+## Action
+Before the upgrade, set the managed realm on every Keycloak target that names none: `meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>`. `--extra` replaces the whole `extras` map, so repeat every key you keep. Or set it in the console edit form ("Managed realm"). To find these targets, run `meho doctor`: it lists every Keycloak target MEHO refuses, in your tenant, or in every tenant for a platform admin. The same list is `GET /api/v1/targets/checks/keycloak-realm`. A realm is one plain name: no `/`, `\`, `?`, `#` or `%`, and no spaces around it. See [Keycloak targets need a managed realm](https://evoila.github.io/meho/latest/guides/targets-and-secrets/#keycloak-targets-need-a-managed-realm).

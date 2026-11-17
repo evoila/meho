@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import ParkCheck, register_park_check
 from meho_backplane.operations._preview import (
     PreviewBuilder,
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
 __all__ = [
+    "USER_NOT_READ_NOTE",
     "UserOfWrite",
     "card_user_id",
     "check_card_username",
@@ -65,6 +66,13 @@ __all__ = [
     "user_matches_username",
     "with_stored_user",
 ]
+
+#: What a card says when MEHO could not read the user before the wait for approval.
+USER_NOT_READ_NOTE = (
+    "MEHO could not read this user from Keycloak, so the name shown is only the one in "
+    "the request. If you approve, the run is refused. Send a new request when MEHO can "
+    "read the user."
+)
 
 
 def _opt_str(value: Any) -> str | None:
@@ -177,7 +185,7 @@ async def read_user_for_write(
             raise KeycloakUserNotFoundError(
                 f"{op_id}: no user with username={username!r} in realm {realm!r}"
             )
-    path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)})
+    path = fill_path(_USER_PATH, {"realm": realm, "user-id": uuid})
     user = await get_or_none(connector, target, path, operator)
     if user is None:
         raise KeycloakUserNotFoundError(f"{op_id}: no user with id={uuid!r} in realm {realm!r}")
@@ -218,7 +226,7 @@ def refuse_other_user_check(op_id: str, id_key: str = "id") -> ParkCheck:
                 "same user. Send only one of them."
             )
         realm = resolve_realm_config(ctx.target).managed_realm
-        path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)})
+        path = fill_path(_USER_PATH, {"realm": realm, "user-id": uuid})
         user = await get_or_none(connector, ctx.target, path, ctx.operator)
         if user is None or user_matches_username(ctx.params, user):
             return None
@@ -247,7 +255,7 @@ async def _read_for_card(ctx: PreviewContext, id_key: str) -> tuple[str, dict[st
         user = await get_or_none(
             connector,
             ctx.target,
-            fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)}),
+            fill_path(_USER_PATH, {"realm": realm, "user-id": uuid}),
             ctx.operator,
         )
     except Exception:
@@ -262,7 +270,8 @@ def with_stored_user(builder: PreviewBuilder, *, id_key: str = "id") -> PreviewB
     ``username`` are the stored ones. When it cannot be read (no live
     connector, an unknown user, a fault), the card has no ``username``: the
     value the caller sent is shown as ``requested_username``. The card says
-    which case it is with ``user_available``.
+    which case it is with ``user_available`` and, when it cannot be read,
+    says so in ``user_note``.
     """
 
     async def _wrapped(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -274,6 +283,7 @@ def with_stored_user(builder: PreviewBuilder, *, id_key: str = "id") -> PreviewB
         stored = _opt_str(found[1].get("username")) if found is not None else None
         if found is None or stored is None:
             card["user_available"] = False
+            card["user_note"] = USER_NOT_READ_NOTE
             requested = _opt_str(ctx.params.get("username"))
             if requested is not None:
                 card["requested_username"] = requested

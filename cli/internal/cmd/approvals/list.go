@@ -46,7 +46,7 @@ func newListCmd() *cobra.Command {
 			"wait for a decision. Use --status all to see requests in " +
 			"every state, or --status approved|rejected|expired for " +
 			"one state. --filter-work-ref filters to the requests " +
-			"authorised by an external change ticket (exact match, " +
+			"authorised by an external change ticket (whole id; white space at the ends is ignored, " +
 			"e.g. gh:evoila/meho#1). --order oldest|newest picks the " +
 			"sort; the default is newest first, or oldest first when " +
 			"--filter-work-ref is set, so the steps of one change ticket read " +
@@ -96,7 +96,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&outcomeUnknown, "outcome-unknown", false,
 		"list approved changes whose outcome MEHO does not know, for you to check")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
-		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
+		"filter by ticket id (whole id; white space at the ends is ignored)")
 	cmd.Flags().StringVar(&order, "order", "",
 		"sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)")
 	// 0 means "not set": the flag is then left off the request and the

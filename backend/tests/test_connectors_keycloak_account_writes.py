@@ -719,6 +719,24 @@ async def test_delete_by_id_removes_only_that_credential(kc: KeycloakConnector) 
     assert not other.called
 
 
+async def test_a_credential_id_with_a_slash_reaches_keycloak_encoded_once(
+    kc: KeycloakConnector,
+) -> None:
+    odd = {**_CREDENTIALS[0], "id": "cred/../pw"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_CREDENTIALS_PATH).mock(
+            side_effect=[httpx.Response(200, json=[odd]), httpx.Response(200, json=[])]
+        )
+        delete = mock.delete(url__regex=r".*/credentials/.*").respond(204)
+        result = await _run(
+            "keycloak.user.credential.delete", {"id": _USER_UUID, "credential_id": "cred/../pw"}
+        )
+    assert result["status"] == "ok", result
+    assert delete.call_count == 1
+    assert delete.calls.last.request.url.raw_path.endswith(b"/credentials/cred%2F%2E%2E%2Fpw")
+
+
 async def test_delete_with_no_match_names_the_types_the_user_has_and_deletes_nothing(
     kc: KeycloakConnector,
 ) -> None:
@@ -906,6 +924,7 @@ async def _park_sign_in_change(op_id: str, requester: Operator) -> uuid.UUID:
         _mount_user_lookup(mock)
         mock.get(_USER_PATH).respond(200, json=_USER_BEFORE)
         mock.get(_CREDENTIALS_PATH).respond(200, json=_CREDENTIALS)
+        mock.get(f"/admin/realms/{_REALM}").respond(200, json={"realm": _REALM})
         call = await call_operation(
             requester,
             {
@@ -1249,10 +1268,10 @@ async def test_an_approved_credential_delete_stops_when_the_list_changes_after_t
 
 
 @pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
-async def test_outside_the_login_realm_a_self_approver_may_approve_their_own_change(
+async def test_outside_the_login_realm_a_self_approver_cannot_approve_their_own_change(
     kc: KeycloakConnector, op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Not a change of rights there: the risk level's normal approval rules apply."""
+    """A change of rights in every realm: another admin must approve it."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/another-login")
     get_settings.cache_clear()
     requester = _operator().model_copy(update={"self_approver": True})
@@ -1260,7 +1279,27 @@ async def test_outside_the_login_realm_a_self_approver_may_approve_their_own_cha
     async with get_sessionmaker()() as session:
         row = await session.get(ApprovalRequest, request_id)
     assert row is not None
-    assert not row.rights_change
+    assert row.rights_change
     assert row.proposed_effect["preview"]["grant"]["login_realm"] is False
 
-    await _approve_as(request_id, requester)
+    with pytest.raises((RightsChangeApprovalError, ApprovalRoleFloorError)):
+        await _approve_as(request_id, requester)
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_outside_the_login_realm_another_admin_approves_the_change(
+    kc: KeycloakConnector, op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/another-login")
+    get_settings.cache_clear()
+    request_id = await _park_sign_in_change(op_id, _operator())
+    admin = _operator("kc-account-admin").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
+
+    await _approve_as(request_id, admin)
+
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.status == "approved"

@@ -75,17 +75,20 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm, _opt_str
-from meho_backplane.connectors.keycloak.ops_write_realm_delete import _backplane_login_realms
 from meho_backplane.connectors.keycloak.ops_write_user_identity import (
+    USER_NOT_READ_NOTE,
     read_user_for_write,
     refuse_other_user_check,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_preview_builder,
+)
+from meho_backplane.targets.keycloak_realm_warnings import (
+    backplane_login_realms as _backplane_login_realms,
 )
 
 if TYPE_CHECKING:
@@ -466,7 +469,7 @@ async def keycloak_user_required_actions_update(
 
 
 def _credentials_path(realm: str, user_id: str) -> str:
-    return fill_path(_USER_CREDENTIALS_PATH, {"realm": realm, "user-id": quote_segment(user_id)})
+    return fill_path(_USER_CREDENTIALS_PATH, {"realm": realm, "user-id": user_id})
 
 
 async def _has_otp(
@@ -569,13 +572,13 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     remove = _names(ctx.params.get("remove"))
     preview: dict[str, Any] = {
         "resource": "user_required_actions",
-        "username": None,
         "id": _opt_str(ctx.params.get("id")),
         "realm": _managed_realm(ctx),
         "add": add,
         "remove": remove,
         "current_available": False,
         "user_available": False,
+        "user_note": USER_NOT_READ_NOTE,
     }
     requested = _opt_str(ctx.params.get("username"))
     if requested is not None:
@@ -600,7 +603,7 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
         user = await get_or_none(
             connector,
             target,
-            fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(uuid)}),
+            fill_path(_USER_PATH, {"realm": realm, "user-id": uuid}),
             ctx.operator,
         )
     except Exception:
@@ -614,6 +617,7 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
         preview["username"] = stored
         preview["user_available"] = True
         preview.pop("requested_username", None)
+        preview.pop("user_note", None)
     preview["current_available"] = True
     preview["current_required_actions"] = current
     preview["resulting_required_actions"] = _apply(current, add, remove)

@@ -55,7 +55,6 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import (
     resolve_user,
 )
 from meho_backplane.connectors.keycloak.ops_write_grant import CREDENTIALS_CHANGED
-from meho_backplane.connectors.keycloak.session import quote_segment
 from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
@@ -114,7 +113,7 @@ async def read_credentials(
     """Read the user's credentials, cut down to the allow-list. A bad answer raises."""
     rows = await connector._get_admin_list(
         target,
-        fill_path(_USER_CREDENTIALS_PATH, {"realm": realm, "user-id": quote_segment(user_id)}),
+        fill_path(_USER_CREDENTIALS_PATH, {"realm": realm, "user-id": user_id}),
         operator=operator,
         strict=True,
     )
@@ -194,8 +193,8 @@ async def keycloak_user_credential_delete(
             _USER_CREDENTIAL_PATH,
             {
                 "realm": realm,
-                "user-id": quote_segment(uuid),
-                "credentialId": quote_segment(entry["id"]),
+                "user-id": uuid,
+                "credentialId": entry["id"],
             },
         )
         try:

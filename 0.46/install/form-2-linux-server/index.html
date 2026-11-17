@@ -1182,6 +1182,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#what-meho-connects-to" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What MEHO connects to
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-firewall-file" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3645,6 +3656,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#what-meho-connects-to" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What MEHO connects to
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-firewall-file" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4311,6 +4333,19 @@ package mirror.</p>
 scan from another machine shows only the ports above. The traffic that
 leaves the machine is not filtered, because the operating system and its
 other software are yours.</p>
+<h3 id="what-meho-connects-to">What MEHO connects to<a class="headerlink" href="#what-meho-connects-to" title="Permanent link">&para;</a></h3>
+<p>MEHO connects to the systems it manages and to the AI service. From
+v0.47.0, MEHO may connect to every address outside the built-in
+Kubernetes, on every port. You need no setting for a new system.</p>
+<p>Two things stay closed to MEHO:</p>
+<ul>
+<li>the other parts of the built-in Kubernetes. There MEHO reaches only its
+  own parts, such as its database and its password safe, and DNS;</li>
+<li>the ports of this machine itself, except the console on port 443.</li>
+</ul>
+<p>To limit where MEHO may connect, use a firewall in your network.</p>
+<p>Before v0.47.0, MEHO on this form can connect only to its own parts, so
+it cannot reach the systems it manages. Update to v0.47.0 or later.</p>
 <h3 id="the-firewall-file">The firewall file<a class="headerlink" href="#the-firewall-file" title="Permanent link">&para;</a></h3>
 <p>The rules are in one file, <code>/etc/meho/firewall.nft</code>, with comments for
 your security team. The file is for nftables, the firewall of the Linux

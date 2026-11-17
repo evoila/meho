@@ -382,8 +382,9 @@ _LABEL: Final = re.compile(
 )
 
 
-def _without_command_rule() -> RedactionPolicy:
-    policy = get_default_policy()
+def _without_command_rule(policy: RedactionPolicy | None = None) -> RedactionPolicy:
+    """*policy* (the default policy when not given) as it is on main: without this rule."""
+    policy = policy or get_default_policy()
     rules = tuple(rule for rule in policy.rules if rule.pattern != "command_line_secret")
     assert len(rules) == len(policy.rules) - 1
     return policy.model_copy(update={"rules": rules})
@@ -416,6 +417,35 @@ def test_the_rule_only_hides_more() -> None:
         if more:
             shown_now[text] = more
     assert shown_now == {}
+
+
+#: Ordinary command lines with no secret in them.
+_ORDINARY: Final[list[str]] = [
+    *_KEPT,
+    "kubectl get pods -n kube-system -o wide",
+    "systemctl restart nginx.service && journalctl -u nginx -n 50",
+    "tar -czf /tmp/backup.tgz /etc/nginx; ls -la /tmp",
+    "psql -h db -U app -d appdb -c 'select 1'",
+    "mysql -u root -h db -P 3306 appdb",
+    "ssh -i ~/.ssh/id_ed25519 -p 2222 admin@host uptime",
+    "curl -sS -H 'Accept: application/json' https://example.invalid/api/v1/x",
+    'sh -c "echo hello; date"',
+    "find / -name '*.log' -mtime +7 -print",
+    "Server=db;Database=d;User ID=app;Encrypt=true",
+    "rsync -avz --delete src/ dest/\nrsync done",
+    "docker run --rm -e LOG_LEVEL=debug -p 8080:80 nginx:1.27",
+]
+
+
+@pytest.mark.parametrize("line", _ORDINARY)
+def test_a_line_without_a_secret_is_the_same_as_on_main(line: str) -> None:
+    """The answer and the trace are byte for byte what main makes of the line."""
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    on_main = redact(line, _without_command_rule()).redacted
+    assert redact(line, get_default_policy()).redacted == on_main
+    trace_on_main = redact(line, _without_command_rule(_CONTENT_POLICY)).redacted
+    assert redact(line, _CONTENT_POLICY).redacted == trace_on_main
 
 
 _LONG_LINE: Final = 200_000

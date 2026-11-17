@@ -164,3 +164,4 @@ def test_admin_grant_for_unregistered_principal_is_rejected(
     assert "error" in body, body
     assert body["error"]["code"] == INVALID_PARAMS
     assert "principal_kind=agent" in body["error"]["message"], body
+    assert "`meho agent-principal register <name> --grants none`" in body["error"]["message"]

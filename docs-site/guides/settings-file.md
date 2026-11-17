@@ -205,7 +205,8 @@ What the import does:
   appears twice in the same block.
 - Anything that looks like a secret: a private key, a token, or a
   field in a target's `extras` named like a password or a key, whatever
-  its value.
+  its value. The check uses the same list of secret names that MEHO
+  hides in results.
 - A mask such as `********` or `<keep>`. A mask never means "keep the
   stored value": leave the field out instead.
 - An `apiVersion` other than `meho.evoila.com/v1`.

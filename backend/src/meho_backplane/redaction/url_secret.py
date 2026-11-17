@@ -75,12 +75,21 @@ def is_secret_query_name(name: str) -> bool:
 
     The name is split into words at ``-``, ``_``, ``.`` and camelCase,
     and the last word decides (``X-Amz-Signature``, ``sig``,
-    ``X-Goog-Credential``, ``accessToken``). ``api_key`` counts too.
+    ``X-Goog-Credential``, ``accessToken``). ``api_key`` counts too, and
+    so does every name the shared field name rule marks as secret
+    (``snmp_auth_key``, ``passphrase``), so a link and a field agree.
     """
+    # Imported here: the broadcast package imports the redaction package.
+    from meho_backplane.broadcast.events import is_secret_param_name
+
     words = [w for w in _NAME_SPLIT.split(_CAMEL_BOUNDARY.sub("_", name).lower()) if w]
     if not words:
         return False
-    return words[-1] in _SECRET_LAST_WORDS or words[-2:] == ["api", "key"]
+    return (
+        words[-1] in _SECRET_LAST_WORDS
+        or words[-2:] == ["api", "key"]
+        or is_secret_param_name(name)
+    )
 
 
 def _is_placeholder(value: str) -> bool:

@@ -268,8 +268,15 @@ would send the call replaced). It fails on any difference that
   the login groups of the install. Each login group of the install is
   bound to one of these kinds. A change of rights: only
   `MEHO-Admins` (`rights_change`). With `POLICY_APPROVER_ROUTING` on: the
-  first routing entry that fits (`tenant:routing[0]`). Else today's rule
-  (`default`).
+  routing entries that fit, the install's first
+  (`install:routing[0], tenant:routing[1]`), and `floor`, the install's
+  entry: a tenant's routing can only narrow it
+  ([policy.md](policy.md), "The install's routing is a floor"). For a
+  stored request, the install's routing as it is now, as at the approve
+  click; `category_not_stored` with no group when the click refuses the
+  request because its category is not known. Else today's rule
+  (`default`). For a caller who is not a tenant admin or a
+  platform admin, `rule` and `floor` are null.
 
 **A file that is not imported (`file`).** Needs a tenant admin (or a
 platform admin for `scope: install`) and `POLICY_CLASSIFICATION` (with it

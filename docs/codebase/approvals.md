@@ -1130,7 +1130,9 @@ preview of the waiting request:
   `_backplane_login_realms()`.
 - `platform_admin`: the group the handler will change is the platform
   admin group, the roles include the platform admin role, or the change
-  gives a role of the `realm-management` client (in any case).
+  gives a role of the `realm-management` client (in any case). For a role
+  change in the login realm, the parts of the role count too (see "A role
+  is judged by what it really gives" below).
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
@@ -1188,6 +1190,34 @@ same check refuses the run:
   removes only the credentials the approver saw. This check runs before the
   handler reads the system again, so the handler also compares its own
   read with the approved card (`approved_preview`) before it deletes.
+
+### A role is judged by what it really gives
+
+A role can be made of other roles, and those can be made of more roles.
+For `keycloak.role_mapping.assign` and `keycloak.role_mapping.client.assign`
+in the login realm, the connector reads the parts of every named role, on
+every level (`ops_write_effective_roles.py`), and puts them on the card as
+`effective_roles`. Each entry has `id`, `name`, `client_id` (`None` for a
+realm role), `realm_management` and `login_role`. `realm_management` marks
+a role of the `realm-management` client. `login_role` marks a realm role
+that MEHO's login turns into platform admin rights. As at login, that is
+only the realm role whose name is exactly `JWT_PLATFORM_ADMIN_ROLE_NAME`
+(same case). When the setting is unset, no role has this mark.
+
+If any part has one of these marks, `platform_admin` is true, so a platform
+admin must approve. If no part has a mark, `platform_admin` is false. The
+name of the role that was asked for does not decide. If MEHO cannot read all the parts (a read fails, a role is
+missing, more than 500 roles, nesting deeper than 10 levels),
+`effective_roles` is `None` and `platform_admin` is the strict case.
+Outside the login realm the list is empty and nothing changes.
+
+The run is bound to the list. Both ops are registered with `bound_ids` on
+`effective_roles`: if the live list has other role ids than the approved
+one, the run is refused and a new request is needed. A request parked
+before this rule has no list, so it is refused at the run too, in every
+realm. Both ops are also registered with `bound_ids_missing`, so this
+refusal says plainly: "This request was made before MEHO read what a role
+gives. Send it again."
 
 ## The rights-change mark: another admin must approve
 
@@ -1325,16 +1355,32 @@ works out who may approve it and stores it on the request:
   example `["SA-Operators", "Admins"]`. Group kinds only, never people.
   MEHO stores no members, so the requester is never in it. Whether the
   requester may approve their own change is today's rule (below).
-- `approver_rule` (text): the routing entry that set them
-  (`tenant:routing[0]`, `install:routing[2]`), or `default`.
-- Migration `0167` adds both columns, nullable.
+- `approver_rule` (text): the routing entries that set them, the
+  install's first (`install:routing[2]`, `tenant:routing[0]`,
+  `install:routing[0], tenant:routing[1]`), or `default`.
+- `approver_category` (text): the category the tenant's entries used (the
+  category the classification gave the change).
+- `approver_install_category` (text): the category that the install's
+  policy alone gives the change. The install's entries used it, and the
+  click routes the request again with it (below). A tenant can move an
+  operation to another category for its own rules; the install's routing
+  still applies with this one.
+- Both categories are the empty text on a request that had stored kinds
+  before migration `0173`: MEHO does not know them.
+- Migration `0167` adds the first two columns, migration `0173` the other
+  two. All are nullable.
 
 How the kinds are found:
 
-1. The tenant's routing entries, then the install's. The first entry whose
-   `match` fits wins. A `match` can name a `category`, a `connector`
-   pattern and a `risk` level; all that it names must fit.
-2. The entry's kinds are cut to the kinds that may approve the change
+1. The install's routing is a floor. The first install entry whose
+   `match` fits counts, then the first tenant entry whose `match` fits.
+   An install entry matches on the install's category, a tenant entry on
+   the tenant's.
+   The kinds are the kinds that both name, so a tenant entry can only
+   narrow the install's ([policy.md](policy.md), "The install's routing is
+   a floor"). A `match` can name a `category`, a `connector` pattern and a
+   `risk` level; all that it names must fit.
+2. The kinds are cut to the kinds that may approve the change
    today (`today_kinds`, the same rule as `approver_groups` in
    `policy/evaluate.py`): a `dangerous` or `destructive` change only
    SA-Operators and Admins; a lower one also Operators and Approvers; an
@@ -1349,13 +1395,39 @@ The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
 (`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
 `apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
-dispatcher and the step gate pass it to `create_pending_request`. A request
+install's category is `EndpointDescriptor.policy_install_category`: the
+category from the install's classification entries and overrides alone.
+When those entries give the operation two categories, it is the empty
+text: MEHO does not know it (an operation registered after the install's
+import can match two such entries). Then no group may approve the change
+when an install entry that matches on a `category` could fit it (rule
+`category_not_stored`); the click refuses it and explain shows no group.
+The dispatcher and the step gate pass both to `create_pending_request`. A request
 without a category fits only entries without `category`.
 
 **At the click** (`_load_pending_for_approval`) today's checks run first,
 in their order: a person only, the read-only check, still pending, the
 deadline, the rights-change and group rules (also the rules on own
-changes), the role floor. Then `_check_routed_approver`: the person's
+changes), the role floor. Then `_check_install_floor`
+(`install_floor_refusal` in `policy/routing_floor.py`): MEHO routes the
+request again with the install's file as it is now, the stored risk level
+and the stored `approver_install_category`. A request without stored
+kinds (it started to wait while the switch was off) is not checked here:
+it keeps today's rule until it is decided or expires. When an install
+entry fits and the
+person's kind is not in it, `ApprovalRoutingError` with one sentence, for
+example "The install's routing (`install:routing[0]`) lets only
+MEHO-SA-Operators or MEHO-Admins approve this change. You are in
+MEHO-Operators. A tenant's routing can only narrow it." An install routing
+that is not valid refuses the click. A request whose category is the
+empty text (stored before migration `0173`, or the install's entries
+gave the change two categories) is refused when an install entry that
+matches on a `category` could fit it: MEHO cannot check who may approve
+it, so it must be rejected. When no such
+entry could fit, the category does not change the answer. A change of
+rights is not checked here. `meho policy explain --request` uses the same
+install routing (`install_floor`), so it names the groups the click
+allows now. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
 Readers) must be in the stored kinds. `kind_of` reads the role and the
 approve flags, and a binding of the policy file can set those flags
@@ -1377,9 +1449,13 @@ console sign, the REST fields `may_approve` / `may_approve_reason`, the
 "may approve" compares the evaluator with today's answer before routing.
 
 **When the routing changes.** A waiting request keeps the group kinds it
-stored when it started to wait. A policy file that is imported later
-applies only to new requests, not to the ones already waiting. Run
-approvals are different: they store no kinds, so they use the policy that
+stored when it started to wait. A tenant file that is imported later
+applies only to new requests, not to the ones already waiting. The
+install's file is different: the click always checks the install's
+current routing too, so a narrower install file counts at once for the
+requests that already wait. `approve_right` (the console sign, the push
+recipients) uses only the stored kinds, so in that case the sign can say
+"may approve" and the click still refuses. Run approvals are different: they store no kinds, so they use the policy that
 is stored at the moment of the click.
 
 **Audit rows.** When a request has stored kinds, its audit rows carry
@@ -1398,7 +1474,10 @@ warn for each such entry, and `/ready` shows the same sentence under
 `features.policy.notes`.
 
 **Old requests and the switch.** A request without stored kinds (made while
-the switch was off, or before migration `0167`) keeps today's rule. With
+the switch was off, or before migration `0167`) keeps today's rule until it
+is decided or expires: the click does not check the install's routing for
+it. A request with stored kinds from before migration `0173` has the empty
+text as category (see the click above). With
 the switch off, MEHO stores nothing and checks no stored kinds, so turning
 the switch off brings back today's rule for every waiting request too. A
 stored value that is not a list of kinds lets nobody approve (fail
@@ -1424,7 +1503,9 @@ the policy that is stored at the moment a person approves it
 Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
 `tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
 `tests/test_web_push_send.py`,
-`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`.
+`tests/test_policy_routing_floor.py`,
+`tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`,
+`tests/migrations/test_migration_0173_add_approval_request_approver_category.py`.
 
 **Not yet:** a team is a group kind. Bindings that give a login group
 categories come later. The "separated duties" file

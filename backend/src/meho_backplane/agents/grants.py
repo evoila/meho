@@ -187,7 +187,7 @@ async def _validate_principal_registered(
             "grants are enforced only for tokens carrying principal_kind=agent "
             "(a registered agent principal), so a grant for this sub would "
             "never be evaluated. Register it first with "
-            "`meho agent-principal register`."
+            "`meho agent-principal register <name> --grants none`."
         )
 
 

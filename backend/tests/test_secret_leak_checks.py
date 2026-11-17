@@ -845,3 +845,17 @@ def test_operator_repr_excludes_raw_jwt() -> None:
     assert "raw_jwt" not in text, f"raw_jwt field name leaked into repr: {text!r}"
     # The field is still populated and accessible by name.
     assert op.raw_jwt == sentinel
+
+
+def _sweep_matches(text: str) -> bool:
+    return any(pattern.search(text) for pattern in SECRET_LEAK_PATTERNS)
+
+
+@pytest.mark.parametrize("name", ["password", "secret", "token", "api_key"])
+@pytest.mark.parametrize("sep", ["=", ":"])
+def test_sweep_accepts_a_name_only_when_the_hide_mark_follows(name: str, sep: str) -> None:
+    """A hidden value passes the sweep; a made-up value after the same name fails it."""
+    assert not _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line_secret] ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}made-up-value ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep} [REDACTED:command_line_secret] ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED] ok")

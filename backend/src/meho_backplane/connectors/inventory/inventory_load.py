@@ -57,6 +57,7 @@ from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     ResultRecordKindError,
     get_result_handle_store,
+    result_profile_scope,
 )
 
 if TYPE_CHECKING:
@@ -257,7 +258,7 @@ async def load_inventories(
                 raw,
                 operator_sub=operator.sub,
                 handle_id=handle_id,
-                mcp_profile=operator.mcp_tool_profile,
+                mcp_profile=result_profile_scope(operator.mcp_tool_profile),
             )
         )
     for number, document in enumerate(inventories, start=1):

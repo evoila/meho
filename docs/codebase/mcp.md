@@ -1264,7 +1264,11 @@ What such a profile does (`mcp/profiles.py`):
 - A stored result keeps the profile of the session that made it
   (`result_profile_var` in `connectors/result_handle_store.py`, set by
   `handle_tools_call`). A read under another profile, or without a
-  profile, is "not found".
+  profile, is "not found". Only a profile with a connector list keeps
+  its results apart (`result_profile_scope`). No profile, a built-in
+  profile, and every session while the switch is off keep and read
+  results as before, also results made before the upgrade or through
+  REST.
 
 Not filtered: the MCP resources (`resources/list`, `resources/read`).
 They hold tenant info, conventions, knowledge and memory, and no
@@ -1279,7 +1283,7 @@ fixed claim mapper that writes `mcp_profile: <name>` into every token.
 The mapper is on the client, so a session cannot get a token without it.
 
 - MEHO reads the claim when it checks the token
-  (`auth/mcp_profile_claim.py`). A value it cannot read gives 403
+  (`auth/mcp_profile_claim.py`). A value it cannot read (also `null`) gives 403
   `malformed_mcp_profile_claim`; a profile it does not know gives 403
   `unknown_mcp_profile_claim`, at every entrance.
 - `verify_jwt_for_audience` refuses such a token with 403

@@ -95,7 +95,10 @@ from meho_backplane.audit_cutover import (
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import compute_effective_broadcast_detail
 from meho_backplane.broadcast.events import resolve_op_class
-from meho_backplane.connectors.result_handle_store import result_profile_var
+from meho_backplane.connectors.result_handle_store import (
+    result_profile_scope,
+    result_profile_var,
+)
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
@@ -622,9 +625,9 @@ async def handle_tools_call(
                 f"tools/call {name!r}: arguments failed inputSchema: {_schema_error_text(exc)}",
             ) from exc
 
-        # #6099: a stored result keeps the session's profile, so only a
-        # session of the same profile can read it back.
-        profile_token = result_profile_var.set(operator.mcp_tool_profile)
+        # #6099: a stored result keeps the session's profile when it has a
+        # connector list, so only a session of the same profile reads it.
+        profile_token = result_profile_var.set(result_profile_scope(operator.mcp_tool_profile))
         try:
             result = await handler(operator, arguments)
         finally:

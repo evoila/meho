@@ -34,7 +34,11 @@ import meho_backplane.operations.result_query as rq
 import meho_backplane.operations.result_read_admission as admission
 from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import ResultHandleStore, result_profile_var
+from meho_backplane.connectors.result_handle_store import (
+    ResultHandleStore,
+    result_profile_scope,
+    result_profile_var,
+)
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.mcp.handlers import handle_tools_call, handle_tools_list
 from meho_backplane.mcp.profiles import (
@@ -283,6 +287,25 @@ async def test_the_session_profile_is_bound_while_the_handler_runs() -> None:
         await handle_tools_call(_operator("k8s"), {"name": "meho_status", "arguments": {}})
     assert seen == ["k8s"]
     assert result_profile_var.get() is None
+
+
+@pytest.mark.usefixtures("profiles_on")
+@pytest.mark.asyncio
+async def test_a_built_in_profile_binds_no_result_profile() -> None:
+    seen: list[str | None] = []
+
+    async def _handler(_operator: Operator, _arguments: dict[str, Any]) -> dict[str, Any]:
+        seen.append(result_profile_var.get())
+        return {"ok": True}
+
+    entry = get_tool("meho_status")
+    assert entry is not None
+    with (
+        patch("meho_backplane.mcp.handlers.get_tool", return_value=(entry[0], _handler)),
+        patch("meho_backplane.mcp.handlers.write_mcp_audit_row", new=AsyncMock()),
+    ):
+        await handle_tools_call(_operator("investigate"), {"name": "meho_status", "arguments": {}})
+    assert seen == [None]
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +576,48 @@ def _gates(profile: str | None, tools: list[str]) -> list[tuple[Any, ...]]:
         )
         for tool in tools
     ]
+
+
+@pytest.mark.parametrize("switch", [False, True])
+def test_only_a_profile_with_a_connector_list_keeps_results_apart(
+    switch: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    required_settings_env: None,  # noqa: F811
+) -> None:
+    monkeypatch.setenv("MCP_PROFILE_CONNECTOR_LISTS", "true" if switch else "false")
+    monkeypatch.setenv("MCP_CONNECTOR_PROFILES", json.dumps(_PROFILES))
+    get_settings.cache_clear()
+    assert result_profile_scope(None) is None
+    for name in TOOL_PROFILES:
+        assert result_profile_scope(name) is None
+    assert result_profile_scope("k8s") == ("k8s" if switch else None)
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("kind", ["paging", "query", "path"])
+@pytest.mark.parametrize("switch", [False, True])
+@pytest.mark.parametrize("profile", [None, *sorted(TOOL_PROFILES)])
+@pytest.mark.asyncio
+async def test_results_without_a_connector_list_read_as_before(
+    result_store: ResultHandleStore,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    switch: bool,
+    profile: str | None,
+) -> None:
+    """A result made before the upgrade, or through REST, has no profile.
+
+    A session with no profile or a built-in profile reads it, with the
+    switch off and on. A result such a session makes is read back the
+    same way.
+    """
+    monkeypatch.setenv("MCP_PROFILE_CONNECTOR_LISTS", "true" if switch else "false")
+    get_settings.cache_clear()
+    old_record = await _spill_under(result_store, None)
+    assert await _read(_operator(profile), old_record, kind)
+    own_record = await _spill_under(result_store, result_profile_scope(profile))
+    assert await _read(_operator(None), own_record, kind)
+    get_settings.cache_clear()
 
 
 @pytest.mark.parametrize("profile", [None, *sorted(TOOL_PROFILES)])

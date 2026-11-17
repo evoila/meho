@@ -74,10 +74,15 @@ checked on every read so another operator in the same tenant gets a miss
 exactly.
 
 MCP tool profile (#6099): a record also keeps the profile of the MCP
-session that made it (``mcp_profile``, from :data:`result_profile_var`).
-A read names the profile of the reading session, and a record made under
-another profile, or under no profile, is a miss. So a result stored under
-one profile cannot be read under another profile of the same person.
+session that made it (``mcp_profile``, from :data:`result_profile_var`),
+when that profile has a connector list. A read names the profile of the
+reading session, and a record made under another profile, or under no
+profile, is a miss. So a result stored under one such profile cannot be
+read under another profile of the same person. A session without a
+profile, a built-in profile, or any session while the
+``MCP_PROFILE_CONNECTOR_LISTS`` switch is off keeps and reads ``None``
+(:func:`result_profile_scope`), so these sessions read the same results
+as before, also records written before the field existed.
 
 Bounded size
 ============
@@ -127,6 +132,7 @@ __all__ = [
     "dispose_result_handle_store",
     "get_result_handle_store",
     "reset_result_handle_store_for_testing",
+    "result_profile_scope",
     "result_profile_var",
 ]
 
@@ -134,6 +140,22 @@ __all__ = [
 #: ``None``. The MCP ``tools/call`` handler sets it; every record written
 #: while it is set keeps it, so only a read under the same profile finds it.
 result_profile_var: ContextVar[str | None] = ContextVar("result_profile", default=None)
+
+
+def result_profile_scope(profile: str | None) -> str | None:
+    """The profile a stored result keeps for a session of *profile* (#6099).
+
+    Only a profile with a connector list, while the switch is on, keeps
+    its results apart. Every other session gets ``None``, so it reads the
+    same results as before the switch existed.
+    """
+    if profile is None:
+        return None
+    settings = get_settings()
+    if not settings.mcp_profile_connector_lists or profile not in settings.mcp_connector_profiles:
+        return None
+    return profile
+
 
 _log = structlog.get_logger(__name__)
 

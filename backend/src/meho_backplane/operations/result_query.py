@@ -72,6 +72,7 @@ from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     SpilledRowSet,
     get_result_handle_store,
+    result_profile_scope,
 )
 from meho_backplane.jsonflux.query.contract import (
     RESULT_TABLE,
@@ -206,7 +207,7 @@ async def read_result_window(
             handle_id=handle_id,
             offset=offset,
             limit=page_limit,
-            mcp_profile=operator.mcp_tool_profile,
+            mcp_profile=result_profile_scope(operator.mcp_tool_profile),
         )
         if window is None:
             raise ResultHandleNotFoundError(handle_id)
@@ -620,7 +621,7 @@ async def run_result_query(
             raw,
             operator_sub=operator.sub,
             handle_id=handle_id,
-            mcp_profile=operator.mcp_tool_profile,
+            mcp_profile=result_profile_scope(operator.mcp_tool_profile),
         )
         if row_set is None:
             raise ResultHandleNotFoundError(handle_id)
@@ -717,7 +718,7 @@ async def _read_document_path(
             raw,
             operator_sub=operator.sub,
             handle_id=handle_id,
-            mcp_profile=operator.mcp_tool_profile,
+            mcp_profile=result_profile_scope(operator.mcp_tool_profile),
         )
         if stored is None:
             raise ResultHandleNotFoundError(handle_id)

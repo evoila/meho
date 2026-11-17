@@ -557,6 +557,23 @@ scan from another machine shows only the ports above. The traffic that
 leaves the machine is not filtered, because the operating system and its
 other software are yours.
 
+### What MEHO connects to
+
+MEHO connects to the systems it manages and to the AI service. From
+v0.47.0, MEHO may connect to every address outside the built-in
+Kubernetes, on every port. You need no setting for a new system.
+
+Two things stay closed to MEHO:
+
+- the other parts of the built-in Kubernetes. There MEHO reaches only its
+  own parts, such as its database and its password safe, and DNS;
+- the ports of this machine itself, except the console on port 443.
+
+To limit where MEHO may connect, use a firewall in your network.
+
+Before v0.47.0, MEHO on this form can connect only to its own parts, so
+it cannot reach the systems it manages. Update to v0.47.0 or later.
+
 ### The firewall file
 
 The rules are in one file, `/etc/meho/firewall.nft`, with comments for

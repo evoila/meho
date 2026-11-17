@@ -233,8 +233,9 @@ def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
 #: are the older hand-written copies. They differ from the MCP tools in
 #: :mod:`meho_backplane.mcp.tools.operations` (no exact-op mode, no
 #: ``preview_hash``). With the ``agent_operation_tools_from_mcp`` setting on,
-#: :func:`_active_catalog` uses :data:`_MCP_OPERATIONS_META_TOOLS` in their
-#: place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
+#: :func:`_active_catalog` uses the tools of
+#: :func:`~meho_backplane.agent.toolset_operations.build_operation_meta_tools`
+#: in their place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
 #: broadcast and context tools.
 #:
 #: Each handler first checks the arguments against the tool's own
@@ -352,13 +353,6 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *build_docs_meta_tools(),
 )
 
-#: The operation tools built from the MCP tools (#4754), by name. They take
-#: the place of the hand-written copies when the
-#: ``agent_operation_tools_from_mcp`` setting is on.
-_MCP_OPERATIONS_META_TOOLS: dict[str, MetaToolSpec] = {
-    spec.name: spec for spec in build_operation_meta_tools()
-}
-
 
 def _active_catalog() -> tuple[MetaToolSpec, ...]:
     """Return the catalog for a run, with the operation tools the setting picks.
@@ -366,10 +360,14 @@ def _active_catalog() -> tuple[MetaToolSpec, ...]:
     Off (the default): :data:`_META_TOOL_CATALOG` as it is. On: the same
     catalog, with the three operation tools built from the MCP tools in the
     place of the hand-written copies. Tool names and order do not change.
+
+    The MCP-based tools are built here, for each run, because their text and
+    schema follow the ``SEARCH_TYPED_FIRST`` switch (#4712).
     """
     if not get_settings().agent_operation_tools_from_mcp:
         return _META_TOOL_CATALOG
-    return tuple(_MCP_OPERATIONS_META_TOOLS.get(m.name, m) for m in _META_TOOL_CATALOG)
+    from_mcp = {spec.name: spec for spec in build_operation_meta_tools()}
+    return tuple(from_mcp.get(m.name, m) for m in _META_TOOL_CATALOG)
 
 
 #: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).

@@ -1091,14 +1091,15 @@ Every other result has an `outcome` field:
     description line in `tools/list`
     (`mcp/tools/_include_raw.py`); the REST and CLI flag change nothing.
     Hosted agent runs with the setting `agent_operation_tools_from_mcp`
-    on use the registered tool text, so they see the input in both
-    states; with the switch off the input changes nothing.
+    on follow the switch the same way: their tools are built for each run
+    (`agent/toolset_operations.py`).
   - Code: `operations/_search_typed_first.py`, `typed_only` in
     `operations/_search.py`, `search_operations` and
     `list_operation_groups` in `operations/meta_tools.py`. Tests:
     `tests/test_search_typed_first.py`, and
     `test_include_raw_follows_the_typed_first_switch` in
-    `tests/test_mcp_surface_conformance.py`.
+    `tests/test_mcp_surface_conformance.py` and
+    `tests/test_agent_toolset_operations.py`.
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #4712).

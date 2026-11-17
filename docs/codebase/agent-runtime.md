@@ -548,8 +548,10 @@ it):
 | `work_ref` | MEHO sets the run's change reference itself, from the trigger that started the run. The model must not replace it on the audit rows. The same rule holds for `work_ref` on `broadcast_announce`. |
 | `async`, `run_id`, `wait_seconds` | The hosted tool waits until each call ends, also while the call waits for an approval. A background call and its status check are not needed. |
 
-`list_operation_groups` and `search_operations` leave out nothing. The
-hosted `call_operation` text is the MCP text without the part about `async`,
+`list_operation_groups` and `search_operations` leave out nothing. Their
+`include_raw` input and its description line follow the `SEARCH_TYPED_FIRST`
+switch, as in `tools/list` (#4712). So the toolset builds the three tools
+for each run, not once at start. The hosted `call_operation` text is the MCP text without the part about `async`,
 plus one sentence that says each call waits until it ends.
 
 Two checks run before each handler:

@@ -9,6 +9,9 @@
 * ``test_switch_off_keeps_the_hand_written_tools`` /
   ``test_switch_on_uses_the_mcp_tools`` — the setting picks the form; off is
   the default.
+* ``test_include_raw_follows_the_typed_first_switch`` — with the setting
+  on, the hosted ``include_raw`` input and its description line follow the
+  ``SEARCH_TYPED_FIRST`` switch, like ``tools/list`` (#4712).
 * ``test_hosted_run_gets_the_exact_op_contract`` — a hosted run calls
   ``search_operations`` with ``op_id`` and gets the contract back.
 * ``test_call_operation_passes_preview_hash_to_the_dispatcher`` — the hosted
@@ -51,7 +54,9 @@ from meho_backplane.agent.toolset_operations import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.mcp.registry import get_tool
+from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
 from meho_backplane.operations import meta_tools
+from meho_backplane.operations._search_typed_first import INCLUDE_RAW_LINE
 from meho_backplane.operations.meta_tools import UnknownOperationError
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -107,6 +112,8 @@ def test_hosted_schema_is_mcp_wire_schema_minus_left_out_fields(name: str) -> No
     entry = get_tool(name)
     assert entry is not None
     definition, _handler = entry
+    if name != "call_operation":
+        definition = include_raw_for_settings(definition)
     wire = definition.to_wire()["inputSchema"]
     spec = _specs()[name]
 
@@ -135,7 +142,7 @@ def test_descriptions_follow_the_mcp_text() -> None:
     for name in ("list_operation_groups", "search_operations"):
         entry = get_tool(name)
         assert entry is not None
-        assert specs[name].description == entry[0].description
+        assert specs[name].description == include_raw_for_settings(entry[0]).description
     assert "EXACT-OP MODE" in specs["search_operations"].description
     assert "unknown_op" in specs["search_operations"].description
 
@@ -155,6 +162,23 @@ def test_switch_off_keeps_the_hand_written_tools() -> None:
     call = tools["call_operation"].tool_def.parameters_json_schema
     assert "op_id" not in search["properties"]
     assert "preview_hash" not in call["properties"]
+
+
+@pytest.mark.usefixtures("switch_on")
+@pytest.mark.parametrize("typed_first", [False, True])
+def test_include_raw_follows_the_typed_first_switch(
+    monkeypatch: pytest.MonkeyPatch, typed_first: bool
+) -> None:
+    monkeypatch.setenv("SEARCH_TYPED_FIRST", "true" if typed_first else "false")
+    get_settings.cache_clear()
+    tools = {t.name: t for t in toolset_mod.resolve_agent_tools({}, _operator())}
+    for name in ("list_operation_groups", "search_operations"):
+        tool_def = tools[name].tool_def
+        assert ("include_raw" in tool_def.parameters_json_schema["properties"]) is typed_first
+        assert (INCLUDE_RAW_LINE in (tool_def.description or "")) is typed_first
+    call = tools["call_operation"].tool_def
+    assert "include_raw" not in call.parameters_json_schema["properties"]
+    assert INCLUDE_RAW_LINE not in (call.description or "")
 
 
 @pytest.mark.usefixtures("switch_on")

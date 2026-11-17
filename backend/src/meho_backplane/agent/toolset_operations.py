@@ -14,7 +14,12 @@ builds the three tools from the registered MCP tools instead, like
   minus the fields in :data:`LEFT_OUT_FIELDS`;
 * the description is the MCP description. ``call_operation`` drops the part
   about the left-out ``async`` mode and adds one hosted sentence instead;
-* the role floor and capability are the MCP tool's own.
+* the role floor and capability are the MCP tool's own;
+* ``list_operation_groups`` and ``search_operations`` follow the
+  ``SEARCH_TYPED_FIRST`` switch like ``tools/list`` does
+  (:func:`~meho_backplane.mcp.tools._include_raw.include_raw_for_settings`):
+  with it off they have no ``include_raw`` input and no line about it. So
+  the toolset builds these tools for each run, not once at import.
 
 The handlers are the shared ones in
 :mod:`meho_backplane.operations.meta_tools`, the same ones the older copies
@@ -51,6 +56,7 @@ from meho_backplane.mcp.registry import ToolDefinition, get_tool
 # Imported for its registration side effect: it registers the three MCP
 # tools, so get_tool can resolve them below.
 from meho_backplane.mcp.tools import operations as _operations_mcp_tools  # noqa: F401
+from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
 from meho_backplane.operations import meta_tools as _meta_tools
 from meho_backplane.operations.meta_tools import UnknownOperationError
 
@@ -93,6 +99,10 @@ LEFT_OUT_FIELDS: dict[str, tuple[str, ...]] = {
     _SEARCH_OPERATIONS: (),
     _CALL_OPERATION: ("work_ref", "async", "run_id", "wait_seconds"),
 }
+
+#: The tools whose ``include_raw`` input follows the ``SEARCH_TYPED_FIRST``
+#: switch.
+_INCLUDE_RAW_TOOLS: frozenset[str] = frozenset({_LIST_OPERATION_GROUPS, _SEARCH_OPERATIONS})
 
 #: Where the MCP ``call_operation`` text starts to explain ``async`` mode.
 #: The hosted text stops here.
@@ -173,6 +183,8 @@ def _build(name: str) -> MetaToolSpec:
     if entry is None:  # pragma: no cover - defensive; the import registers all three
         raise RuntimeError(f"hosted operation tools need MCP tool {name!r} to be registered")
     definition, _mcp_handler = entry
+    if name in _INCLUDE_RAW_TOOLS:
+        definition = include_raw_for_settings(definition)
     left_out = LEFT_OUT_FIELDS[name]
     return MetaToolSpec(
         name=name,
@@ -187,5 +199,9 @@ def _build(name: str) -> MetaToolSpec:
 
 
 def build_operation_meta_tools() -> tuple[MetaToolSpec, ...]:
-    """Build the three hosted operation tools from the registered MCP tools."""
+    """Build the three hosted operation tools from the registered MCP tools.
+
+    The result depends on the ``SEARCH_TYPED_FIRST`` switch, so call this
+    for each run.
+    """
     return tuple(_build(name) for name in OPERATION_TOOL_NAMES)

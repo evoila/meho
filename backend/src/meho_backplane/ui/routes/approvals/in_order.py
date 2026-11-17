@@ -127,6 +127,7 @@ from meho_backplane.operations.approved_reveal import (
     is_write_reveal,
 )
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
+from meho_backplane.policy.routing_floor import InstallFloor, load_install_floor
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
@@ -318,6 +319,7 @@ async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
     """
     rows: list[ApprovalRequest] = []
     async with get_sessionmaker()() as db_session:
+        floor = await load_install_floor(db_session)
         while True:
             page = await list_pending(
                 db_session,
@@ -332,15 +334,17 @@ async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
             if len(page) < _PAGE:
                 break
     return [
-        _Step(step=n, row=row, right=_right_if_pending(operator, row))
+        _Step(step=n, row=row, right=_right_if_pending(operator, row, floor))
         for n, row in enumerate(rows, start=1)
     ]
 
 
-def _right_if_pending(operator: Operator, row: ApprovalRequest) -> ApproveRight | None:
+def _right_if_pending(
+    operator: Operator, row: ApprovalRequest, floor: InstallFloor | None
+) -> ApproveRight | None:
     if row.status != ApprovalRequestStatus.PENDING.value:
         return None
-    return approve_right(operator, row)
+    return approve_right(operator, row, floor=floor)
 
 
 def _next_refused(run: _Run) -> _Step | None:

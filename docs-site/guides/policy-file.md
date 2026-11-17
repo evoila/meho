@@ -174,16 +174,43 @@ entry that can fit the same change. Two entries cannot fit the same change
 when both name a `category` (or a `risk`) and the values differ, or when
 their `connector` patterns cannot fit the same connector. When both
 connector patterns have `*`, `?` or `[` and differ, MEHO counts them as
-fitting the same change. A login group, matched by its full path or its
-group attribute, counts as the group kind its binding gives it.
+fitting the same change.
+
+Two cases are only a warning, not a refusal. MEHO still accepts the file:
+
+- An earlier entry of the same tenant fits each of these changes first.
+  For example, `routing[0]` sends network changes to `[Admins]`, and
+  `routing[1]` sends every `caution` change to every group. A network
+  change always meets `routing[0]` first, so `routing[1]` does not count
+  for it.
+- Both connector patterns have `*`, `?` or `[` and differ. MEHO cannot
+  tell whether they fit the same connector.
+
+The floor works per group kind, not per login group. A login group,
+matched by its full path or its group attribute, counts as the group kind
+its binding gives it. So the tenant's `bindings` decide who is in a kind:
+when the tenant binds one more login group to `Admins`, its people count
+as Admins for the install's routing too.
 
 When a change waits, the install's entry counts first, then the tenant's.
 A person must be in both. At the approve click MEHO checks the install's
 file as it is then, with the install's category of the operation. So a tenant entry stored before this rule, or an
-install file that changed later, cannot widen anything. When the install's
+install file that changed later, cannot widen anything. The approval
+card, the "may approve" sign and the push messages use the install's file
+as it is then too, so they show what the click decides. The audit row of
+the approval names the install entry that counted (`approver_floor`). A
+step of a multi-step operation waits for the same people as a direct call
+of the same operation. When the install's
 file changes, `meho policy diff --scope install` lists the tenants whose
 routing no longer fits. Their entries stay, but where they are wider they
-do not count.
+do not count. `meho policy export` of a tenant writes a
+`# Has no effect where wider:` comment above each such entry.
+
+When the install's own file gives an operation two categories, nobody may
+approve a change of it if an install entry that matches on a category
+could fit it. This holds also when no entry names either category. Give
+the operation one category in the install's file, reject the waiting
+request, and start the call again.
 
 MEHO ships a starting file, "separated duties"
 (`deploy/policy-profiles/separated-duties.yaml`): identity and secret

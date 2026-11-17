@@ -168,6 +168,7 @@ from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
+from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
 from meho_backplane.work_ref import (
     WORK_REF_FILTER_DESCRIPTION,
@@ -974,7 +975,8 @@ async def list_approvals(
                 offset=offset,
                 order=order,
             )
-        return [_view(r, right=approve_right(operator, r)) for r in unknown_rows]
+            floor = await load_install_floor(session)
+        return [_view(r, right=approve_right(operator, r, floor=floor)) for r in unknown_rows]
     # Validate status value against the closed enum; "all" means no filter.
     status_filter: ApprovalRequestStatus | None = None
     if status != "all":
@@ -1005,8 +1007,9 @@ async def list_approvals(
             stmt = stmt.limit(limit)
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
+        floor = await load_install_floor(session)
 
-    return [_view(r, right=approve_right(operator, r)) for r in rows]
+    return [_view(r, right=approve_right(operator, r, floor=floor)) for r in rows]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -1041,7 +1044,8 @@ async def get_approval_request(
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
-    return _view(row, reviewer_context, delegation, approve_right(operator, row))
+        floor = await load_install_floor(session)
+    return _view(row, reviewer_context, delegation, approve_right(operator, row, floor=floor))
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)
@@ -1500,7 +1504,9 @@ async def mark_approval_outcome_checked(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="note_required"
         ) from exc
-    return _view(request, right=approve_right(operator, request))
+    return _view(
+        request, right=approve_right(operator, request, floor=await current_install_floor())
+    )
 
 
 class RerunRequestBody(BaseModel):

@@ -51,7 +51,7 @@ the notes) and none of the others failed.
 | `dns` | The host of `BACKPLANE_URL` resolves, and the address it points at answers as this MEHO. | "The host name ... does not resolve." Add the name to DNS, or fix `BACKPLANE_URL`. If `BACKPLANE_URL` is empty, set it to the address people use to reach MEHO. "The address it points at does not answer as this MEHO." The name points at another server: point it at the address MEHO is served on, or fix `BACKPLANE_URL`. |
 | `certificate` | MEHO opens a TLS connection to `BACKPLANE_URL`. The chain is trusted, the name matches, and more than 30 days are left. | Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix `BACKPLANE_URL`. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address. |
 | `network` | The host of `BACKPLANE_URL` points at a private, shared or local address. | Warning, not red: "points at a public internet address". See [MEHO stays on the management network](#meho-stays-on-the-management-network). |
-| `clock` | The clock of MEHO is within 60 seconds of the time Keycloak reports and the time PostgreSQL reports. | The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. If a time source cannot be read, check that MEHO can reach it. |
+| `clock` | The clock of MEHO is within 60 seconds of the time PostgreSQL reports, and of the time Keycloak reports when Keycloak sends one (see the notes). | The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. No answer from Keycloak, or an error answer: check that Keycloak is running and that MEHO can reach the address in `KEYCLOAK_DISCOVERY_URL` (or `KEYCLOAK_ISSUER_URL` when that is not set). The time of PostgreSQL cannot be read: check that MEHO can reach it. |
 | `reachability` | Every system in the settings answers the same call that `meho targets probe` uses. With no systems added, the line is green. | "2 of 5 systems did not answer." (the console page names them). Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right. |
 
 ## MEHO stays on the management network
@@ -78,6 +78,11 @@ a firewall, and run the checks again. The install itself is not stopped.
 - The clock check reads the time from a successful discovery answer of
   Keycloak only. An error page from a proxy in front of Keycloak does not
   count, so the line is red while Keycloak is down.
+- The time of Keycloak comes from the `Date` header of its answer. The
+  Keycloak of the built-in core sends no `Date` header. Then the clock line
+  compares with PostgreSQL only, says that the time of Keycloak was not
+  compared, and stays green. Behind a proxy, the `Date` header comes from the
+  proxy, so the line compares with the clock of the proxy.
 - The reachability check does not store anything. `meho targets probe` also
   stores the detected product and version; this check only asks.
 - A system whose login lives in Vault needs a person's token to read that

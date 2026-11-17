@@ -2994,6 +2994,22 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
+def _without_new_credential(dumped: dict[str, Any]) -> dict[str, Any]:
+    """*dumped* without its answer: the run made a new credential.
+
+    The person who approved gets the credential in the answer of the run,
+    once. The copy MEHO keeps on the request has the status, the error and
+    the audit id, and no answer and no handle.
+    """
+    extras = dumped.get("extras")
+    return {
+        **dumped,
+        "result": None,
+        "handle": None,
+        "extras": {**(extras if isinstance(extras, dict) else {}), "secret_value_withheld": True},
+    }
+
+
 async def persist_resume_result(
     request_id: uuid.UUID, result: Any, *, parked_op_id: str, parked_op_class: str | None = None
 ) -> None:
@@ -3015,7 +3031,9 @@ async def persist_resume_result(
     The run summary on the list and show views reads only that stamp, so a
     row this code did not write shows no guidance. *parked_op_id* is the op
     id of the request and *parked_op_class* its class; a secret-class op
-    gets no stamp.
+    gets no stamp. A ``credential_mint`` op (its class stored on the row or
+    given by its op id) is stored without its answer: MEHO keeps no copy of
+    the new credential.
 
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
@@ -3028,6 +3046,8 @@ async def persist_resume_result(
     dumped = _dump_result_envelope(result)
     if dumped is None:
         return
+    if (parked_op_class or request_op_class(parked_op_id, None)) == "credential_mint":
+        dumped = _without_new_credential(dumped)
     dumped = with_approval_guidance(
         dumped, parked_op_id=parked_op_id, parked_op_class=parked_op_class
     )

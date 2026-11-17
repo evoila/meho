@@ -33,6 +33,7 @@ from meho_backplane.operations.ingest import (
     BuiltinConnectorWriteForbiddenError,
     ConnectorInUseError,
     ConnectorNotFoundError,
+    ImplIdEndsInDigitsError,
     InvalidSchemaError,
     InvalidSpecError,
     LegacyTenantConnectorCopyError,
@@ -44,12 +45,12 @@ from meho_backplane.operations.ingest import (
     UpstreamNotSpecError,
     VersionMismatchError,
     build_connector_legacy_tenant_copy_detail,
+    build_connector_name_detail,
     build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
-    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -188,6 +189,7 @@ SPEC_ERROR_TYPES: Final = (
     OpIdCollision,
     LlmOutputInvalid,
     ProductImplIdMismatch,
+    ImplIdEndsInDigitsError,
 )
 
 
@@ -233,8 +235,8 @@ def raise_invalid_params_for_spec_error(exc: Exception) -> None:
         data = build_op_id_collision_detail(exc)
     elif isinstance(exc, LlmOutputInvalid):
         data = build_llm_output_invalid_detail(exc)
-    elif isinstance(exc, ProductImplIdMismatch):
-        data = build_product_impl_id_mismatch_detail(exc)
+    elif isinstance(exc, ProductImplIdMismatch | ImplIdEndsInDigitsError):
+        data = build_connector_name_detail(exc)
     else:  # pragma: no cover — defensive; caller funnels only SPEC_ERROR_TYPES
         raise exc
     raise McpInvalidParamsError(str(exc), data=data) from exc

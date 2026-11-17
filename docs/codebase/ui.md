@@ -495,6 +495,7 @@ backplane Python base image already follows).
     <script src="/ui/static/src/app/csrf-token.js" defer>
     <script src="/ui/static/src/app/session-expiry.js" defer>
     <script src="/ui/static/src/app/page-tenant.js" defer>
+    <script src="/ui/static/src/app/work-ref-refused.js" defer>   <!-- swaps in a refused ticket id search -->
     <script src="/ui/static/src/vendor/sse.min.js" defer>
     <script src="/ui/static/src/vendor/alpine.min.js" defer>
   </head>
@@ -3285,8 +3286,8 @@ between the two agents surfaces, and the agent detail page carries a
   `agents/runs/list.html` page on a browser nav, the
   `agents/runs/_table_rows.html` `<tbody>` fragment on a filter swap.
   Filters: `status` (the runtime `AgentRunStatus` `StrEnum` used directly
-  as the `Query` type — an out-of-enum value 422s) + `work_ref` (exact
-  match). Both ride `hx-push-url` so the filtered view is bookmarkable.
+  as the `Query` type — an out-of-enum value 422s) + `work_ref` (whole
+  ticket id). Both ride `hx-push-url` so the filtered view is bookmarkable.
   Columns: run-id prefix, status pill, agent name, trigger provenance,
   model + provider + tier, turns, work_ref chip, relative created,
   duration.

@@ -89,10 +89,12 @@ from meho_backplane.agents.identity_ref import (
 from meho_backplane.agents.identity_ref import (
     validate_identity_ref as _validate_identity_ref,
 )
+from meho_backplane.agents.live_grants import load_live_grants
 from meho_backplane.agents.mapping import apply_changes, build_definition_row
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
+    AgentDefinitionSaved,
     AgentDefinitionUpdate,
     validate_name,
 )
@@ -110,6 +112,7 @@ __all__ = [
     # ``_validate_identity_ref`` below is the alias internal call sites use.
     "AgentIdentityRefInvalidError",
     "StartingGrantsError",
+    "with_live_grants",
 ]
 
 
@@ -119,6 +122,20 @@ __all__ = [
 #: a tenant that grows past it doesn't accidentally stream the whole
 #: table back to a casual ``meho agent list``.
 DEFAULT_LIST_LIMIT: int = 100
+
+
+async def with_live_grants(
+    tenant_id: uuid.UUID, entry: AgentDefinitionRead
+) -> AgentDefinitionSaved:
+    """Return *entry* with the live grants of its agent (the create and edit answers).
+
+    Read after the save, so the list also holds the grants a starting
+    grant pick just wrote.
+    """
+    live = await load_live_grants(tenant_id, entry.identity_ref)
+    return AgentDefinitionSaved(
+        **entry.model_dump(), live_grants=live.grants, live_grants_truncated=live.truncated
+    )
 
 
 class AgentDefinitionExistsError(Exception):

@@ -70,7 +70,9 @@ files for the Linux server:
 The server needs no internet, so download the three files on another
 machine. Check the signature of the checksum file there first, then the
 download. You need
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+version 3 or newer. Version 2 cannot read the signature file of the
+release: it stops with `bundle does not contain cert for verification`.
 
 ```bash
 TAG=v<version>

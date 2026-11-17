@@ -385,6 +385,16 @@ egress rules to:
   on `broadcast.enabled: true` and is omitted when the broadcast subchart
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
+- The console address — only when
+  `networkPolicy.ingressControllerEgress.podLabels` is set (default
+  `{}`, #6612): `tcp/<ingressControllerEgress.port>` (default 8443) to
+  the Pods with those labels in `ingressControllerNamespace`. The
+  first-start `certificate` check connects to the backplane's own
+  address, and the host port or Service in front of the ingress sends
+  that connection to the ingress Pod before the rule is checked. This is
+  a separate key, not an `extraEgress` item, because a later values file
+  that sets `extraEgress` replaces the whole list. Install form 2 sets it
+  for RKE2's Traefik (`app.kubernetes.io/name: rke2-traefik`)
 - Operator rules — every item of `networkPolicy.extraEgress` (default
   `[]`), added after the rules above, exactly as written (#3516)
 
@@ -1506,6 +1516,7 @@ them).
 | `probes.startup.*` | `/healthz` httpGet + 15-min first-boot budget (#2393, #4102) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
+| `networkPolicy.ingressControllerEgress.podLabels` / `.port` | `{}` / `8443` | Labels and Pod port of the ingress controller, so MEHO can reach its own console address (#6612). Empty labels: no rule. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |

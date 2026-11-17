@@ -545,7 +545,10 @@ kernel, the script prints a note to restart the machine after the update.
 `values-single-node.yaml` turns the built-in parts on (`corePostgres`,
 `coreKeycloak`, `coreVault`), sets `ingress.className: traefik`,
 `networkPolicy.ingressControllerNamespace: kube-system` (RKE2's Traefik
-runs there) and `ingress.tls.secretName: meho-core-tls`, the self-signed
+runs there), `networkPolicy.ingressControllerEgress.podLabels`
+(`app.kubernetes.io/name: rke2-traefik`, so MEHO can reach its own
+console address, see [Network policies and Traefik](#network-policies-and-traefik))
+and `ingress.tls.secretName: meho-core-tls`, the self-signed
 certificate the install makes. Every storage class stays at the chart's
 default, empty, so the volumes use the default class. The chart points
 MEHO at the built-in parts itself (#4047), so the file names no database
@@ -955,6 +958,15 @@ policy limits. The chart's own policies let the namespace `kube-system`
 reach MEHO (`networkPolicy.ingressControllerNamespace: kube-system` in
 `values-single-node.yaml`). No RKE2 policy is in `meho` or
 `local-path-storage`.
+
+The other way round, the chart's own policy limits what the `meho` pod
+may reach. The first-start `certificate` check connects to the console
+address on port 443. From a pod, that connection also goes through the
+host port to the Traefik pod on port 8443, and Calico checks the
+`meho` policy against that pod and port. So `values-single-node.yaml`
+sets `networkPolicy.ingressControllerEgress.podLabels` to the Traefik
+label, and the chart adds a rule to the Traefik pods in `kube-system` on
+port 8443 (#6612). Without it the check says "could not connect".
 
 ### For later Tasks
 

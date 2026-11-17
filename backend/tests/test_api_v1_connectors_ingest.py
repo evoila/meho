@@ -3999,6 +3999,77 @@ paths:
     assert "version='7.0'" in detail["message"]
 
 
+def test_ingest_second_version_under_same_name_passes_pre_flight(
+    client: TestClient,
+    tmp_path: Any,
+) -> None:
+    """A dry run of a second label is accepted when only a stand-in class exists (#4728)."""
+    from meho_backplane.connectors import registry as _registry_mod
+    from meho_backplane.operations.ingest.connector_registration import (
+        ensure_connector_class_registered,
+    )
+
+    ensure_connector_class_registered(
+        product="t4728nw", version="19.14", impl_id="t4728nw-rest", base_url=None
+    )
+    spec_path = tmp_path / "nw.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: nw
+  version: '19.12'
+paths:
+  /nw/clients:
+    get:
+      summary: list clients
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    try:
+        with respx.mock as mock_router:
+            _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+            spec_url = _register_spec_at_https(mock_router, spec_path, path="nw-1912.yaml")
+            response = client.post(
+                "/api/v1/connectors/ingest",
+                json={
+                    "product": "t4728nw",
+                    "version": "19.12",
+                    "impl_id": "t4728nw-rest",
+                    "specs": [{"uri": spec_url}],
+                    "dry_run": True,
+                },
+                headers=_authed(token),
+            )
+    finally:
+        _registry_mod._REGISTRY_V2.pop(("t4728nw", "19.14", "t4728nw-rest"), None)
+    assert response.status_code == 200, response.text
+
+
+def test_ingest_impl_id_with_dash_then_digit_returns_422(client: TestClient) -> None:
+    """An impl_id such as ``t4728nw-rest-1912`` is refused with a clear 422 (#4728)."""
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "t4728nw",
+                "version": "19.12",
+                "impl_id": "t4728nw-rest-1912",
+                "specs": [{"uri": "https://example.test/nw.yaml"}],
+                "dry_run": True,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["kind"] == "impl_id_ends_in_digits"
+    assert "t4728nw-rest-1912" in detail["message"]
+
+
 # ---------------------------------------------------------------------------
 # #2977 — reject epoch-versioned (non-idempotent probe) registrations
 # ---------------------------------------------------------------------------

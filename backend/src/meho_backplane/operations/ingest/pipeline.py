@@ -80,6 +80,7 @@ exercised. Useful for operators validating a spec before committing.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Sequence
 from typing import Literal
 from uuid import UUID
@@ -121,6 +122,7 @@ from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
 )
 from meho_backplane.operations.ingest.exceptions import (
+    ImplIdEndsInDigitsError,
     LlmOutputInvalid,
     ProductImplIdMismatch,
     VersionMismatchError,
@@ -776,6 +778,8 @@ class IngestionPipelineService:
         # rejected before any spec I/O or DB write, on every entry point
         # that reaches this method (REST / MCP / CLI).
         self._assert_product_round_trips(product=product, version=version, impl_id=impl_id)
+        if re.search(r"-\d", impl_id):
+            raise ImplIdEndsInDigitsError(product=product, version=version, impl_id=impl_id)
         # The rows would run on the class that serves this name; refuse when
         # that class runs only its own hand-written operations.
         assert_ingest_target_accepts(product=product, version=version, impl_id=impl_id)

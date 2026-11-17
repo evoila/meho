@@ -187,7 +187,9 @@ Rules:
   `meho_agents_edit`) when the new `identity_ref` names another agent
   (#6389). An edit that sends the same `identity_ref` asks nothing. On an
   edit the field is used only together with `identity_ref`; without it
-  the request gets 422. The rows go to that agent principal. A live row the agent already has is skipped,
+  the request gets 422. A pick that is sent with the same `identity_ref`
+  is still written: MEHO does not ask for it, but it takes it.
+  The rows go to that agent principal. A live row the agent already has is skipped,
   and so is a `deny` row. An expired row with the same pattern and
   target is renewed: it gets `auto-execute` and no end date.
 - Only a person may send a pick that adds rows (`read-everything` or
@@ -274,6 +276,47 @@ schema that `tools/list` shows (`ToolDefinition.for_settings` in
 `mcp/registry.py`). To accept the field with `off`, the tools would
 have to show it with `off` too, and then a switch that is off would
 change what an AI client sees.
+
+### Live grants in the create and edit answers (`agents/live_grants.py`)
+
+When MEHO asks for no pick because the agent already has a live grant,
+the person still sees what the agent may do. Every way in shows the
+agent's live grants:
+
+- **REST.** `POST /api/v1/agents` and `PATCH /api/v1/agents/{name}`
+  answer `AgentDefinitionSaved`: the definition plus `live_grants` (each
+  with `id`, `op_pattern`, `target_scope`, `target_name`, `verdict`,
+  `expires_at`) and `live_grants_truncated`. The list is read after the
+  save, so it also holds the rows a pick just wrote. `GET` answers keep
+  the plain `AgentDefinitionRead`.
+- **MCP.** `meho_agents_create` and `meho_agents_edit` answer
+  `{name, agent, live_grants, live_grants_truncated}`. The tool text names
+  `live_grants` only in the sentence that the switch adds, so with
+  `AGENT_GRANT_REQUIRED=off` the tool list is unchanged.
+- **CLI.** `meho agent create` and `meho agent edit` without `--grants`
+  print "This agent already has these grants; no starting grant is
+  needed." and one line per grant (operations, target, verdict, end
+  date). They print nothing more when the agent has no live grant.
+  `--json` has the answer's `live_grants`.
+- **Console.** The identity reference field of the create and edit
+  forms loads `GET /ui/agents/principals/live-grants?identity_ref=<agent>`
+  (`ui/routes/agents/live_grants.py`, tenant admin only) when the form
+  opens and after each change. When the agent has live grants, the
+  fragment lists them next to the pick with the same sentence.
+
+A grant is live when it has no end date or its end date is in the
+future; a grant that has run out is not listed, and then MEHO asks for
+the pick. The list reads only the caller's tenant, and names a target
+only when it is in that tenant. It holds at most 100 grants; when there
+are more, `live_grants_truncated` is true and the CLI and console say so.
+`test_agent_live_grants.py`, `test_ui_agent_live_grants.py` and
+`cli/internal/cmd/agent/live_grants_test.go` check it.
+
+The agent form caps the system prompt (65,536 characters) and the turn budget (8
+characters) in the browser. A longer value fails the form route's own
+length check before MEHO's form code runs, and that answer is a JSON 422.
+The modal container swaps a 422 into the open form only when the answer
+is HTML, so such an answer never replaces the form and the person's text.
 
 ## Elevation sweeper (`agents/grant_expiry.py`)
 

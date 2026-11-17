@@ -31,6 +31,7 @@ the end, then return to the trail.
 | `acr.loa.map` | Realm attribute (**Realm settings → General → ACR to LoA mapping**) | Names the sign-in levels: `meho-approve` is level 2, `meho-touch` is level 3. |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | `meho-mcp-code`, `meho-mcp-desktop` | **Public** clients, copies of `meho-mcp` | The Claude Code plugin and the Claude Desktop extension, each with a login of its own, when `MCP_CLIENT_PER_TOOL_KIND` is on. See [The MCP clients of the AI tools](#the-mcp-clients-of-the-ai-tools). |
+| `meho-mcp-profile-<name>` | **Public** client, copy of `meho-mcp` plus a fixed claim (optional) | A session tied to one MCP tool profile. See [A login client for one tool profile](#a-login-client-for-one-tool-profile). |
 | `meho-web` | Confidential client, authorization-code + PKCE | The MEHO web UI. Redirect URI `https://<host>/ui/auth/callback`. |
 | `meho approval touch` | Login flow, bound to `meho-web`, with two levels | Level 1 is the normal console login. Level 3 (`meho-touch`) asks for a passkey touch every time. See [The passkey touch level](#the-passkey-touch-level). |
 | `meho-admin`, `meho-check-runner` | Confidential service clients | MEHO manages clients and users in the realm (`meho-admin`), and runs scheduled checks (`meho-check-runner`) |
@@ -1017,6 +1018,46 @@ With the switch off (the default), both tools keep `meho-mcp`, as before.
 Older plugins and other MCP clients keep `meho-mcp` in any case. MEHO
 accepts tokens of all three clients on `/mcp`. None of them can approve
 a request: an approval needs `meho-cli-approve` or the web console.
+
+## A login client for one tool profile
+
+You can make a login client whose tokens work only for one MCP tool
+profile. Use it when an agent must stay inside one profile, for example a
+profile that may use only the Kubernetes connectors. The profile itself is
+set on the backplane; see "Tool profiles" in the MCP surface page.
+
+**With `bootstrap-clients`.** Add `--mcp-profile <name>` (repeat it for
+more profiles). It makes `meho-mcp-profile-<name>`.
+
+**By hand.**
+
+1. Make a client exactly like `meho-mcp`: public, standard flow with PKCE
+   `S256`, the same redirect URIs, the eight mappers, the four default
+   scopes and the same optional scopes.
+2. Add one more mapper on the client itself, not in a client scope:
+   **Mappers → Add mapper → By configuration → Hardcoded claim**.
+   - Name: `mcp-profile`
+   - Token Claim Name: `mcp_profile`
+   - Claim value: the profile name, for example `k8s`
+   - Claim JSON type: `String`
+   - Add to access token: **On**. Add to ID token and to userinfo: Off.
+
+Because the mapper is on the client, every token of the client has the
+claim, also a renewed token and a token with fewer scopes.
+
+**What MEHO does with such a token:**
+
+- It works only at `https://<meho-host>/mcp?profile=<name>`.
+- At `/mcp` without the profile, at another profile, at the REST API and
+  at the status route, MEHO answers 403 `mcp_profile_scope_violation`.
+- A claim value MEHO cannot read, or a profile MEHO does not know, gives
+  403 everywhere. A profile from `MCP_CONNECTOR_PROFILES` is known only
+  while `MCP_PROFILE_CONNECTOR_LISTS` is on.
+- Tokens without the claim work as before.
+
+Limit: this stops someone from using the profile's token anywhere else.
+It does not stop the same person from signing in again through another
+login client, such as `meho-mcp`.
 
 ## How long each login lasts
 

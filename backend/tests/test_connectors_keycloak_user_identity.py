@@ -29,7 +29,13 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector
+
+# The connector loads ops_user_required_actions late and it adds its card builder when
+# it loads. Load it at collection, so the test setup keeps the builder for every test.
+from meho_backplane.connectors.keycloak import (
+    KeycloakConnector,
+    ops_user_required_actions,  # noqa: F401
+)
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -546,6 +552,11 @@ async def test_a_user_renamed_after_the_request_is_refused_when_it_runs(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         user_read, writes = _mount_user_write(mock)
         request_id = await _park(op_id, params)
+        # The card must hold the user, or the run would refuse for a missing id instead.
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            assert _USER_UUID in str(row.proposed_effect.get("preview")), row.proposed_effect
         user_read.respond(200, json={**_user(True), "username": "renamed-guest"})
         resumed = await _approve_and_resume(request_id)
     # With a username in the request the run refuses the pair; by id it refuses the card.
@@ -573,8 +584,7 @@ def assert_refused_without_write(
     if text is not None and "object_changed_since_approval" not in dumped:
         withheld = "<vendor text withheld" in dumped
         message = resumed.extras["exception_message"]
-        # A card built under load can lack its user id; the run then refuses that.
-        assert withheld or text in message or "card shows no user id" in message, dumped
+        assert withheld or text in message, dumped
     assert not writes.called
 
 

@@ -522,7 +522,7 @@ server-side:
   narrows.
 
 `--filter-work-ref <ref>` shows only the runs started with that
-change-ticket reference (exact match).
+ticket id (whole id; white space at the ends is ignored).
 
 The CLI sends what you pass and renders what the backend returns —
 no client-side double-checking.

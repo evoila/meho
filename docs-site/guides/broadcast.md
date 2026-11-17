@@ -84,10 +84,11 @@ forward with the cursor:
 `next_cursor` round-trips back as the next call's `cursor` to read the
 next page of the same view; it is `null` at the end. `watch_checkpoint`
 is where `meho_broadcast_watch` starts so nothing after this read is missed.
-The `filter` object narrows by exact match on `principal`, `target`,
-and `work_ref` (a change-ticket reference), plus `active_only` to keep
-only active claims: trusted, not completed, and with a TTL that has not
-run out.
+The `filter` object narrows by exact match on `principal` and `target`.
+It also narrows by `work_ref` (a change-ticket id): white space at both
+ends is ignored, and a value with control or invisible characters, or
+longer than 256 characters, is refused. `active_only` keeps only active
+claims: trusted, not completed, and with a TTL that has not run out.
 
 ## Announce intent
 

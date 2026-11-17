@@ -171,7 +171,7 @@ register_mcp_tool(
             "meho_scheduler_cancel) alongside the model-native `id`. "
             "Optional filters: kind ('cron'|'one_off'|'event'), "
             "status ('active'|'paused'|'cancelled'|'fired'), "
-            "work_ref (exact-match change-ticket reference). "
+            "work_ref (the whole ticket id; white space at both ends is ignored). "
             "Tenant-scoped via the JWT; cross-tenant listing is not "
             "exposed on the MCP transport."
         ),
@@ -191,8 +191,11 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "description": (
-                        "Optional exact-match filter on the trigger's "
-                        "change-ticket reference (e.g. 'gh:evoila/meho#13')."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#13'). White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused."
                     ),
                 },
                 "limit": {

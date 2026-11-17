@@ -3298,8 +3298,8 @@ the notes) and none of the others failed.</p>
 </tr>
 <tr>
 <td><code>clock</code></td>
-<td>The clock of MEHO is within 60 seconds of the time Keycloak reports and the time PostgreSQL reports.</td>
-<td>The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. If a time source cannot be read, check that MEHO can reach it.</td>
+<td>The clock of MEHO is within 60 seconds of the time PostgreSQL reports, and of the time Keycloak reports when Keycloak sends one (see the notes).</td>
+<td>The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. No answer from Keycloak, or an error answer: check that Keycloak is running and that MEHO can reach the address in <code>KEYCLOAK_DISCOVERY_URL</code> (or <code>KEYCLOAK_ISSUER_URL</code> when that is not set). The time of PostgreSQL cannot be read: check that MEHO can reach it.</td>
 </tr>
 <tr>
 <td><code>reachability</code></td>
@@ -3330,6 +3330,11 @@ a firewall, and run the checks again. The install itself is not stopped.</p>
 <li>The clock check reads the time from a successful discovery answer of
   Keycloak only. An error page from a proxy in front of Keycloak does not
   count, so the line is red while Keycloak is down.</li>
+<li>The time of Keycloak comes from the <code>Date</code> header of its answer. The
+  Keycloak of the built-in core sends no <code>Date</code> header. Then the clock line
+  compares with PostgreSQL only, says that the time of Keycloak was not
+  compared, and stays green. Behind a proxy, the <code>Date</code> header comes from the
+  proxy, so the line compares with the clock of the proxy.</li>
 <li>The reachability check does not store anything. <code>meho targets probe</code> also
   stores the detected product and version; this check only asks.</li>
 <li>A system whose login lives in Vault needs a person's token to read that

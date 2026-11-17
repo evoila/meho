@@ -1033,11 +1033,15 @@ async def policy_gate(
     With ``POLICY_ENGINE_SHADOW`` on, :mod:`meho_backplane.policy.shadow`
     compares the policy evaluator with this answer; this answer counts. It
     keeps the rule the evaluator matched for
-    :func:`~meho_backplane.policy.stamp.take_rule` (#6044)."""
+    :func:`~meho_backplane.policy.stamp.take_rule` (#6044). An MCP profile
+    with a connector list may deny first (:func:`_profile_denial`, #6099)."""
     forget_rule()
     requester_denial = _requester_denial(operator, descriptor, params)
     if requester_denial is not None:
         return PermissionVerdict.DENY, requester_denial
+    profile_denial = await _profile_denial(operator, descriptor, connector_id, target)
+    if profile_denial is not None:
+        return PermissionVerdict.DENY, profile_denial
     return await _verdict_with_shadow(
         operator=operator,
         descriptor=descriptor,
@@ -1047,6 +1051,27 @@ async def policy_gate(
         params=params,
         decide_only=decide_only,
     )
+
+
+async def _profile_denial(
+    operator: Operator, descriptor: EndpointDescriptor, connector_id: str | None, target: Any
+) -> str | None:
+    """Why the session's MCP profile refuses this call, or ``None`` (#6099).
+
+    The connector that runs comes from the target, so the target's
+    connector is checked too, not only the ``connector_id`` argument.
+    """
+    if operator.mcp_tool_profile is None:
+        return None
+    # Imported here: the ``mcp`` package imports this module.
+    from meho_backplane.mcp.profiles import profile_denial, profile_target_denial
+
+    denial = profile_denial(
+        operator.mcp_tool_profile, connector_id, mutating=_is_mutating(descriptor)
+    )
+    if denial is not None:
+        return denial
+    return await profile_target_denial(operator.mcp_tool_profile, target)
 
 
 async def _verdict_with_shadow(

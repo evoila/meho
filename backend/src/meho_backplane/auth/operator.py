@@ -431,9 +431,16 @@ class Operator(BaseModel):
     web_session: bool = False
     #: The MCP tool profile the client named with ``?profile=`` (#4172),
     #: or ``None`` for the full tool list. Only the MCP route sets it, from
-    #: the URL; see :mod:`meho_backplane.mcp.profiles`. It only hides
-    #: tools. It gives no right and takes no right from the person.
+    #: the URL; see :mod:`meho_backplane.mcp.profiles`. A built-in profile
+    #: only hides tools. A profile with a connector list (#6099) also limits
+    #: the connectors and, when read-only, the changes. It never gives a
+    #: right.
     mcp_tool_profile: str | None = None
+    #: The profile named by the ``mcp_profile`` claim of the login token
+    #: (#6099), or ``None`` when the token has no such claim. Only the token
+    #: check sets it. MEHO takes such a token only at
+    #: ``/mcp?profile=<this name>``.
+    mcp_profile_claim: str | None = None
     #: The MCP client asked for the short tool texts with ``?texts=short``
     #: (#6293). Only the MCP route sets it, from the URL; see
     #: :mod:`meho_backplane.mcp.short_texts`. It changes only tool texts.

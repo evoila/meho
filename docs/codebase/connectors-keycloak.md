@@ -47,8 +47,9 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset. Two more, `keycloak.user.lock_status` and
 `keycloak.realm.lock_settings`, show whether a user is locked after failed
-sign-ins. In total the connector registers 49
-operations: 19 `safe` reads and 30 writes that wait for
+sign-ins. Two more, `keycloak.events.list` and `keycloak.admin_events.list`,
+read the saved login events and admin events. In total the connector registers
+51 operations: 21 `safe` reads and 30 writes that wait for
 approval (8 `caution`, 18 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
@@ -236,12 +237,13 @@ rejects a whitespace-only secret rather than setting an empty password.
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
 - `register_operations()` — walks `READ_OPS`, `WRITE_OPS`,
-  `LOGIN_CHECK_OPS`, `APPROVAL_FLOW_OPS`, `PASSKEY_CODE_SKIP_OPS` and
-  `IDENTITY_PROVIDER_OPS`,
+  `LOGIN_CHECK_OPS`, `APPROVAL_FLOW_OPS`, `PASSKEY_CODE_SKIP_OPS`,
+  `IDENTITY_PROVIDER_OPS` and `EVENT_OPS`,
   resolves each `handler_attr` to a bound method, looks the group's
   `when_to_use` up in the merged `WHEN_TO_USE_BY_GROUP` ∪
   `WHEN_TO_USE_WRITE_BY_GROUP` ∪ `WHEN_TO_USE_LOGIN_CHECK_BY_GROUP` ∪
-  `WHEN_TO_USE_AUTHFLOW_BY_GROUP` ∪ `WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP`
+  `WHEN_TO_USE_AUTHFLOW_BY_GROUP` ∪ `WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP` ∪
+  `WHEN_TO_USE_EVENTS_BY_GROUP`
   (a missing entry is a hard error), and
   upserts via `register_typed_operation`. Idempotent across restarts.
 - `_write_admin(target, method, path, *, operator, json, idempotent_conflict=True)`
@@ -1286,6 +1288,37 @@ A failed read, or a body of the wrong shape, is an error, never an empty list.
 
 The first op is named `.step.list` and not `.executions`, because the event
 feed treats a name that ends in `.list` as a read.
+
+### Login events and admin events (`ops_events.py`)
+
+Two `safe` reads, group `events`, for the first questions of a security
+review: who logged in and who failed, and who changed what. Each copies only
+a fixed list of fields (an allow-list).
+
+| op_id | Admin REST API | rows |
+|---|---|---|
+| `keycloak.events.list` | `GET .../events` | `time`, `type`, `clientId`, `userId`, `ipAddress`, `error`. Filters: `type` (list), `client`, `user`, `ipAddress`, `dateFrom`, `dateTo`. |
+| `keycloak.admin_events.list` | `GET .../admin-events` | `time`, `operationType`, `resourceType`, `resourcePath`, `authRealmId`, `authClientId`, `authUserId`, `authIpAddress`, `error`. Filters: `operationTypes`, `resourceTypes`, `resourcePath`, `authUser`, `authIpAddress`, `dateFrom`, `dateTo`. |
+
+- The admin event `representation` (the JSON text of the change, which can
+  hold a password), the `details` map and the session id are never returned.
+  The flight recorder trace masks `representation` too
+  (`_TRACE_ONLY_FIELDS` in `redaction.py`), because it stores the vendor
+  answer before the op filters it.
+- Each call first reads the realm (`GET /admin/realms/{realm}`). When
+  `eventsEnabled` (login events) or `adminEventsEnabled` (admin events) is
+  false, the answer is `enabled: false` with a `message` and no rows, and
+  Keycloak's event endpoint is not called. A realm answer without the flag
+  is an error. An empty `rows` with `enabled: true` means nothing was saved
+  for the filter.
+- Paging: `first` (default 0) and `max` (default 100, at most 1000). The op
+  asks Keycloak for `max + 1` rows and returns `max`; `has_more` is true when
+  the page is not the end of the list. Answer shape:
+  `{realm, enabled, first, max, has_more, rows, total}`. A long `rows` list
+  comes back behind a result handle like any other list.
+- `dateFrom` and `dateTo` are `YYYY-MM-DD`. Times come back as ISO 8601 in
+  UTC. A failed read, a body that is not a list, or a row that is not an
+  object is an error, never an empty list.
 
 ### Skip the one-time code after a passkey (#5663)
 

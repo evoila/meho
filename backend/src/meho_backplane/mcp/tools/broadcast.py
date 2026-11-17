@@ -298,12 +298,15 @@ register_mcp_tool(
                             "type": "string",
                             "minLength": 1,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It groups every "
+                                "event tied to one ticket -- an "
+                                "announcement's declared 'work_ref' OR an "
+                                "audit-driven operation's projected lineage "
+                                "'work_ref'."
                             ),
                         },
                         "active_only": {
@@ -973,12 +976,15 @@ register_mcp_tool(
                             "type": "string",
                             "minLength": 1,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It groups every "
+                                "event tied to one ticket -- an "
+                                "announcement's declared 'work_ref' OR an "
+                                "audit-driven operation's projected lineage "
+                                "'work_ref'."
                             ),
                         },
                         "active_only": {

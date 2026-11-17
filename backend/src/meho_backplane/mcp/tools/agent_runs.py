@@ -424,8 +424,8 @@ register_mcp_tool(
             "started_at, ended_at}]}; "
             "agent_definition_id / agent_name are null for an ad-hoc run "
             "or a definition deleted after the run. Filter by "
-            "work_ref (exact-match external change-ticket reference, e.g. "
-            "'gh:evoila/meho#11'), status, and/or agent_name (exact-match "
+            "work_ref (the whole ticket id, e.g. 'gh:evoila/meho#11'; white "
+            "space at both ends is ignored), status, and/or agent_name (exact-match "
             "agent definition name — an unknown name returns an empty "
             "list, not an error); page with limit (1..500, default 100) + "
             "offset. Tenant-isolated server-side — only your tenant's runs "
@@ -437,8 +437,11 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "description": (
-                        "Exact-match external change-ticket reference filter, "
-                        "e.g. 'gh:evoila/meho#11'."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#11'). White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused."
                     ),
                 },
                 "agent_name": {

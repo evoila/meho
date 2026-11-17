@@ -133,8 +133,8 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
-		"narrow to one external change-ticket reference (exact match; "+
-			"e.g. gh:evoila/meho#1) — \"show every write authorised by ticket X\"")
+		"filter by ticket id (whole id; white space at the ends is ignored) — "+
+			"\"show every write authorised by ticket X\"")
 	cmd.Flags().BoolVar(&fullRowLost, "full-row-lost", false,
 		"only the short rows: the database refused the full row, so MEHO stored "+
 			"the row without the target's answer and the error text")

@@ -94,9 +94,11 @@ __all__ = [
     "SignInLevelInForce",
     "read_approval_sign_in",
     "read_failed",
+    "read_web_approval_sign_in",
     "sign_in_level_for_status",
     "sign_in_level_in_force",
     "sign_in_level_warning",
+    "web_sign_in_level_warning",
 ]
 
 ApprovalSignInState = Literal["ok", "flow_missing", "flow_differs", "not_bound", "not_checked"]
@@ -129,6 +131,9 @@ _KNOWN_NOT_CHECKED = frozenset(
 
 #: The states in which the read worked and the realm does not give the level.
 _NO_LEVEL_STATES = frozenset({"flow_missing", "flow_differs", "not_bound"})
+
+#: The ``detail`` of the console's state when its approval client setting is empty.
+_NO_WEB_CLIENT = "UI_KEYCLOAK_APPROVE_CLIENT_ID is empty"
 
 
 class ApprovalSignInStatus(BaseModel):
@@ -347,22 +352,38 @@ class SignInLevel(NamedTuple):
     check_failed: bool = False
 
 
-async def sign_in_level_in_force(
-    settings: Settings, *, client_id: str | None = None
-) -> SignInLevel:
+async def read_web_approval_sign_in(settings: Settings | None = None) -> ApprovalSignInStatus:
+    """The state of the console's approval client, read like the command line's (#6282).
+
+    An empty ``UI_KEYCLOAK_APPROVE_CLIENT_ID`` counts as a missing client
+    (``not_bound``), without a read: the console then has no approval
+    sign-in to offer.
+    """
+    settings = settings or get_settings()
+    client_id = settings.ui_keycloak_approve_client_id
+    if not client_id:
+        return ApprovalSignInStatus(state="not_bound", client="", detail=_NO_WEB_CLIENT)
+    return await read_approval_sign_in(settings, client_id=client_id)
+
+
+async def sign_in_level_in_force(settings: Settings, *, web: bool = False) -> SignInLevel:
     """What MEHO does now with a token of the approval client that lacks the level (#6281).
 
-    ``off``, ``observe`` and ``required`` are the setting itself. ``auto``
-    reads the approval sign-in (:func:`read_approval_sign_in`, kept for a
-    short time): ``observe`` only when MEHO knows for sure that the realm
-    does not give the level, else ``required``; also when the read failed.
-    *client_id* is the approval client whose binding counts; the console
-    passes its own (#6282).
+    ``off``, ``observe`` and ``required`` are the setting itself, with no
+    read of the realm. ``auto`` reads the approval sign-in
+    (:func:`read_approval_sign_in`, kept for a short time): ``observe``
+    only when MEHO knows for sure that the realm does not give the level,
+    else ``required``; also when the read failed. *web* reads the
+    console's approval client instead (:func:`read_web_approval_sign_in`,
+    #6282).
     """
     mode = settings.approval_sign_in_level
     if mode != "auto":
         return SignInLevel(sign_in_level_for_status(mode, None))
-    status = await read_approval_sign_in(settings, client_id=client_id)
+    if web:
+        status = await read_web_approval_sign_in(settings)
+    else:
+        status = await read_approval_sign_in(settings)
     return SignInLevel(sign_in_level_for_status(mode, status), check_failed=read_failed(status))
 
 
@@ -399,4 +420,32 @@ def sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str
     return (
         f"MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is {mode}. "
         "Set it to auto or required."
+    )
+
+
+def web_sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str | None:
+    """The health warning for the console's approval client (#6282), else ``None``.
+
+    Only ``auto`` can differ between the two approval clients: it reads
+    each client's binding. For the other values,
+    :func:`sign_in_level_warning` already says it for both.
+    """
+    if mode != "auto" or status is None:
+        return None
+    if read_failed(status):
+        return (
+            "MEHO could not check the console approval client "
+            f"(approvals.web_sign_in is not_checked: {status.detail}). Until a check works, "
+            "MEHO refuses a console approval sign-in without the approval level."
+        )
+    if sign_in_level_for_status(mode, status) == "required":
+        return None
+    fix = (
+        "Set UI_KEYCLOAK_APPROVE_CLIENT_ID."
+        if status.detail == _NO_WEB_CLIENT
+        else _sign_in_fix(status)
+    )
+    return (
+        "The console does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
+        f"approvals.web_sign_in is {status.state}, not ok. {fix}"
     )

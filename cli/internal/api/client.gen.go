@@ -2158,8 +2158,11 @@ type ApprovalSignInStatusState string
 // level: “off“, “observe“ or “required“ (“auto“ is “observe“
 // only while “sign_in“ shows for sure that the realm does not give the
 // level, and “required“ when it is “ok“ or its read failed).
-// “sign_in_level_warning“ is a short sentence whenever the level is not
-// required in practice or the read failed, else “None“.
+// “web_sign_in“ and “web_sign_in_level_in_force“ are the same for the
+// console's approval client (#6282): “auto“ reads each client's
+// binding, so the two can differ. “sign_in_level_warning“ is a short
+// sentence whenever the level is not required in practice for either
+// client or a read failed, else “None“.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
@@ -2170,6 +2173,10 @@ type ApprovalsStatus struct {
 	SignInLevel        *string               `json:"sign_in_level"`
 	SignInLevelInForce *string               `json:"sign_in_level_in_force"`
 	SignInLevelWarning *string               `json:"sign_in_level_warning"`
+
+	// WebSignIn The state of the approval sign-in flow and its binding (#6280).
+	WebSignIn             *ApprovalSignInStatus `json:"web_sign_in,omitempty"`
+	WebSignInLevelInForce *string               `json:"web_sign_in_level_in_force"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -7111,8 +7118,11 @@ type HealthResponse struct {
 	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
 	// only while ``sign_in`` shows for sure that the realm does not give the
 	// level, and ``required`` when it is ``ok`` or its read failed).
-	// ``sign_in_level_warning`` is a short sentence whenever the level is not
-	// required in practice or the read failed, else ``None``.
+	// ``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the
+	// console's approval client (#6282): ``auto`` reads each client's
+	// binding, so the two can differ. ``sign_in_level_warning`` is a short
+	// sentence whenever the level is not required in practice for either
+	// client or a read failed, else ``None``.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

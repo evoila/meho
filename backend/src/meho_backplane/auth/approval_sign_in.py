@@ -102,6 +102,7 @@ __all__ = [
     "LEVEL_MISSING_REMEDIATION",
     "LEVEL_UNCHECKED_REMEDIATION",
     "WEB_FRESH_SIGN_IN_REMEDIATION",
+    "WEB_LEVEL_MISSING_REMEDIATION",
     "ApprovalAuth",
     "TouchBinding",
     "TouchPresence",
@@ -140,6 +141,12 @@ FRESH_SIGN_IN_REMEDIATION: Final[str] = (
 LEVEL_MISSING_REMEDIATION: Final[str] = (
     "Your sign-in did not reach the approval level. "
     "An admin must check approvals.sign_in in /api/v1/health."
+)
+
+#: The same sentence for a console approve: it names the console's approval client (#6282).
+WEB_LEVEL_MISSING_REMEDIATION: Final[str] = (
+    "Your sign-in did not reach the approval level. "
+    "An admin must check approvals.web_sign_in in /api/v1/health."
 )
 
 #: The sentence instead, when the level is required because MEHO's check of the realm failed.

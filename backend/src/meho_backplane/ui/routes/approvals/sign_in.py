@@ -14,7 +14,7 @@
 
 ``auto`` is resolved as on the command line, from the binding of the
 console's approval client
-(:func:`~meho_backplane.auth.approval_sign_in_flow.sign_in_level_in_force`).
+(:func:`~meho_backplane.auth.approval_sign_in_flow.read_web_approval_sign_in`).
 An empty console approval client setting makes ``auto`` record only.
 """
 
@@ -44,11 +44,7 @@ async def web_sign_in_level() -> SignInLevel:
     ``auto`` then only records, because the console cannot start an
     approval sign-in. An explicit ``required`` still refuses.
     """
-    settings = get_settings()
-    client_id = settings.ui_keycloak_approve_client_id
-    if not client_id and settings.approval_sign_in_level == "auto":
-        return SignInLevel("observe")
-    return await sign_in_level_in_force(settings, client_id=client_id or None)
+    return await sign_in_level_in_force(get_settings(), web=True)
 
 
 def sign_in_url(return_to: str, level: SignInLevel) -> str:

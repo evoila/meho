@@ -24,8 +24,8 @@ from fastapi import HTTPException
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.approval_sign_in import (
-    LEVEL_MISSING_REMEDIATION,
     LEVEL_UNCHECKED_REMEDIATION,
+    WEB_LEVEL_MISSING_REMEDIATION,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.web_approval_sign_in import (
@@ -129,9 +129,10 @@ def test_required_refuses_an_approval_sign_in_without_the_level(acr: str | None)
     assert refused.value.status_code == 401
     detail = str(refused.value.detail)
     if acr == "1":
-        assert detail.endswith(LEVEL_MISSING_REMEDIATION)
+        assert detail.endswith(WEB_LEVEL_MISSING_REMEDIATION)
+        assert "approvals.web_sign_in" in detail
     else:
-        assert LEVEL_MISSING_REMEDIATION not in detail
+        assert WEB_LEVEL_MISSING_REMEDIATION not in detail
 
 
 def test_required_names_a_failed_realm_check_when_only_the_level_is_missing() -> None:
@@ -162,7 +163,7 @@ def test_required_refuses_a_token_that_is_not_this_persons_console_approval_sign
     with pytest.raises(HTTPException) as refused:
         check_web_approval_sign_in(_person(), approval, _settings(), level_in_force="required")
     assert refused.value.status_code == 401
-    assert LEVEL_MISSING_REMEDIATION not in str(refused.value.detail)
+    assert WEB_LEVEL_MISSING_REMEDIATION not in str(refused.value.detail)
 
 
 @pytest.mark.parametrize("mode", ["auto", "", "something"])

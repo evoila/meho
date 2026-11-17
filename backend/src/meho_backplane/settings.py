@@ -1358,8 +1358,9 @@ class Settings(BaseModel):
         level, else ``required``, also when the check failed. Any other value
         stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``. The console
         uses the same setting for its own approval sign-in (#6282); ``auto``
-        there reads the binding of :attr:`ui_keycloak_approve_client_id`,
-        and only records when that setting is empty.
+        there reads the binding of :attr:`ui_keycloak_approve_client_id`
+        (``approvals.web_sign_in`` in ``/api/v1/health``), and only records
+        when that setting is empty.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``

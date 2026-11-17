@@ -35,10 +35,11 @@ from typing import Any
 import structlog
 
 from meho_backplane.auth.approval_sign_in import (
+    LEVEL_UNCHECKED_REMEDIATION,
     WEB_FRESH_SIGN_IN_REMEDIATION,
+    WEB_LEVEL_MISSING_REMEDIATION,
     ApprovalAuth,
     _approval_auth,
-    _level_remedy,
     _longest_sign_in_max_age,
     asked_for_credentials,
     check_fresh_web_approval_sign_in,
@@ -133,8 +134,9 @@ def check_web_approval_sign_in(
     Under ``required`` only the approval sign-in token approves, and it
     must carry the approval level. The refusal is the ``401`` with the
     console's text. When the level is the only missing part, it adds
-    :data:`~meho_backplane.auth.approval_sign_in.LEVEL_MISSING_REMEDIATION`
-    (or ``LEVEL_UNCHECKED_REMEDIATION`` when *level_check_failed*). Under
+    :data:`~meho_backplane.auth.approval_sign_in.WEB_LEVEL_MISSING_REMEDIATION`,
+    which names ``approvals.web_sign_in`` (or ``LEVEL_UNCHECKED_REMEDIATION``
+    when *level_check_failed*). Under
     ``observe`` and ``off`` the session's own sign-in approves as before
     (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`)
     when there is no usable approval sign-in token.
@@ -152,9 +154,11 @@ def check_web_approval_sign_in(
             approval_client=True,
             approval_level=False,
         )
+        remedy = (
+            LEVEL_UNCHECKED_REMEDIATION if level_check_failed else WEB_LEVEL_MISSING_REMEDIATION
+        )
         raise fresh_sign_in_challenge(
-            f"fresh_sign_in_required: {WEB_FRESH_SIGN_IN_REMEDIATION} "
-            f"{_level_remedy(level_check_failed)}",
+            f"fresh_sign_in_required: {WEB_FRESH_SIGN_IN_REMEDIATION} {remedy}",
             max_age_seconds=settings.fresh_sign_in_max_age_seconds,
         )
     if mode == "required":

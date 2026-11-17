@@ -67,6 +67,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE as _DEFAULT_AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _DEFAULT_ISSUER
@@ -535,11 +536,16 @@ def test_list_work_ref_filter_counts_length_after_cleaning(typed: str, stored: s
     ids=["invisible", "too-long"],
 )
 def test_list_work_ref_filter_refuses_a_bad_ticket_id(typed: str, message: str) -> None:
-    """A value the rule refuses is a 422 that names the rule, not a search for the raw text."""
+    """A refused value is a 422 page that shows the rule and lists no trigger."""
     _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    trigger_id = _seed_trigger(tenant_id=_TENANT_A)
     response = _list_with_work_ref(typed)
     assert response.status_code == 422, response.text
-    assert message in response.json()["detail"]
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "data-work-ref-refused" in response.text
+    assert message in response.text
+    assert str(trigger_id) not in response.text
 
 
 def test_list_is_tenant_isolated() -> None:

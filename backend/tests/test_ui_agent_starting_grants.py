@@ -583,15 +583,20 @@ requires_node = pytest.mark.skipif(
 # Runs the container's ``hx-on::before-swap`` code the way htmx 2.0.9 does
 # (``event`` in scope, fired on the swap target) for each case, then does
 # the swap htmx would do: the body goes into the container only when
-# ``shouldSwap`` is on. Prints what the container holds after each case.
+# ``shouldSwap`` is on. A case's ``contentType`` is the answer's
+# Content-Type header (default: HTML). Prints what the container holds after each case.
 _SWAP_DRIVER = r"""
 "use strict";
 const [code, casesJson] = process.argv.slice(1);
 const handler = new Function("event", code);
 const out = {};
 for (const c of JSON.parse(casesJson)) {
+  const contentType = c.contentType ?? "text/html; charset=utf-8";
   const detail = {
-    xhr: { status: c.status },
+    xhr: {
+      status: c.status,
+      getResponseHeader: (name) => (name.toLowerCase() === "content-type" ? contentType : null),
+    },
     requestConfig: { verb: c.verb },
     shouldSwap: c.status < 400,
     isError: c.status >= 400,

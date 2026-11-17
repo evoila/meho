@@ -188,7 +188,12 @@ class OperationRunService:
 
         ``wrap``, when given, runs the dispatch in the background task, so
         the caller can act when the call ends.
+
+        The run keeps the MCP tool profile of the caller when that profile
+        has a connector list (#6099), so only a session of the same profile
+        reads it over MCP.
         """
+        from meho_backplane.connectors.result_handle_store import result_profile_scope
         from meho_backplane.operations._validate import compute_audit_params_hash
         from meho_backplane.operations.meta_tools import call_operation
 
@@ -207,6 +212,7 @@ class OperationRunService:
             target_name=_target_name(arguments.get("target")),
             params_hash=params_hash,
             approval_request_id=None,
+            mcp_profile=result_profile_scope(operator.mcp_tool_profile),
         )
 
         def dispatch() -> Awaitable[dict[str, Any]]:
@@ -282,6 +288,7 @@ class OperationRunService:
         target_name: str | None,
         params_hash: str | None,
         approval_request_id: uuid.UUID | None,
+        mcp_profile: str | None = None,
     ) -> uuid.UUID:
         """Insert a ``pending`` row + claim this worker's lease; commit; return id."""
         settings = get_settings()
@@ -297,6 +304,7 @@ class OperationRunService:
                 target_name=target_name,
                 params_hash=params_hash,
                 approval_request_id=approval_request_id,
+                mcp_profile=mcp_profile,
             )
             await run_lifecycle.claim_lease(
                 session,

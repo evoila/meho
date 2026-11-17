@@ -80,5 +80,10 @@
    changed in another tab. ``defer`` after ``session-expiry.js``, whose
    banner helper it reuses. #}
 <script src="/ui/static/src/app/page-tenant.js" defer></script>
+{# Refused ticket id search values. The ticket id search boxes and the
+   approvals "in order" window answer a value that breaks the ticket id rule
+   with HTML, status 422 and the ``Meho-Work-Ref-Refused`` header. This
+   listener swaps that answer in, so the page shows the rule text. #}
+<script src="/ui/static/src/app/work-ref-refused.js" defer></script>
 <script src="/ui/static/src/vendor/sse.min.js" defer></script>
 <script src="/ui/static/src/vendor/alpine.min.js" defer></script>

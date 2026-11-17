@@ -326,6 +326,17 @@ def _browser_login(
     Fails with Keycloak's own error text when the login is refused (for
     example ``invalid_scope``), so a regression reads plainly.
     """
+    return str(_browser_login_tokens(base_url, scope, username, password)["access_token"])
+
+
+def _browser_login_tokens(
+    base_url: str,
+    scope: str,
+    username: str = _OPERATOR_USER,
+    password: str = _OPERATOR_PASSWORD,
+    client_id: str = _MCP_CLIENT_ID,
+) -> dict:
+    """Run the authorization-code + PKCE login for *client_id*; return the token answer."""
     realm_url = f"{base_url}/realms/{_REALM}/protocol/openid-connect"
     verifier = secrets.token_urlsafe(48)
     challenge = (
@@ -354,7 +365,7 @@ def _browser_login(
             "GET",
             f"{realm_url}/auth",
             params={
-                "client_id": _MCP_CLIENT_ID,
+                "client_id": client_id,
                 "response_type": "code",
                 "redirect_uri": _REDIRECT_URI,
                 "scope": scope,
@@ -398,14 +409,14 @@ def _browser_login(
             f"{realm_url}/token",
             data={
                 "grant_type": "authorization_code",
-                "client_id": _MCP_CLIENT_ID,
+                "client_id": client_id,
                 "code": query["code"][0],
                 "redirect_uri": _REDIRECT_URI,
                 "code_verifier": verifier,
             },
         )
         token.raise_for_status()
-        return str(token.json()["access_token"])
+        return dict(token.json())
 
 
 @pytest.fixture(scope="module")

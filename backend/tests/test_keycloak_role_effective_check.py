@@ -104,6 +104,8 @@ def _connector(
 
     async def _get_json(_t: Any, path: str, *, operator: Any) -> dict[str, Any]:
         segments = path.split("/")
+        if segments[-2] == "realms":  # .../realms/{realm}: the realm name check
+            return {"realm": segments[-1]}
         if "roles" in segments:  # .../clients/{uuid}/roles/{name}
             return _CLIENT_ROLES[segments[-3]][segments[-1]]
         names = {uuid: name for name, uuid in _CLIENTS.items()}

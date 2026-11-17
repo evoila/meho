@@ -54,3 +54,33 @@ func TestHTTPValidationErrorRejectsOtherShapes(t *testing.T) {
 		t.Errorf("want an error for a number detail; got %+v", got.Detail)
 	}
 }
+
+func TestHTTPValidationErrorDecodesObjectDetail(t *testing.T) {
+	// The shape the backplane sends when an ingest label is refused (#4728).
+	body := `{"detail":{"kind":"uncovered_version_label","product":"networker","version":"19.12",` +
+		`"impl_id":"networker-rest","registered_classes":[{"class_name":"X","version":"19.14",` +
+		`"impl_id":"networker-rest","supported_version_range":">=19.14,<20.0"}],` +
+		`"message":"version='19.12' is not covered"}}`
+	var got HTTPValidationError
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Detail == nil || len(*got.Detail) != 1 {
+		t.Fatalf("want one detail entry; got %+v", got.Detail)
+	}
+	d := (*got.Detail)[0]
+	if d.Msg != "version='19.12' is not covered" || d.Type != "uncovered_version_label" {
+		t.Errorf("object detail decoded wrong: %+v", d)
+	}
+}
+
+func TestHTTPValidationErrorObjectDetailWithoutMessageKeepsText(t *testing.T) {
+	var got HTTPValidationError
+	if err := json.Unmarshal([]byte(`{"detail":{"error":"output_too_large","limit":5}}`), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	d := (*got.Detail)[0]
+	if d.Type != "output_too_large" || d.Msg != `{"error":"output_too_large","limit":5}` {
+		t.Errorf("want type and raw text kept; got %+v", d)
+	}
+}

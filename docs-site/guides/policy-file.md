@@ -231,9 +231,17 @@ bindings:
   alone never gives or takes the right to approve: a person in the
   shipped approver group may approve only when the token also says
   `approver: true`, and a person with `approver: true` keeps that right in
-  the shipped readers group. So with the setting on and no stored
-  bindings, every person may approve exactly what they may approve with
-  the setting off.
+  the shipped readers group. So a shipped binding on its own gives or
+  takes no right to approve. Approver routing by category can still make
+  the list of people who may approve a change shorter.
+- The self-approval group (the setting `JWT_SELF_APPROVER_GROUP`) can be
+  a group that is not in `JWT_ROLE_GROUPS`. Then a person can be in it
+  and in one role group. Next to an operator group the person gets
+  `SA-Operators`, as today. Next to any other group, that group's kind
+  stays.
+- With the default settings the self-approval group is a role group. A
+  person in it and in a second role group cannot log in
+  (`multiple_role_groups`), with the setting on or off.
 - A binding in your file (a stored binding) is your own choice. There the
   group alone gives the flags of the kind: a read-only person in a group
   bound to `Approvers` may approve, whatever the token says.

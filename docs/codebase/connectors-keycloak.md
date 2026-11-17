@@ -890,11 +890,14 @@ of them does not use this check.
 - The approval card shows the username stored in Keycloak for the user id
   (`username`, `user_available: true`). A name the caller sent is never
   shown as the user's name: when the user cannot be read, the card has no
-  `username`. It shows the sent value as `requested_username` and
-  `user_available: false`.
+  `username`. It shows the sent value as `requested_username`,
+  `user_available: false` and a `user_note` that says MEHO could not read
+  the user and that an approval is refused at the run. The required-actions
+  card does the same.
 - `user.delete` keeps its own card (the delete's `blast_radius` block). Its
   `username` is only the stored name. For a user that does not exist, the
-  card shows the sent name as `requested_username`.
+  card shows the sent name as `requested_username`. Its lookup uses the
+  shared `user_matches_username` for an id and a name that differ.
 - After approval, the op acts on the user id shown on the card. It does not
   look the username up again. A card without a user id is refused. A card
   without a stored username (no `username`, or `user_available` is not
@@ -1254,8 +1257,13 @@ request share one read, so a wrong password makes one failed sign-in.
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused
   step. `extras.remediation` also says what the run changed before: the
-  flow (alias, id, `flow_created`), the level map and the mapper. These
-  changes stay; a second run after the fix keeps them.
+  flow (alias, id, `flow_created`), the level map, the mapper and the
+  company login default. These changes stay; a second run after the fix
+  keeps them. When the realm has no company login default and the run
+  removed the flow's old one, a refused read back says "the flow has no
+  company login default". The short error message is cut to fit the
+  256-character limit (`_half_way_text`), so a long client id cannot push
+  its end past it.
 
 After a refusal (before the wait, or a 403 at the run), MEHO drops the
 admin token it keeps, so the next call signs in again. The next step also
@@ -1447,7 +1455,7 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
-| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available, user_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
+| `keycloak.user.required_actions.update` | `{resource, [username,] id, realm, add, remove, current_available, user_available[, user_note, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |

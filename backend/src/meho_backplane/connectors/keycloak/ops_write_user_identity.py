@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
 __all__ = [
+    "USER_NOT_READ_NOTE",
     "UserOfWrite",
     "card_user_id",
     "check_card_username",
@@ -65,6 +66,13 @@ __all__ = [
     "user_matches_username",
     "with_stored_user",
 ]
+
+#: What a card says when MEHO could not read the user before the wait for approval.
+USER_NOT_READ_NOTE = (
+    "MEHO could not read this user from Keycloak, so the name shown is only the one in "
+    "the request. If you approve, the run is refused. Send a new request when MEHO can "
+    "read the user."
+)
 
 
 def _opt_str(value: Any) -> str | None:
@@ -262,7 +270,8 @@ def with_stored_user(builder: PreviewBuilder, *, id_key: str = "id") -> PreviewB
     ``username`` are the stored ones. When it cannot be read (no live
     connector, an unknown user, a fault), the card has no ``username``: the
     value the caller sent is shown as ``requested_username``. The card says
-    which case it is with ``user_available``.
+    which case it is with ``user_available`` and, when it cannot be read,
+    says so in ``user_note``.
     """
 
     async def _wrapped(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -274,6 +283,7 @@ def with_stored_user(builder: PreviewBuilder, *, id_key: str = "id") -> PreviewB
         stored = _opt_str(found[1].get("username")) if found is not None else None
         if found is None or stored is None:
             card["user_available"] = False
+            card["user_note"] = USER_NOT_READ_NOTE
             requested = _opt_str(ctx.params.get("username"))
             if requested is not None:
                 card["requested_username"] = requested

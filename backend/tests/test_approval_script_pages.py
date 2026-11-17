@@ -110,20 +110,29 @@ def test_a_page_border_never_splits_a_character() -> None:
 
 
 def test_a_secret_value_that_crosses_the_page_border_is_hidden_on_every_page() -> None:
-    line = f"export DB_PASSWORD={_FAKE_VALUE}\n"
+    prefix = "export DB_PASSWORD="
+    line = f"{prefix}{_FAKE_VALUE}\n"
     padding = "# " + "x" * 60 + "\n"
-    # Put the line right on the first border, then fill a second page.
-    head = padding * ((SCRIPT_SHOWN_MAX_BYTES - 20) // len(padding))
-    script = head + line + padding * 1500
-    assert len(script.encode("utf-8")) > SCRIPT_SHOWN_MAX_BYTES
-    assert script.index(_FAKE_VALUE) < SCRIPT_SHOWN_MAX_BYTES < script.index(_FAKE_VALUE) + 200
+    # The value starts 13 bytes before the first border and ends after it.
+    before = 13
+    head_size = SCRIPT_SHOWN_MAX_BYTES - before - len(prefix)
+    head = padding * (head_size // len(padding))
+    head += "#" * (head_size - len(head) - 1) + "\n"
+    tail = padding * 1500
+    script = head + line + tail
+    assert script.index(_FAKE_VALUE) == SCRIPT_SHOWN_MAX_BYTES - before
+    first_part, second_part = _FAKE_VALUE[:before], _FAKE_VALUE[before:]
+    assert first_part and second_part
     pages = _all_pages(script)
     assert len(pages) >= 2
     for p in pages:
-        assert _FAKE_VALUE not in p["script"]
+        assert first_part not in p["script"]
+        assert second_part not in p["script"]
         assert p["script_values_hidden"] is True
         assert "script_sha256" not in p
-    assert "[REDACTED" in "".join(p["script"] for p in pages)
+    hidden_line = script_page_fields(line, 1)["script"]
+    assert _FAKE_VALUE not in hidden_line
+    assert "".join(p["script"] for p in pages) == head + hidden_line + tail
 
 
 def test_the_checksum_is_of_the_whole_script_and_the_same_on_every_page() -> None:
@@ -222,13 +231,47 @@ async def test_a_script_over_the_limit_is_refused_with_plain_words_before_it_wai
 async def test_an_ascii_script_over_the_limit_is_refused_with_plain_words_before_it_waits(
     linux_write_registered: None,  # noqa: F811 -- fixture
 ) -> None:
+    # Over the schema ``maxLength`` too: the plain sentence replaces its error.
     dumped = await _dispatch_script(_text(SCRIPT_MAX_BYTES + 1))
     assert dumped["status"] == "error", dumped
     assert "invalid_params" in dumped["error"]
     text = repr(dumped["extras"])
     assert "The script is 1,048,577 bytes." in text
     assert "MEHO accepts at most 1,048,576 bytes (1 MiB) for linux.script.run." in text
+    assert "at most this many characters" not in text
     assert await _count_requests() == 0
+
+
+def test_the_script_schema_says_the_limit() -> None:
+    from meho_backplane.connectors.linux.ops_write import _SCRIPT_RUN_OP
+
+    script_schema = _SCRIPT_RUN_OP.parameter_schema["properties"]["script"]
+    assert script_schema["maxLength"] == SCRIPT_MAX_BYTES
+
+
+def test_a_check_problem_replaces_only_the_length_error_on_its_own_field() -> None:
+    from meho_backplane.operations._validate import params_errors
+
+    script_error = {
+        "path": "$.script",
+        "validator": "maxLength",
+        "expected": "string with at most this many characters: 1048576",
+        "remediation": "use a shorter value",
+    }
+    ref_error = {**script_error, "path": "$.script_ref"}
+    params = {"script": _text(SCRIPT_MAX_BYTES + 1)}
+    errors = params_errors("linux.script.run", params, [script_error, ref_error])
+    assert [e["path"] for e in errors] == ["script", "$.script_ref"]
+    assert errors[0]["validator"] == "params_check"
+    # Another kind of schema error: the schema errors stay as they are.
+    type_error = {**script_error, "path": "$.timeout_seconds", "validator": "type"}
+    assert params_errors("linux.script.run", params, [script_error, type_error]) == [
+        script_error,
+        type_error,
+    ]
+    # No check problem: the length error stays.
+    small = {"script": "echo hi\n"}
+    assert params_errors("linux.script.run", small, [ref_error]) == [ref_error]
 
 
 # ---------------------------------------------------------------------------

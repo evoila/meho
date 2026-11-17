@@ -55,6 +55,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import hvac
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -211,17 +212,22 @@ def _make_preview_ctx(params: dict[str, Any]) -> PreviewContext:
     )
 
 
-async def test_preview_builder_emits_ref_only_summary() -> None:
+async def test_preview_builder_emits_ref_only_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     """The builder names source + sink as ``{kind, ref}`` and echoes reason.
 
-    No store I/O, so the value cannot enter the summary — and the params
-    it reads carry references only.
+    The params it reads carry references only. The sink also says whether
+    its secret exists; here Vault refuses the read, so it says "not known".
     """
+    install_fake_client(monkeypatch, read_exc=hvac.exceptions.Forbidden("permission denied"))
     preview = await build_secret_move_preview(_make_preview_ctx(_MOVE_PARAMS))
     assert preview == {
         "action": "secret.move",
         "source": {"kind": "vault", "ref": "secret/db/prod#password"},
-        "sink": {"kind": "vault", "ref": "secret/db/replica#password"},
+        "sink": {
+            "kind": "vault",
+            "ref": "secret/db/replica#password",
+            "secret_exists": "not known",
+        },
         "merge": False,
         "reason": "promote replica credential",
     }
@@ -268,7 +274,11 @@ async def test_move_with_no_grant_parks_pending(
     assert effect["op_class"] == "other"
     preview = effect["preview"]
     assert preview["source"] == {"kind": "vault", "ref": "secret/db/prod#password"}
-    assert preview["sink"] == {"kind": "vault", "ref": "secret/db/replica#password"}
+    assert preview["sink"] == {
+        "kind": "vault",
+        "ref": "secret/db/replica#password",
+        "secret_exists": "yes",
+    }
     # Both refs are present in the serialised proposed_effect.
     effect_json = json.dumps(effect)
     assert "secret/db/prod#password" in effect_json
@@ -288,14 +298,19 @@ async def test_move_refuses_execution_without_approval(
     monkeypatch: pytest.MonkeyPatch,
     _registered_secret_broker_op: None,
 ) -> None:
-    """Neither ``read_secret`` nor ``write_secret`` runs on the park path."""
+    """Neither ``read_secret`` nor ``write_secret`` runs on the park path.
+
+    The park looks up only whether the sink secret exists, for the card.
+    """
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
 
     result = await _dispatch_move(_make_operator())
 
     assert result.status == "awaiting_approval", result.error
     # The connector-resolution / read / write never happen for a park.
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read. The only read is the sink lookup for the
+    # approval card (does the sink secret exist?).
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
     assert fake.secrets.kv.v2.put_calls == []
 
 
@@ -379,7 +394,9 @@ async def test_expired_grant_not_honored(
 
     # Parked, not executed: the expired grant authorizes nothing.
     assert result.status == "awaiting_approval", result.error
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read. The only read is the sink lookup for the
+    # approval card (does the sink secret exist?).
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
     assert fake.secrets.kv.v2.put_calls == []
 
 
@@ -407,7 +424,9 @@ async def test_active_grant_parks_not_auto_executes(
 
     # Parked (the grant is capped at needs-approval), never executed.
     assert result.status == "awaiting_approval", result.error
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read. The only read is the sink lookup for the
+    # approval card (does the sink secret exist?).
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
     assert fake.secrets.kv.v2.put_calls == []
 
 

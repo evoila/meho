@@ -56,7 +56,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.approval_queue import (
-    ApprovalGroupForbiddenError,
+    RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -502,11 +502,12 @@ async def test_approved_run_acts_on_the_user_id_on_the_card(kc: KeycloakConnecto
 
 
 async def test_a_plain_operator_cannot_approve_the_write(kc: KeycloakConnector) -> None:
+    """The write is a change of rights: only another admin approves it."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _, put = _mount(mock, ["CONFIGURE_TOTP"])
         request_id = await _park({"username": "event-guest", "remove": ["CONFIGURE_TOTP"]})
         async with get_sessionmaker()() as session:
-            with pytest.raises(ApprovalGroupForbiddenError):
+            with pytest.raises(RightsChangeApprovalError):
                 await approve_request(
                     session, request_id, operator=_operator("kc-otp-approver"), params=None
                 )
@@ -627,7 +628,8 @@ async def test_card_still_shows_the_request_when_the_user_cannot_be_read(
             assert pending is not None
             preview = pending.proposed_effect["preview"]
     # The user could not be read, so the sent name is not shown as the user's name.
-    assert preview["username"] is None
+    assert "username" not in preview
+    assert "could not read this user" in preview["user_note"]
     assert preview["requested_username"] == "event-guest"
     assert preview["remove"] == ["CONFIGURE_TOTP"]
     assert preview["current_available"] is False

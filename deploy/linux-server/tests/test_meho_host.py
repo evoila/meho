@@ -72,6 +72,12 @@ BASE_USERS = "root:x:0:0:root:/root:/bin/bash\n"
 BASE_GROUPS = "root:x:0:\n"
 ETCD_USER = "etcd:x:998:998:etcd user:/nonexistent:/sbin/nologin\n"
 ETCD_GROUP = "etcd:x:998:\n"
+# The part of the install record that uninstall reads for the routes of the
+# old pod network, as lib/core.sh writes it.
+POD_RANGE_RECORD = (
+    '{\n  "options": {\n    "cluster_cidr": "10.42.0.0/16",\n'
+    '    "service_cidr": "10.43.0.0/16"\n  }\n}\n'
+)
 KERNEL_LINE = (
     f"Removing {SYSCTL_FILE} does not change the running kernel. A restart of this "
     "machine brings back the operating system's own kernel values."
@@ -1826,6 +1832,103 @@ class UninstallTests(HostTestCase):
         self.assertTrue(self.host.host_path(SYSCTL_FILE).exists())
         self.assertTrue(self.host.host_path(ETCD_RECORD).exists())
         self.assertNotIn("userdel", self.host.calls())
+
+    def set_pod_range(self, routes: str) -> None:
+        """An install record with the pod range 10.42.0.0/16, and the routes
+        that 'ip -4 route show' lists."""
+        self.host.host_file("/etc/meho/install.json", POD_RANGE_RECORD)
+        self.host.answer("ip_route", routes)
+
+    def route_deletes(self) -> list[str]:
+        return [line for line in self.host.calls().splitlines() if " route del " in line]
+
+    def test_the_blackhole_routes_of_the_pod_range_go_and_other_routes_stay(self) -> None:
+        self.set_pod_range(
+            "default via 10.0.0.1 dev ens18 proto static\n"
+            "blackhole 10.42.0.0/24 proto 80\n"
+            "blackhole 10.42.7.9\n"
+            "10.42.1.0/24 via 10.0.0.1 dev ens18\n"
+            "blackhole 10.40.0.0/14\n"
+            "blackhole 192.0.2.0/24\n"
+        )
+
+        result = self.uninstall()
+
+        self.assertEqual(
+            ["ip -4 route del blackhole 10.42.0.0/24", "ip -4 route del blackhole 10.42.7.9"],
+            self.route_deletes(),
+        )
+        self.assertIn(
+            "[ok]   removed the blackhole routes 10.42.0.0/24, 10.42.7.9 of the pod range"
+            " 10.42.0.0/16, which RKE2's uninstall script leaves\n",
+            result.stdout,
+        )
+        calls = self.host.calls().splitlines()
+        self.assertLess(calls.index("rke2-uninstall.sh"), calls.index("ip -4 route show"))
+
+    def test_one_route_is_named_in_the_singular(self) -> None:
+        self.set_pod_range("blackhole 10.42.0.0/24 proto 80\n")
+
+        result = self.uninstall()
+
+        self.assertIn(
+            "[ok]   removed the blackhole route 10.42.0.0/24 of the pod range 10.42.0.0/16,",
+            result.stdout,
+        )
+
+    def test_without_a_route_of_the_pod_range_nothing_is_said(self) -> None:
+        self.set_pod_range("default via 10.0.0.1 dev ens18\nblackhole 192.0.2.0/24\n")
+
+        result = self.uninstall()
+
+        self.assertEqual([], self.route_deletes())
+        self.assertNotIn("blackhole", result.stdout + result.stderr)
+
+    def assert_no_route_is_read(self, record: str) -> None:
+        self.host.host_file("/etc/meho/install.json", record)
+        self.host.answer("ip_route", "blackhole 10.42.0.0/24\n")
+
+        self.uninstall()
+
+        self.assertNotIn("ip -4 route", self.host.calls())
+
+    def test_without_a_pod_range_in_the_record_no_route_is_read(self) -> None:
+        self.assert_no_route_is_read("{}\n")
+
+    def test_with_a_pod_range_without_a_prefix_no_route_is_read(self) -> None:
+        self.assert_no_route_is_read('{\n  "options": {\n    "cluster_cidr": "10.42.0.0"\n  }\n}\n')
+
+    def test_a_failed_route_delete_is_a_warning_and_uninstall_goes_on(self) -> None:
+        self.set_pod_range("blackhole 10.42.0.0/24\n")
+        self.host.answer("ip_route_del_rc", "2")
+
+        result = self.uninstall()
+
+        self.assertIn("RTNETLINK answers: Operation not permitted", result.stderr)
+        self.assertIn(
+            "[WARN] ip could not remove the route blackhole 10.42.0.0/24 of the pod range"
+            " 10.42.0.0/16. A new install refuses it. Read its message above, then run:"
+            " ip route del blackhole 10.42.0.0/24\n",
+            result.stderr,
+        )
+        self.assertNotIn("removed the blackhole", result.stdout)
+        self.assertFalse(self.host.host_path("/var/lib/meho").exists())
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_a_failed_route_list_is_a_warning_and_uninstall_goes_on(self) -> None:
+        self.set_pod_range("blackhole 10.42.0.0/24\n")
+        self.host.answer("ip_route_rc", "1")
+
+        result = self.uninstall()
+
+        self.assertEqual([], self.route_deletes())
+        self.assertIn(
+            "[WARN] ip could not list the routes of this machine, so a blackhole route of the"
+            " pod range 10.42.0.0/16 may be left.",
+            result.stderr,
+        )
+        self.assertFalse(self.host.host_path("/var/lib/meho").exists())
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
 
     def test_uninstall_takes_no_option(self) -> None:
         self.assert_usage_error(self.host.run("uninstall", "--yes"), "uninstall takes no option")

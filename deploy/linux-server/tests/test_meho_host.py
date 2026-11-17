@@ -917,9 +917,9 @@ class SupportBundleTests(HostTestCase):
             f"2026-10-23T11:00:01Z authorization: basic {basic}\n"
             f'{{"headers": {{"Authorization": "Bearer {json_bearer}"}}, "status": 401}}\n'
             f'{{"body": "{{\\"Authorization\\": \\"Bearer {escaped_bearer}\\"}}"}}\n'
-            f"2026-10-23T11:00:02Z connect postgresql://meho:{db_pass}@meho-postgres:5432/meho\n"
-            f"2026-10-23T11:00:03Z connect postgresql://meho:{at_pass}@meho-postgres/meho\n"
-            f'{{"url": "redis://:{redis_pass}@meho-redis:6379", "ok": true}}\n'
+            f"connect postgresql://meho:{db_pass}@meho-postgres:5432/meho\n"  # trufflehog:ignore
+            f"connect postgresql://meho:{at_pass}@meho-postgres/meho\n"  # trufflehog:ignore
+            f'{{"url": "redis://:{redis_pass}@meho-redis:6379", "ok": true}}\n'  # trufflehog:ignore
             f"2026-10-23T11:00:04Z ALTER ROLE meho WITH PASSWORD '{sql_pass}' VALID UNTIL x\n"
             f"2026-10-23T11:00:05Z alter role meho password '{quoted_pass}';\n"
             f'2026-10-23T11:00:06Z CREATE ROLE app Password "{lower_pass}" LOGIN\n'

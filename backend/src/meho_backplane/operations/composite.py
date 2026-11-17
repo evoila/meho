@@ -989,6 +989,7 @@ async def enforce_subop_policy(
                     # reviewer who runs the re-run. ``None`` outside a re-run.
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
+                    install_category=descriptor.policy_install_category,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed

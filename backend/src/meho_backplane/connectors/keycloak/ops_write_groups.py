@@ -78,10 +78,13 @@ from meho_backplane.connectors.keycloak._paths import (
     _USER_GROUP_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     GROUP_WRITE_OPS,
     WHEN_TO_USE_GROUP_WRITE,
+)
+from meho_backplane.connectors.keycloak.ops_write_user_identity import (
+    UserOfWrite,
+    read_user_for_write,
 )
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
@@ -178,32 +181,20 @@ async def _resolve_group_id(
     return resolved
 
 
-async def _resolve_user_id(
+async def _resolve_user(
     connector: KeycloakConnector,
     target: KeycloakTargetLike,
     params: dict[str, Any],
     operator: Operator,
-) -> str:
-    """Resolve the target user's UUID from ``user_id`` or ``username``.
+) -> UserOfWrite:
+    """Find the target user from ``user_id`` or ``username`` and read it.
 
-    Prefers an explicit ``user_id`` (UUID); otherwise resolves ``username``
-    via :meth:`KeycloakConnector._find_user_uuid`. The op-id for error
-    messages is read from ``params['_op_id']`` (set by the caller).
+    The op-id for error messages is read from ``params['_op_id']`` (set by
+    the caller). An ``user_id`` and a ``username`` must be the same user.
     """
-    op_id = params["_op_id"]
-    user_id = _opt_str(params.get("user_id"))
-    if user_id is not None:
-        return user_id
-    username = _opt_str(params.get("username"))
-    if username is None:
-        raise ValueError(f"{op_id} requires either 'user_id' (UUID) or 'username'")
-    managed_realm = resolve_realm_config(target).managed_realm
-    resolved = await connector._find_user_uuid(target, managed_realm, username, operator=operator)
-    if resolved is None:
-        raise KeycloakUserNotFoundError(
-            f"{op_id}: no user with username={username!r} in realm {managed_realm!r}"
-        )
-    return resolved
+    return await read_user_for_write(
+        connector, operator, target, params, op_id=params["_op_id"], id_key="user_id"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -331,12 +322,19 @@ async def keycloak_group_member_add(
     realms = resolve_realm_config(target)
     params = {**params, "_op_id": "keycloak.group.member.add"}
     group_id = await _resolve_group_id(self, target, params, operator)
-    user_id = await _resolve_user_id(self, target, params, operator)
+    user = await _resolve_user(self, target, params, operator)
+    user_id = user.uuid
     already_member = await self._user_in_group(
         target, realms.managed_realm, user_id, group_id, operator=operator
     )
     if already_member:
-        return {"user_id": user_id, "group_id": group_id, "added": False, "unchanged": True}
+        return {
+            "user_id": user_id,
+            "username": user.username,
+            "group_id": group_id,
+            "added": False,
+            "unchanged": True,
+        }
     await self._write_admin(
         target,
         "PUT",
@@ -351,7 +349,13 @@ async def keycloak_group_member_add(
         operator=operator,
         idempotent_conflict=False,
     )
-    return {"user_id": user_id, "group_id": group_id, "added": True, "unchanged": False}
+    return {
+        "user_id": user_id,
+        "username": user.username,
+        "group_id": group_id,
+        "added": True,
+        "unchanged": False,
+    }
 
 
 async def keycloak_group_member_remove(
@@ -369,11 +373,18 @@ async def keycloak_group_member_remove(
     realms = resolve_realm_config(target)
     params = {**params, "_op_id": "keycloak.group.member.remove"}
     group_id = await _resolve_group_id(self, target, params, operator)
-    user_id = await _resolve_user_id(self, target, params, operator)
+    user = await _resolve_user(self, target, params, operator)
+    user_id = user.uuid
     if not await self._user_in_group(
         target, realms.managed_realm, user_id, group_id, operator=operator
     ):
-        return {"user_id": user_id, "group_id": group_id, "removed": False, "unchanged": True}
+        return {
+            "user_id": user_id,
+            "username": user.username,
+            "group_id": group_id,
+            "removed": False,
+            "unchanged": True,
+        }
     await self._write_admin(
         target,
         "DELETE",
@@ -388,4 +399,10 @@ async def keycloak_group_member_remove(
         operator=operator,
         idempotent_conflict=False,
     )
-    return {"user_id": user_id, "group_id": group_id, "removed": True, "unchanged": False}
+    return {
+        "user_id": user_id,
+        "username": user.username,
+        "group_id": group_id,
+        "removed": True,
+        "unchanged": False,
+    }

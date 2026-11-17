@@ -112,6 +112,7 @@ async def _park(
             preview_hash="preview-hash" if level == "destructive" else None,
             rights_change=rights_change,
             category=category,
+            install_category=category,
         )
         await session.commit()
         return request.id
@@ -137,17 +138,27 @@ async def _approve(request_id: uuid.UUID, operator: Operator) -> ApprovalRequest
 
 
 def _entry(ref: str, approvers: tuple[str, ...], **match: str) -> RouteEntry:
-    return RouteEntry(ref=ref, approvers=approvers, **match)
+    return RouteEntry(ref=ref, approvers=approvers, install=ref.startswith("install:"), **match)
 
 
 def test_a_category_entry_routes_its_changes_and_cuts_to_todays_kinds() -> None:
     entries = [_entry("install:routing[0]", ("Operators", "Admins"), category="network")]
 
     caution = route(
-        entries, category="network", connector_id="demo-1.x", level="caution", op_id="demo.x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="demo.x",
     )
     dangerous = route(
-        entries, category="network", connector_id="demo-1.x", level="dangerous", op_id="demo.x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="demo-1.x",
+        level="dangerous",
+        op_id="demo.x",
     )
 
     assert caution.kinds == ("Operators", "Admins")
@@ -160,7 +171,12 @@ def test_no_entry_fits_gives_todays_rule() -> None:
     entries = [_entry("install:routing[0]", ("Admins",), category="network")]
 
     found = route(
-        entries, category="storage", connector_id="demo-1.x", level="caution", op_id="demo.x"
+        entries,
+        category="storage",
+        install_category="storage",
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="demo.x",
     )
 
     assert found.rule == DEFAULT_RULE
@@ -173,35 +189,71 @@ def test_no_category_matches_only_entries_without_one() -> None:
         _entry("install:routing[1]", ("SA-Operators",), risk="caution"),
     ]
 
-    found = route(entries, category=None, connector_id="demo-1.x", level="caution", op_id="x")
+    found = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="x",
+    )
 
     assert found.rule == "install:routing[1]"
 
 
-def test_the_first_fitting_entry_wins_and_the_tenant_comes_first() -> None:
-    install = {"routing": [{"match": {"category": "network"}, "approvers": ["Admins"]}]}
-    tenant = {"routing": [{"match": {"connector": "demo-*"}, "approvers": ["SA-Operators"]}]}
+def test_the_install_counts_first_and_the_tenant_only_narrows() -> None:
+    install = {"routing": [{"match": {"category": "network"}, "approvers": ["SA-Operators"]}]}
+    tenant = {
+        "routing": [{"match": {"connector": "demo-*"}, "approvers": ["SA-Operators", "Admins"]}]
+    }
 
     entries = routes_from_documents(install, tenant)
     found = route(
-        entries, category="network", connector_id="demo-1.x", level="caution", op_id="demo.x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="demo-1.x",
+        level="caution",
+        op_id="demo.x",
     )
 
-    assert [e.ref for e in entries] == ["tenant:routing[0]", "install:routing[0]"]
-    assert found == route(
-        entries[:1], category="network", connector_id="demo-1.x", level="caution", op_id="demo.x"
-    )
+    assert [(e.ref, e.install) for e in entries] == [
+        ("tenant:routing[0]", False),
+        ("install:routing[0]", True),
+    ]
+    # The tenant's entry names Admins too, but the install's floor does not.
     assert found.kinds == ("SA-Operators",)
+    assert found.rule == "install:routing[0], tenant:routing[0]"
+    assert found.floor == "install:routing[0]"
 
 
 def test_a_risk_and_connector_entry_needs_both_to_fit() -> None:
     entries = [_entry("install:routing[0]", ("Admins",), connector="nsx-*", risk="destructive")]
 
-    other_level = route(entries, category=None, connector_id="nsx-4", level="caution", op_id="x")
-    other_connector = route(
-        entries, category=None, connector_id="k8s-1", level="destructive", op_id="x"
+    other_level = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="nsx-4",
+        level="caution",
+        op_id="x",
     )
-    both = route(entries, category=None, connector_id="nsx-4", level="destructive", op_id="x")
+    other_connector = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="k8s-1",
+        level="destructive",
+        op_id="x",
+    )
+    both = route(
+        entries,
+        category=None,
+        install_category=None,
+        connector_id="nsx-4",
+        level="destructive",
+        op_id="x",
+    )
 
     assert other_level.rule == DEFAULT_RULE
     assert other_connector.rule == DEFAULT_RULE
@@ -214,6 +266,7 @@ def test_an_operation_with_the_admin_role_floor_goes_to_admins_only() -> None:
     found = route(
         entries,
         category="network",
+        install_category="network",
         connector_id="demo-1.x",
         level="caution",
         op_id="targets.register",
@@ -577,12 +630,29 @@ def test_separated_duties_routes_network_to_sa_operators_and_admins() -> None:
     entries = routes_from_documents(document_of(parsed.model), None)
 
     network = route(
-        entries, category="network", connector_id="pfsense-ssh-1", level="caution", op_id="x"
+        entries,
+        category="network",
+        install_category="network",
+        connector_id="pfsense-ssh-1",
+        level="caution",
+        op_id="x",
     )
     identity = route(
-        entries, category="identity", connector_id="keycloak-admin-26", level="caution", op_id="x"
+        entries,
+        category="identity",
+        install_category="identity",
+        connector_id="keycloak-admin-26",
+        level="caution",
+        op_id="x",
     )
-    compute = route(entries, category="compute", connector_id="k8s-1", level="caution", op_id="x")
+    compute = route(
+        entries,
+        category="compute",
+        install_category="compute",
+        connector_id="k8s-1",
+        level="caution",
+        op_id="x",
+    )
 
     assert network.kinds == ("SA-Operators", "Admins")
     assert identity.kinds == ("Admins",)
@@ -609,7 +679,7 @@ async def test_a_waiting_request_stores_the_routed_kinds_and_never_a_person() ->
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
-async def test_the_tenants_own_routing_wins() -> None:
+async def test_the_tenants_routing_narrows_the_installs() -> None:
     await _store_policy(_NETWORK_ONLY_SA)
     await _store_policy(
         {
@@ -622,7 +692,8 @@ async def test_the_tenants_own_routing_wins() -> None:
     row = await _load(await _park("caution"))
 
     assert row.approver_roles == ["Admins"]
-    assert row.approver_rule == "tenant:routing[0]"
+    assert row.approver_rule == "install:routing[0], tenant:routing[0]"
+    assert row.approver_category == "network"
 
 
 @pytest.mark.asyncio
@@ -726,14 +797,19 @@ async def test_a_person_outside_the_stored_kinds_gets_one_sentence() -> None:
     with pytest.raises(ApprovalRoutingError) as caught:
         await _approve(request_id, operator)
 
+    # The click checks the install's routing first (the floor).
+    assert caught.value.reason_text == (
+        "The install's routing (`install:routing[0]`) lets only MEHO-SA-Operators or "
+        "MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can "
+        "only narrow it."
+    )
+    assert isinstance(caught.value, ApprovalGroupForbiddenError)
+    row = await _load(request_id)
+    assert row.status == ApprovalRequestStatus.PENDING.value
     expected = (
         "Only MEHO-SA-Operators or MEHO-Admins may approve this change "
         "(routing rule `install:routing[0]`). You are in MEHO-Operators."
     )
-    assert caught.value.reason_text == expected
-    assert isinstance(caught.value, ApprovalGroupForbiddenError)
-    row = await _load(request_id)
-    assert row.status == ApprovalRequestStatus.PENDING.value
     right = approve_right(operator, row)
     assert (right.may_approve, right.reason, right.message) == (
         False,
@@ -872,5 +948,5 @@ async def test_rest_approve_answers_403_with_the_sentence(
     response = await _post(ac, "approve", request_id, token)
 
     assert response.status_code == 403
-    assert "Only MEHO-SA-Operators or MEHO-Admins may approve this change" in response.text
+    assert "lets only MEHO-SA-Operators or MEHO-Admins approve this change" in response.text
     assert _fake_resume == []

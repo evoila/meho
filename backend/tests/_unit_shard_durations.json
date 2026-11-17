@@ -456,6 +456,7 @@
   "tests/test_connectors_keycloak_trace_mask.py": 1.79,
   "tests/test_connectors_keycloak_update_merge.py": 8.81,
   "tests/test_connectors_keycloak_user_enabled.py": 14.94,
+  "tests/test_connectors_keycloak_user_identity.py": 9.8,
   "tests/test_connectors_keycloak_user_logout.py": 7.68,
   "tests/test_connectors_keycloak_user_otp.py": 41.82,
   "tests/test_connectors_keycloak_user_state.py": 15.23,

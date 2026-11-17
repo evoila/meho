@@ -385,6 +385,8 @@ async def _explain_request(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
         ) from exc
+    except InvalidStoredPolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 def _asker(operator: Operator, body: PolicyExplainBody) -> Operator:

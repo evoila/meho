@@ -96,15 +96,16 @@ EOF
 }
 
 # render_egress_values <pod range> <service range> <addresses>: the
-# outgoing rules of the MEHO pod (#6612). The chart's NetworkPolicy lets it
+# outgoing rule of the MEHO pod (#6612). The chart's NetworkPolicy lets it
 # reach only the built-in parts; on form 2 it also reaches every address
 # outside the built-in Kubernetes, on every port: the systems it manages
 # and the AI service. The pod range, the service range and the addresses of
 # this machine stay closed, so the pod reaches no other pod and none of
-# RKE2's own ports. The second rule is its own console address: the port
-# forwarding of RKE2's Traefik sends that connection to the Traefik pod on
-# 8443 before the rule is checked. An address inside the two ranges, such as
-# the one of RKE2's flannel.1 interface, is closed by the range already.
+# RKE2's own ports. Its own console address is reached through the Traefik
+# pod, by the chart's rule that values-single-node.yaml turns on
+# (networkPolicy.ingressControllerEgress). An address inside the two ranges,
+# such as the one of RKE2's flannel.1 interface, is closed by the range
+# already.
 render_egress_values() {
     local pod_range=$1 service_range=$2 addresses=$3 address
     cat <<EOF
@@ -123,18 +124,6 @@ EOF
         cidrs_overlap "$address" "$service_range" && continue
         printf '              - "%s/32"\n' "$address"
     done <<<"$addresses"
-    cat <<'EOF'
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: rke2-traefik
-      ports:
-        - port: 8443
-          protocol: TCP
-EOF
 }
 
 # write_place_values <hostname> <tenant id> <admin user> <approver user>

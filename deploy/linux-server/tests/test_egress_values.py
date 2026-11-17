@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-"""Tests of the outgoing rules of the MEHO pod that install.sh writes to
+"""Tests of the outgoing rule of the MEHO pod that install.sh writes to
 values-place.yaml on form 2: every address outside the built-in Kubernetes,
 on every port, but not the pod range, the service range or the addresses of
-this machine; and the console address through the Traefik pod. Also the
-NetworkPolicy that the chart makes from them."""
+this machine. Also the NetworkPolicy that the chart makes from it. The rule
+to the console address through the Traefik pod is the chart's own
+(networkPolicy.ingressControllerEgress in values-single-node.yaml)."""
 
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ class EgressValuesTests(InstallTestCase):
     def place_values(self) -> str:
         return self.machine.host_path(PLACE_VALUES).read_text()
 
-    def test_meho_reaches_every_address_outside_the_cluster_and_its_console(self) -> None:
+    def test_meho_reaches_every_address_outside_the_cluster(self) -> None:
         result = self.machine.run()
 
         self.assert_succeeds(result)
@@ -176,24 +177,7 @@ class EgressChartRenderTests(InstallTestCase):
             "          except:\n"
             "          - 172.30.0.0/16\n"
             "          - 172.31.0.0/20\n"
-            "          - 10.0.0.5/32\n",
-            egress,
-        )
-
-    def test_the_networkpolicy_of_meho_opens_its_console_through_traefik(self) -> None:
-        egress = self.networkpolicy_of_meho().split("\n  egress:\n", 1)[1]
-
-        self.assertIn(
-            "    - ports:\n"
-            "      - port: 8443\n"
-            "        protocol: TCP\n"
-            "      to:\n"
-            "      - namespaceSelector:\n"
-            "          matchLabels:\n"
-            "            kubernetes.io/metadata.name: kube-system\n"
-            "        podSelector:\n"
-            "          matchLabels:\n"
-            "            app.kubernetes.io/name: rke2-traefik",
+            "          - 10.0.0.5/32",
             egress,
         )
 

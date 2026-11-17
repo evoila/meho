@@ -47,7 +47,7 @@ def egress_values(
     service_range: str = "10.43.0.0/16",
     addresses: tuple[str, ...] = ("10.0.0.5",),
 ) -> str:
-    """The outgoing rules of the MEHO pod in values-place.yaml."""
+    """The outgoing rule of the MEHO pod in values-place.yaml."""
     closed = "".join(f'              - "{address}/32"\n' for address in addresses)
     return (
         "networkPolicy:\n"
@@ -59,16 +59,6 @@ def egress_values(
         f'              - "{pod_range}"\n'
         f'              - "{service_range}"\n'
         f"{closed}"
-        "    - to:\n"
-        "        - namespaceSelector:\n"
-        "            matchLabels:\n"
-        "              kubernetes.io/metadata.name: kube-system\n"
-        "          podSelector:\n"
-        "            matchLabels:\n"
-        "              app.kubernetes.io/name: rke2-traefik\n"
-        "      ports:\n"
-        "        - port: 8443\n"
-        "          protocol: TCP\n"
     )
 
 

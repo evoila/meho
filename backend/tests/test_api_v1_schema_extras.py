@@ -60,6 +60,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
+from structlog.tracebacks import ExceptionDictTransformer
 
 from meho_backplane.api.v1.audit_models import AuditQueryRequest
 from meho_backplane.api.v1.kb import IngestKbRequest, KbEntryCreate
@@ -237,7 +238,8 @@ def _log_buffer() -> Iterator[io.StringIO]:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

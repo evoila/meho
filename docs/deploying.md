@@ -251,8 +251,7 @@ to federate. Decide which identity serves them:
 | On-prem / no pod identity + per-operator WIF, no `checkRunner` | no | **nothing — credentialed Sensors read `unknown` forever** | — |
 
 **"Background reads" here means the empty-`raw_jwt` callers only** — the
-sensor check-runner, the topology-refresh scheduler, runbook verify
-dispatch, the legacy connector `execute()` shims. It does **not** cover
+sensor check-runner, the topology-refresh scheduler, the legacy connector `execute()` shims. It does **not** cover
 connector `probe()` / `fingerprint()`. Those build their operator with
 `synthesise_system_operator()`, which by deliberate design (G3.10) carries a
 **non-empty placeholder** `raw_jwt`; `_select_auth_path` only tests

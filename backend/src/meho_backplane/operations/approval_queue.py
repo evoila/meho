@@ -123,6 +123,8 @@ from meho_backplane.operations._audit import (
     policy_rule_columns,
     policy_rule_var,
     resolve_agent_session_id,
+    run_id_var,
+    step_id_var,
     work_ref_var,
 )
 from meho_backplane.operations._errors import (
@@ -1327,6 +1329,10 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
+#: Audit paths that carry the runbook run and step of the call.
+_RUNBOOK_STEP_PATHS = frozenset({"approval.request", "approval.result"})
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1404,6 +1410,19 @@ async def _write_audit_row(
     if request.approver_rule is not None:
         payload["approver_rule"] = request.approver_rule
         payload["approver_roles"] = request.approver_roles
+    # The runbook run and step of a check that waits or reads its result
+    # (the "request" and "result" rows). Both rows are written on the task
+    # of the runbook step, so the vars are bound. A "decision" row is written
+    # on the approver's task and gets neither.
+    run_id: uuid.UUID | None = None
+    step_id: str | None = None
+    if path in _RUNBOOK_STEP_PATHS:
+        run_id = run_id_var.get()
+        step_id = step_id_var.get()
+        if run_id is not None:
+            payload["run_id"] = str(run_id)
+        if step_id is not None:
+            payload["step_id"] = step_id
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1470,6 +1489,8 @@ async def _write_audit_row(
         # durable source of truth -- it keeps both audit rows aligned with
         # the value the request was parked under.
         work_ref=request.work_ref,
+        run_id=run_id,
+        step_id=step_id,
         **policy_kwargs,
     )
     session.add(row)

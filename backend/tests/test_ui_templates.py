@@ -845,12 +845,12 @@ def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
     assert match is not None, "kb/detail.html rendered no inline <style> block"
     style_block = match.group(0)
 
-    # (a) both theme scopes present in the pygments token rules.
-    assert re.search(r"(?m)^\.kb-code \.\w", style_block), (
-        "default/dark-scoped .kb-code pygments rule set missing"
-    )
-    assert '[data-theme="meho-light"] .kb-code .' in style_block, (
-        "light-theme-scoped .kb-code pygments rule set missing"
+    # (a) one pygments token rule set, scoped to .kb-code. The console has
+    #     a single light theme, so a second theme-scoped set would ship on
+    #     every KB page and never be selected.
+    assert re.search(r"(?m)^\.kb-code \.\w", style_block), ".kb-code pygments rule set missing"
+    assert "data-theme" not in style_block, (
+        "a theme-scoped pygments override is back; there is only one theme"
     )
 
     # (b) surface background follows the active theme via a live token.

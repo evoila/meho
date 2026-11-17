@@ -774,6 +774,11 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
     -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -d @-
 
+# A call made with a token waits for approval: the answer is 202 with an
+# approval_request_id, and nothing is written yet. Approve it before the
+# next step. Each PATCH below waits for approval the same way.
+meho approvals approve <approval_request_id>
+
 # Rotate the pin (e.g. the appliance cert was re-issued): PATCH the new
 # PEM. The pooled client is rebuilt — the pin digest is part of the
 # client-pool cache key, so the old client is never reused.
@@ -817,6 +822,11 @@ curl -sf -X POST https://meho.example.com/api/v1/targets \
         "auth_model": "shared_service_account",
         "verify_tls": false
       }'
+
+# A call made with a token waits for approval: the answer is 202 with an
+# approval_request_id, and nothing is written yet. Approve it before the
+# next step. Each PATCH below waits for approval the same way.
+meho approvals approve <approval_request_id>
 
 # Flip an existing target back to secure once its CA is in the bundle.
 curl -sf -X PATCH https://meho.example.com/api/v1/targets/harbor-lab \

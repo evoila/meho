@@ -142,6 +142,8 @@ targets:
 
 ```bash
 meho targets import targets.yaml
+# Each row waits for approval. Approve it before the probe:
+meho approvals approve <approval-id-from-targets-import>
 meho targets probe win-fs01
 ```
 

@@ -18,8 +18,8 @@ option name and the words around it stay readable:
 * a database login ``user/password@service`` (also ``@//host:port/service``),
   with quoted, joined and escaped password parts (``user/"x y"@service``);
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string. A value in
-  quotes or in braces (``Pwd={x;y}``) is read to its closing mark. A value
-  without them runs to the ``;`` (or the end of the line), so it may hold
+  quotes or in braces (``Pwd={x;y}``) is read to its closing mark on the
+  same line. A value without them runs to the ``;`` (or the end of the line), so it may hold
   spaces and quotes (``Pwd=made'up;``). Text counts as a connection string
   when a ``;`` stands before the label, or a ``;`` ends the value and a
   next field (``;Database=``) follows or no option (``-x``) or ``key=``
@@ -143,6 +143,11 @@ _IN_SINGLE_MARK: Final = re.compile(r"['\n]")
 _IN_DOUBLE_MARK: Final = re.compile(r'["\\\n]')
 
 
+def _ends_word(text: str, index: int) -> bool:
+    """True at the end of the text, at white space or at an operator."""
+    return index >= len(text) or text[index].isspace() or text[index] in ";|&<>()"
+
+
 class _OuterQuotes:
     """Where the quoted string that a position stands in closes, read left to right.
 
@@ -150,8 +155,9 @@ class _OuterQuotes:
     The closing quote of that string ends the inner command, so it is not
     read as the start of a quoted part of the password. A quoted string
     ends at the end of its line here: log text often has an apostrophe of
-    its own (``don't``). Each part of the text is read once, so a scan
-    stays linear.
+    its own (``don't``). For the same reason a quote that a word follows
+    directly opens a quoted value and does not close the string. Each part
+    of the text is read once, so a scan stays linear.
     """
 
     def __init__(self, text: str) -> None:
@@ -190,6 +196,10 @@ class _OuterQuotes:
             else:
                 after = _skip_double_quoted(text, index - 1, line_end)
                 self._close = after - 1 if after > 0 else -1
+            if self._close >= 0 and not _ends_word(text, self._close + 1):
+                # A quote with a word right behind it opens a quoted value
+                # (``don't --password 'a b'``): it does not close a string.
+                self._close = -1
         return self._close if self._close >= 0 else None
 
 
@@ -469,17 +479,26 @@ _NEXT_FIELD: Final = re.compile(r";[ \t]*[A-Za-z][\w .-]{0,63}=")
 #: The closing character of a quoted connection string value. ODBC quotes a
 #: value with braces (``Pwd={x;y}``).
 _CLOSING: Final = {"'": "'", '"': '"', "{": "}"}
+#: The closing character or the end of the line, for each opening character.
+_CLOSING_OR_LINE_END: Final = {
+    opening: re.compile(f"[{re.escape(closing)}\n]") for opening, closing in _CLOSING.items()
+}
 
 
 def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
-    """Span of a quoted connection string value; a doubled closing mark is part of it."""
+    """Span of a quoted connection string value; a doubled closing mark is part of it.
+
+    The search ends at the end of the line, so a value that is never closed
+    does not make each later label search to the end of the text.
+    """
     closing = _CLOSING[text[start]]
+    stop = _CLOSING_OR_LINE_END[text[start]]
     pos = start + 1
     while True:
-        close = text.find(closing, pos)
-        if close == -1:
-            line_end = text.find("\n", start)
-            return start, len(text) if line_end == -1 else line_end
+        mark = stop.search(text, pos)
+        if mark is None or mark.group(0) == "\n":
+            return start, len(text) if mark is None else mark.start()
+        close = mark.start()
         if text.startswith(closing, close + 1):
             pos = close + 2
             continue

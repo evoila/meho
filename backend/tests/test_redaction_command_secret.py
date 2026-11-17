@@ -188,6 +188,24 @@ def test_an_unclosed_quote_does_not_hide_the_rest_of_the_text() -> None:
     assert out.endswith("\nnext line stays")
 
 
+#: A quoted value with a single quote mark earlier on the same line, for
+#: long options, tool options and environment names.
+_AFTER_APOSTROPHE: Final[list[tuple[str, str]]] = [
+    ("don't wait: backup-agent --password 'made up' --target s3", "--target s3"),
+    ("it's done: mysql -u root -p'made up' appdb", "appdb"),
+    ("job's env: DB_PASSWORD='made up' ./run.sh", "./run.sh"),
+]
+
+
+@pytest.mark.parametrize(("line", "kept"), _AFTER_APOSTROPHE)
+def test_a_quoted_value_is_hidden_after_an_apostrophe_on_the_line(line: str, kept: str) -> None:
+    out = redact(line, get_default_policy()).redacted
+    assert "made" not in out
+    assert out.startswith(line.split(":", 1)[0] + ":")
+    assert out.endswith(kept)
+    assert _MARK in out
+
+
 def test_spans_never_overlap_and_are_left_to_right() -> None:
     text = f"mysql -p{PW} --password {PW} DB_PASSWORD={PW}; Server=a;{_PASSWORD_IS}{PW};"
     spans = COMMAND_SECRET.secret_spans(text)
@@ -405,6 +423,7 @@ def test_the_rule_only_hides_more() -> None:
     before_policy = _without_command_rule()
     texts = _texts_of_other_tests() + [line for line, _gone, _kept in _HIDDEN]
     texts += [line for line, _expected in _WHOLE_OUTPUT]
+    texts += [line for line, _kept in _AFTER_APOSTROPHE]
     shown_now: dict[str, set[str]] = {}
     for text in texts:
         before = _shown(redact(text, before_policy).redacted)
@@ -434,6 +453,7 @@ _ORDINARY: Final[list[str]] = [
     "Server=db;Database=d;User ID=app;Encrypt=true",
     "rsync -avz --delete src/ dest/\nrsync done",
     "docker run --rm -e LOG_LEVEL=debug -p 8080:80 nginx:1.27",
+    "don't stop: sh -c 'mysql --version'; echo 'ok'",
 ]
 
 
@@ -512,6 +532,21 @@ def test_an_800000_character_text_of_secret_elements_is_read_in_under_a_second(
     spans = COMMAND_SECRET.secret_spans(text)
     assert time.perf_counter() - started < 1.0
     assert spans == []
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["Pwd={a\n", "a;Password='a\n", 'a;pw="a\n', "Pwd={a}}\n", "x;Pwd={"],
+)
+def test_a_1600000_character_text_of_unclosed_connection_values_is_read_in_under_a_second(
+    unit: str,
+) -> None:
+    # Each line opens a quoted or braced value that is never closed. A search
+    # for its closing mark that runs to the end of the text takes square time.
+    text = unit * (1_600_000 // len(unit))
+    started = time.perf_counter()
+    COMMAND_SECRET.secret_spans(text)
+    assert time.perf_counter() - started < 1.0
 
 
 # -- through the three operations ----------------------------------------------------

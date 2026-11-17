@@ -245,7 +245,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "secrets that someone typed in. To check local users or static "
         "routes, do not read the whole file: call ``pfsense.user.list`` or "
         "``pfsense.route.static.list``, which return only a short list of "
-        "fields and never read secret fields."
+        "fields and never read secret fields. To find out who changed the "
+        "configuration, when, and what changed, call "
+        "``pfsense.config.history``: it lists the kept revisions and shows "
+        "the diff of one revision."
     ),
     "dhcp": (
         "Use for pfSense DHCP lease-state operations: reading the live "
@@ -854,6 +857,24 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_user_list(self, target, params, operator)
+
+    async def config_history(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.config.history`` (#4989).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_config_history.pfsense_config_history`.
+        Secrets are removed before any diff leaves the handler.
+        """
+        from meho_backplane.connectors.pfsense.ops_config_history import (
+            pfsense_config_history as _pfsense_config_history,
+        )
+
+        return await _pfsense_config_history(self, target, params, operator)
 
     async def user_disable(
         self,

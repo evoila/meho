@@ -882,6 +882,15 @@ class Settings(BaseModel):
         more instead of two long texts
         (:mod:`meho_backplane.operations.answer_ready`). It stays off until
         model tests show it helps. Env ``JSONFLUX_ANSWER_READY``.
+    result_query_small_form:
+        Off by default. When on, the MCP ``result_query`` tool gets its
+        small form (#4174): an error in ``query`` names the wrong place as a
+        path (``query.filter[0].field: ...``), a filter that matches no row
+        adds ``no_match`` with a few values each filter field really has,
+        and ``query.filter`` takes the ``contains`` operator (a text match
+        that ignores case). The REST route does not change. It stays off
+        until a benchmark run shows it helps. Env
+        ``RESULT_QUERY_SMALL_FORM``.
     composite_max_depth:
         Hard cap on the recursion depth a composite operation
         (``source_kind='composite'``) may reach via successive
@@ -1979,6 +1988,7 @@ class Settings(BaseModel):
     result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     jsonflux_answer_ready: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    result_query_small_form: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
@@ -3368,6 +3378,9 @@ def get_settings() -> Settings:
         ),
         jsonflux_answer_ready=parse_bool_env(
             os.environ.get("JSONFLUX_ANSWER_READY", "false"),
+        ),
+        result_query_small_form=parse_bool_env(
+            os.environ.get("RESULT_QUERY_SMALL_FORM", "false"),
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),

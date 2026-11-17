@@ -282,6 +282,47 @@ plus a `coverage_note` — so a `COUNT` over a capped spill is labelled as
 covering the stored subset, **never** presented as a whole-inventory
 total.
 
+### Small form of `result_query` (`RESULT_QUERY_SMALL_FORM`, off by default)
+
+Small models call `result_query`, and MEHO accepts the calls, but they
+often ask the wrong thing: a field that is not on the handle, or a value
+that is not in the data. The small form helps them fix the call (#4174).
+It stays off until a benchmark run shows that a small open model does
+better and Claude does not do worse. Turning it on by default is a
+separate change.
+
+With `RESULT_QUERY_SMALL_FORM=true`, the MCP tool changes like this
+(`mcp/tools/_result_query_small_form.py`):
+
+- **An error names the wrong place** as a path. Examples:
+  `query.filter[0].field: unknown field 'state': ...`,
+  `query.filter[0]: Additional properties are not allowed ('column' was
+  unexpected)`, `query.path: ...`. The compiler keeps the place on
+  `QueryContractError.loc`, beside the text, so the REST text does not
+  change. The `tools/call` input check adds the path only for a tool whose
+  `ToolDefinition.input_error_path` is true; only `result_query` sets it,
+  and only while the switch is on.
+- **A filter that matches no row** adds `no_match` to the answer:
+  `values` has up to 10 values each filter field has in the stored rows,
+  in stored order (longer texts cut to 64 characters), and `note` says
+  what to do (`operations/result_query_no_match.py`). Null, object and
+  list values are left out. An aggregate without `group_by` (for example
+  `COUNT(*)`) answers one row even when nothing matched, so for it the
+  filter alone runs once more, for at most one row. The values come from
+  the stored rows the caller can already read by paging.
+- **`contains`** is one more operator in `query.filter`
+  (`SmallFormQuerySpec`). It compiles to
+  `contains(lower(<column>), lower(?))`: the value is bound as a
+  parameter, `%` and `_` are plain characters, and case does not matter.
+  It works only on text columns and needs a non-empty text value.
+
+There is no new parameter. `tools/list` shows `contains` in the operator
+list and `no_match` in the output schema only while the switch is on. The
+REST route keeps `ResultQuerySpec`, so its body, its OpenAPI schema and its
+answers do not change. Tests: `tests/test_result_query_small_form_core.py`,
+`tests/test_mcp_result_query_small_form.py` (also the tool text budget with
+the switch on).
+
 ### Source coverage and storage coverage (#3676)
 
 A stored record carries two coverage labels. They answer different

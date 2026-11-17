@@ -327,6 +327,24 @@ async def test_connector_list_target_fit_says_no_connector_for_the_profile() -> 
     assert "profile" in result["target_fit"]["hint"]
 
 
+@pytest.mark.usefixtures("profiles_on")
+@pytest.mark.asyncio
+async def test_connector_list_product_filter_names_only_profile_products() -> None:
+    """A product filter with no match never names a product outside the profile."""
+    rows = {
+        "connectors": [],
+        "product_filter": {
+            "query": "nope",
+            "matches": [],
+            "known_products": ["kubernetes", "vault"],
+        },
+        "_listed_products": {"kubernetes-1.x": "kubernetes", "vault-1.x": "vault"},
+    }
+    with patch.object(connector_admin, "list_connector_rows", new=AsyncMock(return_value=rows)):
+        result = await connector_admin._list_handler(_operator("k8s"), {"product": "nope"})
+    assert result["product_filter"]["known_products"] == ["kubernetes"]
+
+
 # ---------------------------------------------------------------------------
 # The policy gate: the stricter of the person's and the profile's rules
 # ---------------------------------------------------------------------------

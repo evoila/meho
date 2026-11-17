@@ -1175,8 +1175,9 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 def _check_script_size(params: dict[str, Any]) -> dict[str, Any] | None:
     """Params check of ``linux.script.run``: refuse a script over the size limit.
 
-    Runs before the call can wait for approval. The schema ``maxLength`` counts
-    characters; this counts UTF-8 bytes, which is what the limit means.
+    Runs before the call can wait for approval. The schema has no ``maxLength``
+    on purpose: it counts characters and runs first, so it would hide the plain
+    sentence. This counts UTF-8 bytes, which is what the limit means.
     """
     script = params.get("script")
     if not isinstance(script, str):
@@ -1406,7 +1407,6 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "script": {
                 "type": "string",
-                "maxLength": SCRIPT_MAX_BYTES,
                 "description": (
                     "The script body to run, at most 1,048,576 bytes. The "
                     "approver reads it page by page, and its SHA-256. Do NOT "

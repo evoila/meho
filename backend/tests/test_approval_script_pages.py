@@ -219,12 +219,15 @@ async def test_a_script_over_the_limit_is_refused_with_plain_words_before_it_wai
 
 
 @pytest.mark.asyncio
-async def test_an_ascii_script_over_the_limit_is_refused_by_the_schema_before_it_waits(
+async def test_an_ascii_script_over_the_limit_is_refused_with_plain_words_before_it_waits(
     linux_write_registered: None,  # noqa: F811 -- fixture
 ) -> None:
     dumped = await _dispatch_script(_text(SCRIPT_MAX_BYTES + 1))
     assert dumped["status"] == "error", dumped
     assert "invalid_params" in dumped["error"]
+    text = repr(dumped["extras"])
+    assert "The script is 1,048,577 bytes." in text
+    assert "MEHO accepts at most 1,048,576 bytes (1 MiB) for linux.script.run." in text
     assert await _count_requests() == 0
 
 

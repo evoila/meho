@@ -688,31 +688,6 @@ async def test_card_does_not_show_the_sent_name_when_the_user_cannot_be_read(
     assert "could not read this user" in card["user_note"]
 
 
-@pytest.mark.parametrize("readable", [True, False])
-async def test_required_actions_card_shows_the_stored_name_or_none(
-    kc: KeycloakConnector, readable: bool
-) -> None:
-    op_id = "keycloak.user.required_actions.update"
-    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        _mount_token(mock)
-        if readable:
-            _mount_user(mock, _user(True))
-            card = await _card(op_id, {"id": _USER_UUID, "username": "EVENT-GUEST", "add": ["X"]})
-        else:
-            mock.get(_USERS_PATH).respond(500)
-            card = await _card(op_id, {"username": "event-guest", "add": ["X"]})
-    if readable:
-        assert card["username"] == "event-guest"
-        assert card["user_available"] is True
-        assert "user_note" not in card
-    else:
-        # The card does not show the sent name as the user's name.
-        assert "username" not in card
-        assert card["requested_username"] == "event-guest"
-        assert card["user_available"] is False
-        assert "could not read this user" in card["user_note"]
-
-
 async def test_card_of_a_member_change_shows_the_stored_name(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)

@@ -69,6 +69,7 @@ from uuid import UUID
 import hvac.exceptions
 import pytest
 import requests.exceptions
+import structlog.testing
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
@@ -1496,9 +1497,13 @@ async def test_preflight_fail_soft_when_probe_raises(
     fake = install_fake_vault(monkeypatch)
     fake.sys.raise_on_get_capabilities = hvac.exceptions.VaultDown("sealed")
 
-    result = await vault_kv_write_capability_preflight(
-        _make_operator(), "vault.kv.put", {"path": "meho/x"}
-    )
+    # Capture the log lines instead of printing them. With no logging set up,
+    # structlog prints the failure with every local variable, and those hold
+    # made-up secret test data.
+    with structlog.testing.capture_logs():
+        result = await vault_kv_write_capability_preflight(
+            _make_operator(), "vault.kv.put", {"path": "meho/x"}
+        )
 
     assert result is None
 

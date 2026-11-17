@@ -65,6 +65,9 @@ on:
     paths:
       - 'mkdocs.yml'
       - 'docs-site/**'
+      - 'docs/upgrade-rows/**'
+      - 'docs/deploying.md'
+      - 'scripts/ci/upgrade_rows.py'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'docs/compatibility/**'
@@ -89,6 +92,7 @@ on:
     paths:
       - 'mkdocs.yml'
       - 'docs-site/**'
+      - 'docs/upgrade-rows/**'
   workflow_dispatch:
 
 # Read-only by default; the deploy job elevates to the minimum it

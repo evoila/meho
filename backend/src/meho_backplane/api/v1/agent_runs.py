@@ -451,7 +451,7 @@ async def list_runs(
 
     Tenant-isolated server-side via the JWT — cross-tenant runs are
     invisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one
-    change ticket (exact match); ``?status=running`` narrows to one
+    change ticket (whole id, see the work_ref parameter); ``?status=running`` narrows to one
     lifecycle state; ``?agent_name=triage`` narrows to runs produced by
     that agent definition (an unknown name yields an empty list). Returns
     ``created_at DESC``.

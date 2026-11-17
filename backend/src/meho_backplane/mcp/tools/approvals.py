@@ -344,10 +344,12 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "description": (
-                        "Filter by external change-ticket reference (exact "
-                        "match), e.g. 'gh:evoila/meho#1' — the requests "
-                        "authorised by change ticket X. Omit for no "
-                        "work_ref filter."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#1') — the requests authorised by "
+                        "change ticket X. White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused. Omit for no work_ref filter."
                     ),
                 },
                 "outcome_unknown": {

@@ -1213,6 +1213,7 @@
   "tests/test_ui_unified_grants.py": 36.89,
   "tests/test_ui_vault.py": 57.95,
   "tests/test_ui_vault_writes.py": 54.18,
+  "tests/test_ui_work_ref_refused_js.py": 0.05,
   "tests/test_uncertain_outcome.py": 0.95,
   "tests/test_unit_connector_select.py": 1.56,
   "tests/test_unit_shard_split.py": 1.46,

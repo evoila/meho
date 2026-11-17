@@ -42,6 +42,7 @@ import structlog
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
+from structlog.tracebacks import ExceptionDictTransformer
 
 from meho_backplane.agent.invocation import AgentInvoker
 from meho_backplane.agent.run import PydanticAgentRun
@@ -502,7 +503,8 @@ def _capture_loop_log_to_buffer(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(_stdlib_logging.INFO),

@@ -89,6 +89,7 @@ from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.audit import write_mcp_session_open_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.call_flow_guide import call_flow_guide
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
 from meho_backplane.mcp.profiles import (
     UnknownToolProfileError,
@@ -450,6 +451,19 @@ async def _session_preamble(operator: Operator) -> PreambleAssembly:
     )
 
 
+def _session_call_flow_guide(operator: Operator) -> str:
+    """Return the call flow guide for *operator*, or ``""`` (#4715).
+
+    Only with the ``MCP_CALL_FLOW_GUIDE`` switch on. The guide names only
+    tools on the session's tool list, read with the same filter as
+    :func:`_session_can_announce`. The guide names no add-on tools, so no
+    add-on families are passed.
+    """
+    if not get_settings().mcp_call_flow_guide:
+        return ""
+    return call_flow_guide({defn.name for defn in all_tools_for(operator)})
+
+
 async def _session_instructions(operator: Operator) -> str | None:
     """Assemble the ``initialize.instructions`` payload for *operator*.
 
@@ -498,6 +512,8 @@ async def _session_instructions(operator: Operator) -> str | None:
 
     #4172: the bands follow the session's tool profile; see
     :func:`_session_preamble`.
+
+    #4715: the call flow guide comes first; see :func:`_session_call_flow_guide`.
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
@@ -523,9 +539,9 @@ async def _session_instructions(operator: Operator) -> str | None:
             dropped_slugs=preamble.dropped_slugs,
         )
     memory = await memory_band(operator)
-    joined = "\n\n".join(
-        band for band in (preamble.text, memory, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND) if band
-    )
+    guide = _session_call_flow_guide(operator)
+    bands = (guide, preamble.text, memory, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND)
+    joined = "\n\n".join(band for band in bands if band)
     _log.info(
         "mcp_preamble_receipt",
         tenant_id=str(operator.tenant_id),

@@ -12,6 +12,13 @@
 # Publishing is #4814. A run on every release tag comes once the release
 # test exists (#4816).
 #
+# Every run signs SHA256SUMS with cosign (keyless, like linux-download.yml)
+# and checks the signature. With the input publish it also makes and signs
+# the OS-package file and uploads the files to Google Cloud Storage. The
+# real signing key (secret MEHO_OS_PACKAGES_SIGNING_KEY) and the bucket
+# (variable MEHO_RELEASE_BUCKET) are set up by the project owner. See
+# docs/RELEASING.md.
+#
 # Runner: the lab's self-hosted pool, which must reach the lab's vCenter
 # and the build VM's address, and GitHub for the CIS content. The build VM
 # must reach the Ubuntu archive. The lab's test place is an internal ticket.
@@ -35,6 +42,11 @@ on:
         description: The release tag whose form-2 download to build from, for example v0.40.0.
         required: true
         type: string
+      publish:
+        description: Make and sign the OS-package file, and upload the files to the release bucket.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -52,6 +64,10 @@ jobs:
     # The form-2 install on the build VM takes up to 30 minutes, the clean
     # and the export about as long again.
     timeout-minutes: 180
+    permissions:
+      contents: read
+      # Mint the GitHub OIDC token for cosign keyless signing.
+      id-token: write
     env:
       TAG: ${{ inputs.tag }}
     steps:
@@ -142,6 +158,46 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/ova"
           deploy/appliance/build.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
 
+      - name: Make and sign the OS-package file
+        # Release runs only (publish). The key is read from the secret
+        # here and nowhere else. MEHO_RELEASE=1 makes the script stop when
+        # the key is empty or is a test key. The .deb files are the OS
+        # updates of the build day, in ${RUNNER_TEMP}/os-debs.
+        if: ${{ inputs.publish }}
+        env:
+          MEHO_RELEASE: "1"
+          MEHO_OS_PACKAGES_SIGNING_KEY: ${{ secrets.MEHO_OS_PACKAGES_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          deploy/appliance/os-packages.sh "${TAG#v}" "${RUNNER_TEMP}/os-debs" "${RUNNER_TEMP}/ova"
+
+      - name: Sign the checksums with cosign
+        # SHA256SUMS lists the OVA and, on a release run, the OS-package
+        # file. Same signing as SHA256SUMS-linux in linux-download.yml; the
+        # bundle file sits next to it.
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/ova"
+          shopt -s nullglob
+          sha256sum "meho-appliance-${TAG#v}.ova" meho-appliance-*-os-packages.tar > SHA256SUMS
+          cosign sign-blob --yes --bundle=SHA256SUMS.cosign.bundle SHA256SUMS
+          cosign verify-blob \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/appliance-build.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle SHA256SUMS.cosign.bundle \
+            SHA256SUMS
+
+      - name: Upload the files to the release bucket
+        # Release runs only. The script stops with a plain message when the
+        # bucket is not set up, never creates a bucket, never changes who
+        # can read it, and never overwrites a published file.
+        if: ${{ inputs.publish }}
+        env:
+          MEHO_RELEASE_BUCKET: ${{ vars.MEHO_RELEASE_BUCKET }}
+        run: |
+          set -euo pipefail
+          deploy/appliance/upload-release.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
+
       - name: Write the summary
         if: always()
         run: |
@@ -167,7 +223,9 @@ jobs:
           # of the lab.
           path: |
             ${{ runner.temp }}/ova/meho-appliance-*.ova
+            ${{ runner.temp }}/ova/meho-appliance-*-os-packages.tar
             ${{ runner.temp }}/ova/SHA256SUMS
+            ${{ runner.temp }}/ova/SHA256SUMS.cosign.bundle
             ${{ runner.temp }}/ova/meho-appliance-*-cis.txt
           if-no-files-found: error
           retention-days: 3

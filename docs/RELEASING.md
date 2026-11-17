@@ -90,6 +90,45 @@ across every cut:
   backstop a PR cannot edit. The full enforcement map is in
   [`docs/codebase/devops.md` § Untrusted pull-request isolation](codebase/devops.md).
 
+## Appliance release files
+
+The appliance build (`appliance-build.yml`, run by hand with a release tag)
+makes two files and a checksum list for a release:
+
+- `meho-appliance-X.Y.Z.ova`: the appliance.
+- `meho-appliance-X.Y.Z-os-packages.tar`: the OS updates for an update of
+  the appliance, a signed flat apt repository. `deploy/appliance/os-packages.sh`
+  makes it. `install.sh --os-packages` checks its signature with the key
+  file `/etc/apt/keyrings/meho-os-packages.gpg`.
+- `SHA256SUMS` lists both files. `SHA256SUMS.cosign.bundle` is its cosign
+  signature, keyless, as for `SHA256SUMS-linux`. The signature names
+  `appliance-build.yml` and the ref the workflow ran on.
+
+The files go to Google Cloud Storage, one folder per release:
+`gs://<bucket>/X.Y.Z/`. The OVA is too big for a GitHub release file.
+
+**Signing the OS-package file.** The key is the secret
+`MEHO_OS_PACKAGES_SIGNING_KEY` of the release workflow (an armored secret
+key without a passphrase). Only release runs read it. The workflow input
+`publish` makes the run a release run (`MEHO_RELEASE=1`). A release run
+stops with a plain message when the secret is empty. It also stops when the
+key's user id holds `TEST KEY`: the test key of the tests can never sign a
+release.
+
+**The upload step.** `deploy/appliance/upload-release.sh` copies the OVA,
+the OS-package file, `SHA256SUMS` and its bundle to the folder of the
+version. The bucket name is the workflow variable `MEHO_RELEASE_BUCKET`.
+When it is empty, the step stops with a plain message. The step never
+creates a bucket, never changes who can read it and never overwrites a
+file. A second run of the same release with the same content does nothing.
+A second run with other content stops. How the runner logs in to Google
+Cloud is part of the bucket set-up.
+
+**The project owner sets up** the signing key (made once, with a backup
+copy in the team password manager, never on a laptop), the bucket and its
+public read access, and the runner's access to it. No key, no bucket name
+and no account name is in the repository.
+
 ## Versioning
 
 [SemVer](https://semver.org). The version lives **only in the git tag** —

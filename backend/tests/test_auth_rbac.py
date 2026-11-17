@@ -56,6 +56,7 @@ import respx
 import structlog
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from structlog.tracebacks import ExceptionDictTransformer
 
 from meho_backplane.api.v1.rbac_test import router as rbac_test_router
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -123,7 +124,8 @@ def _configure_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

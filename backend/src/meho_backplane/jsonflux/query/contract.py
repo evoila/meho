@@ -51,7 +51,8 @@ rejected at model construction). The ``select`` and ``IN`` caps bound the
 compile-time expansion — one quoted identifier per projected column, one
 bound placeholder per ``IN`` element — so a caller cannot force an
 arbitrarily large (though still single, still parameterized) ``SELECT``.
-Operator allow-list ``=, !=, <, <=, >, >=, IN, IS NULL``; aggregate
+Operator allow-list ``=, !=, <, <=, >, >=, IN, IS NULL`` (plus
+``contains`` in :class:`SmallFormQuerySpec`); aggregate
 allow-list ``COUNT, SUM, MIN, MAX, AVG``. The output-row
 ceiling (``MAX_LIMIT``) is single-sourced in
 :mod:`meho_backplane.operations.result_query` and passed to
@@ -80,6 +81,8 @@ __all__ = [
     "OutputPlan",
     "QueryContractError",
     "ResultQuerySpec",
+    "SmallFormFilterPredicate",
+    "SmallFormQuerySpec",
     "compile_query",
 ]
 
@@ -119,6 +122,12 @@ _NOT_QUERYABLE_REASONS: dict[str, str] = {
 #: injection attempt via the operator slot is not expressible.
 FilterOperator = Literal["=", "!=", "<", "<=", ">", ">=", "IN", "IS NULL"]
 
+#: The operators of the small form (``RESULT_QUERY_SMALL_FORM``): the list
+#: above plus ``contains``, a text match that ignores upper and lower case.
+#: Only :class:`SmallFormQuerySpec` accepts it, so the REST body and the MCP
+#: tool with the switch off keep the list above.
+SmallFormFilterOperator = Literal["=", "!=", "<", "<=", ">", ">=", "IN", "IS NULL", "contains"]
+
 #: Aggregate functions the compiler will emit. Fixed allow-list, same
 #: reasoning as :data:`FilterOperator`.
 AggregateFunc = Literal["COUNT", "SUM", "MIN", "MAX", "AVG"]
@@ -133,6 +142,9 @@ _VALUELESS_OPERATORS: frozenset[str] = frozenset({"IS NULL"})
 #: Operators whose value must be a non-empty list (expanded to one bound
 #: placeholder per element).
 _LIST_OPERATORS: frozenset[str] = frozenset({"IN"})
+
+#: The text-match operator of the small form (:class:`SmallFormQuerySpec`).
+_TEXT_OPERATORS: frozenset[str] = frozenset({"contains"})
 
 #: Cap on an ``IN`` value list. Each element compiles to one bound
 #: placeholder (``_build_where``), so an unbounded list would expand the
@@ -161,6 +173,10 @@ _MAX_KNOWN_SUGGESTIONS = 20
 class QueryContractError(ValueError):
     """A structured query cannot be compiled against this handle's schema.
 
+    ``loc`` is the place in the query that is wrong, for example
+    ``filter[0].field``, when the compiler knows it. It is not part of the
+    message; a transport may put it in front.
+
     Raised by :func:`compile_query` for violations that need the handle's
     actual column set to detect — an unknown field, an aggregate over a
     missing column, an order-by column not covered by ``group_by`` in a
@@ -170,6 +186,10 @@ class QueryContractError(ValueError):
     ``ValidationError``. Each transport maps this to its own recoverable
     error (MCP ``-32602``; REST ``422``) so the caller can narrow and retry.
     """
+
+    def __init__(self, message: str, *, loc: str | None = None) -> None:
+        super().__init__(message)
+        self.loc = loc
 
 
 class FilterPredicate(BaseModel):
@@ -332,6 +352,27 @@ class ResultQuerySpec(BaseModel):
         return not (self.filter or self.select or self.group_by or self.aggregate or self.order_by)
 
 
+class SmallFormFilterPredicate(FilterPredicate):
+    """A filter term that may also use ``contains`` (``RESULT_QUERY_SMALL_FORM``)."""
+
+    op: SmallFormFilterOperator = Field(  # type: ignore[assignment]
+        description="Comparison operator (fixed allow-list, with `contains`)."
+    )
+
+
+class SmallFormQuerySpec(ResultQuerySpec):
+    """A :class:`ResultQuerySpec` whose filter terms may use ``contains``.
+
+    The MCP tool uses it only while ``RESULT_QUERY_SMALL_FORM`` is on.
+    """
+
+    filter: list[SmallFormFilterPredicate] = Field(  # type: ignore[assignment]
+        default_factory=list,
+        max_length=10,
+        description="Predicates AND-ed into the WHERE clause (max 10).",
+    )
+
+
 class OutputPlan(BaseModel):
     """How to turn fetched cursor rows into the public output rows.
 
@@ -395,7 +436,7 @@ def _quote_ident(name: str) -> str:
     return f'"{escaped}"'
 
 
-def _require_known(field: str, known: Mapping[str, ResultField]) -> None:
+def _require_known(field: str, known: Mapping[str, ResultField], loc: str) -> None:
     """Reject a field that is not a column on the handle's schema."""
     if field not in known:
         suggestions = sorted(known)[:_MAX_KNOWN_SUGGESTIONS]
@@ -403,29 +444,31 @@ def _require_known(field: str, known: Mapping[str, ResultField]) -> None:
         suffix = f" (and {omitted} more)" if omitted else ""
         raise QueryContractError(
             f"unknown field {field!r}: not a column on this result handle. "
-            f"Known columns: {suggestions}{suffix}."
+            f"Known columns: {suggestions}{suffix}.",
+            loc=loc,
         )
 
 
-def _require_queryable(field: str, known: Mapping[str, ResultField], role: str) -> str:
+def _require_queryable(field: str, known: Mapping[str, ResultField], role: str, loc: str) -> str:
     """Return the quoted internal column for a field used in SQL.
 
     A field the catalog marks non-queryable is rejected before any SQL runs.
     It can still be returned with ``select``, which reads the raw rows.
     """
-    _require_known(field, known)
+    _require_known(field, known, loc)
     entry = known[field]
     if not entry.queryable:
         reason = entry.reason or "unknown"
         text = _NOT_QUERYABLE_REASONS.get(reason, reason)
         raise QueryContractError(
             f"field {field!r} cannot be used in {role}: {text} (reason: {reason}). "
-            "Return it with `select`, or read the raw rows by paging (`offset` / `limit`)."
+            "Return it with `select`, or read the raw rows by paging (`offset` / `limit`).",
+            loc=loc,
         )
     return _quote_ident(entry.column)
 
 
-def _validate_filter_literal(field: str, column_type: str, value: Any) -> None:
+def _validate_filter_literal(field: str, column_type: str, value: Any, loc: str) -> None:
     """Reject a value whose Python kind cannot represent a scalar column type.
 
     *column_type* is the DuckDB type the projection uses for the field's
@@ -457,7 +500,8 @@ def _validate_filter_literal(field: str, column_type: str, value: Any) -> None:
     if not matches:
         raise QueryContractError(
             f"filter value for field {field!r} with column type {column_type!r} "
-            f"must be a compatible scalar, got {type(value).__name__}."
+            f"must be a compatible scalar, got {type(value).__name__}.",
+            loc=loc,
         )
 
 
@@ -468,37 +512,70 @@ def _build_where(
 ) -> str:
     """Compile the predicate list into a parameterized ``WHERE`` body."""
     terms: list[str] = []
-    for pred in predicates:
-        ident = _require_queryable(pred.field, known, "`filter`")
+    for index, pred in enumerate(predicates):
+        loc = f"filter[{index}]"
+        ident = _require_queryable(pred.field, known, "`filter`", f"{loc}.field")
         family = known[pred.field].scalar_family
         column_type = _FAMILY_COLUMN_TYPES.get(family) if family is not None else None
-        if pred.op in _VALUELESS_OPERATORS:
-            if pred.value is not None:
-                raise QueryContractError(
-                    f"operator {pred.op!r} on field {pred.field!r} takes no value; omit `value`."
-                )
-            terms.append(f"{ident} IS NULL")
-        elif pred.op in _LIST_OPERATORS:
-            if not isinstance(pred.value, list) or not pred.value:
-                raise QueryContractError(
-                    f"operator 'IN' on field {pred.field!r} needs a non-empty list value."
-                )
-            if column_type is not None:
-                for value in pred.value:
-                    _validate_filter_literal(pred.field, column_type, value)
-            placeholders = ", ".join("?" for _ in pred.value)
-            terms.append(f"{ident} IN ({placeholders})")
-            params.extend(pred.value)
-        else:
-            if pred.value is None or isinstance(pred.value, (list, dict)):
-                raise QueryContractError(
-                    f"operator {pred.op!r} on field {pred.field!r} needs a scalar value."
-                )
-            if column_type is not None:
-                _validate_filter_literal(pred.field, column_type, pred.value)
-            terms.append(f"{ident} {pred.op} ?")
-            params.append(pred.value)
+        terms.append(_predicate_term(pred, ident, column_type, loc, params))
     return " AND ".join(terms)
+
+
+def _predicate_term(
+    pred: FilterPredicate, ident: str, column_type: str | None, loc: str, params: list[Any]
+) -> str:
+    """Compile one predicate; its values are appended to *params*."""
+    if pred.op in _VALUELESS_OPERATORS:
+        if pred.value is not None:
+            raise QueryContractError(
+                f"operator {pred.op!r} on field {pred.field!r} takes no value; omit `value`.",
+                loc=f"{loc}.value",
+            )
+        return f"{ident} IS NULL"
+    if pred.op in _LIST_OPERATORS:
+        if not isinstance(pred.value, list) or not pred.value:
+            raise QueryContractError(
+                f"operator 'IN' on field {pred.field!r} needs a non-empty list value.",
+                loc=f"{loc}.value",
+            )
+        if column_type is not None:
+            for value in pred.value:
+                _validate_filter_literal(pred.field, column_type, value, f"{loc}.value")
+        params.extend(pred.value)
+        return f"{ident} IN ({', '.join('?' for _ in pred.value)})"
+    if pred.op in _TEXT_OPERATORS:
+        term = _contains_term(pred, ident, column_type, loc)
+        params.append(pred.value)
+        return term
+    if pred.value is None or isinstance(pred.value, (list, dict)):
+        raise QueryContractError(
+            f"operator {pred.op!r} on field {pred.field!r} needs a scalar value.",
+            loc=f"{loc}.value",
+        )
+    if column_type is not None:
+        _validate_filter_literal(pred.field, column_type, pred.value, f"{loc}.value")
+    params.append(pred.value)
+    return f"{ident} {pred.op} ?"
+
+
+def _contains_term(pred: FilterPredicate, ident: str, column_type: str | None, loc: str) -> str:
+    """Compile one ``contains`` term: the text holds ``value``, in any case.
+
+    The value is bound as a parameter like every other value. DuckDB's
+    ``contains`` matches the text as it is (``%`` and ``_`` are not
+    wildcards); ``lower`` on both sides makes the match ignore case.
+    """
+    if column_type != "VARCHAR":
+        raise QueryContractError(
+            f"operator 'contains' on field {pred.field!r} needs a text column.",
+            loc=f"{loc}.field",
+        )
+    if not isinstance(pred.value, str) or not pred.value:
+        raise QueryContractError(
+            f"operator 'contains' on field {pred.field!r} needs a non-empty text value.",
+            loc=f"{loc}.value",
+        )
+    return f"contains(lower({ident}), lower(?))"
 
 
 def _aggregate_alias(agg: Aggregate) -> str:
@@ -527,33 +604,39 @@ def _build_grouped_projection(
     if spec.aggregate and spec.select:
         raise QueryContractError(
             "`select` is not allowed with `aggregate`: the output columns are the "
-            "`group_by` keys plus the aggregates."
+            "`group_by` keys plus the aggregates.",
+            loc="select",
         )
     select_parts: list[str] = []
     group_parts: list[str] = []
     public_names: list[str] = []
-    for col in spec.group_by:
-        ident = _require_queryable(col, known, "`group_by`")
+    for index, col in enumerate(spec.group_by):
+        ident = _require_queryable(col, known, "`group_by`", f"group_by[{index}]")
         if col in public_names:
             raise QueryContractError(
-                f"duplicate output column {col!r}; each output column must be distinct."
+                f"duplicate output column {col!r}; each output column must be distinct.",
+                loc=f"group_by[{index}]",
             )
         group_parts.append(ident)
         select_parts.append(f"{ident} AS {_output_alias(len(public_names))}")
         public_names.append(col)
-    for agg in spec.aggregate:
+    for index, agg in enumerate(spec.aggregate):
+        loc = f"aggregate[{index}]"
         if agg.func == "COUNT" and agg.field is None:
             expr = "COUNT(*)"
         else:
             if agg.field is None:
                 raise QueryContractError(
-                    f"aggregate {agg.func} requires a `field` (only COUNT may omit it)."
+                    f"aggregate {agg.func} requires a `field` (only COUNT may omit it).",
+                    loc=f"{loc}.field",
                 )
-            expr = f"{agg.func}({_require_queryable(agg.field, known, '`aggregate`')})"
+            ident = _require_queryable(agg.field, known, "`aggregate`", f"{loc}.field")
+            expr = f"{agg.func}({ident})"
         alias = _aggregate_alias(agg)
         if alias in public_names:
             raise QueryContractError(
-                f"duplicate aggregate output {alias!r}; each aggregate must be distinct."
+                f"duplicate aggregate output {alias!r}; each aggregate must be distinct.",
+                loc=loc,
             )
         select_parts.append(f"{expr} AS {_output_alias(len(public_names))}")
         public_names.append(alias)
@@ -574,8 +657,8 @@ def _build_projection(
     """
     if spec.aggregate or spec.group_by:
         return _build_grouped_projection(spec, known)
-    for col in spec.select:
-        _require_known(col, known)
+    for index, col in enumerate(spec.select):
+        _require_known(col, known, f"select[{index}]")
     plan = OutputPlan(ordinal=True, select=tuple(spec.select) if spec.select else None)
     return _quote_ident(ROW_ORDINAL), "", plan
 
@@ -591,14 +674,16 @@ def _build_order(spec: ResultQuerySpec, known: Mapping[str, ResultField]) -> lis
     grouped = bool(spec.group_by or spec.aggregate)
     group_cols = set(spec.group_by)
     parts: list[str] = []
-    for term in spec.order_by:
-        _require_known(term.field, known)
+    for index, term in enumerate(spec.order_by):
+        loc = f"order_by[{index}].field"
+        _require_known(term.field, known, loc)
         if grouped and term.field not in group_cols:
             raise QueryContractError(
                 f"cannot order by {term.field!r} in a grouped query: order only by a "
-                "`group_by` key."
+                "`group_by` key.",
+                loc=loc,
             )
-        ident = _require_queryable(term.field, known, "`order_by`")
+        ident = _require_queryable(term.field, known, "`order_by`", loc)
         parts.append(f"{ident} {'DESC' if term.direction == 'desc' else 'ASC'}")
     return parts
 

@@ -18,9 +18,10 @@ option name and the words around it stay readable:
 * a database login ``user/password@service`` (also ``@//host:port/service``),
   with quoted, joined and escaped password parts (``user/"x y"@service``);
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string. A value in
-  quotes or in braces (``Pwd={x;y}``) is read to its closing mark on the
-  same line. A value without them runs to the ``;`` (or the end of the line), so it may hold
-  spaces and quotes (``Pwd=made'up;``). Text counts as a connection string
+  quotes or in braces (``Pwd={x;y}``) is read to its closing mark, also
+  across line breaks; a value that is never closed ends at its line. A
+  value without them runs to the ``;`` (or the end of the line), so it may
+  hold spaces and quotes (``Pwd=made'up;``). Text counts as a connection string
   when a ``;`` stands before the label, or a ``;`` ends the value and a
   next field (``;Database=``) follows or no option (``-x``) or ``key=``
   word stands in the value. A label behind ``-`` is a command option.
@@ -49,6 +50,7 @@ that is never closed) is not repeated.
 
 from __future__ import annotations
 
+import bisect
 import re
 from typing import Final
 
@@ -479,33 +481,57 @@ _NEXT_FIELD: Final = re.compile(r";[ \t]*[A-Za-z][\w .-]{0,63}=")
 #: The closing character of a quoted connection string value. ODBC quotes a
 #: value with braces (``Pwd={x;y}``).
 _CLOSING: Final = {"'": "'", '"': '"', "{": "}"}
-#: Longest quoted connection string value that is read across line breaks.
-_QUOTED_MAX: Final = 128
-#: A quoted value up to its closing mark, for each opening character. A doubled
-#: closing mark is part of the value. The groups are atomic, so a value that is
-#: never closed is read once and not tried again in another way.
-_QUOTED_VALUE: Final = {
-    opening: re.compile(
-        f"[{re.escape(opening)}](?>[^{re.escape(closing)}]++|{re.escape(closing * 2)})*+"
-        f"{re.escape(closing)}"
-    )
-    for opening, closing in _CLOSING.items()
-}
 
 
-def _quoted_connection_value(text: str, start: int) -> tuple[int, int]:
-    """Span of a quoted connection string value; a doubled closing mark is part of it.
+class _ClosingMarks:
+    """Find the closing mark of a quoted connection string value.
 
-    A quoted value may hold line breaks. The search for the closing mark
-    stops after ``_QUOTED_MAX`` characters. A value that is not closed there
-    ends at the end of its first line, so it does not make each later label
-    search to the end of the text.
+    A doubled closing mark is part of the value, and the value may hold line
+    breaks. The runs of each closing character are found once for the text.
+    Each search is then one look-up, so many values that are never closed do
+    not each read to the end of the text.
     """
-    limit = min(len(text), start + 1 + _QUOTED_MAX)
-    value = _QUOTED_VALUE[text[start]].match(text, start, limit)
-    if value is not None:
-        return start, value.end()
-    line_end = text.find("\n", start, limit)
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._runs: dict[str, tuple[list[int], list[int], list[int]]] = {}
+
+    def _runs_of(self, closing: str) -> tuple[list[int], list[int], list[int]]:
+        """Start and end of each run of *closing*, and the first odd run end from each run on."""
+        if closing not in self._runs:
+            runs = [m.span() for m in re.finditer(f"{re.escape(closing)}+", self._text)]
+            starts = [a for a, _ in runs]
+            ends = [b for _, b in runs]
+            odd_end = [-1] * (len(runs) + 1)
+            for i in range(len(runs) - 1, -1, -1):
+                odd_end[i] = ends[i] if (ends[i] - starts[i]) % 2 else odd_end[i + 1]
+            self._runs[closing] = (starts, ends, odd_end)
+        return self._runs[closing]
+
+    def end(self, start: int) -> int | None:
+        """Index after the mark that closes the value opened at *start*, or ``None``.
+
+        In a run of closing characters, pairs are part of the value. A run of
+        odd length (counted from where the value starts) ends with the closing mark.
+        """
+        starts, ends, odd_end = self._runs_of(_CLOSING[self._text[start]])
+        i = bisect.bisect_right(ends, start + 1)
+        if i == len(ends):
+            return None
+        if (ends[i] - max(starts[i], start + 1)) % 2:
+            return ends[i]
+        return None if odd_end[i + 1] < 0 else odd_end[i + 1]
+
+
+def _quoted_connection_value(text: str, start: int, marks: _ClosingMarks) -> tuple[int, int]:
+    """Span of a quoted connection string value, through its closing mark.
+
+    A value that is never closed ends at the end of its line.
+    """
+    end = marks.end(start)
+    if end is not None:
+        return start, end
+    line_end = text.find("\n", start)
     return start, len(text) if line_end < 0 else line_end
 
 
@@ -529,13 +555,13 @@ def _is_connection_field(text: str, match: re.Match[str], start: int, stop: int)
 
 
 def _connection_span(
-    text: str, match: re.Match[str], quotes: _OuterQuotes
+    text: str, match: re.Match[str], quotes: _OuterQuotes, marks: _ClosingMarks
 ) -> tuple[int, int] | None:
     start = match.end()
     if start >= len(text) or text[start] in ";\n":
         return None
     if text[start] in _CLOSING:
-        return _quoted_connection_value(text, start)
+        return _quoted_connection_value(text, start, marks)
     close = quotes.end(match.start())
     window = min(len(text) if close is None else close, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
@@ -558,10 +584,11 @@ def _connection_span(
 def _connection_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     quotes = _OuterQuotes(text)
+    marks = _ClosingMarks(text)
     pos = 0
     while (match := _CONNECTION.search(text, pos)) is not None:
         pos = match.end()
-        span = _connection_span(text, match, quotes)
+        span = _connection_span(text, match, quotes, marks)
         if span is not None:
             spans.append(span)
             pos = max(pos, span[1])

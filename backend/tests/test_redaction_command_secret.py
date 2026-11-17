@@ -367,6 +367,63 @@ def test_a_quoted_connection_value_is_hidden_across_a_line_break(
         assert out.endswith(";Database=d")
 
 
+_LONG = "x" * 200
+
+
+@pytest.mark.parametrize(
+    ("value", "rest"),
+    [
+        # A line break and a long text before the closing mark.
+        ("'made\n" + _LONG + "up'", ";Database=d\nnext log line"),
+        ('"made\n' + _LONG + 'up"', ";Database=d\nnext log line"),
+        ("{made\n" + _LONG + "up}", ";Database=d\nnext log line"),
+        # A doubled closing mark far from the opening mark.
+        ("'" + _LONG + "''madeup'", ";Database=d"),
+        ("{" + _LONG + "}}madeup}", ";Database=d"),
+        # A long value on one line: the fields and lines after it stay.
+        ("'made" + _LONG + "up'", ";Database=d\nnext log line"),
+        ("{made" + _LONG + "up}", ";Database=d\nnext log line"),
+    ],
+)
+def test_a_long_quoted_connection_value_is_hidden_to_its_closing_mark(
+    value: str, rest: str
+) -> None:
+    line = f"Server=db;pw={value}{rest}"
+    assert [line[a:b] for a, b in COMMAND_SECRET.secret_spans(line)] == [value]
+    answer = redact(line, get_default_policy()).redacted
+    trace, _ = scrub_content(line)
+    for out in (answer, trace):
+        assert "made" not in out
+        assert "up" not in out
+        assert out.startswith("Server=db;pw=")
+        assert out.endswith(rest)
+
+
+def _closing_mark_by_reading(text: str, start: int) -> int | None:
+    """The closing mark found by reading the text one mark at a time."""
+    closing = {"'": "'", '"': '"', "{": "}"}[text[start]]
+    pos = start + 1
+    while (close := text.find(closing, pos)) >= 0:
+        if not text.startswith(closing, close + 1):
+            return close + 1
+        pos = close + 2
+    return None
+
+
+def test_the_closing_mark_is_the_one_found_by_reading_the_text() -> None:
+    texts = ["".join(p) for n in range(1, 8) for p in itertools.product("'{}a\n", repeat=n)]
+    for text in texts:
+        line = f"a;pw={text}"
+        start = len("a;pw=")
+        if line[start] not in "'{":
+            continue
+        end = _closing_mark_by_reading(line, start)
+        if end is None:
+            line_end = line.find("\n", start)
+            end = len(line) if line_end < 0 else line_end
+        assert COMMAND_SECRET.secret_spans(line)[:1] == [(start, end)], line
+
+
 def test_the_trace_scrub_hides_what_the_answer_hides() -> None:
     line = f"exec mysql -u root -p{PW} appdb; User ID=u;{_PASSWORD_IS}{PW} x y;"
     answer = redact(line, get_default_policy()).redacted

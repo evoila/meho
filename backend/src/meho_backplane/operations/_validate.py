@@ -73,6 +73,7 @@ __all__ = [
     "derive_install_key",
     "ingested_schema_for_validation",
     "params_check_errors",
+    "params_errors",
     "params_hash_candidates",
     "params_hash_matches",
     "params_problem",
@@ -403,6 +404,26 @@ def params_check_errors(op_id: str, params: dict[str, Any]) -> list[dict[str, An
         return []
     problem = check(params)
     return [] if problem is None else [problem]
+
+
+def params_errors(
+    op_id: str, params: dict[str, Any], schema_errors: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The ``validation_errors`` of one call: the schema's, then the op's own check.
+
+    The check runs when the schema passes. It also runs when every schema
+    error is a ``maxLength`` error: then each value has the right type, and
+    the check may say the same limit in plainer words (``linux.script.run``
+    counts bytes, the schema counts characters). A check problem replaces the
+    schema error on the same field; other schema errors stay.
+    """
+    if not schema_errors:
+        return params_check_errors(op_id, params)
+    if any(err["validator"] != "maxLength" for err in schema_errors):
+        return schema_errors
+    problems = params_check_errors(op_id, params)
+    covered = {f"$.{problem['path']}" for problem in problems}
+    return problems + [err for err in schema_errors if err["path"] not in covered]
 
 
 def ingested_schema_for_validation(parameter_schema: dict[str, Any]) -> dict[str, Any]:

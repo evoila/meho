@@ -660,9 +660,10 @@ prompt print the same block, one line per script line
 **Longer than one page.** `linux.script.run` accepts a script of at most
 1,048,576 bytes (1 MiB, `SCRIPT_MAX_BYTES`): a larger one is refused when
 the request is made, before it waits for approval, by a params check
-(`_check_script_size`) with a plain text. The schema has no `maxLength` on
-purpose: it counts characters and runs first, so it would hide the plain
-text. The check counts bytes. While the request waits, the
+(`_check_script_size`) with a plain text. The schema has `maxLength` too, so
+a client sees the limit. It counts characters and the check counts bytes.
+When both fail, the plain text replaces the schema error
+(`operations/_validate.py`, `params_errors`). While the request waits, the
 approver reads every page: `GET /api/v1/approvals/{id}/script?page=N`
 (same access as `GET /api/v1/approvals/{id}`), `meho approvals show <id>
 --script-page N`, and the "previous page" / "next page" links of the console

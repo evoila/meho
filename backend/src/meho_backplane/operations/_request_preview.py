@@ -107,7 +107,7 @@ from meho_backplane.operations._target_version_range import version_range_previe
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
-    params_check_errors,
+    params_errors,
     policy_gate,
     validate_params,
 )
@@ -499,7 +499,7 @@ def _validate_params_envelope(
             source_kind=descriptor.source_kind,
             missing_ref=exc.missing_ref,
         )
-    validation_errors = validation_errors or params_check_errors(op_id, params)
+    validation_errors = params_errors(op_id, params, validation_errors)
     if validation_errors:
         return _invalid_params_envelope(
             op_id=op_id,

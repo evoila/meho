@@ -19,8 +19,9 @@ const approvalFlowDocs = "https://evoila.github.io/meho/install/keycloak-realm/#
 
 // approvalFlowFix is the fix for a missing flow or binding.
 const approvalFlowFix = "a Keycloak admin runs the operation keycloak.authflow.ensure_approval_flow " +
-	"on the Keycloak target (it waits for approval); with the built-in Keycloak, `helm upgrade` " +
-	"does it too; see " + approvalFlowDocs
+	"on the Keycloak target; another admin approves it, never the person who asked, so the install " +
+	"needs two admins first (add the second one in Keycloak itself); with the built-in Keycloak, " +
+	"`helm upgrade` does it too; see " + approvalFlowDocs
 
 // approvalLevelCheckName names the doctor line for the approval level.
 const approvalLevelCheckName = "approval level"

@@ -61,6 +61,7 @@ from meho_backplane.ui.routes.agents.forms import (
     submit_edit,
     submit_toggle,
 )
+from meho_backplane.ui.routes.agents.live_grants import register_live_grants_route
 from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
     resolve_human_admin_or_403,
@@ -618,6 +619,7 @@ def build_agents_router() -> APIRouter:
     router = APIRouter(tags=["ui-agents"])
     _register_static_prefix_routes(router)
     _register_principals_routes(router)
+    register_live_grants_route(router)
     _register_read_routes(router)
     _register_run_routes(router)
     _register_write_routes(router)

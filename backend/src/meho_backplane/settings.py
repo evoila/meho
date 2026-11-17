@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
 from pydantic.config import JsonDict
 
 from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
+from meho_backplane.mcp_profile_config import ConnectorProfile, parse_connector_profiles
 from meho_backplane.retrieval.embedding import (
     BAKED_MODEL_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
@@ -1556,6 +1557,18 @@ class Settings(BaseModel):
         stay the same. A small model keeps more of its context window for
         the job. It stays off until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
+    mcp_profile_connector_lists:
+        Off by default. When on, the profiles of ``mcp_connector_profiles``
+        count: a session that names one at ``/mcp?profile=<name>`` may use
+        only the connectors of that profile
+        (:mod:`meho_backplane.mcp.profiles`). When off, MEHO does not know
+        these profile names. It stays off until model tests show it helps.
+        Env ``MCP_PROFILE_CONNECTOR_LISTS``.
+    mcp_connector_profiles:
+        The extra MCP tool profiles, each with a connector list, as one JSON
+        object (:mod:`meho_backplane.mcp_profile_config`). Empty by default.
+        A bad value stops the start. Read only when
+        ``mcp_profile_connector_lists`` is on. Env ``MCP_CONNECTOR_PROFILES``.
     mcp_reveal_fetch:
         Off by default. When on, ``call_operation`` on MCP takes an
         ``approval_request_id``: the person who asked to see a secret value
@@ -2517,6 +2530,8 @@ class Settings(BaseModel):
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -2625,6 +2640,16 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: What ``preview_operation`` gives back for three Keycloak changes of
+    #: rights. The approval request a person reads always shows their cards:
+    #: for ``keycloak.client.update`` and ``keycloak.realm.update`` the values
+    #: now of each field the request sends next to the new values, for
+    #: ``keycloak.protocol_mapper.create`` the client's mappers now and the
+    #: new one (:mod:`meho_backplane.connectors.keycloak.ops_write_rights_card`).
+    #: On, ``preview_operation`` shows the same cards. Off (the default), it
+    #: gives back the same answers as before. Set via
+    #: ``KEYCLOAK_RIGHTS_CHANGE_CARDS``.
+    keycloak_rights_change_cards: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Other product names in the ``product`` filter of
     #: ``meho_connector_list`` (#6560), behind a switch that is off by
     #: default. When on, the filter ignores case, also matches the names a
@@ -2962,6 +2987,12 @@ class Settings(BaseModel):
                 f"completed operation always fits. Got: {value}"
             )
         return value
+
+    @field_validator("mcp_connector_profiles", mode="before")
+    @classmethod
+    def _mcp_connector_profiles_must_parse(cls, value: object) -> dict[str, ConnectorProfile]:
+        """Read ``MCP_CONNECTOR_PROFILES``; a bad value stops the start (#6099)."""
+        return parse_connector_profiles(value)
 
     @field_validator("vault_oidc_role_by_tenant")
     @classmethod
@@ -3644,6 +3675,12 @@ def get_settings() -> Settings:
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
         ),
+        mcp_profile_connector_lists=parse_bool_env(
+            os.environ.get("MCP_PROFILE_CONNECTOR_LISTS"),
+        ),
+        mcp_connector_profiles=parse_connector_profiles(
+            os.environ.get("MCP_CONNECTOR_PROFILES", ""),
+        ),
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
         ),
@@ -3692,6 +3729,9 @@ def get_settings() -> Settings:
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),
+        ),
+        keycloak_rights_change_cards=parse_bool_env(
+            os.environ.get("KEYCLOAK_RIGHTS_CHANGE_CARDS"),
         ),
         connector_list_product_aliases=parse_bool_env(
             os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),

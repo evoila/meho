@@ -13,7 +13,10 @@ check the approval rules:
 
 * a reviewer (an operator, or a read-only person with the approver flag)
   cannot approve another person's request;
-* a MEHO-SA-Operator or a tenant admin can;
+* a tenant admin can; a MEHO-SA-Operator who is not an admin cannot,
+  because all five are changes of rights
+  (``connectors/keycloak/rights_changes.py``), which only another admin
+  approves;
 * the single-operator self-approval switch does not let the requester
   approve their own request.
 """
@@ -32,7 +35,7 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalGroupForbiddenError,
-    SelfApprovalForbiddenError,
+    RightsChangeApprovalError,
     approve_request,
     create_pending_request,
 )
@@ -118,7 +121,7 @@ def test_identity_writes_register_as_dangerous(op_id: str) -> None:
 async def test_a_reviewer_cannot_approve_an_identity_write(op_id: str, reviewer: Operator) -> None:
     request_id = await _park(op_id)
 
-    with pytest.raises(ApprovalGroupForbiddenError):
+    with pytest.raises((ApprovalGroupForbiddenError, RightsChangeApprovalError)):
         await _approve(request_id, reviewer)
 
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
@@ -126,19 +129,25 @@ async def test_a_reviewer_cannot_approve_an_identity_write(op_id: str, reviewer:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", _IDENTITY_WRITES)
-@pytest.mark.parametrize(
-    "approver",
-    [_person(_OTHER, sa_operator=True), _person(_OTHER, role=TenantRole.TENANT_ADMIN)],
-    ids=["sa-operator", "tenant-admin"],
-)
-async def test_an_sa_operator_or_tenant_admin_approves_an_identity_write(
-    op_id: str, approver: Operator
+async def test_a_tenant_admin_approves_an_identity_write(op_id: str) -> None:
+    request_id = await _park(op_id)
+
+    await _approve(request_id, _person(_OTHER, role=TenantRole.TENANT_ADMIN))
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _IDENTITY_WRITES)
+async def test_an_sa_operator_who_is_not_an_admin_cannot_approve_a_change_of_rights(
+    op_id: str,
 ) -> None:
     request_id = await _park(op_id)
 
-    await _approve(request_id, approver)
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request_id, _person(_OTHER, sa_operator=True))
 
-    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
 @pytest.mark.asyncio
@@ -150,8 +159,6 @@ async def test_the_self_approval_switch_does_not_cover_an_identity_write(
     get_settings.cache_clear()
     request_id = await _park(op_id)
 
-    with pytest.raises(SelfApprovalForbiddenError) as exc:
+    with pytest.raises(RightsChangeApprovalError):
         await _approve(request_id, _person(_REQUESTER))
-
-    assert exc.value.high_risk is True
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value

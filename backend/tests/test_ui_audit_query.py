@@ -69,6 +69,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
@@ -452,14 +453,45 @@ def test_audit_work_ref_filter_counts_length_after_cleaning(
     ids=["invisible", "too-long"],
 )
 def test_audit_work_ref_filter_refuses_a_bad_ticket_id(path: str, typed: str, message: str) -> None:
-    """A value the rule refuses is a 422 that names the rule, not a search for the raw text."""
+    """A refused value is a 422 page or fragment that shows the rule and lists no row."""
     _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_rows(tenant_id=_TENANT_A, count=1, op_id="vsphere.vm.seen")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         response = client.get(path, params={"work_ref": typed})
     assert response.status_code == 422, response.text
-    assert message in response.json()["detail"]
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert message in response.text
+    assert "vsphere.vm.seen" not in response.text
+
+
+def test_audit_load_more_refusal_replaces_the_results() -> None:
+    """A refused value during "Load more" replaces the results, not the rows list.
+
+    The pager appends its answer into the rows list. The refused answer is the
+    whole results block, so the htmx headers send it to the results area.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_rows(tenant_id=_TENANT_A, count=1, op_id="vsphere.vm.seen")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        paged = client.get(
+            "/ui/audit/results", params={"partial": "rows", "work_ref": "CHG\u200b1"}
+        )
+        searched = client.get("/ui/audit/results", params={"work_ref": "CHG\u200b1"})
+    assert paged.status_code == 422, paged.text
+    assert paged.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert paged.headers["HX-Retarget"] == "#audit-results"
+    assert paged.headers["HX-Reswap"] == "innerHTML"
+    assert paged.text.count('id="audit-results-inner"') == 1
+    assert "control or invisible characters" in paged.text
+    assert "vsphere.vm.seen" not in paged.text
+    # The search form already swaps the results; its answer needs no new target.
+    assert searched.status_code == 422, searched.text
+    assert "HX-Retarget" not in searched.headers
+    assert "HX-Reswap" not in searched.headers
 
 
 def test_audit_first_page_renders_load_more_when_more_rows() -> None:

@@ -36,11 +36,13 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.agents.grant_sets import StartingGrants
+from meho_backplane.agents.live_grants import LiveGrant
 
 __all__ = [
     "NAME_PATTERN",
     "AgentDefinitionCreate",
     "AgentDefinitionRead",
+    "AgentDefinitionSaved",
     "AgentDefinitionUpdate",
     "AgentModelTier",
     "validate_name",
@@ -213,3 +215,20 @@ class AgentDefinitionRead(BaseModel):
     created_by_sub: str
     created_at: datetime
     updated_at: datetime
+
+
+class AgentDefinitionSaved(AgentDefinitionRead):
+    """The answer of a create or an edit: the row and the live grants of its agent.
+
+    ``live_grants`` lists the grants of the agent that ``identity_ref``
+    names that are live after the save, also the ones a starting grant
+    pick just wrote. When MEHO asks for no pick because the agent already
+    has a live grant, these are the grants that say what the agent may do.
+    """
+
+    live_grants: list[LiveGrant] = Field(
+        description="The live grants of the agent that identity_ref names, after the save."
+    )
+    live_grants_truncated: bool = Field(
+        description="True when the agent has more live grants than live_grants lists."
+    )

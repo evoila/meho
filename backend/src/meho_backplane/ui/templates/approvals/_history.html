@@ -52,6 +52,7 @@
     has_more          -- bool: whether a further page exists
     order             -- str: the order in use, "oldest" or "newest" (#3596)
     order_choice      -- str: the operator's explicit choice, "" when none
+    work_ref_error    -- str | None: why the work_ref filter was refused (no rows)
     in_order_work_ref -- str | None: the change ticket the "Approve group in
                          order" button runs (#3597); None hides the button
 -#}
@@ -146,7 +147,9 @@
   {% endif %}
 
   {# ---------- Rows ---------- #}
-  {% if requests %}
+  {% if work_ref_error %}
+    <div role="alert" class="alert alert-error text-sm" data-work-ref-refused>{{ work_ref_error }}</div>
+  {% elif requests %}
     <ul
       id="approvals-history-rows"
       class="divide-base-content/8 divide-y rounded-box border border-base-300 bg-base-100"

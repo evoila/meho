@@ -1082,6 +1082,54 @@ def test_check_version_covered_raises_when_label_outside_range() -> None:
     assert "_FakeRangedConnector" in detail
 
 
+def test_check_version_covered_ignores_stand_in_from_earlier_ingest() -> None:
+    """A second label under the same name is not refused when only a stand-in exists (#4728).
+
+    The first ingest (``19.14``) registers a stand-in class whose range
+    covers only its own label. Ingesting ``19.12`` after it must pass.
+    """
+    from meho_backplane.operations.ingest.connector_registration import (
+        ensure_connector_class_registered,
+    )
+
+    assert ensure_connector_class_registered(
+        product="networker", version="19.14", impl_id="networker-rest", base_url=None
+    )
+    for label in ("19.12", "19.13", "19.12.0", "18.1"):
+        check_version_covered_by_registered_class(
+            product="networker", version=label, impl_id="networker-rest"
+        )
+    # The second ingest can then register its own class under the new label.
+    assert ensure_connector_class_registered(
+        product="networker", version="19.12", impl_id="networker-rest", base_url=None
+    )
+
+
+def test_check_version_covered_still_refuses_when_handwritten_class_present_with_stand_in() -> None:
+    """A stand-in next to a hand-written class does not widen what is accepted (#4728)."""
+    from meho_backplane.operations.ingest.connector_registration import (
+        ensure_connector_class_registered,
+    )
+
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeRangedConnector,
+    )
+    ensure_connector_class_registered(
+        product="vmware", version="7.0", impl_id="vmware-rest", base_url=None
+    )
+    with pytest.raises(UncoveredVersionLabel) as excinfo:
+        check_version_covered_by_registered_class(
+            product="vmware", version="7.1", impl_id="vmware-rest"
+        )
+    # Only the hand-written class is named; the stand-in is left out.
+    assert excinfo.value.candidates == [
+        ("9.0", "vmware-rest", "_FakeRangedConnector", ">=8.5,<10.0")
+    ]
+
+
 def test_check_version_covered_logs_orphan_when_no_class_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1463,6 +1511,42 @@ async def test_service_ingest_rejects_divergent_product_with_handrolled_impl_no_
     async with sessionmaker() as fresh:
         rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
     assert rows == [], f"divergent ingest must persist no rows; got {rows!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("impl_id", ["networker-rest-1912", "acme-2x-rest", "x-1"])
+async def test_ingest_refuses_impl_id_with_dash_then_digit(impl_id: str) -> None:
+    """An impl_id with a dash then a digit is refused with a clear message (#4728).
+
+    Its connector_id would split at the wrong dash, so the label would be
+    ``1912-19.12`` instead of ``19.12``. The refusal comes before any spec
+    fetch or DB write.
+    """
+    from meho_backplane.operations.ingest import ImplIdEndsInDigitsError
+
+    operator = Operator(
+        sub="platform-admin",
+        raw_jwt="test-jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    service = IngestionPipelineService(operator=operator)
+    with pytest.raises(ImplIdEndsInDigitsError) as excinfo:
+        await service.ingest(
+            product=impl_id.split("-")[0],
+            version="19.12",
+            impl_id=impl_id,
+            specs=[SpecSource(uri="https://example.test/spec.yaml")],
+            tenant_id=None,
+            dry_run=True,
+        )
+    assert impl_id in str(excinfo.value)
+    assert "--version" in str(excinfo.value)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert rows == []
 
 
 @pytest.mark.asyncio

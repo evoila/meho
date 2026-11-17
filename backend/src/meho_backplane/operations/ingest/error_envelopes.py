@@ -40,6 +40,7 @@ from typing import Any
 
 from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
+    ImplIdEndsInDigitsError,
     InvalidSchemaError,
     InvalidSpecError,
     LegacyTenantConnectorCopyError,
@@ -57,7 +58,9 @@ __all__ = [
     "build_catalog_entry_typed_connector_detail",
     "build_catalog_entry_upstream_not_spec_detail",
     "build_connector_legacy_tenant_copy_detail",
+    "build_connector_name_detail",
     "build_connector_scope_ambiguous_detail",
+    "build_impl_id_ends_in_digits_detail",
     "build_invalid_schema_detail",
     "build_invalid_spec_detail",
     "build_llm_output_invalid_detail",
@@ -366,6 +369,7 @@ def build_uncovered_version_label_detail(
 
     Body shape:
 
+    * ``kind`` — the stable ``"uncovered_version_label"`` classifier.
     * ``product`` / ``version`` / ``impl_id`` — the connector triple
       the operator submitted, surfaced so the agent doesn't need to
       re-thread them from its own prompt.
@@ -378,6 +382,7 @@ def build_uncovered_version_label_detail(
       ignore the structured fields.
     """
     return {
+        "kind": "uncovered_version_label",
         "product": exc.product,
         "version": exc.version,
         "impl_id": exc.impl_id,
@@ -392,6 +397,30 @@ def build_uncovered_version_label_detail(
         ],
         "message": str(exc),
     }
+
+
+def build_impl_id_ends_in_digits_detail(exc: ImplIdEndsInDigitsError) -> dict[str, Any]:
+    """Structured detail for :class:`ImplIdEndsInDigitsError`.
+
+    Fields: ``kind`` (``"impl_id_ends_in_digits"``), the submitted
+    ``product`` / ``version`` / ``impl_id``, and the rendered ``message``.
+    """
+    return {
+        "kind": "impl_id_ends_in_digits",
+        "product": exc.product,
+        "version": exc.version,
+        "impl_id": exc.impl_id,
+        "message": str(exc),
+    }
+
+
+def build_connector_name_detail(
+    exc: ProductImplIdMismatch | ImplIdEndsInDigitsError,
+) -> dict[str, Any]:
+    """Structured detail for a refused connector name (both name guards)."""
+    if isinstance(exc, ImplIdEndsInDigitsError):
+        return build_impl_id_ends_in_digits_detail(exc)
+    return build_product_impl_id_mismatch_detail(exc)
 
 
 def build_product_impl_id_mismatch_detail(

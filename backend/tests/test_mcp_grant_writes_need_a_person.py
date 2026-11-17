@@ -134,6 +134,21 @@ async def test_a_machine_login_with_tenant_admin_is_refused(kind: PrincipalKind,
     assert await _count(AgentPrincipal) == 1
 
 
+@pytest.mark.asyncio
+async def test_register_refusal_names_a_command_with_a_starting_grant() -> None:
+    """The CLI command in the text must work with every AGENT_GRANT_REQUIRED value."""
+    for client in _client_for(_operator(PrincipalKind.SERVICE)):
+        body = _call(client, "meho_agent_principals_register")
+
+    _assert_refused(body, "meho_agent_principals_register")
+    message = body["error"]["message"]
+    assert message.endswith(
+        "A person registers an agent principal in the operator console, or with the CLI: "
+        "`meho agent-principal register <name> --grants none` (or "
+        "`--grants read-everything`, or `--grants read-targets --target <target>`)."
+    ), message
+
+
 @pytest.fixture
 def inferred_service_operator() -> Iterator[Operator]:
     """A client-credentials token with no ``principal_kind`` claim, read by MEHO."""

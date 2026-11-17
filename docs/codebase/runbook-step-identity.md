@@ -41,7 +41,7 @@ is no stand-in identity.
 
 The check call always follows the token rule of
 [approvals.md](approvals.md), also when the run is advanced from the web
-console. `_resolve_verify_response` calls the operation with
+console. `_dispatch_check_call` (in `runbooks/run_service.py`) calls the operation with
 `caller.model_copy(update={"web_session": False})`. It keeps the caller's
 kind, client id, roles, session id and token. So:
 
@@ -79,14 +79,31 @@ tenant (`read_approval_result`). The read writes an `approval.result`
 audit row. An approved result is used once: the next retry of the same
 step runs the call again.
 
+An approved result has no age limit. A retry days after the approval uses
+the stored result, as long as the step still holds the link.
+
+Two audit rows belong to such a check, and both carry `run_id` and
+`step_id` (the audit columns and the same keys in `payload`), like the row
+of a check that runs or is refused:
+
+- the `approval.request` row, written when the check waits for approval;
+- the `approval.result` row, written when a retry reads the request.
+
+Both rows name the real caller. The `approval.decision` row is written for
+the approver, who is not in the runbook step, so it has neither id.
+
+The console shows the check's parameters on the run page (`Params`), next
+to the operation and the expected result, as it does for an operation
+step.
+
 ## When the check call does not return `ok`
 
 When the call is refused (`denied`), fails (`error`), or waits for
 approval (`awaiting_approval`), the step fails, whatever its `expect`
 says. The `PreviousStepFailedError` text names the reason, for example
 `step 'check' check call did not run: denied: ...`. REST and MCP return
-this text as the error. The console shows it as an inline alert above the
-failed-step banner. The step's
+this text as the error. The console shows it inside the failed-step banner,
+also after a page reload. The step's
 `verify_response.actual` holds `status` and `error` of the call. The
 assignee can fix the cause and retry the step
 ([runbook-step-retry.md](runbook-step-retry.md)).

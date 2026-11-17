@@ -124,6 +124,14 @@ from meho_backplane.mcp.tools._connector_classification import (
     drop_classification_fields,
     request_from_tool,
 )
+from meho_backplane.mcp.tools._connector_product_filter import (
+    LISTED_PRODUCTS_KEY,
+    PRODUCT_FILTER_KEY,
+    connector_list_product_aliases,
+    filter_by_product,
+    listed_products,
+    reduce_product_filter,
+)
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -246,7 +254,11 @@ async def list_connector_rows(
     helper the REST route at ``GET /api/v1/connectors`` uses. ``status``
     has already been checked against the tool's JSON Schema. ``product``
     keeps only rows with exactly that product; empty text means no
-    filter. ``detail`` picks short rows (the default) or full rows.
+    filter. With the switch ``CONNECTOR_LIST_PRODUCT_ALIASES`` on, the
+    filter also matches other product names and adds a ``product_filter``
+    block (:func:`filter_by_product`) and the products of all listed rows
+    (``LISTED_PRODUCTS_KEY``, dropped by :func:`reduce_connector_list`).
+    ``detail`` picks short rows (the default) or full rows.
     ``target`` (a target name or alias) keeps only the rows that fit that
     target and adds a ``target_fit`` summary
     (:func:`connectors_for_target`); it never chooses a connector.
@@ -259,17 +271,22 @@ async def list_connector_rows(
     product = (arguments.get("product") or "").strip()
     detail = arguments.get("detail", "short")
     target_name = (arguments.get("target") or "").strip()
-    connectors = [
-        item
-        for item in await list_ingested_connectors(operator=operator, status=status)
-        if not product or item.product == product
-    ]
+    listed = await list_ingested_connectors(operator=operator, status=status)
+    extra: dict[str, Any] = {}
+    if product and connector_list_product_aliases():
+        connectors, extra[PRODUCT_FILTER_KEY] = filter_by_product(
+            listed, product, operator.tenant_id
+        )
+        extra[LISTED_PRODUCTS_KEY] = listed_products(listed)
+    else:
+        connectors = [item for item in listed if not product or item.product == product]
     if not target_name:
-        return {"connectors": [_connector_row(item, detail) for item in connectors]}
+        return {"connectors": [_connector_row(item, detail) for item in connectors], **extra}
     target = await _load_target(operator, target_name)
     target_fit, fitting = connectors_for_target(target, connectors)
     return {
         "connectors": [_connector_row(item, detail) for item in fitting],
+        **extra,
         "target_fit": target_fit,
     }
 
@@ -444,28 +461,38 @@ async def _load_target(operator: Operator, name: str) -> Any:
                 ) from exc
 
 
+#: Blocks of the answer that are not rows: they stay next to a handle.
+_SUMMARY_KEYS: Final[tuple[str, ...]] = (PRODUCT_FILTER_KEY, "target_fit")
+
+
 async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> dict[str, Any]:
     """Return *result* unchanged, or a JSONFlux summary + ``handle`` above the threshold.
 
     Same pattern as ``list_targets``: the spill is keyed to the caller's
     tenant and subject, which is the key ``result_query`` reads back with.
-    A ``target_fit`` summary is not part of the rows: it stays next to the
-    handle.
+    A ``target_fit`` or ``product_filter`` summary is not part of the rows:
+    it stays next to the handle. A long list in ``product_filter`` gets its
+    own handle (:func:`reduce_product_filter`).
     """
-    rows = {key: value for key, value in result.items() if key != "target_fit"}
+    result = {key: value for key, value in result.items() if key != LISTED_PRODUCTS_KEY}
+    context: dict[str, Any] = {
+        "op_id": CONNECTOR_LIST_NAME,
+        "tenant_id": str(operator.tenant_id),
+        "operator_sub": operator.sub,
+    }
+    if PRODUCT_FILTER_KEY in result:
+        result[PRODUCT_FILTER_KEY] = await reduce_product_filter(
+            _CONNECTOR_LIST_REDUCER, result[PRODUCT_FILTER_KEY], context
+        )
+    rows = {key: value for key, value in result.items() if key not in _SUMMARY_KEYS}
     summary, handle = await _CONNECTOR_LIST_REDUCER.reduce(
         rows,
         None,
-        {
-            "op_id": CONNECTOR_LIST_NAME,
-            "tenant_id": str(operator.tenant_id),
-            "operator_sub": operator.sub,
-            "pagination_hint": _CONNECTOR_LIST_PAGINATION_HINT,
-        },
+        {**context, "pagination_hint": _CONNECTOR_LIST_PAGINATION_HINT},
     )
     if handle is None:
         return result
-    kept = {"target_fit": result["target_fit"]} if "target_fit" in result else {}
+    kept = {key: result[key] for key in _SUMMARY_KEYS if key in result}
     return {**summary, **kept, "handle": handle.model_dump(mode="json")}
 
 

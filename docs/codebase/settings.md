@@ -216,7 +216,8 @@ them at once.
   password has no shape to find. A key that only names something about a
   token or secret (`token_url`, `secret_path`) passes. The name rule is
   `is_secret_param_name` in `broadcast/events.py`, the same one the broadcast
-  scrub and the approval echo use.
+  scrub and the approval echo use. So every name that the results hide is
+  refused here too (`snmpAuthKey`, `pass_phrase`, `password_ref`).
 - A mask such as `*`, `********` or `<keep>` is refused. It never means
   "keep the stored value".
 - Once a secret is found, nothing else is checked: no later check, and not
@@ -276,8 +277,8 @@ file yet.
   rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
   `tests/test_tenant_scope_person_only.py`.
 - Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
-  command line writes at once, as the target routes do today, or waits for
-  someone to approve it in the web console. Today it writes at once.
+  command line writes at once or waits for someone to approve it, as the
+  target routes do for a call made with a token. Today it writes at once.
 
 ## Endpoints
 

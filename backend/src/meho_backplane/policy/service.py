@@ -63,6 +63,7 @@ from meho_backplane.policy.document import (
     parse_policy_file,
 )
 from meho_backplane.policy.routing import category_routing_warnings
+from meho_backplane.policy.routing_floor import floor_warnings, tenants_wider
 from meho_backplane.policy.store import _lock_tenant_policy, _override_entries_for
 from meho_backplane.policy.validate import KnownOp, check_document, load_known_ops
 from meho_backplane.settings import get_settings
@@ -432,6 +433,9 @@ async def build_plan(
     plan.diff = _build_diff(
         before, document, scope=scope, ops=ops, old_side=old_side, new_side=new_side
     )
+    if scope == "install" and routing_enabled():
+        plan.diff["routing_floor"] = await tenants_wider(session, document)
+        plan.warnings.extend(floor_warnings(plan.diff["routing_floor"]))
     return plan
 
 

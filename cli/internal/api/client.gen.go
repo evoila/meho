@@ -6669,9 +6669,11 @@ type EventSourceUpdate struct {
 
 // ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
 type ExplainApprovers struct {
+	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. For a waiting request it is the install's routing as it is now, as at the approve click. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
+	Floor  *string  `json:"floor"`
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. category_not_stored when MEHO does not know the category the install's policy gives the change (it gives it two categories, or a waiting request started before MEHO stored it) and an install entry that matches on a category could fit it; then no group may approve it. Null for a caller who is not a tenant admin or a platform admin.
 	Rule *string `json:"rule"`
 }
 
@@ -12695,6 +12697,21 @@ type VersionResponse struct {
 type WithdrawRequestBody struct {
 	// Reason Optional reason why the sender takes the request back.
 	Reason *string `json:"reason,omitempty"`
+}
+
+// WriteAwaitingApproval The 202 answer of a REST write that waits for approval.
+type WriteAwaitingApproval struct {
+	// ApprovalRequestId Id of the approval request. A person approves it in the console, with `meho approvals approve <id>`, or on REST.
+	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
+
+	// Message What happens next, in plain words.
+	Message string `json:"message"`
+
+	// OpId The operation that runs after approval, for example `targets.register`.
+	OpId string `json:"op_id"`
+
+	// Status Always `awaiting_approval`: nothing is written yet.
+	Status string `json:"status"`
 }
 
 // UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
@@ -60466,6 +60483,7 @@ type CreateTargetApiV1TargetsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON201      *Target
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60511,6 +60529,7 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
 type DeleteTargetApiV1TargetsNameDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON409      *struct {
 		Detail struct {
 			GraphNodeRefs int                                             `json:"graph_node_refs"`
@@ -60565,6 +60584,7 @@ type UpdateTargetApiV1TargetsNamePatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *Target
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60865,6 +60885,7 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON201      *TopologyEdge
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60888,6 +60909,7 @@ type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *UnderscoreBulkImportResponse
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60910,6 +60932,7 @@ func (r BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse) StatusCode() int
 type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60971,6 +60994,7 @@ func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
 type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -78686,6 +78710,13 @@ func ParseCreateTargetApiV1TargetsPostResponse(rsp *http.Response) (*CreateTarge
 		}
 		response.JSON201 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -78745,6 +78776,13 @@ func ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp *http.Response) (*Delet
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
 		var dest struct {
 			Detail struct {
@@ -78823,6 +78861,13 @@ func ParseUpdateTargetApiV1TargetsNamePatchResponse(rsp *http.Response) (*Update
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -79255,6 +79300,13 @@ func ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse(rsp *http.Response) (*
 		}
 		response.JSON201 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79288,6 +79340,13 @@ func ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse(rsp *http.Respo
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79314,6 +79373,13 @@ func ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp *http.Re
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79399,6 +79465,13 @@ func ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp *http.Respon
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

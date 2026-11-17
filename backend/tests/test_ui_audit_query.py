@@ -466,6 +466,34 @@ def test_audit_work_ref_filter_refuses_a_bad_ticket_id(path: str, typed: str, me
     assert "vsphere.vm.seen" not in response.text
 
 
+def test_audit_load_more_refusal_replaces_the_results() -> None:
+    """A refused value during "Load more" replaces the results, not the rows list.
+
+    The pager appends its answer into the rows list. The refused answer is the
+    whole results block, so the htmx headers send it to the results area.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_rows(tenant_id=_TENANT_A, count=1, op_id="vsphere.vm.seen")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        paged = client.get(
+            "/ui/audit/results", params={"partial": "rows", "work_ref": "CHG\u200b1"}
+        )
+        searched = client.get("/ui/audit/results", params={"work_ref": "CHG\u200b1"})
+    assert paged.status_code == 422, paged.text
+    assert paged.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert paged.headers["HX-Retarget"] == "#audit-results"
+    assert paged.headers["HX-Reswap"] == "innerHTML"
+    assert paged.text.count('id="audit-results-inner"') == 1
+    assert "control or invisible characters" in paged.text
+    assert "vsphere.vm.seen" not in paged.text
+    # The search form already swaps the results; its answer needs no new target.
+    assert searched.status_code == 422, searched.text
+    assert "HX-Retarget" not in searched.headers
+    assert "HX-Reswap" not in searched.headers
+
+
 def test_audit_first_page_renders_load_more_when_more_rows() -> None:
     """A result set larger than one page renders a "Load more" with a cursor."""
     _seed_tenant(_TENANT_A, "tenant-a")

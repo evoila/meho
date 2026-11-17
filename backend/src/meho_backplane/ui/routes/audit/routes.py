@@ -826,7 +826,11 @@ async def _results_handler(
         else "audit/_results.html"
     )
     response = get_templates().TemplateResponse(request, template, context)
-    if work_ref_error is not None:
+    if work_ref_error is not None and partial == _RESULTS_PARTIAL_ROWS:
+        # The "Load more" button appends into the rows list; the refused
+        # answer is the whole results block, so it replaces that block instead.
+        mark_work_ref_refused(response, retarget="#audit-results", reswap="innerHTML")
+    elif work_ref_error is not None:
         mark_work_ref_refused(response)
     return response
 

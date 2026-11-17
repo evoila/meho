@@ -72,8 +72,20 @@ def refused_filter_text(exc: WorkRefError) -> str:
     return f"MEHO did not search. The ticket id is refused: {exc}."
 
 
-def mark_work_ref_refused(response: Response) -> Response:
-    """Make *response* the 422 answer of a refused ticket id search value."""
+def mark_work_ref_refused(
+    response: Response, *, retarget: str | None = None, reswap: str | None = None
+) -> Response:
+    """Make *response* the 422 answer of a refused ticket id search value.
+
+    A "Load more" button adds its answer at the end of the rows list. Its
+    refused answer is the whole list area, so it must replace that area
+    instead: *retarget* (a CSS selector) and *reswap* (an htmx swap style)
+    set the htmx headers ``HX-Retarget`` and ``HX-Reswap`` for that.
+    """
     response.status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     response.headers[WORK_REF_REFUSED_HEADER] = "1"
+    if retarget is not None:
+        response.headers["HX-Retarget"] = retarget
+    if reswap is not None:
+        response.headers["HX-Reswap"] = reswap
     return response

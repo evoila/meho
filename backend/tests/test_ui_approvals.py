@@ -1838,6 +1838,40 @@ def test_history_work_ref_filter_refuses_a_bad_ticket_id(
     assert "No  requests for" not in response.text
 
 
+def test_history_load_more_refusal_replaces_the_console() -> None:
+    """A refused value during "Load more" replaces the console, not the rows list.
+
+    The pager appends its answer into the rows list. The refused answer is the
+    whole console, so the htmx headers send it to the console instead.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        paged = client.get(
+            "/ui/approvals/list",
+            params={"tab": "all", "offset": "25", "partial": "rows", "work_ref": "CHG\u200b1"},
+            headers=_HX_HEADERS,
+        )
+        searched = client.get(
+            "/ui/approvals/list",
+            params={"tab": "all", "work_ref": "CHG\u200b1"},
+            headers=_HX_HEADERS,
+        )
+
+    assert paged.status_code == 422, paged.text
+    assert paged.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert paged.headers["HX-Retarget"] == "#approvals-history"
+    assert paged.headers["HX-Reswap"] == "outerHTML"
+    assert paged.text.count('id="approvals-history"') == 1
+    assert "data-work-ref-refused" in paged.text
+    # The search box already swaps the console; its answer needs no new target.
+    assert searched.status_code == 422, searched.text
+    assert "HX-Retarget" not in searched.headers
+    assert "HX-Reswap" not in searched.headers
+
+
 def test_history_push_url_preserves_work_ref_filter() -> None:
     """``hx-push-url`` carries the active ``work_ref`` so the filtered view round-trips.
 

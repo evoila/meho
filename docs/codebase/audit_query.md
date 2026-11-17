@@ -612,6 +612,11 @@ swap an error answer by itself, so the console script
 that header. So a bookmarked page and a search-as-you-type box both show
 why the value was refused.
 
+The "Load more" button of the audit and approvals pages adds its answer
+at the end of the rows list. A refused answer there is the whole results
+area, so it also carries the htmx headers `HX-Retarget` and `HX-Reswap`.
+They make htmx replace the results area instead of adding to the list.
+
 The "in order" window lists the same requests as the Pending tab
 filtered with the same text: the cleaned id and the text as typed. The
 step numbers on the Pending tab count the same rows. With a filter,

@@ -952,12 +952,18 @@ async def _render_history(
             detail=f"Unknown approvals list partial '{partial}'.",
         )
     context = await _build_history_context(session, tab, work_ref, offset, order)
-    template = (
-        "approvals/_history_rows_oob.html"
-        if partial == _HISTORY_PARTIAL_ROWS and context["work_ref_error"] is None
-        else "approvals/_history.html"
-    )
-    return _history_response(get_templates().TemplateResponse(request, template, context), context)
+    refused = context["work_ref_error"] is not None
+    if partial == _HISTORY_PARTIAL_ROWS and not refused:
+        return get_templates().TemplateResponse(
+            request, "approvals/_history_rows_oob.html", context
+        )
+    response = get_templates().TemplateResponse(request, "approvals/_history.html", context)
+    if refused and partial == _HISTORY_PARTIAL_ROWS:
+        # The "Load more" button appends into the rows list; the refused
+        # answer is the whole console, so it replaces the console instead.
+        mark_work_ref_refused(response, retarget="#approvals-history", reswap="outerHTML")
+        return response
+    return _history_response(response, context)
 
 
 async def _render_detail_modal(

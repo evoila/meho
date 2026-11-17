@@ -65,7 +65,6 @@ from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     with_stored_user,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
-from meho_backplane.connectors.keycloak.session import quote_segment
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -91,8 +90,8 @@ async def _holders(
         _CLIENT_ROLE_USERS_PATH,
         {
             "realm": realm,
-            "client-uuid": quote_segment(client_uuid),
-            "role-name": quote_segment(role),
+            "client-uuid": client_uuid,
+            "role-name": role,
         },
     )
     ids: list[str] = []

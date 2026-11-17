@@ -53,7 +53,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     get_or_none,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -103,7 +103,7 @@ async def _user_id(
     rows = await get_admin_list_strict(
         connector,
         target,
-        fill_path(_USERS_PATH, {"realm": quote_segment(realm)}),
+        fill_path(_USERS_PATH, {"realm": realm}),
         operator=operator,
         params={"username": username, "exact": "true"},
     )
@@ -135,9 +135,8 @@ async def keycloak_user_get(
 ) -> dict[str, Any]:
     """Return one user's state and the type and date of each credential."""
     realm = resolve_realm_config(target).managed_realm
-    realm_segment = quote_segment(realm)
     user_id = await _user_id(self, operator, target, realm, params, _GET_OP)
-    segments = {"realm": realm_segment, "user-id": quote_segment(user_id)}
+    segments = {"realm": realm, "user-id": user_id}
     rep = await get_or_none(self, target, fill_path(_USER_PATH, segments), operator)
     if rep is None:
         raise _not_found(_GET_OP, user_id)
@@ -174,9 +173,7 @@ async def keycloak_user_sessions(
     """Return how many live sessions one user has, with no id and no token."""
     realm = resolve_realm_config(target).managed_realm
     user_id = await _user_id(self, operator, target, realm, params, _SESSIONS_OP)
-    path = fill_path(
-        _USER_SESSIONS_PATH, {"realm": quote_segment(realm), "user-id": quote_segment(user_id)}
-    )
+    path = fill_path(_USER_SESSIONS_PATH, {"realm": realm, "user-id": user_id})
     try:
         rows = await get_admin_list_strict(self, target, path, operator=operator)
     except httpx.HTTPStatusError as exc:

@@ -29,9 +29,10 @@ What the card adds to the refs
 ==============================
 
 * A ``vault-target`` side names the target as typed (``target``), the
-  target it points to now (``target_id``, ``target_name``) and that
-  target's Vault role (``vault_role``). The approved run compares
-  ``target_id`` with the target it finds and refuses another one
+  target it points to now (``target_id``, ``target_name``), that target's
+  Vault role (``vault_role``) and its Vault login mount (``vault_mount``).
+  The approved run compares all three with the target it finds and
+  refuses another target, role or mount
   (:class:`~meho_backplane.connectors.secret.vault_target_endpoint.VaultTargetChangedError`).
 * The sink says whether its secret exists (``secret_exists``) and, with
   ``merge``, whether the named field exists (``field_exists``): ``"yes"``,
@@ -39,7 +40,9 @@ What the card adds to the refs
   login and checks as the write
   (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.sink_state`);
   it keeps only yes or no and drops the read data at once. Every other
-  sink kind and every failed lookup say ``"not known"``.
+  sink kind and every failed lookup say ``"not known"``. The approved run
+  holds a Vault sink to a ``"no"``
+  (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.write_secret`).
 
 The agent's own ``preview_operation`` gets only the refs: ``{kind, ref}``
 and, for a ``vault-target`` side, the target name as typed. It makes no
@@ -81,7 +84,7 @@ for such a sink too.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
@@ -91,17 +94,15 @@ from meho_backplane.connectors.secret.vault_target_endpoint import (
     VaultTargetKvSecretEndpoint,
     VaultTargetRefusedError,
     check_vault_target_refs,
+    login_of,
     vault_target_move_preflight,
 )
-from meho_backplane.connectors.vault.target_auth import resolve_vault_target_auth
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_permission_preflight,
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
-from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
-from meho_backplane.targets.schemas import Target
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -130,21 +131,22 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
     """The approval card's summary of one side: :func:`_ref_only` and the target.
 
     A ``vault-target`` side also names the target it points to now
-    (``target_id``, ``target_name``) and that target's Vault role
-    (``vault_role``). The approved run compares ``target_id`` with the
-    target it finds. A name that does not resolve to a usable Vault target
-    gets no ``target_id``; the permission check then refuses the call.
+    (``target_id``, ``target_name``), that target's Vault role
+    (``vault_role``) and its Vault login mount (``vault_mount``). The
+    approved run compares them with the target it finds. A name that does
+    not resolve to a usable Vault target gets no ``target_id``; the
+    permission check then refuses the call.
     """
     summary = _ref_only(spec)
     if spec.kind == VAULT_TARGET_KIND:
         endpoint = VaultTargetKvSecretEndpoint(spec.ref)
         try:
             row = await endpoint.resolve_vault_target(operator)
-        except (VaultTargetRefusedError, TargetNotFoundError, AmbiguousTargetError):
+        except VaultTargetRefusedError:
             return summary
         summary["target_id"] = str(row.id)
         summary["target_name"] = row.name
-        summary["vault_role"] = str(resolve_vault_target_auth(cast(Target, row)).role)
+        summary["vault_role"], summary["vault_mount"] = login_of(row)
     return summary
 
 

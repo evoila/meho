@@ -173,24 +173,52 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   move fail before the source is read.
 - The approval preview names both sides and the merge flag. A
   `vault-target` side shows the name as typed (`target`), the target it
-  points to (`target_id`, `target_name`) and that target's Vault role
-  (`vault_role`). The sink shows whether its secret exists
-  (`secret_exists`) and, with `merge`, whether the field exists
-  (`field_exists`): `"yes"`, `"no"` or `"not known"`. A Vault sink looks
-  this up at park time with the same checks and login as the write, and
-  only when both `vault-target` sides pass their checks. It keeps only
-  yes or no. Every other sink kind, and a failed lookup, says
-  `"not known"`. No value is in the preview or in the audit row. The
-  agent's own `preview_operation` shows only the refs (`kind`, `ref`
-  and, for a `vault-target` side, `target`) and makes no lookup.
+  points to (`target_id`, `target_name`), that target's Vault role
+  (`vault_role`) and its Vault login mount (`vault_mount`: the target's
+  `extras.vault_mount`, or the deployment's `VAULT_OIDC_MOUNT_PATH`). No
+  value is in the preview or in the audit row. The agent's own
+  `preview_operation` shows only the refs (`kind`, `ref` and, for a
+  `vault-target` side, `target`) and makes no lookup.
+- The sink shows whether its secret exists (`secret_exists`) and, with
+  `merge`, whether the field exists (`field_exists`). MEHO reads this
+  when the request is made, not when the move runs. The lookup uses only
+  the write right on the sink: the same tenant path rule, MEHO policy
+  check and Vault login as the write, and only when both `vault-target`
+  sides pass their checks. It needs no other right. The answer holds
+  only `"yes"`, `"no"` or `"not known"`; the read data is dropped at
+  once. Only a Vault sink can say yes or no. Every other sink kind, and
+  a failed lookup, says `"not known"`.
+- The approved run holds a Vault sink to a `"no"` on the approval
+  (`_approved_sink_expectation` in `vault_endpoint.py`):
+  - `secret_exists: "no"`, without `merge`: the write uses `cas=0`, so
+    Vault refuses it if the secret exists by then.
+  - `secret_exists: "no"`, with `merge`: a secret found by the run's read
+    refuses the write; the write uses `cas=0`, so a secret made after
+    that read is refused too.
+  - `field_exists: "no"` (with `merge`): the field found by the run's
+    read refuses the write; the check-and-set on the read version covers
+    the time up to the write.
+  - Each refusal is `SecretSinkChangedError`: the sink changed since the
+    approval, nothing was written, send a new request. The fields of a
+    sink secret that exists by then stay as they are.
+  - `"yes"` and `"not known"` bind nothing: the run writes as an ordinary
+    move does (without `merge` it replaces the secret; with `merge` it
+    keeps the other fields, guarded by check-and-set).
+  - The check is atomic: only a Vault sink says yes or no, and Vault
+    refuses the guarded write itself (check-and-set). No sink kind
+    without check-and-set gives an answer that binds the run.
 - The approved run of a move compares the target it finds for each
-  `vault-target` side with `target_id` on the approval
-  (`approved_preview("secret.move")`, checked in `check_access`). Another
-  target, or an approval without `target_id`, refuses the run with
-  `VaultTargetChangedError` before any Vault login. So the run acts on the
-  targets the approver saw, even when a name or alias points to another
-  target by then. An approval made before MEHO showed target ids is
-  refused too; the requester sends a new request.
+  `vault-target` side with the approval (`approved_preview("secret.move")`,
+  checked in `check_access`): `target_id`, `vault_role` and `vault_mount`.
+  Another target, another Vault role or login mount, or an approval
+  without one of them, refuses the run with `VaultTargetChangedError`
+  before any Vault login. So the run acts on the targets the approver
+  saw, with the role and the mount the approver saw, even when a name or
+  alias points to another target by then. A name that finds no target
+  (or more than one) refuses the run with `VaultTargetNotFoundError`,
+  before any Vault login; nothing is read or written. An approval made
+  before MEHO showed target ids is refused too; the requester sends a new
+  request.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.

@@ -4,14 +4,16 @@
 """An approved ``secret.move`` acts on the Vault targets its approval card showed.
 
 * The card shows, for each ``vault-target`` side, the name as typed, the
-  target it points to (name and id) and that target's Vault role.
-* The approved run compares the target ids with the card. Another target,
-  or a card without the ids, refuses the run before any Vault login.
+  target it points to (name and id), that target's Vault role and its
+  Vault login mount.
+* The approved run compares the target ids, roles and mounts with the
+  card. Another target, role or mount, or a card without them, refuses the
+  run before any Vault login. So does a target that is gone by then.
 * The card says whether the sink secret exists and, with ``merge``,
   whether its field exists: "yes", "no" or "not known".
 * A planted value stays out of every answer, log line and stored row of
   the whole flow (wait for approval, approve, run): the approval row, the
-  audit rows, the trace and every other table.
+  audit rows, the trace, every other table and the broadcast stream.
 
 The Vault client is faked at the single ``_build_client`` seam; no real HTTP.
 """
@@ -26,8 +28,9 @@ from uuid import UUID
 import hvac
 import pytest
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
+import meho_backplane.broadcast.client as broadcast_client
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.secret.move_preview import build_secret_move_preview
@@ -148,6 +151,7 @@ async def test_the_card_shows_the_real_target_and_its_role_for_each_side(
     assert card["sink"]["target_name"] == "vault-dst"
     assert card["sink"]["target_id"] == await _target_id("vault-dst")
     assert card["sink"]["vault_role"] == "role-dst"
+    assert card["source"]["vault_mount"] == card["sink"]["vault_mount"] == "jwt"
     assert _SECRET_VALUE not in json.dumps(card)
 
 
@@ -192,10 +196,80 @@ async def test_a_name_that_points_to_another_target_refuses_the_run(
     assert fake.secrets.kv.v2.put_calls == []
 
 
-@pytest.mark.parametrize("side", ["source", "sink"])
+async def _set_extras(name: str, extras: dict[str, Any]) -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(update(TargetORM).where(TargetORM.name == name).values(extras=extras))
+        await session.commit()
+
+
+@pytest.mark.parametrize(
+    ("extras", "says"),
+    [
+        ({"vault_role": "role-new"}, "the Vault role of the sink target 'vault-dst' changed"),
+        (
+            {"vault_role": "role-dst", "vault_mount": "jwt-other"},
+            "the Vault login mount of the sink target 'vault-dst' changed",
+        ),
+    ],
+    ids=["role", "mount"],
+)
+@pytest.mark.usefixtures("_alias")
+async def test_a_changed_vault_role_or_mount_refuses_the_run(
+    extras: dict[str, Any], says: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask({"from": _SRC, "to": _DST})
+    fake.auth.jwt.login_calls.clear()
+    fake.secrets.kv.v2.read_calls.clear()
+    await _set_extras("vault-dst", extras)
+
+    result = await _approve_and_run(row.id)
+
+    assert result.status == "error", result
+    assert result.error == "connector_error: VaultTargetChangedError"
+    message = _message(result)
+    assert says in message
+    assert "Nothing was read or written. Send a new request" in message
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
+    assert fake.secrets.kv.v2.put_calls == []
+
+
+async def test_a_target_gone_at_the_run_is_named_as_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask({"from": _SRC, "to": "vault-target:vault-dst/secret/b#password"})
+    fake.auth.jwt.login_calls.clear()
+    fake.secrets.kv.v2.read_calls.clear()
+    async with get_sessionmaker()() as session:
+        await session.execute(delete(TargetORM).where(TargetORM.name == "vault-dst"))
+        await session.commit()
+
+    result = await _approve_and_run(row.id)
+
+    assert result.status == "error", result
+    assert result.error == "connector_error: VaultTargetNotFoundError"
+    assert _message(result) == (
+        "no Vault target named 'vault-dst' was found in your tenant. Nothing was read or written"
+    )
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
+    assert fake.secrets.kv.v2.put_calls == []
+
+
+@pytest.mark.parametrize(
+    ("side", "key"),
+    [
+        ("source", "target_id"),
+        ("sink", "target_id"),
+        ("sink", "vault_role"),
+        ("sink", "vault_mount"),
+    ],
+)
 @pytest.mark.usefixtures("_alias")
 async def test_a_card_without_the_target_id_refuses_the_run(
-    side: str, monkeypatch: pytest.MonkeyPatch
+    side: str, key: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A card made before MEHO showed target ids cannot be checked, so it is refused."""
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
@@ -203,7 +277,7 @@ async def test_a_card_without_the_target_id_refuses_the_run(
     fake.auth.jwt.login_calls.clear()
     effect = dict(row.proposed_effect)
     card = _card(row)
-    card[side] = {k: v for k, v in card[side].items() if k != "target_id"}
+    card[side] = {k: v for k, v in card[side].items() if k != key}
     async with get_sessionmaker()() as session:
         await session.execute(
             update(ApprovalRequest)
@@ -362,6 +436,40 @@ async def test_only_the_approval_request_looks_up_the_sink(
 _MARKER = "planted-move-marker-7f3a9c"
 
 
+class _BroadcastRecorder:
+    """Stand-in for the broadcast Valkey client: keeps every stream entry and every call."""
+
+    def __init__(self) -> None:
+        self.streams: dict[str, list[dict[str, Any]]] = {}
+        self.calls: list[tuple[str, Any, Any]] = []
+
+    async def xadd(self, key: str, fields: dict[str, Any], *args: Any, **kwargs: Any) -> str:
+        self.streams.setdefault(key, []).append(dict(fields))
+        return f"1700000000000-{len(self.streams[key])}"
+
+    async def xrange(self, key: str, *args: Any, **kwargs: Any) -> list[Any]:
+        return [(f"1700000000000-{i}", e) for i, e in enumerate(self.streams.get(key, []), 1)]
+
+    def register_script(self, _script: str) -> Any:
+        async def run(keys: Any = (), args: Any = (), **_kwargs: Any) -> list[Any]:
+            self.calls.append(("script", keys, args))
+            stream_key, payload = keys[0], args[0]
+            return [1, await self.xadd(stream_key, {"event": payload})]
+
+        return run
+
+    def __getattr__(self, name: str) -> Any:
+        async def call(*args: Any, **kwargs: Any) -> None:
+            self.calls.append((name, args, kwargs))
+
+        return call
+
+    async def read_everything(self) -> str:
+        """Every entry of every stream (read with ``XRANGE``) and every other call."""
+        entries = [await self.xrange(key, "-", "+") for key in self.streams]
+        return json.dumps({"entries": entries, "calls": self.calls}, default=str)
+
+
 async def _all_stored_rows() -> str:
     """Every row of every table, as one text."""
     parts: list[str] = []
@@ -372,10 +480,12 @@ async def _all_stored_rows() -> str:
     return "\n".join(parts)
 
 
+@pytest.mark.parametrize("write_refused", [False, True], ids=["moved", "write-refused"])
 @pytest.mark.usefixtures("_alias")
 async def test_a_planted_value_is_in_no_answer_log_or_stored_row(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    write_refused: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """On the success path, and when Vault refuses the write after the source was read."""
     async with get_sessionmaker()() as session:
         session.add(
             Tenant(
@@ -388,13 +498,22 @@ async def test_a_planted_value_is_in_no_answer_log_or_stored_row(
         await session.commit()
     reset_flight_recorder_config_cache_for_testing()
     fake = install_fake_client(monkeypatch, secret={"password": _MARKER, "note": _MARKER})
+    if write_refused:
+        fake.secrets.kv.v2.put_exc = hvac.exceptions.Forbidden("permission denied")
+    stream = _BroadcastRecorder()
+    monkeypatch.setattr(broadcast_client, "_CLIENT", stream)
+    monkeypatch.setattr(broadcast_client, "_BLOCKING_CLIENT", stream)
+    assert broadcast_client.get_broadcast_client() is stream
     caplog.set_level(logging.DEBUG)
 
     with structlog.testing.capture_logs() as logs:
         row = await _ask({"from": _SRC, "to": _DST, "merge": True, "reason": "planted check"})
         result = await _approve_and_run(row.id)
 
-    assert result.status == "ok", result
+    if write_refused:
+        assert result.error == "connector_error: SecretMergeRefusedError", result
+    else:
+        assert result.status == "ok", result
     put = fake.secrets.kv.v2.put_calls[0]
     assert put["secret"]["password"] == _MARKER  # the move did carry the value
     async with get_sessionmaker()() as session:
@@ -403,5 +522,6 @@ async def test_a_planted_value_is_in_no_answer_log_or_stored_row(
         ("answer", result.model_dump_json()),
         ("log", json.dumps(logs, default=str) + caplog.text),
         ("stored rows", await _all_stored_rows()),
+        ("broadcast stream", await stream.read_everything()),
     ):
         assert _MARKER not in text, place

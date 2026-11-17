@@ -73,7 +73,12 @@ whether the secret changed after MEHO read it (`SecretMergeChangedError`:
 run the move again) or Vault refused for another reason
 (`SecretMergeRefusedError`). The approval says whether the sink secret
 exists and, with `merge`, whether the field exists: "yes", "no" or
-"not known".
+"not known". MEHO reads this when the request is made, with only the
+write right on the sink. When the approval says "no", the approved run
+holds to it: a sink secret or field that exists by then refuses the run
+(`SecretSinkChangedError`) and nothing is written. Vault's check-and-set
+makes this check part of the write. "yes" and "not known" do not bind
+the run.
 
 There is deliberately **no** `--value` / `--secret` / `--password` flag
 of any kind. The value is never a CLI argument, flag, env var, or prompt,
@@ -136,10 +141,13 @@ the matching op on that target (`vault.kv.read` for a source,
 `vault.kv.put` for a sink, `vault.kv.patch` for a sink with `merge`). A
 move that fails these checks does not wait for approval.
 The approval shows, for each `vault-target` side, the name as typed, the
-target it points to (name and id) and that target's Vault role. The
-approved run compares the target ids with the approval. If a name points
-to another target by then, or the approval shows no id, the run is
-refused before any Vault login and nothing is read or written.
+target it points to (name and id), that target's Vault role and its
+Vault login mount. The approved run compares the target ids, roles and
+mounts with the approval. If a name points to another target by then,
+the role or the mount of the target changed, or the approval does not
+show them, the run is refused before any Vault login and nothing is read
+or written. A target that is not found at the run is refused the same
+way, with a message that says so.
 `secret.handoff.export` does not accept a `vault-target:` source.
 
 **keycloak** (`keycloak:` —
@@ -221,7 +229,7 @@ Each claim below ties to the mechanism that enforces it.
 | **The op response** | the handler returns only `{status, value_fingerprint, length}`; the response schema is `additionalProperties: false` over those three ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py)). |
 | **Logs** | the only in-memory carrier, [`SecretMaterial`](../../backend/src/meho_backplane/connectors/secret/endpoints.py), overrides `__repr__`/`__str__` to render `<SecretMaterial len=N fingerprint=…>` — so a stray `logger.info(..., material=m)` or f-string renders the redacted form, never the value. Adapters log only field **names**/paths, never values, mirroring [`strip_credential_value`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)'s "No secret in logs" discipline. |
 | **The audit row** | this is the load-bearing distinction. The generic dispatch path persists the raw payload behind redaction ([`dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py) module docstring, step 9). For `secret.move` there is **no raw value for the audit row to carry in the first place**: the value was never in the params (only references) and never in the response (only a keyed fingerprint + length). The audit row stores the value-free params + the value-free return. There is nothing to redact. |
-| **The approval `proposed_effect`** | the park-time preview builder ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)) summarises the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`. For a `vault-target` side it adds the target the name points to and that target's Vault role. It never reads the source. For a Vault sink it looks up whether the secret (and with `merge`, the field) exists and keeps only "yes", "no" or "not known"; the read data is dropped at once. |
+| **The approval `proposed_effect`** | the park-time preview builder ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)) summarises the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`. For a `vault-target` side it adds the target the name points to, that target's Vault role and its Vault login mount. It never reads the source. For a Vault sink it looks up whether the secret (and with `merge`, the field) exists and keeps only "yes", "no" or "not known"; the read data is dropped at once. |
 | **Broadcast / event payloads** | [`classify_op("secret.move")`](../../backend/src/meho_backplane/broadcast/events.py) returns `"other"` (`.move` is in neither the read- nor write-suffix set, and `secret.move` is in no credential allowlist). The broadcast carries the same value-free params + response the audit row sees — there is no value in them to broadcast. |
 
 The transfer is **server-side**: read from source → write to sink, both

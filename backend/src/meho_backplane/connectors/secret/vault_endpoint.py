@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AbstractAsyncContextManager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import hvac
 import structlog
@@ -75,6 +75,7 @@ from meho_backplane.connectors.secret.endpoints import (
     register_secret_endpoint,
 )
 from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
+from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -84,6 +85,7 @@ __all__ = [
     "SecretMergeChangedError",
     "SecretMergeDeletedVersionError",
     "SecretMergeRefusedError",
+    "SecretSinkChangedError",
     "VaultKvSecretEndpoint",
     "VaultSecretRefError",
 ]
@@ -157,6 +159,43 @@ class SecretMergeRefusedError(VaultSecretRefError, ConnectorOwnMessage):
                 "again, or check the Vault role and policy for this path"
             )
         super().__init__(message)
+
+
+class SecretSinkChangedError(VaultSecretRefError, ConnectorOwnMessage):
+    """The approved run finds a sink secret or field the approval said does not exist.
+
+    Nothing is written. A fixed MEHO sentence (the field *name* at most),
+    no Vault text and no value.
+    """
+
+    def __init__(self, what: str) -> None:
+        super().__init__(
+            f"the sink changed since the approval: {what} exists now, but the approval "
+            "showed it does not exist. Nothing was written. Send a new request"
+        )
+
+
+class _SinkExpectation(NamedTuple):
+    """What the approval card of a ``secret.move`` said does not exist at the sink."""
+
+    secret_missing: bool
+    field_missing: bool
+
+
+def _approved_sink_expectation() -> _SinkExpectation:
+    """Read the sink side of the approval card, during the approved run of ``secret.move``.
+
+    Only a ``"no"`` binds the run. ``"yes"``, ``"not known"`` and an
+    ordinary run (no card) bind nothing.
+    """
+    card = approved_preview("secret.move")
+    sink = card.get("sink") if card is not None else None
+    if not isinstance(sink, dict):
+        return _SinkExpectation(secret_missing=False, field_missing=False)
+    return _SinkExpectation(
+        secret_missing=sink.get("secret_exists") == "no",
+        field_missing=sink.get("field_exists") == "no",
+    )
 
 
 def _parse_vault_ref(ref: str) -> tuple[str, str]:
@@ -256,20 +295,29 @@ class VaultKvSecretEndpoint:
         the material's bytes — KV-v2 stores JSON string values, and the
         source read coerced via :func:`strip_credential_value`, so the
         round-trip is lossless for the credential strings the broker
-        moves. ``cas`` is omitted (unconditional write); a check-and-set
-        guard is a policy-task concern (#1579), not the mechanism.
+        moves. The write is unconditional, except in the approved run of a
+        ``secret.move`` whose approval said the sink secret does not exist:
+        then it writes with ``cas=0``, so Vault refuses it if the secret
+        exists by then (:class:`SecretSinkChangedError`, nothing written).
         """
         _log.debug("secret_broker.vault.write", path=self._path, field=self._field)
         self.check_write_allowed(operator)
+        cas = 0 if _approved_sink_expectation().secret_missing else None
         body: dict[str, str] = {self._field: material.value.decode("utf-8")}
         async with self._client(operator, "vault.kv.put") as client:
-            await asyncio.to_thread(
-                client.secrets.kv.v2.create_or_update_secret,
-                path=self._path,
-                secret=body,
-                cas=None,
-                mount_point=self._mount,
-            )
+            try:
+                await asyncio.to_thread(
+                    client.secrets.kv.v2.create_or_update_secret,
+                    path=self._path,
+                    secret=body,
+                    cas=cas,
+                    mount_point=self._mount,
+                )
+            except hvac.exceptions.InvalidRequest:
+                if cas is None:
+                    raise
+                # Vault's answer to a cas=0 write on a secret that exists.
+                raise SecretSinkChangedError("the sink secret") from None
 
     async def write_secret_merged(self, operator: Operator, material: SecretMaterial) -> None:
         """Write *material* into the addressed field and keep the other fields.
@@ -282,38 +330,25 @@ class VaultKvSecretEndpoint:
         ``cas=0`` (Vault: "only if it does not exist"). A secret whose
         latest version is deleted or destroyed is refused and nothing is
         written: its other fields cannot be read, so a merge would lose them.
+
+        In the approved run of a ``secret.move``, the read holds the sink to
+        the approval: when the approval said the secret does not exist, a
+        secret found now refuses the write, and when it said the field does
+        not exist, the field found now refuses it
+        (:class:`SecretSinkChangedError`, nothing written). The
+        check-and-set on the read version covers the time up to the write.
         """
         _log.debug("secret_broker.vault.write_merged", path=self._path, field=self._field)
         self.check_write_allowed(operator)
         value = material.value.decode("utf-8")
+        expect = _approved_sink_expectation()
         async with self._client(operator, "vault.kv.patch") as client:
-            await asyncio.to_thread(self._merge_write, client, value)
+            await asyncio.to_thread(self._merge_write, client, value, expect)
 
-    def _merge_write(self, client: hvac.Client, value: str) -> None:
+    def _merge_write(self, client: hvac.Client, value: str, expect: _SinkExpectation) -> None:
         """Blocking read-modify-write with CAS (runs in a worker thread)."""
         kv = client.secrets.kv.v2
-        body: dict[str, Any]
-        try:
-            payload = kv.read_secret_version(
-                path=self._path, mount_point=self._mount, raise_on_deleted_version=False
-            )
-        except hvac.exceptions.InvalidPath as exc:
-            # A destroyed latest version also answers 404, but with metadata.
-            if _version_metadata(exc.json) is not None:
-                raise SecretMergeDeletedVersionError from None
-            body, cas = {}, 0
-        else:
-            metadata = _version_metadata(payload) or {}
-            if metadata.get("deletion_time") or metadata.get("destroyed") is True:
-                raise SecretMergeDeletedVersionError
-            body = dict(_structural_unwrap(payload, path=self._path))
-            version = metadata.get("version")
-            if not isinstance(version, int) or isinstance(version, bool):
-                raise VaultSecretRefError(
-                    f"vault KV-v2 read for {self._path!r} returned no version, "
-                    "so the merge cannot be guarded with check-and-set"
-                )
-            cas = version
+        body, cas = self._merge_read(kv, expect)
         body[self._field] = value
         try:
             kv.create_or_update_secret(
@@ -322,7 +357,43 @@ class VaultKvSecretEndpoint:
         except (hvac.exceptions.InvalidRequest, hvac.exceptions.Forbidden) as exc:
             # A failed check-and-set (400) or a policy that allows the read
             # but not the write (403).
-            raise self._merge_refusal(kv, cas) from exc
+            refusal = self._merge_refusal(kv, cas)
+            if expect.secret_missing and isinstance(refusal, SecretMergeChangedError):
+                refusal = SecretSinkChangedError("the sink secret")
+            raise refusal from exc
+
+    def _merge_read(self, kv: Any, expect: _SinkExpectation) -> tuple[dict[str, Any], int]:
+        """Read the sink secret for a merge: its data and the version to guard with.
+
+        ``({}, 0)`` when the secret does not exist. Refuses a deleted latest
+        version and a sink that differs from what the approval said.
+        """
+        try:
+            payload = kv.read_secret_version(
+                path=self._path, mount_point=self._mount, raise_on_deleted_version=False
+            )
+        except hvac.exceptions.InvalidPath as exc:
+            # A destroyed latest version also answers 404, but with metadata.
+            if _version_metadata(exc.json) is None:
+                return {}, 0
+            if expect.secret_missing:
+                raise SecretSinkChangedError("the sink secret") from None
+            raise SecretMergeDeletedVersionError from None
+        if expect.secret_missing:
+            raise SecretSinkChangedError("the sink secret")
+        metadata = _version_metadata(payload) or {}
+        if metadata.get("deletion_time") or metadata.get("destroyed") is True:
+            raise SecretMergeDeletedVersionError
+        body = dict(_structural_unwrap(payload, path=self._path))
+        version = metadata.get("version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise VaultSecretRefError(
+                f"vault KV-v2 read for {self._path!r} returned no version, "
+                "so the merge cannot be guarded with check-and-set"
+            )
+        if expect.field_missing and self._field in body:
+            raise SecretSinkChangedError(f"the field {self._field!r} of the sink secret")
+        return body, version
 
     def _merge_refusal(self, kv: Any, cas: int) -> VaultSecretRefError:
         """Tell a changed secret from another refusal of the merge write.

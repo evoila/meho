@@ -3466,7 +3466,7 @@ meho keycloak realm delete [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
-- `--realm` — the name of the realm to delete (required)
+- `--realm` — the name of the realm to delete: the target's managed realm (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -3491,7 +3491,7 @@ meho keycloak realm update [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
-- `--realm` — realm to update (defaults to the target's managed realm)
+- `--realm` — realm to update: must be the target's managed realm (the default); another realm is refused
 - `--representation-file`, `-f` — path to a JSON file with the partial RealmRepresentation body (required)
 - `--target` — target slug to dispatch against (required)
 

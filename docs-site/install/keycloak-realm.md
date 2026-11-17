@@ -1330,7 +1330,8 @@ already runs gets these settings once, in one of two ways:
     ```
 
     Then run `meho keycloak realm update --target <keycloak-target>
-    --realm meho -f realm-login.json`. MEHO reads the realm, changes only
+    -f realm-login.json`, with a target whose managed realm is `meho`.
+    MEHO reads the realm, changes only
     these fields, and writes it back.
 
 - **By hand**, in the Keycloak admin console, with the table above.

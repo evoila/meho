@@ -3354,13 +3354,13 @@ async def _build_proposed_effect(
             # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
-        # A setting of the target that is allowed but risky, for example a
-        # Keycloak target that manages MEHO's own sign-in realm.
         # The realm a Keycloak target works on, so the reviewer sees it
         # in the first lines of the card.
         realm_of_target = target_managed_realm(target)
         if realm_of_target is not None:
             base["target_realm"] = realm_of_target
+        # A setting of the target that is allowed but risky, for example a
+        # Keycloak target that manages MEHO's own sign-in realm.
         risky_settings = target_warnings(target)
         if risky_settings:
             base["target_warnings"] = risky_settings

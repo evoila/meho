@@ -70,7 +70,7 @@ func newRealmCreateCmd() *cobra.Command {
 
 // newRealmUpdateCmd returns the `meho keycloak realm update` command
 // (keycloak.realm.update — approval-gated). PUTs /admin/realms/{realm}
-// (default the target's managed realm; --realm overrides) with the partial
+// (the target's managed realm; another --realm is refused) with the partial
 // RealmRepresentation from --representation-file.
 func newRealmUpdateCmd() *cobra.Command {
 	var (
@@ -82,8 +82,9 @@ func newRealmUpdateCmd() *cobra.Command {
 		Use:   "update",
 		Short: "Update a Keycloak realm's top-level config (approval-gated)",
 		Long: "update dispatches keycloak.realm.update with the partial\n" +
-			"RealmRepresentation from --representation-file (JSON). Defaults to\n" +
-			"the target's managed realm; --realm overrides. Requires approval.\n\n" +
+			"RealmRepresentation from --representation-file (JSON). It updates\n" +
+			"the target's managed realm; a --realm that names another realm is\n" +
+			"refused. Requires approval.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
 		Example:       "  meho keycloak realm update --target keycloak-lab -f realm-patch.json",
@@ -107,7 +108,7 @@ func newRealmUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
 		"path to a JSON file with the partial RealmRepresentation body (required)")
 	cmd.Flags().StringVar(&realmName, "realm", "",
-		"realm to update (defaults to the target's managed realm)")
+		"realm to update: must be the target's managed realm (the default); another realm is refused")
 	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
 		panic(err) // programmer error: the flag is defined directly above
 	}

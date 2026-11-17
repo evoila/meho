@@ -68,7 +68,9 @@ __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
 _WHEN_TO_USE_REALM_WRITE = (
     "Use to create a new Keycloak realm (``keycloak.realm.create``) or "
     "update the managed realm's top-level config "
-    "(``keycloak.realm.update``). Both require human approval. Pass the "
+    "(``keycloak.realm.update``). A target works on its managed realm only, "
+    "so create a new realm through a target that names that realm as its "
+    "managed realm. Both require human approval. Pass the "
     "RealmRepresentation under ``representation``. Re-running a create is "
     "idempotent (a 409 already-exists is treated as success). "
     "``keycloak.realm.delete`` removes a whole realm for good (destructive: a "
@@ -241,9 +243,9 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         description=(
             "POSTs ``/admin/realms`` with the RealmRepresentation under "
             "``representation``. The realm name is ``representation.realm`` "
-            "(or the ``realm`` param). A 409 already-exists is treated as an "
-            "idempotent success. requires_approval=True; dispatches via the "
-            "admin-auth path."
+            "(or the ``realm`` param) and must be the target's managed realm. "
+            "A 409 already-exists is an idempotent success. "
+            "requires_approval=True; uses the admin login."
         ),
         parameter_schema={
             "type": "object",
@@ -251,7 +253,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "representation": _REPRESENTATION_PROP,
                 "realm": {
                     "type": "string",
-                    "description": "Realm name (if not in representation).",
+                    "description": (
+                        "Realm name (if not in representation). Must be the "
+                        "target's managed realm; another realm is refused."
+                    ),
                 },
             },
             "required": ["representation"],
@@ -275,8 +280,8 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         handler_attr="realm_update",
         summary="Update a Keycloak realm's top-level config (approval-gated).",
         description=(
-            "Updates ``/admin/realms/{realm}`` (default the target's managed "
-            "realm; ``realm`` overrides) with the partial "
+            "Updates ``/admin/realms/{realm}`` (the target's managed realm; "
+            "a ``realm`` that names another realm is refused) with the partial "
             "RealmRepresentation under ``representation``. Reads the realm, "
             "puts the given fields on top and PUTs the full realm back, so "
             "fields you do not send stay as they are; then reads it again "
@@ -293,7 +298,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "representation": _REPRESENTATION_PROP,
                 "realm": {
                     "type": "string",
-                    "description": "Realm to update (default managed_realm).",
+                    "description": (
+                        "Realm to update. Must be the target's managed realm "
+                        "(the default); another realm is refused."
+                    ),
                 },
                 **SMTP_PASSWORD_SECRET_PROPS,
             },

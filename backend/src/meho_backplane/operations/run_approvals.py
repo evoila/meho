@@ -326,6 +326,7 @@ async def _check_routed_entry(
         op_id=entry.op_id,
         level=descriptor.safety_level,
         category=descriptor.policy_category,
+        install_category=descriptor.policy_install_category,
     )
     routed.append(
         {

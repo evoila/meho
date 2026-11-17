@@ -371,6 +371,16 @@ update_os() {
     # The restart ends the SSH session, so ssh's exit code says nothing.
     ssh_build "sudo systemctl reboot" || true
     wait_for_ssh "$boot"
+    # The form-2 install checks the clock first. Right after a restart the
+    # time sync is not done yet, and a fast runner gets there before it.
+    # shellcheck disable=SC2016  # the build VM expands this, not this shell
+    ssh_build 'for _ in $(seq 60); do
+            [ "$(timedatectl show --property=NTPSynchronized --value)" = yes ] && exit 0
+            sleep 2
+        done
+        exit 1' ||
+        fail "The build VM's clock did not synchronise within 2 minutes after the restart." \
+            "check that the build VM reaches its time server ('timedatectl timesync-status' on the VM); then go on with --from-step 2."
     ok "installed every package update of today; the build VM restarted into the kernel $(ssh_build uname -r)"
 }
 

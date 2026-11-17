@@ -50,7 +50,6 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import (
     resolve_user,
 )
 from meho_backplane.connectors.keycloak.secret_endpoint import KeycloakClientNotFoundError
-from meho_backplane.connectors.keycloak.session import quote_segment
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -92,8 +91,8 @@ async def _resolve_roles(
                     _CLIENT_ROLE_PATH,
                     {
                         "realm": realm,
-                        "client-uuid": quote_segment(client_uuid),
-                        "role-name": quote_segment(name),
+                        "client-uuid": client_uuid,
+                        "role-name": name,
                     },
                 ),
                 operator=operator,
@@ -141,7 +140,7 @@ async def _change_client_roles(
     )
     path = fill_path(
         _USER_ROLE_MAPPINGS_CLIENT_PATH,
-        {"realm": realm, "user-id": quote_segment(uuid), "client-id": quote_segment(client_uuid)},
+        {"realm": realm, "user-id": uuid, "client-id": client_uuid},
     )
     try:
         await connector._write_admin(

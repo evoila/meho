@@ -157,6 +157,22 @@ spec:
       ports:
         - port: 53
           protocol: UDP
+    {{- with .Values.networkPolicy.ingressControllerEgress.podLabels }}
+    # The backplane's own console address (#6612): the first-start
+    # `certificate` check connects to it. The host port or Service in front
+    # of the ingress controller sends the connection to its Pod before the
+    # rule is checked, so the rule names the Pods and their port.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Values.networkPolicy.ingressControllerNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+      ports:
+        - port: {{ $.Values.networkPolicy.ingressControllerEgress.port }}
+          protocol: TCP
+    {{- end }}
     {{- with .Values.networkPolicy.extraEgress }}
     {{- range $i, $rule := . }}
     {{- /* Also guarded by the schema; this check holds under --skip-schema-validation. */}}

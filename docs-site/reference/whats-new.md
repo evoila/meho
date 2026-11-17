@@ -9,6 +9,40 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.47.0](https://github.com/evoila/meho/releases/tag/v0.47.0) — 2026-11-17
+
+- **Keycloak writes that change rights need another admin.** Giving a
+  role, adding a group member, changing a client or resetting a
+  password waits for a second admin on every call, in every realm.
+- **More changes wait for a person.** A run approval never covers a
+  credential read or a command as root on a host. Every `secret.move`,
+  every `harbor.robot.create` and every AD group member change waits
+  for its own approval.
+- **Target writes with a token wait for approval.** Upgrade the `meho`
+  command line together with the server.
+- **Secret values go only to the person who asked.** After the
+  approval, that person fetches the value once, within 15 minutes.
+  MEHO stores no value.
+- **Connectors say which versions they serve.** A target whose version
+  is outside its connector's range is refused. Check your Kubernetes,
+  RKE2, PostgreSQL, MongoDB, Argo CD and Vault targets before the
+  upgrade.
+- **Keycloak targets name their realm.** Set `managed_realm` on each
+  Keycloak target before the upgrade.
+- **A policy file for each install and tenant**, and `meho policy
+  explain` says why a call runs, waits or is refused. Most policy
+  features are behind switches that are off by default.
+- **Sign in and approve with a passkey**, and get a push message on
+  your phone or laptop when an approval waits.
+- **Command line.** Named login profiles, a Windows build, and
+  `meho docs ask` for a docs answer with sources.
+- **More operations.** Keycloak, Harbor, Azure, pfSense, FreeIPA,
+  Vault and Linux operations, and a `spaces` connector behind a switch.
+- **MEHO on a plain Linux server** has its own chapter in the install
+  guide.
+- **Many security fixes.** They are listed under "Security" in the
+  release notes.
+
 ## [v0.46.0](https://github.com/evoila/meho/releases/tag/v0.46.0) — 2026-11-09
 
 - **Approved changes with hidden values run.** A request whose settings

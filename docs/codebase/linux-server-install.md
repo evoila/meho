@@ -249,6 +249,8 @@ with Kubernetes tools.
 
 - Every run writes the file again: the install, `--from-disk` and the
   update. So it follows a certificate that changed in between.
+  `meho-host certificate` (#4738) writes it too, with the customer's CA
+  ([linux-server-meho-host.md](linux-server-meho-host.md), `certificate`).
 - A Secret without a CA certificate (the read fails, or the value has no
   `-----BEGIN CERTIFICATE-----` line) removes the file and gives a
   `[WARN]`. A file from an earlier run could name a CA that the console no
@@ -1161,9 +1163,6 @@ Tasks add in this folder are checked by the same job.
 - **Two builds of `main` of the same day** compare by their commit id as
   text, so an update between them may be refused as "older". Releases and
   builds of different days compare correctly.
-- **`meho-host certificate` (#4738) does not write the console CA file.**
-  It changes the TLS Secret, and the file follows at the next run of
-  `install.sh`. Until then the file names the old CA.
 - **The Helm time limit is 15 minutes per operation:** the wait for the
   pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.

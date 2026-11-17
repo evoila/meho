@@ -475,7 +475,15 @@ and `Nothing was changed.` when it fails:
    --patch-file=/dev/stdin` on standard input, so the key is never on a
    command line. A merge patch keeps the labels of the Secret. kubectl's
    messages are not shown, because an error text could quote the patch.
-6. Print the certificate line of `check`, which reads the Secret again
+6. Write the CA, the last certificate, to `/var/lib/meho/console-ca.crt`
+   (`write_console_ca`, mode 0644), the file that `install.sh` writes at
+   its end ([linux-server-install.md](linux-server-install.md), Step 6). So
+   the file names the CA of the new certificate without a new run of
+   `install.sh`. The file is written as `console-ca.crt.new` and then
+   moved, so nobody reads half a file. The Secret holds the new
+   certificate already, so a file that cannot be written gives only a
+   `[WARN]` line.
+7. Print the certificate line of `check`, which reads the Secret again
    with the same rule. A certificate with 30 days or less left is
    installed, and the line is a `[WARN]`.
 
@@ -719,8 +727,12 @@ certificate only for client logins (`usage="clientAuth"`), a certificate
 that is not yet valid, a missing intermediate, only one certificate, the
 server certificate twice, no certificate, a first block that is not a
 certificate, an encrypted key, a certificate as the key, a file that cannot
-be read, no install record, no `openssl` and a failed write. The check
-line has the client-only case too, alone and with an expired certificate.
+be read, no install record, no `openssl` and a failed write. The CA file
+of the install is replaced by the new CA (mode 0644), is written when it
+was missing, stays as it was when a check refuses the certificate, and a
+folder that cannot be written gives only a `[WARN]` (skipped as root). The
+check line has the client-only case too, alone and with an expired
+certificate.
 The unseal tests cover each step of the three commands and each way it
 fails: in `keyholder on` RKE2 down, a Secret without a key, a wrong key, a
 failed delete, a failed restart, no answer and a pod that someone already
@@ -781,10 +793,17 @@ packages later.
   certificate` (#4738) writes the same Secret. A change of
   `ingress.tls.secretName` needs a change of `CONSOLE_TLS_SECRET`.
 - **`certificate` prints the check line, not the first-start list.** The
-  first-start list of the backplane (#4042) is not built yet. Until it is,
-  `certificate` prints the certificate line of `check`, which applies the
-  same rule to the Secret it just wrote (a `shortcut:` comment in
-  `command_certificate`). When #4042 lands, `certificate` prints that list.
+  first-start list (`meho status --first-start`, which `install.sh` shows
+  at its end) fetches the certificate through the console address. Traefik
+  shows the new Secret only within a minute, so right after the patch the
+  list could still see the old certificate. The check line applies the
+  same rule to the Secret that `certificate` just wrote.
+- **The first-start list trusts only the CA store of the MEHO pod.** Its
+  `certificate` line is green only when the backplane trusts the CA of
+  the console certificate. The pod does not trust the `ca.crt` of
+  `meho-core-tls` by itself, and form 2 has no command that adds a CA to
+  its trust store. So with the install's own CA, and with a customer CA
+  that is not in the pod's store, the line stays red.
 - **The OpenBao names are fixed.** The commands use the StatefulSet
   `meho-vault`, its pod `meho-vault-0`, the container `bao` and the Secret
   `meho-core-vault-unseal`: the names of the release `meho` with the chart's
@@ -804,8 +823,8 @@ packages later.
   (#3960) are not part of them.
 - **The certificate line checks the Secret, not the connection.** It does
   not connect to port 443, so it does not prove that Traefik serves this
-  Secret. The first-start list (#4042, not built yet) is planned to fetch
-  the certificate through the console address.
+  Secret. The first-start list fetches the certificate through the console
+  address, so it shows what Traefik serves.
 
 - **The Traefik pods are found by name.** The bundle takes the `kube-system`
   pods whose name starts with `rke2-traefik-`, which is how RKE2's

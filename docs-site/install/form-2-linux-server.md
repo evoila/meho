@@ -70,7 +70,9 @@ files for the Linux server:
 The server needs no internet, so download the three files on another
 machine. Check the signature of the checksum file there first, then the
 download. You need
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+version 3 or newer. Version 2 cannot read the signature file of the
+release: it stops with `bundle does not contain cert for verification`.
 
 ```bash
 TAG=v<version>
@@ -164,22 +166,42 @@ your site uses, and give them with `--cluster-cidr` and
 5. **It writes the first-login passwords and the unseal key** to two
    files that only root can read. Nothing secret shows on the screen.
 6. **It installs the `meho` command** and writes the install record
-   `/etc/meho/install.json`. The record holds no secret.
+   `/etc/meho/install.json`. The record holds no secret. From v0.47.0, it
+   also writes the CA of the console certificate to
+   `/var/lib/meho/console-ca.crt` (see
+   [The console certificate](#the-console-certificate)), and it reads the
+   [first-start list](first-start-checks.md). A red line in the list does
+   not stop the install.
 
 When a later step fails, its `[FAIL]` line says what to do. After RKE2
 has started, a second run finds a machine that is only partly installed,
 and it stops. Then run `sudo meho-host support-bundle` and send the file
 to evoila support (see [Get help from support](#get-help-from-support)).
 
-At the end, the script prints the result:
+At the end, the script prints the result. From v0.47.0 it looks like
+this:
 
 ```text
 install.sh: MEHO <version> is installed on meho.example.com.
   Console:               https://meho.example.com/ui/
+  Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
   First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
   Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
-  First-start list:      not in this version yet. Open the console address to check that MEHO answers.
+  First-start list:      a red line; each red line says what to fix
+    GREEN   dns           The host name meho.example.com resolves. Where it points is checked once the certificate check is green.
+    RED     certificate   The certificate of meho.example.com is not trusted. Install the full chain, and add your own CA to the trust bundle of MEHO.
+    ...
 ```
+
+With the install's own certificate, the `certificate` line is red. That
+is expected (see [The console certificate](#the-console-certificate)).
+Each other red line says what to fix. When the script cannot read the
+list, for example behind address translation (`--public-address`), the
+line says `not read`. Then open the first-start page in the console after
+the first login ([Step 4](#step-4-first-login)).
+
+Before v0.47.0, the result has no `Console CA` line, and the last line
+says `First-start list: not in this version yet`.
 
 ## Step 4: First login
 
@@ -253,7 +275,52 @@ browsers and laptops do not know this CA. So:
 - the `meho` command and the Claude tools on your laptops refuse the
   certificate (see [Tools for your laptop](laptop-tools.md)).
 
+From v0.47.0, the install writes this CA to
+`/var/lib/meho/console-ca.crt`. The CA is not secret. Only root can open
+the folder, so read the file with `sudo`:
+
+```bash
+sudo cat /var/lib/meho/console-ca.crt
+```
+
+Give the file to the computers that use MEHO. [Tools for your
+laptop](laptop-tools.md#step-1-trust-the-sites-own-certificate-authority)
+says how a computer trusts it. MEHO itself does not trust this CA, so the
+`certificate` line of the first-start list stays red.
+
 For production, use a certificate from your own CA.
+
+### Use a certificate from your own CA
+
+From v0.47.0, `meho-host certificate` puts a certificate from your own CA
+in place.
+
+1. Get a certificate for the DNS name of the install from your CA. It
+   must be made for a TLS server. You need two files:
+    - `chain.pem`: the server certificate first, then every intermediate
+      CA certificate, and your CA certificate last;
+    - `key.pem`: the private key of the server certificate, without a pass
+      phrase.
+2. Copy both files to the server, and run:
+
+    ```bash
+    sudo meho-host certificate --cert chain.pem --key key.pem
+    ```
+
+    The command checks that the key belongs to the certificate, that the
+    certificate names the DNS name of the install and is valid now, and
+    that the chain ends at your CA. When a check fails, one `[FAIL]` line
+    says what is wrong, and nothing changes.
+
+3. When every check passes, the console, the API and the login show the
+   new certificate within a minute. The command writes your CA to
+   `/var/lib/meho/console-ca.crt`. Its last line is the `console-certificate`
+   line of `meho-host check`. With 30 days or less left, the line is a
+   `[WARN]`.
+4. MEHO keeps the key. Delete your copy of `key.pem` from the server.
+
+An update keeps your certificate. To replace it, for example before it
+expires, run the command again with the new files.
 
 ### The unseal key
 
@@ -265,14 +332,45 @@ machine needs no person. The page
 says what this protects and what it does not.
 
 In keyholder mode, OpenBao stays sealed after a restart until a person
-unseals it with the key.
+unseals it with the key. From v0.47.0, `meho-host` switches the mode.
 
-!!! note "Not in this version yet"
+To switch to keyholder mode:
 
-    Two tasks need a command on the server that this version does not
-    have yet: putting a certificate from your own CA in place, and
-    switching OpenBao to keyholder mode. Ask evoila if you need either
-    of them now.
+```bash
+sudo meho-host keyholder on
+```
+
+The command asks for the unseal key from your key store. What you type
+or paste is not shown. It checks that the key is the right one, deletes
+the copy of the key that MEHO keeps on the machine, and restarts OpenBao.
+OpenBao is then sealed, and MEHO waits. So you see at once that the
+keyholder step works. Unseal OpenBao:
+
+```bash
+sudo meho-host unseal
+```
+
+From now on, after every restart of the machine, a keyholder runs
+`sudo meho-host unseal`. Until then, MEHO waits. When an update restarts
+OpenBao, it waits up to 10 minutes for a keyholder (see [Update](#update)).
+
+To go back, so that OpenBao unseals itself again:
+
+```bash
+sudo meho-host keyholder off
+```
+
+It asks for the key, keeps a copy of it on the machine, and restarts
+OpenBao.
+
+Never give the key on the command line, because it would stay in the
+shell history. A script gives the key on standard input instead.
+
+!!! note "Before v0.47.0"
+
+    `meho-host certificate`, `meho-host keyholder` and `meho-host unseal`
+    come with v0.47.0. Ask evoila if you need your own certificate or
+    keyholder mode on an older version.
 
 **You now have a running MEHO and a logged-in admin.** Go on with
 [the setup page and the settings file](setup-page.md). The rest of this
@@ -302,11 +400,16 @@ the same machine. There is no other update command.
     Only `yes` goes on. For a run with no person at the terminal, add
     `--confirm-backup`.
 
+    In keyholder mode, when the update restarts OpenBao, it waits up to
+    10 minutes for the unseal. A keyholder then runs
+    `sudo meho-host unseal` in a second SSH session.
+
 4. When the script is done, run `sudo meho-host check`.
 
 The update keeps the answers of the install, the firewall with your SSH
-range, the data, the passwords and the keys. It does not write the two
-first-login files again.
+range, your certificate, the data, the passwords and the keys. It does not
+write the two first-login files again. From v0.47.0, it writes the CA file
+again and shows the first-start list at the end, as the install does.
 
 **One minor version at a time.** RKE2 moves only one minor version at a
 time, for example from v1.37 to v1.38, but not from v1.37 to v1.39. When
@@ -506,6 +609,8 @@ The profile hardens the built-in Kubernetes, not the operating system.
   `/var/lib/meho/unseal-key`. Delete both after the first login
   ([Step 4](#step-4-first-login)).
 - Only root can open the folders `/etc/meho` and `/var/lib/meho`.
+- `/var/lib/meho/console-ca.crt` holds only the CA certificate of the
+  console. It is not secret.
 - The support bundle can still hold secrets from the logs. Check it
   before you send it (see [Get help from support](#get-help-from-support)).
 

@@ -84,6 +84,9 @@ readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_SUPPORT_DIR=/var/lib/meho/support
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
 readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
+# The CA of the console certificate, which install.sh writes at its end
+# (lib/common.sh) and certificate writes again. It is not secret.
+readonly MEHO_CONSOLE_CA_FILE=/var/lib/meho/console-ca.crt
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_ETC_DIR=/etc/meho
 # The two commands install.sh puts on the machine, and the folder of the
@@ -305,7 +308,8 @@ Commands:
                     checks that the key belongs to the certificate, that
                     the certificate names the host name of this install
                     and is valid now, and that the chain ends at your CA.
-                    When a check fails, nothing changes. At the end it
+                    When a check fails, nothing changes. It writes your
+                    CA to /var/lib/meho/console-ca.crt, and at the end it
                     prints the certificate line of check.
   keyholder on      OpenBao, the password safe of MEHO, stays sealed after
                     every restart, and MEHO waits, until a keyholder runs
@@ -1514,6 +1518,24 @@ write_console_tls() {
             --type=merge --patch-file=/dev/stdin >/dev/null 2>&1
 }
 
+# write_console_ca <CA certificate>: the CA of the new certificate goes to
+# MEHO_CONSOLE_CA_FILE, which install.sh writes at its end (write_console_ca
+# in lib/core.sh). So the file names the CA that the console's certificate
+# chains to without a new run of install.sh. The CA is not secret: mode
+# 0644, in the root-only folder /var/lib/meho. The file is written next to
+# its place and then moved, so nobody reads half a file. The Secret holds
+# the new certificate already, so a failure here only warns.
+write_console_ca() {
+    local file="${HOST_ROOT}${MEHO_CONSOLE_CA_FILE}"
+    if { printf '%s\n' "$1" >"$file.new"; } 2>/dev/null &&
+        chmod 0644 "$file.new" && mv -f "$file.new" "$file"; then
+        ok "wrote your CA to $MEHO_CONSOLE_CA_FILE"
+        return 0
+    fi
+    rm -f "$file.new"
+    warn "$MEHO_CONSOLE_CA_FILE could not be written, so it may still hold the old CA. Give your own CA file to the browsers and laptops that use MEHO."
+}
+
 # check_new_certificate <host> <file> <certificates>: stop with one [FAIL]
 # line unless the chain is complete and the server certificate passes the
 # rule of the console certificate (certificate_state), with the last
@@ -1593,10 +1615,12 @@ command_certificate() {
         fail "the Secret $CONSOLE_TLS_SECRET could not be changed, so the console keeps its certificate." \
             "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
     ok "installed the certificate for $host in the Secret $CONSOLE_TLS_SECRET: the console, the API and the login show it within a minute"
+    write_console_ca "$(pem_block "$chain" last)"
     note "browsers and the meho CLI trust it when the computer trusts your CA."
-    # shortcut: the first-start list (#4042) is not built yet. Until it is,
-    # this prints the certificate line of check, which reads the Secret
-    # again with the same rule. Print the first-start list when #4042 lands.
+    # The certificate line of check, not the first-start list: the list
+    # fetches the certificate through the console address, and Traefik
+    # shows the new Secret only within a minute. The check line reads the
+    # Secret again now, with the same rule.
     check_console_certificate
     print_checks
     if in_list fail "${CHECK_STATUSES[@]}"; then

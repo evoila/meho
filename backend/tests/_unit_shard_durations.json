@@ -711,6 +711,7 @@
   "tests/test_keycloak_realm_name_check.py": 3.59,
   "tests/test_keycloak_rights_change_cards.py": 0.5,
   "tests/test_keycloak_rights_change_cards_mcp.py": 0.6,
+  "tests/test_keycloak_rights_change_current_state.py": 20.0,
   "tests/test_keycloak_rights_change_writes.py": 19.7,
   "tests/test_lesson_header.py": 0.9,
   "tests/test_lessons_metrics.py": 0.87,

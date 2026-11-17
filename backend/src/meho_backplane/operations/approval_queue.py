@@ -161,6 +161,7 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
+from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import (
     is_secret_reveal,
     result_waiting_for_requester,
@@ -2908,6 +2909,9 @@ async def refuse_resume_if_preview_changed(
     preview hash: the login and the group it is for must still have the
     ids the approver saw
     (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+    A fourth check runs for an operation whose card shows the object as it is
+    now: that state must still be the one the approver saw
+    (:func:`~meho_backplane.operations.approval_state_pin.state_changed_since_request`).
     Returns ``None`` when all hold. Else the operation does not run: the
     refusal is stored as the request's run result, so every read surface
     shows the run as failed with the ``preview_changed_since_approval`` or
@@ -2934,6 +2938,8 @@ async def refuse_resume_if_preview_changed(
         reason = await object_changed_since_request(operator, request, target, params)
         if reason is None:
             reason = await grant_changed_since_request(operator, request, target, params)
+        if reason is None:
+            reason = await state_changed_since_request(operator, request, target, params)
         if reason is None:
             return None
         refusal = result_object_changed_since_approval(

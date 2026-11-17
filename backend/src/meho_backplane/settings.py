@@ -2619,12 +2619,14 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    #: What ``preview_operation`` gives back for three Keycloak changes of
+    #: What ``preview_operation`` gives back for Keycloak changes of
     #: rights. The approval request a person reads always shows their cards:
     #: for ``keycloak.client.update`` and ``keycloak.realm.update`` the values
     #: now of each field the request sends next to the new values, for
     #: ``keycloak.protocol_mapper.create`` the client's mappers now and the
     #: new one (:mod:`meho_backplane.connectors.keycloak.ops_write_rights_card`).
+    #: More changes of rights show the object as it is now, such as the roles a
+    #: user has now (:mod:`meho_backplane.connectors.keycloak.ops_write_current_state`).
     #: On, ``preview_operation`` shows the same cards. Off (the default), it
     #: gives back the same answers as before. Set via
     #: ``KEYCLOAK_RIGHTS_CHANGE_CARDS``.

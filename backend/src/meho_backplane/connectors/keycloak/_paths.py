@@ -120,6 +120,8 @@ _GROUPS_PATH = "/admin/realms/{realm}/groups"
 _GROUP_PATH = "/admin/realms/{realm}/groups/{group-id}"
 _GROUP_CHILDREN_PATH = "/admin/realms/{realm}/groups/{group-id}/children"
 _GROUP_MEMBERS_PATH = "/admin/realms/{realm}/groups/{group-id}/members"
+# The roles a group gives directly (the group member add approval card).
+_GROUP_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/groups/{group-id}/role-mappings"
 _USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
 # NB: the user-group membership sub-resource uses the camelCase ``{groupId}``
 # path-parameter name (a Keycloak spec quirk — the groups resource itself uses

@@ -71,6 +71,12 @@ from meho_backplane.mcp.tools._call_operation_reveal import (
     fetch_reveal_over_mcp,
     reveal_fetch_for_settings,
 )
+from meho_backplane.mcp.tools._include_raw import (
+    GROUPS_RAW_OUTPUT_PROPERTY,
+    INCLUDE_RAW_INPUT_PROPERTY,
+    SEARCH_RAW_OUTPUT_PROPERTY,
+    include_raw_for_settings,
+)
 from meho_backplane.mcp.tools._operation_recall import (
     RECALL_OUTPUT_SCHEMA,
     recall_schema_for_settings,
@@ -96,6 +102,7 @@ from meho_backplane.operations._contract_guidance import (
     GUIDANCE_MAX_CHARS,
     GUIDANCE_VALUE_MAX_CHARS,
 )
+from meho_backplane.operations._search_typed_first import INCLUDE_RAW_LINE
 from meho_backplane.operations._secret_values import REVEAL_NOT_IN_BACKGROUND, asks_reveal
 from meho_backplane.operations.meta_tools import (
     SEARCH_NARROWING_MAX,
@@ -299,6 +306,7 @@ register_mcp_tool(
         name="list_operation_groups",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=lambda definition, _operator: include_raw_for_settings(definition),
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
@@ -326,7 +334,7 @@ register_mcp_tool(
             "keyset on `group_key`; "
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
-            "the next page. A `null` `next_cursor` is the end."
+            "the next page. A `null` `next_cursor` is the end." + INCLUDE_RAW_LINE
         ),
         inputSchema={
             "type": "object",
@@ -364,6 +372,7 @@ register_mcp_tool(
                     ),
                     "maxLength": 256,
                 },
+                **INCLUDE_RAW_INPUT_PROPERTY,
             },
             "required": ["connector_id"],
             "additionalProperties": False,
@@ -424,6 +433,7 @@ register_mcp_tool(
                         "page is the end of the listing."
                     ),
                 },
+                **GROUPS_RAW_OUTPUT_PROPERTY,
             },
             "required": ["connector_id", "groups", "next_cursor"],
         },
@@ -479,6 +489,7 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "maxItems": SEARCH_NARROWING_MAX,
         },
+        **SEARCH_RAW_OUTPUT_PROPERTY,
     },
     "required": ["hits", "query_duration_ms", "outcome", "narrowing"],
 }
@@ -584,15 +595,29 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+_search_operations_short_text = with_short_text(
+    SEARCH_OPERATIONS_SHORT, then=classification_schema_for_settings
+)
+
+
+def _search_operations_for_settings(
+    definition: ToolDefinition, operator: Operator
+) -> ToolDefinition:
+    """``search_operations`` as shown under the current settings.
+
+    The ``include_raw`` step runs last, so the short text of
+    ``MCP_SHORT_TOOL_TEXTS`` does not drop its description line.
+    """
+    return include_raw_for_settings(_search_operations_short_text(definition, operator))
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(
-            SEARCH_OPERATIONS_SHORT, then=classification_schema_for_settings
-        ),
+        for_settings=_search_operations_for_settings,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
             "operations. Use this AFTER `list_operation_groups` has "
@@ -633,7 +658,7 @@ register_mcp_tool(
             "or `code_not_installed` (the code of this connector is not in "
             "this MEHO; do not call it; also the answer in exact-op mode). "
             "`advisory` explains any outcome other than "
-            "`matched`; `narrowing` lists next steps."
+            "`matched`; `narrowing` lists next steps." + INCLUDE_RAW_LINE
         ),
         inputSchema={
             "type": "object",
@@ -684,6 +709,7 @@ register_mcp_tool(
                         "picking an operation."
                     ),
                 },
+                **INCLUDE_RAW_INPUT_PROPERTY,
             },
             "required": ["connector_id"],
             # Either `query` (ranked mode) or `op_id` (exact-op mode) is

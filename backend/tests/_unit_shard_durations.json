@@ -1017,6 +1017,7 @@
   "tests/test_search_docs_route.py": 5.42,
   "tests/test_search_filters.py": 1.41,
   "tests/test_search_plain_sentences.py": 1.02,
+  "tests/test_search_typed_first.py": 4.0,
   "tests/test_secret_broker_handoff.py": 3.03,
   "tests/test_secret_broker_keycloak_client_secret_source.py": 0.44,
   "tests/test_secret_broker_keycloak_sink.py": 0.46,

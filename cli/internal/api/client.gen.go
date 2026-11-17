@@ -13778,7 +13778,10 @@ type GetGroupsApiV1OperationsGroupsGetParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Cursor Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358).
-	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// IncludeRaw Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.
+	IncludeRaw    *bool   `form:"include_raw,omitempty" json:"include_raw,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13834,7 +13837,10 @@ type GetSearchApiV1OperationsSearchGetParams struct {
 	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
 
 	// IncludeScores Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.
-	IncludeScores *bool   `form:"include_scores,omitempty" json:"include_scores,omitempty"`
+	IncludeScores *bool `form:"include_scores,omitempty" json:"include_scores,omitempty"`
+
+	// IncludeRaw Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.
+	IncludeRaw    *bool   `form:"include_raw,omitempty" json:"include_raw,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -35595,6 +35601,22 @@ func NewGetGroupsApiV1OperationsGroupsGetRequest(server string, params *GetGroup
 
 		}
 
+		if params.IncludeRaw != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_raw", runtime.ParamLocationQuery, *params.IncludeRaw); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -36064,6 +36086,22 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 		if params.IncludeScores != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_scores", runtime.ParamLocationQuery, *params.IncludeScores); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRaw != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_raw", runtime.ParamLocationQuery, *params.IncludeRaw); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

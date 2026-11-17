@@ -3634,6 +3634,10 @@ operations you register, not <code>execute</code>.</p>
   it out and set <code>version_range_reason</code> to one plain sentence. The template
   has a test, <code>tests/test_version_range.py</code>, that fails when a connector has
   neither.</li>
+<li><strong>Other product names.</strong> When people know the product by other names,
+  list them in <code>product_aliases</code>, for example <code>("vcenter", "vsphere")</code>.
+  With the switch <code>CONNECTOR_LIST_PRODUCT_ALIASES</code> on, a <code>product</code> filter
+  of <code>meho_connector_list</code> also finds your connector by these names.</li>
 <li><strong>Caches.</strong> Key a cache you keep across calls, for example a login
   token, with <code>kit.target_cache_key(target)</code>.</li>
 </ul>

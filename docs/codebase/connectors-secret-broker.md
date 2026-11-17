@@ -163,7 +163,8 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   refuses the write and the move fails. MEHO then reads the version again
   and tells the caller which case it is: the secret changed
   (`SecretMergeChangedError`, run the move again) or Vault refused for
-  another reason (`SecretMergeRefusedError`; its message also says when
+  another reason, for example a Vault policy that allows the read but
+  not the write (`SecretMergeRefusedError`; its message also says when
   MEHO could not read the version again). Both messages are fixed MEHO
   sentences, with no Vault text and no value. If the latest version is
   deleted or destroyed, the move fails and writes nothing
@@ -179,7 +180,9 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   this up at park time with the same checks and login as the write, and
   only when both `vault-target` sides pass their checks. It keeps only
   yes or no. Every other sink kind, and a failed lookup, says
-  `"not known"`. No value is in the preview or in the audit row.
+  `"not known"`. No value is in the preview or in the audit row. The
+  agent's own `preview_operation` shows only the refs (`kind`, `ref`
+  and, for a `vault-target` side, `target`) and makes no lookup.
 - The approved run of a move compares the target it finds for each
   `vault-target` side with `target_id` on the approval
   (`approved_preview("secret.move")`, checked in `check_access`). Another

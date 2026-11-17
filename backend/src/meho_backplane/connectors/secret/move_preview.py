@@ -39,8 +39,11 @@ What the card adds to the refs
   login and checks as the write
   (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.sink_state`);
   it keeps only yes or no and drops the read data at once. Every other
-  sink kind, every failed lookup and the agent's own ``preview_operation``
-  say ``"not known"``.
+  sink kind and every failed lookup say ``"not known"``.
+
+The agent's own ``preview_operation`` gets only the refs: ``{kind, ref}``
+and, for a ``vault-target`` side, the target name as typed. It makes no
+target lookup and no Vault login.
 
 Why ``secret.move`` reaches a builder at all
 ============================================
@@ -107,25 +110,34 @@ if TYPE_CHECKING:
 __all__ = ["build_secret_move_preview", "check_secret_move_sink"]
 
 
-async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
+def _ref_only(spec: SecretRef) -> dict[str, str]:
     """Render a parsed ``<kind>:<ref>`` as a ref-only summary dict.
 
     Names the store-selecting ``kind`` and the store-specific ``ref``
     separately so a reviewer reads the move's endpoints structurally. The
     ``ref`` is an address (a Vault KV path + ``#<field>`` fragment), never
-    a value.
-
-    A ``vault-target`` side also names the target as typed (``target``,
-    which can be an alias), the target it points to now (``target_id``,
-    ``target_name``) and that target's Vault role (``vault_role``). The
-    approved run compares ``target_id`` with the target it finds. A name
-    that does not resolve to a usable Vault target gets no ``target_id``;
-    the permission check then refuses the call.
+    a value. No I/O.
     """
     summary = {"kind": spec.kind, "ref": spec.ref}
     if spec.kind == VAULT_TARGET_KIND:
+        # The target whose role does this read or write, named on its own
+        # so a reviewer does not have to cut it out of the ref.
+        summary["target"] = spec.ref.partition("/")[0]
+    return summary
+
+
+async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
+    """The approval card's summary of one side: :func:`_ref_only` and the target.
+
+    A ``vault-target`` side also names the target it points to now
+    (``target_id``, ``target_name``) and that target's Vault role
+    (``vault_role``). The approved run compares ``target_id`` with the
+    target it finds. A name that does not resolve to a usable Vault target
+    gets no ``target_id``; the permission check then refuses the call.
+    """
+    summary = _ref_only(spec)
+    if spec.kind == VAULT_TARGET_KIND:
         endpoint = VaultTargetKvSecretEndpoint(spec.ref)
-        summary["target"] = endpoint.target_name
         try:
             row = await endpoint.resolve_vault_target(operator)
         except (VaultTargetRefusedError, TargetNotFoundError, AmbiguousTargetError):
@@ -142,24 +154,20 @@ async def _sink_state(
     params: dict[str, Any],
     *,
     merge: bool,
-    look_up: bool,
 ) -> dict[str, str]:
     """Whether the sink secret exists (and with *merge*, its field): yes, no or not known.
 
-    Only a Vault sink can tell; every other sink kind says "not known". With
-    *look_up* off (the agent's own ``preview_operation``), MEHO does not
-    look and says "not known". The
+    Only a Vault sink can tell; every other sink kind says "not known". The
     lookup runs only when both ``vault-target`` sides pass their checks
     (:func:`check_vault_target_refs`), so a call MEHO refuses makes no
     Vault login.
     """
-    sink: object | None = None
-    if look_up:
-        try:
-            sink = resolve_secret_endpoint(spec)
-            await check_vault_target_refs(operator, params)
-        except Exception:
-            sink = None
+    sink: object | None
+    try:
+        sink = resolve_secret_endpoint(spec)
+        await check_vault_target_refs(operator, params)
+    except Exception:
+        sink = None
     if isinstance(sink, VaultKvSecretEndpoint):
         return await sink.sink_state(operator, merge=merge)
     state = {"secret_exists": NOT_KNOWN}
@@ -207,8 +215,9 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
     Names the move's source and sink as parsed ``{kind, ref}`` references
     plus the optional operator ``reason`` — all drawn from the params,
-    which carry references only. A ``vault-target`` side also names the
-    target it points to and that target's Vault role. The sink says
+    which carry references only. The agent's own ``preview_operation``
+    gets just that. For the approval request, a ``vault-target`` side also
+    names the target it points to and that target's Vault role. The sink says
     whether its secret exists (``secret_exists``) and, with ``merge``,
     whether its field exists (``field_exists``): ``"yes"``, ``"no"`` or
     ``"not known"``. That lookup reads the sink secret's field names only;
@@ -229,18 +238,16 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         return None
 
     merge = ctx.params.get("merge") is True
-    sink_summary = await _ref_summary(sink, ctx.operator)
-    sink_summary.update(
-        await _sink_state(
-            sink, ctx.operator, ctx.params, merge=merge, look_up=not ctx.agent_preview
-        )
-    )
-    summary: dict[str, Any] = {
-        "action": "secret.move",
-        "source": await _ref_summary(source, ctx.operator),
-        "sink": sink_summary,
-        "merge": merge,
-    }
+    summary: dict[str, Any] = {"action": "secret.move"}
+    if ctx.agent_preview:
+        # The agent's own preview: the refs only, no lookup.
+        summary["source"] = _ref_only(source)
+        summary["sink"] = _ref_only(sink)
+    else:
+        summary["source"] = await _ref_summary(source, ctx.operator)
+        summary["sink"] = await _ref_summary(sink, ctx.operator)
+        summary["sink"].update(await _sink_state(sink, ctx.operator, ctx.params, merge=merge))
+    summary["merge"] = merge
     reason = ctx.params.get("reason")
     if isinstance(reason, str) and reason:
         summary["reason"] = reason

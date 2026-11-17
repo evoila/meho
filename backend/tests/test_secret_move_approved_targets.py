@@ -301,7 +301,7 @@ async def test_a_sink_kind_that_cannot_tell_says_not_known(
     assert card["sink"]["secret_exists"] == "not known"
 
 
-async def test_the_agents_own_preview_says_not_known_and_makes_no_vault_login(
+async def test_the_agents_own_preview_shows_only_the_refs_and_makes_no_vault_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
@@ -315,8 +315,9 @@ async def test_the_agents_own_preview_says_not_known_and_makes_no_vault_login(
     )
 
     text = json.dumps(answer, default=str)
-    assert '"secret_exists": "not known"' in text, answer
-    assert '"field_exists": "not known"' in text
+    assert '"target": "vault-dst"' in text, answer  # the name as typed
+    for added in ("secret_exists", "field_exists", "target_id", "target_name", "vault_role"):
+        assert added not in text, answer
     assert fake.auth.jwt.login_calls == []
     assert fake.secrets.kv.v2.read_calls == []
     assert fake.secrets.kv.v2.put_calls == []
@@ -326,7 +327,7 @@ async def test_the_agents_own_preview_says_not_known_and_makes_no_vault_login(
 async def test_only_the_approval_request_looks_up_the_sink(
     agent_preview: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The agent's own preview says "not known"; the approval request looks."""
+    """The agent's own preview shows the refs only; the approval request looks."""
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
     ctx = PreviewContext(
         descriptor=object(),  # type: ignore[arg-type]  # the builder does not read it
@@ -341,7 +342,12 @@ async def test_only_the_approval_request_looks_up_the_sink(
 
     assert preview is not None
     if agent_preview:
-        assert preview["sink"]["secret_exists"] == "not known"
+        assert preview == {
+            "action": "secret.move",
+            "source": {"kind": "vault", "ref": "secret/a#password"},
+            "sink": {"kind": "vault", "ref": "secret/b#password"},
+            "merge": False,
+        }
         assert fake.auth.jwt.login_calls == []
         assert fake.secrets.kv.v2.read_calls == []
     else:

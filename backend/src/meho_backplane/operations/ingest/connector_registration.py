@@ -634,6 +634,16 @@ def sibling_handrolled_impl_id(
     return None
 
 
+def _is_ingest_stand_in(cls: type[Connector]) -> bool:
+    """True when *cls* was made by an ingest, not written by hand.
+
+    :func:`_synthesise_shim_class` and :func:`synthesise_profiled_class` both
+    set ``__module__`` to this module. A hand-coded class lives in its own
+    connector module.
+    """
+    return cls.__module__ == __name__
+
+
 def _find_class_covering_version(
     *,
     product: str,
@@ -643,7 +653,8 @@ def _find_class_covering_version(
     """Scan the v2 registry for classes on ``(product, impl_id)`` covering *version*.
 
     Returns ``(candidates, accepted_by)``: every registered class for
-    the ``(product, impl_id)`` pair as a
+    the ``(product, impl_id)`` pair (stand-in classes from earlier
+    ingests are left out, #4728) as a
     ``(version, impl_id, class_name, range)`` tuple, plus the first one
     whose ``supported_version_range`` accepts *parsed_version* (``None``
     when none does). An empty / ``None`` range counts as "accepts any
@@ -659,6 +670,11 @@ def _find_class_covering_version(
     accepted_by: tuple[str, str, str, str] | None = None
     for (entry_product, entry_version, entry_impl_id), cls in all_connectors_v2().items():
         if entry_product != product or entry_impl_id != impl_id:
+            continue
+        if _is_ingest_stand_in(cls):
+            # A stand-in class from an earlier ingest covers only the label
+            # it was made for. It is not a reason to refuse another label
+            # under the same name (#4728).
             continue
         spec_str = cls.supported_version_range
         candidate = (entry_version, entry_impl_id, cls.__name__, spec_str or "")
@@ -755,6 +771,11 @@ def check_version_covered_by_registered_class(
     ``(product, impl_id)`` — a class at ``(harbor, "2.x", harbor-rest)``
     advertising ``">=2.0,<3.0"`` covers an ingest at
     ``(harbor, "2.11", harbor-rest)``.
+
+    Only hand-coded classes count. A stand-in class made by an earlier ingest
+    (a bare auto-shim, or the profiled class made when ``auth_scheme`` is set)
+    covers just its own label, so a second version under the
+    same name (``networker-rest`` 19.14, then 19.12) is not refused (#4728).
 
     Three outcomes by registry state (full prose:
     ``docs/codebase/spec-ingestion.md`` §``check_version_covered_by_registered_class``):

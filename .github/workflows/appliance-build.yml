@@ -12,14 +12,17 @@
 # Publishing is #4814. A run on every release tag comes once the release
 # test exists (#4816).
 #
-# Every run signs SHA256SUMS with cosign (keyless, like linux-download.yml)
-# and checks the signature. With the input publish it also makes and signs
-# the OS-package file and uploads the files to Google Cloud Storage. The
-# real signing key (secret MEHO_OS_PACKAGES_SIGNING_KEY) and the bucket
-# (variable MEHO_RELEASE_BUCKET) are set up by the project owner. See
+# Two jobs. The build job runs on the lab's runner, reads nothing secret
+# but the lab's own settings, and gets only read rights. The publish job
+# runs on a GitHub-hosted runner. It checks the OVA, signs SHA256SUMS with
+# cosign (keyless, like linux-download.yml) and checks the signature. A
+# release run (input publish, started from the tag itself) also makes and
+# signs the OS-package file and uploads the files to Google Cloud Storage.
+# Only a release run uses the GitHub environment "release", which holds
+# the signing key (secret MEHO_OS_PACKAGES_SIGNING_KEY). See
 # docs/RELEASING.md.
 #
-# Runner: the lab's self-hosted pool, which must reach the lab's vCenter
+# Build runner: the lab's self-hosted pool, which must reach the lab's vCenter
 # and the build VM's address, and GitHub for the CIS content. The build VM
 # must reach the Ubuntu archive. The lab's test place is an internal ticket.
 # The vCenter login is in repository secrets
@@ -31,7 +34,9 @@
 # a mask does not reach a file. The build SSH key is made new for every run
 # and never stored.
 #
-# Permissions: read-only. The job runs no pull-request code.
+# Permissions: the build job is read-only. Only the publish job may get a
+# GitHub sign-in token (for cosign and for the Google Cloud sign-in). No
+# job runs pull-request code.
 
 name: appliance-build
 
@@ -66,8 +71,6 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      # Mint the GitHub OIDC token for cosign keyless signing.
-      id-token: write
     env:
       TAG: ${{ inputs.tag }}
     steps:
@@ -177,17 +180,140 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/ova"
           deploy/appliance/build.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
 
-      - name: Make and sign the OS-package file
-        # Release runs only (publish). The key is read from the secret
-        # here and nowhere else. MEHO_RELEASE=1 makes the script stop when
-        # the key is empty or is a test key. The .deb files are the OS
-        # updates of the build day, in ${RUNNER_TEMP}/os-debs.
+      - name: Write the OVA checksum for the publish job
+        # Not signed: the publish job checks it after the download, then
+        # signs its own SHA256SUMS.
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/ova"
+          sha256sum "meho-appliance-${TAG#v}.ova" > SHA256SUMS-ova
+
+      - name: Write the summary
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/ova"
+          cd "${RUNNER_TEMP}/ova"
+          {
+            echo "## Appliance OVA"
+            echo ""
+            if [[ -f SHA256SUMS-ova ]]; then
+              echo "- File: \`meho-appliance-${TAG#v}.ova\` ($(stat -c %s "meho-appliance-${TAG#v}.ova") bytes)"
+              echo "- sha256: \`$(cut -d ' ' -f 1 SHA256SUMS-ova)\`"
+            else
+              echo "- The build failed. Read the log of the step \"Build the OVA\"."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the OVA, its checksum and the CIS scan as artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-appliance-ova
+          # The CIS result list holds rule names and results only, nothing
+          # of the lab.
+          path: |
+            ${{ runner.temp }}/ova/meho-appliance-*.ova
+            ${{ runner.temp }}/ova/SHA256SUMS-ova
+            ${{ runner.temp }}/ova/meho-appliance-*-cis.txt
+          if-no-files-found: error
+          retention-days: 3
+          # The disk in the OVA is already compressed (stream-optimized).
+          compression-level: 0
+
+      - name: Keep the OS update packages for the publish job
+        # The .deb files are the OS updates of the build day, in
+        # ${RUNNER_TEMP}/os-debs. A release run stops in the publish job
+        # with a plain message when there are none.
         if: ${{ inputs.publish }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-appliance-os-debs
+          path: ${{ runner.temp }}/os-debs/*.deb
+          if-no-files-found: warn
+          retention-days: 3
+
+  publish:
+    name: Sign and publish the appliance release files
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # A release run is a run with the input publish, started from the tag
+    # itself ("Use workflow from" is the tag). Only a release run uses the
+    # environment "release": it allows tags v* only, needs the release
+    # owner's approval, and holds the signing key. Any other run has no
+    # environment, so it cannot read the key.
+    environment: ${{ (inputs.publish && github.ref == format('refs/tags/{0}', inputs.tag)) && 'release' || '' }}
+    permissions:
+      contents: read
+      # The GitHub sign-in token for cosign keyless signing and for the
+      # Google Cloud sign-in (workload identity federation).
+      id-token: write
+    env:
+      TAG: ${{ inputs.tag }}
+      RELEASE_RUN: ${{ (inputs.publish && github.ref == format('refs/tags/{0}', inputs.tag)) && '1' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        # Same pin as linux-download.yml.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Download the OVA from the build job
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: meho-appliance-ova
+          path: ${{ runner.temp }}/ova
+
+      - name: Check the OVA checksum
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/ova"
+          sha256sum -c SHA256SUMS-ova
+
+      - name: Say that this run publishes nothing
+        if: ${{ env.RELEASE_RUN != '1' }}
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [[ "${PUBLISH}" == "true" ]]; then
+            echo "::warning::The input publish is on, but the run did not start from the tag ${TAG}. This run signs SHA256SUMS with cosign and checks it, and publishes nothing. Start the run from the tag to publish."
+          else
+            echo "This run signs SHA256SUMS with cosign and checks it, and publishes nothing."
+          fi
+
+      - name: Download the OS update packages
+        if: ${{ env.RELEASE_RUN == '1' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: meho-appliance-os-debs
+          path: ${{ runner.temp }}/os-debs
+
+      - name: Install apt-utils
+        # os-packages.sh needs apt-ftparchive.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        run: |
+          set -euo pipefail
+          command -v apt-ftparchive >/dev/null 2>&1 && exit 0
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apt-utils
+
+      - name: Make and sign the OS-package file
+        # The key is an environment secret of "release", so only a release
+        # run can read it. MEHO_RELEASE=1 makes the script read the key
+        # only from MEHO_OS_PACKAGES_SIGNING_KEY, refuse a test key, and
+        # refuse any key whose fingerprint is not the variable
+        # MEHO_OS_PACKAGES_KEY_FINGERPRINT.
+        if: ${{ env.RELEASE_RUN == '1' }}
         env:
           MEHO_RELEASE: "1"
           MEHO_OS_PACKAGES_SIGNING_KEY: ${{ secrets.MEHO_OS_PACKAGES_SIGNING_KEY }}
+          MEHO_OS_PACKAGES_KEY_FINGERPRINT: ${{ vars.MEHO_OS_PACKAGES_KEY_FINGERPRINT }}
         run: |
           set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/os-debs"
           deploy/appliance/os-packages.sh "${TAG#v}" "${RUNNER_TEMP}/os-debs" "${RUNNER_TEMP}/ova"
 
       - name: Sign the checksums with cosign
@@ -206,47 +332,34 @@ jobs:
             --bundle SHA256SUMS.cosign.bundle \
             SHA256SUMS
 
+      - name: Sign in to Google Cloud
+        # Workload identity federation: no stored key. The provider and the
+        # service account come from repository variables. The service
+        # account may only create and read objects in the release bucket.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.MEHO_RELEASE_GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.MEHO_RELEASE_GCP_SERVICE_ACCOUNT }}
+
       - name: Upload the files to the release bucket
-        # Release runs only. The script stops with a plain message when the
-        # bucket is not set up, never creates a bucket, never changes who
+        # The script stops with a plain message when the bucket is not set
+        # up or does not exist, never creates a bucket, never changes who
         # can read it, and never overwrites a published file.
-        if: ${{ inputs.publish }}
+        if: ${{ env.RELEASE_RUN == '1' }}
         env:
           MEHO_RELEASE_BUCKET: ${{ vars.MEHO_RELEASE_BUCKET }}
         run: |
           set -euo pipefail
           deploy/appliance/upload-release.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
 
-      - name: Write the summary
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/ova"
-          cd "${RUNNER_TEMP}/ova"
-          {
-            echo "## Appliance OVA"
-            echo ""
-            if [[ -f SHA256SUMS ]]; then
-              echo "- File: \`meho-appliance-${TAG#v}.ova\` ($(stat -c %s "meho-appliance-${TAG#v}.ova") bytes)"
-              echo "- sha256: \`$(cut -d ' ' -f 1 SHA256SUMS)\`"
-            else
-              echo "- The build failed. Read the log of the step \"Build the OVA\"."
-            fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Keep the OVA, the checksums and the CIS scan as artifacts
+      - name: Keep the signed checksums as artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: meho-appliance-ova
-          # The CIS result list holds rule names and results only, nothing
-          # of the lab.
+          name: meho-appliance-signed-checksums
           path: |
-            ${{ runner.temp }}/ova/meho-appliance-*.ova
-            ${{ runner.temp }}/ova/meho-appliance-*-os-packages.tar
             ${{ runner.temp }}/ova/SHA256SUMS
             ${{ runner.temp }}/ova/SHA256SUMS.cosign.bundle
-            ${{ runner.temp }}/ova/meho-appliance-*-cis.txt
+            ${{ runner.temp }}/ova/meho-appliance-*-os-packages.tar
           if-no-files-found: error
           retention-days: 3
-          # The disk in the OVA is already compressed (stream-optimized).
-          compression-level: 0

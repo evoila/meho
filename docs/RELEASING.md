@@ -107,27 +107,85 @@ makes two files and a checksum list for a release:
 The files go to Google Cloud Storage, one folder per release:
 `gs://<bucket>/X.Y.Z/`. The OVA is too big for a GitHub release file.
 
-**Signing the OS-package file.** The key is the secret
-`MEHO_OS_PACKAGES_SIGNING_KEY` of the release workflow (an armored secret
-key without a passphrase). Only release runs read it. The workflow input
-`publish` makes the run a release run (`MEHO_RELEASE=1`). A release run
-stops with a plain message when the secret is empty. It also stops when the
-key's user id holds `TEST KEY`: the test key of the tests can never sign a
-release.
+**Who.** One release owner and one backup person start and approve the
+publish run. The backup acts only when the release owner is away. This
+public repository names no people: the team keeps the two names outside
+the repository, and both are required reviewers of the
+environment `release` (below).
+
+**When and how to start the publish run.** After the tag is pushed and
+`linux-download.yml` has put the form-2 download on the GitHub release,
+the release owner starts `appliance-build.yml` by hand:
+
+- "Use workflow from": the tag `vX.Y.Z` itself, not a branch;
+- input `tag`: `vX.Y.Z`;
+- input `publish`: on.
+
+The workflow has two jobs:
+
+1. `build` runs on the lab's runner with read rights only. It builds the
+   OVA and keeps it, its checksum and the OS update packages as workflow
+   artifacts.
+2. `publish` runs on a GitHub-hosted runner. It checks the OVA checksum,
+   makes and signs the OS-package file, writes `SHA256SUMS`, signs it with
+   cosign and checks the signature, signs in to Google Cloud and uploads
+   the files. Only this job may get a GitHub sign-in token.
+
+A release run is a run with `publish` on that started from the tag. Only a
+release run uses the GitHub environment `release`, so the job waits until
+the release owner approves it. Any other run (for example from a branch)
+signs `SHA256SUMS` with cosign and checks it, but never reads the signing
+key and never uploads.
+
+**The environment `release`.** Set it up once in the repository settings:
+
+- deployment rule: tags `v*` only;
+- required reviewer: the release owner (and the backup person);
+- the secret `MEHO_OS_PACKAGES_SIGNING_KEY`: the signing key, an armored
+  secret key without a passphrase. It is an environment secret, not a
+  repository secret, so no other run can read it.
+
+**Signing the OS-package file.** A release run (`MEHO_RELEASE=1`) reads the
+key only from `MEHO_OS_PACKAGES_SIGNING_KEY`, never from a file. It stops
+with a plain message when the secret is empty. It stops when the key's
+user id holds `TEST KEY`: the test key of the tests can never sign a
+release. It also stops when the key's fingerprint is not the repository
+variable `MEHO_OS_PACKAGES_KEY_FINGERPRINT` (40 hex digits), so no key
+other than the real one can sign.
+
+**Google Cloud sign-in.** The publish job signs in with workload identity
+federation (`google-github-actions/auth`): GitHub's sign-in token, no
+stored key file. The repository variables `MEHO_RELEASE_GCP_WIF_PROVIDER`
+(the workload identity provider) and `MEHO_RELEASE_GCP_SERVICE_ACCOUNT`
+(the service account) name them. The service account may only create and
+read objects in the release bucket (for example the role "Storage Object
+Creator" plus "Storage Object Viewer" on that bucket only), nothing else.
 
 **The upload step.** `deploy/appliance/upload-release.sh` copies the OVA,
 the OS-package file, `SHA256SUMS` and its bundle to the folder of the
-version. The bucket name is the workflow variable `MEHO_RELEASE_BUCKET`.
-When it is empty, the step stops with a plain message. The step never
+version. The bucket name is the repository variable `MEHO_RELEASE_BUCKET`.
+When it is empty, or the bucket does not exist, the step stops with a
+plain message. Any other `gcloud` error stops it too. The step never
 creates a bucket, never changes who can read it and never overwrites a
 file. A second run of the same release with the same content does nothing.
-A second run with other content stops. How the runner logs in to Google
-Cloud is part of the bucket set-up.
+A second run with other content stops.
 
-**The project owner sets up** the signing key (made once, with a backup
-copy in the team password manager, never on a laptop), the bucket and its
-public read access, and the runner's access to it. No key, no bucket name
-and no account name is in the repository.
+**Check the signature** of a published release:
+
+```bash
+cosign verify-blob \
+  --certificate-identity "https://github.com/evoila/meho/.github/workflows/appliance-build.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle SHA256SUMS.cosign.bundle \
+  SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+**The release owner sets up** the signing key (made once, with a backup
+copy in the team password manager, never on a laptop) and its fingerprint
+variable, the environment `release`, the bucket and its public read
+access, and the workload identity provider and service account. No key,
+no bucket name and no account name is in the repository.
 
 ## Versioning
 

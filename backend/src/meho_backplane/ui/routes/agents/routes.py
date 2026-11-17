@@ -269,6 +269,8 @@ async def _edit_submit_handler(
     system_prompt: str = Form(default="", max_length=SYSTEM_PROMPT_MAX),
     turn_budget: str | None = Form(default=None, max_length=TURN_BUDGET_MAX_LEN),
     enabled: bool = Form(default=False),
+    grant_set: str = Form(default="", alias="starting_grants", max_length=GRANT_SET_MAX),
+    grant_targets: list[str] = _grant_targets_form,
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
@@ -284,6 +286,8 @@ async def _edit_submit_handler(
         system_prompt=system_prompt,
         turn_budget=turn_budget,
         enabled=enabled,
+        grant_set=grant_set,
+        grant_targets=grant_targets,
     )
 
 

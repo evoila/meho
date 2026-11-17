@@ -48,7 +48,7 @@ each site has one tenant, so all five groups carry the same
    no `tenant_id`. MEHO refuses the login with
    `401 missing_tenant_claim`.
 3. **Stock mapper only.** The human login clients (`meho-cli`,
-   `meho-mcp`, and later `meho-web`) each have three User Attribute
+   `meho-mcp`, `meho-mcp-code`, `meho-mcp-desktop`, and later `meho-web`) each have three User Attribute
    mappers: `tenant_id`, `tenant_role` and `approver`. No scripts. No
    fixed values on a client that many people share.
 4. **Nobody sets these values on a person.** The mapper looks at the

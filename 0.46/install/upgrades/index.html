@@ -3811,6 +3811,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
+<td>With <code>POLICY_APPROVER_ROUTING</code> on, the install's approver routing is a floor: a tenant's routing can only make it narrower. A person must be in the install's entry and in the tenant's entry. A tenant policy import with a wider routing entry is refused, and the message names the category and the install's groups. A wider tenant entry stored before the upgrade no longer widens anything. At the approve click MEHO also checks the install's current routing. A tenant may still give an operation another category for its own rules; the install's routing for the operation still applies, with the category that the install's file alone gives it. A call that started to wait while <code>POLICY_APPROVER_ROUTING</code> was off keeps the older rule after the switch is turned on, until it is decided or runs out. Migration <code>0173</code> adds two columns that may be empty: <code>approval_request.approver_category</code> and <code>approval_request.approver_install_category</code>. A request that already waits for routed approvers gets the empty text in both: MEHO does not know its category. At the click such a request is refused when an install entry that matches on <code>category</code> could fit it.</td>
+<td><strong>Nothing to do</strong> while <code>POLICY_APPROVER_ROUTING</code> is off. Otherwise run <code>meho policy diff --scope install</code> with the install's current file: each warning names a tenant entry that is wider. Fix those tenant files before their next import. Reject a request that waited before the upgrade and is refused for its unknown category, and start the call again. See <a href="https://evoila.github.io/meho/latest/guides/policy-file/#the-installs-routing-is-a-floor">The install's routing is a floor</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
 <td>A request for <code>keycloak.role_mapping.assign</code> or <code>keycloak.role_mapping.client.assign</code> that already waited for approval before this version does not run, in every realm. Its card holds no list of what the role gives. The refusal says: "This request was made before MEHO read what a role gives. Send it again."</td>
 <td>Send such a request again after the upgrade.</td>
 </tr>

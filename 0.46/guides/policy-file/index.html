@@ -2545,6 +2545,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Who approves: routing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-installs-routing-is-a-floor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The install's routing is a floor
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3247,6 +3264,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Who approves: routing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-installs-routing-is-a-floor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The install's routing is a floor
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3441,8 +3475,10 @@ click.</p>
   <code>risk</code> level, or some of them. All that it names must fit.</li>
 <li><code>approvers</code> lists login group kinds: <code>Readers</code>, <code>Operators</code>,
   <code>SA-Operators</code>, <code>Admins</code>, <code>Approvers</code>.</li>
-<li>The first entry that fits wins. A tenant's entries come before the
-  install's. When no entry fits, the same people as today may approve.</li>
+<li>In each file, the first entry that fits wins. When no entry fits, the
+  same people as today may approve.</li>
+<li><strong>The install's routing is a floor.</strong> A tenant can make it narrower,
+  never wider (see below).</li>
 <li>Routing only makes the list shorter. A group never approves more than it
   may today: for example, Operators and Approvers never approve another
   person's <code>dangerous</code> or <code>destructive</code> change.</li>
@@ -3459,6 +3495,46 @@ The approvals page shows "Who can approve", and the <strong>For you</strong> tab
 the changes you may approve. A person outside the stored groups gets one
 sentence that names who may approve. A change that started to wait before
 the setting was on keeps today's rule.</p>
+<h3 id="the-installs-routing-is-a-floor">The install's routing is a floor<a class="headerlink" href="#the-installs-routing-is-a-floor" title="Permanent link">&para;</a></h3>
+<p>When the install's file says "changes of category X are approved by group
+A", a tenant can only narrow that. The people who may approve in the
+tenant are always some of the people the install allows. For a category
+that the install does not route, the tenant is free.</p>
+<p>Example. The install's file says:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">routing</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">category</span><span class="p">:</span><span class="w"> </span><span class="nv">network</span><span class="p p-Indicator">}</span>
+<span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">SA-Operators</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p>A tenant's file may then say <code>approvers: [Admins]</code> for network changes.
+MEHO refuses the tenant's file when an entry:</p>
+<ul>
+<li>adds a group, for example <code>[Operators, SA-Operators, Admins]</code>;</li>
+<li>names another group, for example <code>[Approvers]</code>;</li>
+<li>takes the network changes away from the install's entry, for example
+  <code>match: {risk: caution}</code> with every group.</li>
+</ul>
+<p>The refusal names the category and the install's groups.</p>
+<p>A tenant may give an operation another category for its own rules, also
+a category of its own. The install's routing for the operation still
+applies: MEHO uses the category that the install's file alone gives the
+operation for the install's entries, and the tenant's category for the
+tenant's entries. So the people who may approve are always some of the
+people the install allows, whatever category the tenant chooses.</p>
+<p>How MEHO decides: an entry is narrower when every group it names is also
+in the install's entry. A tenant entry is checked against every install
+entry that can fit the same change. Two entries cannot fit the same change
+when both name a <code>category</code> (or a <code>risk</code>) and the values differ, or when
+their <code>connector</code> patterns cannot fit the same connector. When both
+connector patterns have <code>*</code>, <code>?</code> or <code>[</code> and differ, MEHO counts them as
+fitting the same change. A login group, matched by its full path or its
+group attribute, counts as the group kind its binding gives it.</p>
+<p>When a change waits, the install's entry counts first, then the tenant's.
+A person must be in both. At the approve click MEHO checks the install's
+file as it is then, with the install's category of the operation. So a tenant entry stored before this rule, or an
+install file that changed later, cannot widen anything. When the install's
+file changes, <code>meho policy diff --scope install</code> lists the tenants whose
+routing no longer fits. Their entries stay, but where they are wider they
+do not count.</p>
 <p>MEHO ships a starting file, "separated duties"
 (<code>deploy/policy-profiles/separated-duties.yaml</code>): identity and secret
 changes only Admins approve, network and storage changes only
@@ -3609,8 +3685,12 @@ meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"
   the place of your stored policy. It needs <code>POLICY_CLASSIFICATION</code>.</li>
 <li><code>--request</code> shows the rule stored on an approval request, and the
   groups that may approve it. The groups stored on the request count only
-  while <code>POLICY_APPROVER_ROUTING</code> is on. With it off, explain shows
-  today's groups, the same groups the approve check uses.</li>
+  while <code>POLICY_APPROVER_ROUTING</code> is on. With it on, the install's routing
+  as it is now narrows them, as at the approve click. With it off, explain
+  shows today's groups, the same groups the approve check uses.</li>
+<li>With routing on, "Who may approve" names the routing entries that fit,
+  the install's first. "Install's floor" names the install's entry: a
+  tenant's routing can only narrow it.</li>
 </ul>
 <p>Good to know:</p>
 <ul>

@@ -1735,6 +1735,26 @@
           "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
           "description": "Namespace label value selecting the ingress controller. Must match RFC 1123 label syntax."
         },
+        "ingressControllerEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Labels of the ingress controller Pods in ingressControllerNamespace. Empty: no rule."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The Pod port of the HTTPS entry point of the ingress controller (Traefik: 8443)."
+            }
+          },
+          "description": "An egress rule to the ingress controller Pods, so the backplane can reach its own console address (the first-start certificate check). Rendered only when podLabels is not empty."
+        },
         "postgresCIDR": {
           "type": "string",
           "description": "PostgreSQL egress CIDR (IPv4). Not used with the built-in PostgreSQL (`corePostgres.enabled`): the backplane then reaches its pod by podSelector (root allOf). Otherwise required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."

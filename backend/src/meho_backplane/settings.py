@@ -2620,6 +2620,16 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: What ``preview_operation`` gives back for three Keycloak changes of
+    #: rights. The approval request a person reads always shows their cards:
+    #: for ``keycloak.client.update`` and ``keycloak.realm.update`` the values
+    #: now of each field the request sends next to the new values, for
+    #: ``keycloak.protocol_mapper.create`` the client's mappers now and the
+    #: new one (:mod:`meho_backplane.connectors.keycloak.ops_write_rights_card`).
+    #: On, ``preview_operation`` shows the same cards. Off (the default), it
+    #: gives back the same answers as before. Set via
+    #: ``KEYCLOAK_RIGHTS_CHANGE_CARDS``.
+    keycloak_rights_change_cards: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Other product names in the ``product`` filter of
     #: ``meho_connector_list`` (#6560), behind a switch that is off by
     #: default. When on, the filter ignores case, also matches the names a
@@ -3684,6 +3694,9 @@ def get_settings() -> Settings:
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),
+        ),
+        keycloak_rights_change_cards=parse_bool_env(
+            os.environ.get("KEYCLOAK_RIGHTS_CHANGE_CARDS"),
         ),
         connector_list_product_aliases=parse_bool_env(
             os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),

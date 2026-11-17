@@ -54,8 +54,13 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.agents.runs.operator import resolve_run_reader
 from meho_backplane.ui.routes.agents.runs.views import project_run_to_view
-from meho_backplane.ui.routes.work_ref_form import filter_work_ref
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_runs_list_router"]
 
@@ -87,20 +92,25 @@ async def _render(
     work_ref: str | None,
     session_ctx: UISessionContext,
     operator: Operator,
+    work_ref_error: str | None = None,
 ) -> HTMLResponse:
     """Render the runs list page or the table-rows fragment.
 
     Both branches receive the same context shape so the fragment template
-    and the full-page template stay interchangeable.
+    and the full-page template stay interchangeable. With *work_ref_error*
+    (a refused ticket id search value) the list is empty, shows that text
+    and answers 422.
     """
-    invoker = get_agent_invoker()
-    summaries = await invoker.list_runs(
-        operator,
-        work_ref=work_ref or None,
-        status=status_filter,
-        limit=_LIST_LIMIT,
-    )
-    rows = [project_run_to_view(summary) for summary in summaries]
+    rows = []
+    if work_ref_error is None:
+        invoker = get_agent_invoker()
+        summaries = await invoker.list_runs(
+            operator,
+            work_ref=work_ref or None,
+            status=status_filter,
+            limit=_LIST_LIMIT,
+        )
+        rows = [project_run_to_view(summary) for summary in summaries]
 
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context: dict[str, object] = {
@@ -113,12 +123,15 @@ async def _render(
         "status_options": [s.value for s in AgentRunStatus],
         "status_filter": status_filter.value if status_filter is not None else "",
         "work_ref_filter": work_ref or "",
+        "work_ref_error": work_ref_error,
         "csrf_token": csrf_token,
     }
     template_name = (
         "agents/runs/_table_rows.html" if _is_htmx_request(request) else "agents/runs/list.html"
     )
     response = get_templates().TemplateResponse(request, template_name, context)
+    if work_ref_error is not None:
+        mark_work_ref_refused(response)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
@@ -151,10 +164,21 @@ def build_runs_list_router() -> APIRouter:
         operator: Operator = _run_reader_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/agents/runs``. See module docstring for the URL contract."""
+        try:
+            checked = filter_work_ref(work_ref)
+        except WorkRefError as exc:
+            return await _render(
+                request,
+                status_filter=status,
+                work_ref=work_ref,
+                session_ctx=session_ctx,
+                operator=operator,
+                work_ref_error=refused_filter_text(exc),
+            )
         return await _render(
             request,
             status_filter=status,
-            work_ref=filter_work_ref(work_ref),
+            work_ref=checked,
             session_ctx=session_ctx,
             operator=operator,
         )

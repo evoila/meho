@@ -66,7 +66,7 @@ _CONSOLE_FILTER = (
 )
 
 #: Parameters that read a ticket id without the shared type. Each has a
-#: reason, and the test fails when an entry no longer matches a route.
+#: reason, and the test fails when an entry matches no route.
 _REST_OTHER_DOORS: dict[tuple[str, str], str] = {
     ("/api/v1/agents/{name}/run", "meho_work_ref"): (
         "header: the audit middleware refuses a bad value first, and "
@@ -84,7 +84,7 @@ _REST_OTHER_DOORS: dict[tuple[str, str], str] = {
     ("/ui/runbooks/runs", "work_ref"): _CONSOLE_FORM,
     ("/ui/scheduler/create", "work_ref"): _CONSOLE_FORM,
     # Console search boxes that check the value with the rule of the REST
-    # filters (filter_work_ref): a bad value is a 422 that names the rule.
+    # filters (filter_work_ref): a bad value is a 422 page that names the rule.
     ("/ui/agents/runs", "work_ref"): _CONSOLE_FILTER,
     ("/ui/audit", "work_ref"): _CONSOLE_FILTER,
     ("/ui/audit/results", "work_ref"): _CONSOLE_FILTER,

@@ -3577,7 +3577,7 @@ class AgentAnnouncement(Base):
       backfill (newest-first tenant scan) and the retention prune's
       bounded ``created_at < cutoff`` delete.
     * ``agent_announcement_tenant_work_ref_idx`` --
-      ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
+      ``(tenant_id, work_ref)``. Drives the ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
     * ``agent_announcement_tenant_principal_created_at_idx`` --
@@ -4573,7 +4573,7 @@ class AgentRun(Base):
       the reaper's "what leases have expired" query without
       scanning the table. T4 #825.
     * ``agent_run_tenant_work_ref_idx`` -- composite b-tree on
-      ``(tenant_id, work_ref)``. Drives the tenant-scoped exact-match
+      ``(tenant_id, work_ref)``. Drives the tenant-scoped
       ``--work-ref`` filter on the agent-run list (work_ref I3-T2 #1662).
     """
 
@@ -4706,7 +4706,7 @@ class AgentRun(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T2 #1662 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # agent-run list surfaces. Mirrors runbook_runs_tenant_work_ref_idx.
         Index(
             "agent_run_tenant_work_ref_idx",
@@ -6937,7 +6937,7 @@ class ScheduledTrigger(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T3 #1663 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # scheduled-trigger list surfaces. Mirrors
         # agent_run_tenant_work_ref_idx / runbook_runs_tenant_work_ref_idx.
         Index(

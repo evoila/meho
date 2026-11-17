@@ -2042,6 +2042,20 @@ networkPolicy:
   # -- Namespace label value selecting the ingress controller. RKE2 ships with
   # `ingress-nginx`; override per-cluster.
   ingressControllerNamespace: ingress-nginx
+  # -- Let the backplane reach its own console address (`ingress.host`).
+  # The first-start `certificate` check opens a TLS connection to it. A
+  # NetworkPolicy is checked after a host port or a Service sends the
+  # connection on to the ingress controller Pod, so the rule names those
+  # Pods (in `ingressControllerNamespace`) and their HTTPS port, not the
+  # address. Empty `podLabels` (the default): no rule. A separate key and
+  # not an `extraEgress` entry, because a later values file that sets
+  # `extraEgress` replaces the whole list. Install form 2 sets it for
+  # RKE2's Traefik in `values-single-node.yaml`.
+  ingressControllerEgress:
+    # -- Labels of the ingress controller Pods.
+    podLabels: {}
+    # -- The Pod port of the HTTPS entry point (Traefik: 8443).
+    port: 8443
   # -- PostgreSQL egress CIDR. Required and pattern-validated by the schema
   # only when `networkPolicy.enabled: true` (the default); when disabled the
   # template skips the NetworkPolicy resource and this field may be left blank.

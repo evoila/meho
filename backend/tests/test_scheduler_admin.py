@@ -517,7 +517,7 @@ async def test_service_create_persists_work_ref() -> None:
 
 @pytest.mark.asyncio
 async def test_service_list_filters_work_ref() -> None:
-    """``list_(work_ref=...)`` narrows to triggers carrying that exact ref."""
+    """``list_(work_ref=...)`` narrows to triggers carrying that ref."""
     def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="ref-filter")
     service = SchedulerAdminService()
     tagged = await service.create(

@@ -34,6 +34,8 @@ The rules (:func:`bind`):
   match give two kinds, the login is refused with 401
   ``multiple_bound_kinds``. This counts every binding that matches, also
   one of another base level, so groups of two base levels never pass.
+  The one exception is the shipped self-approval group next to one other
+  shipped group (see the shipped bindings below).
 * One base level per login stays. Vault reads the ``tenant_role`` claim
   of the token, so a binding never changes the role. When the one kind
   that matches has another role than the token, it is left out and
@@ -50,7 +52,9 @@ The rules (:func:`bind`):
   (``meho_tenants``). The ``groups`` claim is not per tenant, so for a
   login with a list the list entry of the tenant decides, as with the
   switch off. A shipped operator group next to the shipped self-approval
-  group gives ``SA-Operators``, as today.
+  group gives ``SA-Operators``, as today. Next to another shipped group the
+  self-approval group does not count for the kind: that group's kind stays,
+  as with the switch off.
 * A shipped binding counts only when its kind gives the same ``approver``
   and ``self_approver`` flags as the token gives today. Else it is left
   out and logged. So a person in the shipped approver group whose token
@@ -125,12 +129,6 @@ _APPROVING_KINDS: Final[frozenset[str]] = frozenset(GROUP_KINDS) - {RoleGroup.RE
 
 #: Where a shipped binding came from (:func:`shipped_bindings`).
 _SHIPPED: Final[str] = "shipped:"
-
-#: An operator group and the self-approval group of the shipped bindings.
-_OPERATOR_AND_SELF_APPROVAL: Final[list[RoleGroup]] = [
-    RoleGroup.OPERATORS,
-    RoleGroup.SA_OPERATORS,
-]
 
 #: The kind with the fewest rights for each base level.
 _LOWEST_KIND: Final[dict[TenantRole, RoleGroup]] = {
@@ -309,11 +307,20 @@ def bind(
     matched = [entry for entry in entries if entry.matches(principal, paths, attributes)]
     log = structlog.get_logger(__name__)
     kinds = sorted({entry.kind for entry in matched}, key=lambda kind: GROUP_KINDS.index(kind))
-    if kinds == _OPERATOR_AND_SELF_APPROVAL and all(e.ref.startswith(_SHIPPED) for e in matched):
-        # Today a person in an operator group and in the self-approval group
-        # is an operator who may self-approve. The shipped bindings keep that.
-        kinds = [RoleGroup.SA_OPERATORS]
-        matched = [entry for entry in matched if entry.kind is RoleGroup.SA_OPERATORS]
+    if (
+        len(kinds) == 2
+        and RoleGroup.SA_OPERATORS in kinds
+        and all(e.ref.startswith(_SHIPPED) for e in matched)
+    ):
+        # Only shipped bindings match: one role group and a self-approval
+        # group that is not a role group (two role groups are refused before
+        # this). With the switch off the role group decides the kind, so the
+        # shipped bindings keep that. Next to an operator group the person is
+        # an operator who may self-approve, as today: SA-Operators.
+        other = next(kind for kind in kinds if kind is not RoleGroup.SA_OPERATORS)
+        keep = RoleGroup.SA_OPERATORS if other is RoleGroup.OPERATORS else other
+        kinds = [keep]
+        matched = [entry for entry in matched if entry.kind is keep]
     if len(kinds) > 1:
         log.warning(
             "multiple_bound_kinds",
@@ -339,7 +346,8 @@ def bind(
         ):
             # A shipped binding gives a flag only when the token gives it too,
             # so the switch on without stored bindings changes no approve right.
-            log.warning(
+            # This is normal for such a person and comes on every request.
+            log.debug(
                 "policy_shipped_binding_other_flags",
                 operator_sub=operator.sub,
                 binding=entry.ref,

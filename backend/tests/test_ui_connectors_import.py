@@ -740,6 +740,35 @@ def test_confirm_schema_invalid_entry_422_writes_nothing() -> None:
     assert _load_target(_TENANT_A, "valid-first") is None
 
 
+def test_confirm_keycloak_entry_with_a_realm_that_is_not_plain_writes_nothing() -> None:
+    """The console import uses the same realm name check; Keycloak sees no call."""
+    register_connector_v2(product="keycloak", version="1.0", impl_id="keycloak", cls=_FakeConnector)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    yaml_text = (
+        "targets:\n"
+        "  - name: kc-import\n"
+        "    product: keycloak\n"
+        "    host: kc.example.test\n"
+        "    managed_realm: ../master\n"
+    )
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    keycloak = mock.route(host="kc.example.test").respond(200)
+    try:
+        response = client.post(
+            "/ui/connectors/import/confirm",
+            headers=_form_headers(csrf),
+            data={"pasted": yaml_text},
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    assert "managed_realm" in response.text
+    assert _count_targets(_TENANT_A) == 0
+    assert not keycloak.called
+
+
 # ---------------------------------------------------------------------------
 # Cross-tenant isolation
 # ---------------------------------------------------------------------------

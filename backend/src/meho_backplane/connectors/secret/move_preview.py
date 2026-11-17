@@ -21,10 +21,32 @@ The summary names only the parsed ``{kind, ref}`` of the move's
 which carry references and never the value (#1577's core invariant:
 ``additionalProperties: false`` on the param schema keeps a value field
 from being smuggled in, and the value is read server-side into a
-redacting :class:`~.endpoints.SecretMaterial`). The builder reads neither
-store, so it cannot observe a value to leak; it does no I/O at all. The
-optional operator ``reason`` is echoed (it is operator-authored audit
-text the schema requires not to carry a value).
+redacting :class:`~.endpoints.SecretMaterial`). The builder never reads
+the source. The optional operator ``reason`` is echoed (it is
+operator-authored audit text the schema requires not to carry a value).
+
+What the card adds to the refs
+==============================
+
+* A ``vault-target`` side names the target as typed (``target``), the
+  target it points to now (``target_id``, ``target_name``), that target's
+  Vault role (``vault_role``) and its Vault login mount (``vault_mount``).
+  The approved run compares all three with the target it finds and
+  refuses another target, role or mount
+  (:class:`~meho_backplane.connectors.secret.vault_target_endpoint.VaultTargetChangedError`).
+* The sink says whether its secret exists (``secret_exists``) and, with
+  ``merge``, whether the named field exists (``field_exists``): ``"yes"``,
+  ``"no"`` or ``"not known"``. A Vault sink looks it up with the same
+  login and checks as the write
+  (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.sink_state`);
+  it keeps only yes or no and drops the read data at once. Every other
+  sink kind and every failed lookup say ``"not known"``. The approved run
+  holds a Vault sink to a ``"no"``
+  (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.write_secret`).
+
+The agent's own ``preview_operation`` gets only the refs: ``{kind, ref}``
+and, for a ``vault-target`` side, the target name as typed. It makes no
+target lookup and no Vault login.
 
 Why ``secret.move`` reaches a builder at all
 ============================================
@@ -65,8 +87,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
-from meho_backplane.connectors.secret.endpoints import parse_secret_ref
-from meho_backplane.connectors.secret.vault_target_endpoint import vault_target_move_preflight
+from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
+from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
+from meho_backplane.connectors.secret.vault_target_endpoint import (
+    VAULT_TARGET_KIND,
+    VaultTargetKvSecretEndpoint,
+    VaultTargetRefusedError,
+    check_vault_target_refs,
+    login_of,
+    vault_target_move_preflight,
+)
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_permission_preflight,
@@ -75,25 +105,77 @@ from meho_backplane.operations._preview import (
 from meho_backplane.operations._validate import params_problem, register_params_check
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.secret.endpoints import SecretRef
 
 __all__ = ["build_secret_move_preview", "check_secret_move_sink"]
 
 
-def _ref_summary(spec: SecretRef) -> dict[str, str]:
+def _ref_only(spec: SecretRef) -> dict[str, str]:
     """Render a parsed ``<kind>:<ref>`` as a ref-only summary dict.
 
     Names the store-selecting ``kind`` and the store-specific ``ref``
     separately so a reviewer reads the move's endpoints structurally. The
     ``ref`` is an address (a Vault KV path + ``#<field>`` fragment), never
-    a value.
+    a value. No I/O.
     """
     summary = {"kind": spec.kind, "ref": spec.ref}
-    if spec.kind == "vault-target":
+    if spec.kind == VAULT_TARGET_KIND:
         # The target whose role does this read or write, named on its own
         # so a reviewer does not have to cut it out of the ref.
         summary["target"] = spec.ref.partition("/")[0]
     return summary
+
+
+async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
+    """The approval card's summary of one side: :func:`_ref_only` and the target.
+
+    A ``vault-target`` side also names the target it points to now
+    (``target_id``, ``target_name``), that target's Vault role
+    (``vault_role``) and its Vault login mount (``vault_mount``). The
+    approved run compares them with the target it finds. A name that does
+    not resolve to a usable Vault target gets no ``target_id``; the
+    permission check then refuses the call.
+    """
+    summary = _ref_only(spec)
+    if spec.kind == VAULT_TARGET_KIND:
+        endpoint = VaultTargetKvSecretEndpoint(spec.ref)
+        try:
+            row = await endpoint.resolve_vault_target(operator)
+        except VaultTargetRefusedError:
+            return summary
+        summary["target_id"] = str(row.id)
+        summary["target_name"] = row.name
+        summary["vault_role"], summary["vault_mount"] = login_of(row)
+    return summary
+
+
+async def _sink_state(
+    spec: SecretRef,
+    operator: Operator,
+    params: dict[str, Any],
+    *,
+    merge: bool,
+) -> dict[str, str]:
+    """Whether the sink secret exists (and with *merge*, its field): yes, no or not known.
+
+    Only a Vault sink can tell; every other sink kind says "not known". The
+    lookup runs only when both ``vault-target`` sides pass their checks
+    (:func:`check_vault_target_refs`), so a call MEHO refuses makes no
+    Vault login.
+    """
+    sink: object | None
+    try:
+        sink = resolve_secret_endpoint(spec)
+        await check_vault_target_refs(operator, params)
+    except Exception:
+        sink = None
+    if isinstance(sink, VaultKvSecretEndpoint):
+        return await sink.sink_state(operator, merge=merge)
+    state = {"secret_exists": NOT_KNOWN}
+    if merge:
+        state["field_exists"] = NOT_KNOWN
+    return state
 
 
 def _linux_sink_refusal(raw_to: str) -> str | None:
@@ -135,8 +217,13 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
     Names the move's source and sink as parsed ``{kind, ref}`` references
     plus the optional operator ``reason`` — all drawn from the params,
-    which carry references only. Does no store I/O, so no value can enter
-    the summary. Declines (returns ``None`` → identifier-only default)
+    which carry references only. The agent's own ``preview_operation``
+    gets just that. For the approval request, a ``vault-target`` side also
+    names the target it points to and that target's Vault role. The sink says
+    whether its secret exists (``secret_exists``) and, with ``merge``,
+    whether its field exists (``field_exists``): ``"yes"``, ``"no"`` or
+    ``"not known"``. That lookup reads the sink secret's field names only;
+    no value enters the summary. Declines (returns ``None`` → identifier-only default)
     when a ref is absent or malformed; the dispatcher has already
     schema-validated the params at this point, so that path is defensive.
     """
@@ -152,12 +239,17 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     if _linux_sink_refusal(raw_to) is not None:
         return None
 
-    summary: dict[str, Any] = {
-        "action": "secret.move",
-        "source": _ref_summary(source),
-        "sink": _ref_summary(sink),
-        "merge": ctx.params.get("merge") is True,
-    }
+    merge = ctx.params.get("merge") is True
+    summary: dict[str, Any] = {"action": "secret.move"}
+    if ctx.agent_preview:
+        # The agent's own preview: the refs only, no lookup.
+        summary["source"] = _ref_only(source)
+        summary["sink"] = _ref_only(sink)
+    else:
+        summary["source"] = await _ref_summary(source, ctx.operator)
+        summary["sink"] = await _ref_summary(sink, ctx.operator)
+        summary["sink"].update(await _sink_state(sink, ctx.operator, ctx.params, merge=merge))
+    summary["merge"] = merge
     reason = ctx.params.get("reason")
     if isinstance(reason, str) and reason:
         summary["reason"] = reason

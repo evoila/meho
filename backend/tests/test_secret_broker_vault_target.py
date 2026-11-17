@@ -307,6 +307,33 @@ async def test_a_refused_merge_write_that_cannot_be_checked_says_so(
     )
 
 
+async def test_a_refused_merge_write_whose_version_cannot_be_read_says_so(
+    monkeypatch: pytest.MonkeyPatch, _env: None
+) -> None:
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"password": _SECRET_VALUE},
+        put_exc=hvac.exceptions.InvalidRequest("refused"),
+    )
+    kv = fake.secrets.kv.v2
+    real_read = kv.read_secret_version
+
+    def read(path: str, **kwargs: Any) -> dict[str, Any]:
+        answer = real_read(path, **kwargs)
+        if kv.put_calls:  # the read after the refused write has no version
+            answer["data"]["metadata"].pop("version")
+        return answer
+
+    monkeypatch.setattr(kv, "read_secret_version", read)
+    result = await _move(
+        {"from": "vault:secret/a#password", "to": "vault:secret/b#password", "merge": True}
+    )
+    assert result.error == "connector_error: SecretMergeRefusedError"
+    assert "could not read the sink secret again" in str(
+        (result.extras or {}).get("exception_message")
+    )
+
+
 async def test_merge_default_off_replaces_the_secret(
     monkeypatch: pytest.MonkeyPatch, _env: None
 ) -> None:

@@ -30,11 +30,14 @@ from sqlalchemy import select, update
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.secret.move_preview import build_secret_move_preview
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Base, DispatchTrace, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import dispatch
+from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
@@ -296,6 +299,54 @@ async def test_a_sink_kind_that_cannot_tell_says_not_known(
     card = _card(await _ask({"from": _SRC, "to": "keycloak:kc/meho/operator-a#password"}))
 
     assert card["sink"]["secret_exists"] == "not known"
+
+
+async def test_the_agents_own_preview_says_not_known_and_makes_no_vault_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+
+    answer = await preview_dispatch(
+        operator=_OPERATOR,
+        connector_id="secret-broker-1.x",
+        op_id="secret.move",
+        target=None,
+        params={"from": _SRC, "to": "vault-target:vault-dst/secret/b#password", "merge": True},
+    )
+
+    text = json.dumps(answer, default=str)
+    assert '"secret_exists": "not known"' in text, answer
+    assert '"field_exists": "not known"' in text
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
+    assert fake.secrets.kv.v2.put_calls == []
+
+
+@pytest.mark.parametrize("agent_preview", [True, False])
+async def test_only_the_approval_request_looks_up_the_sink(
+    agent_preview: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent's own preview says "not known"; the approval request looks."""
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    ctx = PreviewContext(
+        descriptor=object(),  # type: ignore[arg-type]  # the builder does not read it
+        connector_instance=None,
+        operator=_OPERATOR,
+        target=None,
+        params={"from": "vault:secret/a#password", "to": "vault:secret/b#password"},
+        agent_preview=agent_preview,
+    )
+
+    preview = await build_secret_move_preview(ctx)
+
+    assert preview is not None
+    if agent_preview:
+        assert preview["sink"]["secret_exists"] == "not known"
+        assert fake.auth.jwt.login_calls == []
+        assert fake.secrets.kv.v2.read_calls == []
+    else:
+        assert preview["sink"]["secret_exists"] == "yes"
+        assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/b"]
 
 
 # -- a planted value stays out of everything -----------------------------

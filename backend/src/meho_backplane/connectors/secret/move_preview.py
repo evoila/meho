@@ -39,7 +39,8 @@ What the card adds to the refs
   login and checks as the write
   (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.sink_state`);
   it keeps only yes or no and drops the read data at once. Every other
-  sink kind, and every failed lookup, says ``"not known"``.
+  sink kind, every failed lookup and the agent's own ``preview_operation``
+  say ``"not known"``.
 
 Why ``secret.move`` reaches a builder at all
 ============================================
@@ -136,20 +137,29 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
 
 
 async def _sink_state(
-    spec: SecretRef, operator: Operator, params: dict[str, Any], *, merge: bool
+    spec: SecretRef,
+    operator: Operator,
+    params: dict[str, Any],
+    *,
+    merge: bool,
+    look_up: bool,
 ) -> dict[str, str]:
     """Whether the sink secret exists (and with *merge*, its field): yes, no or not known.
 
-    Only a Vault sink can tell; every other sink kind says "not known". The
+    Only a Vault sink can tell; every other sink kind says "not known". With
+    *look_up* off (the agent's own ``preview_operation``), MEHO does not
+    look and says "not known". The
     lookup runs only when both ``vault-target`` sides pass their checks
     (:func:`check_vault_target_refs`), so a call MEHO refuses makes no
     Vault login.
     """
-    try:
-        sink = resolve_secret_endpoint(spec)
-        await check_vault_target_refs(operator, params)
-    except Exception:
-        sink = None
+    sink: object | None = None
+    if look_up:
+        try:
+            sink = resolve_secret_endpoint(spec)
+            await check_vault_target_refs(operator, params)
+        except Exception:
+            sink = None
     if isinstance(sink, VaultKvSecretEndpoint):
         return await sink.sink_state(operator, merge=merge)
     state = {"secret_exists": NOT_KNOWN}
@@ -220,7 +230,11 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
     merge = ctx.params.get("merge") is True
     sink_summary = await _ref_summary(sink, ctx.operator)
-    sink_summary.update(await _sink_state(sink, ctx.operator, ctx.params, merge=merge))
+    sink_summary.update(
+        await _sink_state(
+            sink, ctx.operator, ctx.params, merge=merge, look_up=not ctx.agent_preview
+        )
+    )
     summary: dict[str, Any] = {
         "action": "secret.move",
         "source": await _ref_summary(source, ctx.operator),

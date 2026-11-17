@@ -340,6 +340,8 @@ class VaultKvSecretEndpoint:
             return SecretMergeRefusedError(known=False)
         else:
             current = (_version_metadata(payload) or {}).get("version")
+        if not isinstance(current, int) or isinstance(current, bool):
+            return SecretMergeRefusedError(known=False)  # no version: MEHO cannot tell
         if current != cas:
             return SecretMergeChangedError()
         return SecretMergeRefusedError()

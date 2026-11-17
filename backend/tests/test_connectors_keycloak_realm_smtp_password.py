@@ -494,6 +494,19 @@ async def test_approval_card_hides_a_password_value() -> None:
     assert "smtp_password_source" not in card
 
 
+@pytest.mark.asyncio
+async def test_approval_card_shows_the_password_policy_text() -> None:
+    params = _named_secret_params()
+    params["representation"]["passwordPolicy"] = "length(8) and digits(1)"
+    card = await _realm_update_preview(_card_ctx(params))
+
+    assert card is not None
+    shown = card["representation"]
+    assert shown["passwordPolicy"] == "length(8) and digits(1)"
+    assert shown["attributes"]["someApiKey"] == "***REDACTED***"
+    assert shown["smtpServer"]["authTokenClientSecret"] == "***REDACTED***"
+
+
 #: Made-up values under secret-shaped names that are not in the Keycloak
 #: list of secret fields. The card must hide each of them.
 _NAMED_SECRETS: dict[str, str] = {

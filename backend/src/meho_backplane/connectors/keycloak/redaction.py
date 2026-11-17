@@ -47,6 +47,7 @@ from typing import Any
 from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
+    "PASSWORD_POLICY_FIELD",
     "REDACTED",
     "redact_preview_fields",
     "redact_secret_fields",
@@ -135,15 +136,27 @@ def redact_secret_fields(value: Any) -> Any:
     return _redact(value, _SECRET_FIELDS, shared=False)
 
 
-def redact_preview_fields(value: Any) -> Any:
+#: The one name a realm card shows on purpose: the text of the realm's
+#: password rules (for example ``length(8) and digits(1)``). It holds no
+#: password, but the shared name rule hides it because it has "password"
+#: in its name. A card passes this name in ``show`` so the approver can
+#: read the rules the realm will get.
+PASSWORD_POLICY_FIELD = "passwordPolicy"
+
+
+def redact_preview_fields(value: Any, *, show: frozenset[str] = frozenset()) -> Any:
     """Return *value* with secrets masked for an approval preview.
 
     The same walk as :func:`redact_secret_fields`, and every key the
     shared name rule marks as secret is masked too
     (:func:`_is_shared_secret`). A preview has no reveal, so it hides
     everything at the source.
+
+    *show* names fields to keep, by their exact name. Only a text value
+    stays, and only when the shared name rule hid it. A name in
+    :data:`_SECRET_FIELDS` is hidden whatever *show* says.
     """
-    return _redact(value, _SECRET_FIELDS, shared=True)
+    return _redact(value, _SECRET_FIELDS, shared=True, show=show)
 
 
 #: Field names masked only in the flight recorder trace, on top of
@@ -165,19 +178,32 @@ def redact_trace_fields(value: Any) -> Any:
     return _redact(value, _SECRET_FIELDS | _TRACE_ONLY_FIELDS, shared=True)
 
 
-def _redact(value: Any, fields: frozenset[str], *, shared: bool) -> Any:
+def _redact(
+    value: Any,
+    fields: frozenset[str],
+    *,
+    shared: bool,
+    show: frozenset[str] = frozenset(),
+) -> Any:
     if isinstance(value, dict):
         return {
             key: (
                 REDACTED
                 if isinstance(key, str)
-                and (key.lower() in fields or (shared and _is_shared_secret(key, item)))
-                else _redact(item, fields, shared=shared)
+                and (
+                    key.lower() in fields
+                    or (
+                        shared
+                        and not (key in show and isinstance(item, str))
+                        and _is_shared_secret(key, item)
+                    )
+                )
+                else _redact(item, fields, shared=shared, show=show)
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact(item, fields, shared=shared) for item in value]
+        return [_redact(item, fields, shared=shared, show=show) for item in value]
     return value
 
 

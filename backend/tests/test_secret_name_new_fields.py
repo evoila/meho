@@ -241,6 +241,25 @@ def test_keycloak_preview_scrub_keeps_flags_under_a_secret_name() -> None:
     assert redact_preview_fields(node) == {"resetPasswordAllowed": True, "passwordPolicy": REDACTED}
 
 
+def test_keycloak_preview_scrub_shows_only_the_name_it_is_told_to_show() -> None:
+    node = {
+        "passwordPolicy": "length(8) and digits(1)",
+        "smtpServer": {"password": _VALUE, "passwordPolicy": "length(8)"},
+        "attributes": {"PasswordPolicy": "x", "snmpAuthKey": _VALUE},
+        "passwordPolicyList": [_VALUE],
+    }
+    shown = redact_preview_fields(node, show=frozenset({"passwordPolicy"}))
+    assert shown["passwordPolicy"] == "length(8) and digits(1)"
+    assert shown["smtpServer"] == {"password": REDACTED, "passwordPolicy": "length(8)"}
+    # Another spelling, another name and another value type are not shown.
+    assert shown["attributes"] == {"PasswordPolicy": REDACTED, "snmpAuthKey": REDACTED}
+    assert shown["passwordPolicyList"] == REDACTED
+    assert redact_preview_fields(
+        {"passwordPolicy": {"a": _VALUE}}, show=frozenset({"passwordPolicy"})
+    ) == {"passwordPolicy": REDACTED}
+    assert redact_trace_fields(node)["passwordPolicy"] == REDACTED
+
+
 class _RealmReader:
     """Stands in for the connector: the Admin REST read returns *realm*."""
 

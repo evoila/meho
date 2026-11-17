@@ -215,6 +215,35 @@ async def test_realm_create_preview_redacts_nested_secret_field() -> None:
 
 
 @pytest.mark.asyncio
+async def test_realm_create_preview_shows_password_policy_and_hides_the_rest() -> None:
+    """The password rules text is shown; every other hidden value stays hidden."""
+    secrets = {
+        "password": "made-up-1",
+        "secret": "made-up-2",
+        "credentials": [{"type": "password", "value": "made-up-3"}],
+        "smtpServer": {"host": "smtp.test", "password": "made-up-4"},
+        "attributes": {"snmpAuthKey": "made-up-5", "clientSecret": "made-up-6"},
+        "passwordPolicyKey": "made-up-7",
+    }
+    policy = "length(8) and digits(1)"
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {"representation": {"realm": "meho", "passwordPolicy": policy, **secrets}},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    shown = effect["preview"]["representation"]
+    assert shown["passwordPolicy"] == policy
+    assert shown["password"] == REDACTED
+    assert shown["secret"] == REDACTED
+    assert shown["credentials"] == REDACTED
+    assert shown["smtpServer"] == {"host": "smtp.test", "password": REDACTED}
+    assert shown["attributes"] == {"snmpAuthKey": REDACTED, "clientSecret": REDACTED}
+    assert shown["passwordPolicyKey"] == REDACTED
+    _no_secret_anywhere(effect, *[f"made-up-{n}" for n in range(1, 8)])
+
+
+@pytest.mark.asyncio
 async def test_realm_create_preview_redacts_generic_credential_keys() -> None:
     """`password`-class keys land anywhere in the additionalProperties body.
 

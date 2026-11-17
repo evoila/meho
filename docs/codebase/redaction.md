@@ -317,6 +317,12 @@ The same rule serves the places that had a list of their own:
   (`connectors/keycloak/redaction.py`, `redact_preview_fields` and
   `redact_trace_fields`) hide the Keycloak field names and every name the
   shared rule marks (a flag or a number stays).
+  One name is shown on purpose: `passwordPolicy`, the text of the realm's
+  password rules (for example `length(8) and digits(1)`). It holds no
+  password, and the approver needs to read it. Only the realm create card
+  and the realm update card show it (`show=` of `redact_preview_fields`,
+  exact name, text value only). The group, account, SMTP and rights cards
+  do not carry it and still hide it. The trace hides it too.
 - The Keycloak read results (`redact_secret_fields`) hide only the Keycloak
   field names. The dispatcher hides the shared names in the normal answer
   and keeps their values, so `reveal_secret: true` still returns them.

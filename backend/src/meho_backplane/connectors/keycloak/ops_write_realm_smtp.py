@@ -34,7 +34,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
+from meho_backplane.connectors.keycloak.redaction import (
+    PASSWORD_POLICY_FIELD,
+    redact_preview_fields,
+)
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
@@ -158,6 +161,10 @@ async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         op_id=ctx.descriptor.op_id,
     )
     hidden = redacted.get("representation", {})
+    # The password rules text holds no password: the approver reads it as sent.
+    policy = representation.get(PASSWORD_POLICY_FIELD) if isinstance(representation, dict) else None
+    if isinstance(policy, str) and PASSWORD_POLICY_FIELD in hidden:
+        hidden[PASSWORD_POLICY_FIELD] = policy
     preview: dict[str, Any] = {
         "resource": "realm",
         "realm": _realm_label(ctx),

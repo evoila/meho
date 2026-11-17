@@ -659,7 +659,9 @@ async def _populate_catalog(
 #: the registration helper only inspects the bare callable's identity
 #: and asyncness, not its parameter shape (the dispatcher validates
 #: incoming params against ``parameter_schema`` at dispatch time).
-type TypedOpHandler = Callable[..., Awaitable[dict[str, Any]]]
+#: A handler may also return an error :class:`OperationResult` with its
+#: own ``error_code``; the dispatcher audits it and passes it through.
+type TypedOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResult]]
 
 
 #: Type alias for composite-op handlers. The dispatcher's composite

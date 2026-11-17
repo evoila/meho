@@ -40,6 +40,7 @@ human-only and keep calling
 """
 
 from meho_backplane.connectors.targets.ops import (
+    TARGETS_REGISTER_OP_ID,
     TARGETS_REMOVE_OP_ID,
     build_targets_remove_preview,
     register_targets_registry_operations,
@@ -54,6 +55,7 @@ from meho_backplane.connectors.targets.update import (
     build_targets_update_preview,
     register_targets_update_operation,
 )
+from meho_backplane.op_classes import declare_wait_when_set
 from meho_backplane.operations._preview import (
     register_permission_preflight,
     register_preview_builder,
@@ -71,6 +73,9 @@ register_typed_op_registrar(register_targets_update_operation)
 register_preview_builder(TARGETS_REMOVE_OP_ID, build_targets_remove_preview)
 register_preview_builder(TARGETS_UPDATE_OP_ID, build_targets_update_preview)
 register_permission_preflight(TARGETS_PROBE_OP_ID, targets_probe_preflight)
+# A register that sets a secret field map or the capture setting waits for a
+# person on every call; no standing grant or run approval covers it.
+declare_wait_when_set(TARGETS_REGISTER_OP_ID, ("secret_field_map", "flight_recorder_capture"))
 
 __all__ = [
     "register_targets_probe_operation",

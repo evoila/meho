@@ -322,7 +322,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "limit": {
@@ -1000,7 +1002,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "timeout_ms": {

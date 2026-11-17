@@ -27,6 +27,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+import structlog.testing
 from fastapi.testclient import TestClient
 
 import meho_backplane.mcp.tools._connector_product_filter as pf_mod
@@ -498,3 +499,114 @@ async def test_allow_list_switch_off_has_no_block() -> None:
     )
     narrowed = keep_allowed_connectors(result, frozenset({"vault-1.x"}))
     assert narrowed == {"connectors": []}
+
+
+async def test_allow_list_with_target_says_none_fits_the_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allowed rows match the product but not the target: the hint names the target."""
+    target = SimpleNamespace(
+        name="t1", product="vault", version=None, fingerprint=None, preferred_impl_id=None
+    )
+
+    async def _fake_load(_operator: Operator, _name: str) -> Any:
+        return target
+
+    monkeypatch.setattr(ca_mod, "_load_target", _fake_load)
+    _switch_on(monkeypatch)
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "vcenter", "target": "t1"}
+    )
+    narrowed = keep_allowed_connectors(result, frozenset({"vmware-rest-9.0", "vault-1.x"}))
+    assert narrowed["connectors"] == []
+    block = narrowed["product_filter"]
+    assert block["matches"] == [{"product": "vmware", "matched_name": "vcenter"}]
+    assert "none of them fits the target" in block["hint"]
+    assert "known_products" not in block
+
+
+# ---------------------------------------------------------------------------
+# A wrong product_aliases value never breaks the list
+# ---------------------------------------------------------------------------
+
+
+def _registry_with(
+    monkeypatch: pytest.MonkeyPatch, classes: dict[tuple[str, str, str], type[Connector]]
+) -> None:
+    monkeypatch.setattr(pf_mod, "connectors_for_tenant", lambda _tenant_id: classes)
+
+
+def _class_with(product: str, aliases: Any) -> type[Connector]:
+    return type(
+        f"_{product.title()}Aliases",
+        (_PlainConnector,),
+        {"product": product, "product_aliases": aliases},
+    )
+
+
+def test_aliases_that_are_not_a_list_are_skipped_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad = _class_with("vmware", 7)
+    _registry_with(monkeypatch, {("vmware", "9.0", "vmware-rest"): bad})
+    with structlog.testing.capture_logs() as logs:
+        rows, block = pf_mod.filter_by_product(_ITEMS, "vcenter", tenant_id=None)
+    assert rows == []
+    assert block["known_products"] == ["vault", "vmware"]
+    assert [(e["event"], e["connector_class"]) for e in logs] == [
+        ("connector_product_aliases_skipped", bad.__qualname__)
+    ]
+
+
+def test_aliases_as_a_plain_string_are_one_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    _registry_with(
+        monkeypatch, {("vmware", "9.0", "vmware-rest"): _class_with("vmware", "vcenter")}
+    )
+    rows, _block = pf_mod.filter_by_product(_ITEMS, "vcenter", tenant_id=None)
+    assert [row.connector_id for row in rows] == ["vmware-rest-9.0", "vmware-pyvmomi-7.0"]
+    rows, _block = pf_mod.filter_by_product(_ITEMS, "v", tenant_id=None)
+    assert rows == []
+
+
+def test_a_bad_value_next_to_a_good_one_keeps_the_good_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _registry_with(
+        monkeypatch,
+        {
+            ("vmware", "9.0", "vmware-rest"): _class_with("vmware", ("vcenter",)),
+            ("vault", "1.x", "vault"): _class_with("vault", 7),
+        },
+    )
+    rows, block = pf_mod.filter_by_product(_ITEMS, "vcenter", tenant_id=None)
+    assert [row.connector_id for row in rows] == ["vmware-rest-9.0", "vmware-pyvmomi-7.0"]
+    assert block["matches"] == [{"product": "vmware", "matched_name": "vcenter"}]
+
+
+async def test_a_wrong_value_never_fails_the_list_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    _registry_with(monkeypatch, {("vmware", "9.0", "vmware-rest"): _class_with("vmware", 7)})
+    _switch_on(monkeypatch)
+    result = await ca_mod.list_connector_rows(
+        build_operator(TenantRole.OPERATOR), {"product": "vmware"}
+    )
+    assert _ids(result) == ["vmware-rest-9.0", "vmware-pyvmomi-7.0"]
+
+
+def test_an_alias_never_takes_over_a_real_product_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    grabber = _class_with("vault", ("vmware", "openbao"))
+    _registry_with(
+        monkeypatch,
+        {
+            ("vmware", "9.0", "vmware-rest"): _PlainConnector,
+            ("vault", "1.x", "vault"): grabber,
+        },
+    )
+    with structlog.testing.capture_logs() as logs:
+        rows, block = pf_mod.filter_by_product(_ITEMS, "VMware", tenant_id=None)
+    assert [row.connector_id for row in rows] == ["vmware-rest-9.0", "vmware-pyvmomi-7.0"]
+    assert block["matches"] == [{"product": "vmware", "matched_name": "vmware"}]
+    assert [(e["event"], e["connector_class"], e["alias"]) for e in logs] == [
+        ("connector_product_alias_skipped", grabber.__qualname__, "vmware")
+    ]
+    rows, _block = pf_mod.filter_by_product(_ITEMS, "openbao", tenant_id=None)
+    assert [row.connector_id for row in rows] == ["vault-1.x"]

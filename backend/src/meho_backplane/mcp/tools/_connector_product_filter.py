@@ -32,6 +32,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Final
 from uuid import UUID
 
+import structlog
+
 from meho_backplane.connectors.registry import connectors_for_tenant
 from meho_backplane.operations.ingest import ConnectorListItem
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -46,6 +48,8 @@ __all__ = [
     "listed_products",
     "reduce_product_filter",
 ]
+
+_log = structlog.get_logger(__name__)
 
 #: The key of the block next to ``connectors`` in the answer.
 PRODUCT_FILTER_KEY: Final[str] = "product_filter"
@@ -69,10 +73,36 @@ _NO_ALLOWED_MATCH_HINT: Final[str] = (
     "list the connectors this agent may use."
 )
 
+_NO_TARGET_FIT_HINT: Final[str] = (
+    "Connectors this agent may use have this product, but none of them fits "
+    "the target. Leave target out to list them."
+)
+
 
 def connector_list_product_aliases() -> bool:
     """Return the state of the ``CONNECTOR_LIST_PRODUCT_ALIASES`` switch."""
     return get_settings().connector_list_product_aliases
+
+
+def _declared_names(cls: type) -> tuple[str, ...]:
+    """Return the names *cls* declares in ``product_aliases``.
+
+    A plain string is one name. Any other value that is not a list or tuple
+    is skipped with a warning, so one class with a wrong value never breaks
+    the list.
+    """
+    value = getattr(cls, "product_aliases", ())
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    if value:
+        _log.warning(
+            "connector_product_aliases_skipped",
+            connector_class=cls.__qualname__,
+            reason="product_aliases is not a list or tuple of names",
+        )
+    return ()
 
 
 def _aliases_by_product(tenant_id: UUID | None) -> dict[str, dict[str, str]]:
@@ -80,13 +110,27 @@ def _aliases_by_product(tenant_id: UUID | None) -> dict[str, dict[str, str]]:
 
     The names of every class registered for a product count for that
     product, so one class that declares them covers all connectors of the
-    product. A name that is not a non-empty string is skipped.
+    product. A name that is not a non-empty string is skipped. A name that
+    is the real product name of another connector is skipped with a
+    warning: it never adds rows to that product's filter.
     """
+    registered = connectors_for_tenant(tenant_id)
+    products = {product.casefold() for product, _version, _impl_id in registered}
     names: dict[str, dict[str, str]] = {}
-    for (product, _version, _impl_id), cls in connectors_for_tenant(tenant_id).items():
-        for alias in getattr(cls, "product_aliases", ()) or ():
-            if isinstance(alias, str) and alias.strip():
-                names.setdefault(product, {})[alias.strip().casefold()] = alias.strip()
+    for (product, _version, _impl_id), cls in registered.items():
+        for alias in _declared_names(cls):
+            if not isinstance(alias, str) or not alias.strip():
+                continue
+            folded = alias.strip().casefold()
+            if folded in products and folded != product.casefold():
+                _log.warning(
+                    "connector_product_alias_skipped",
+                    connector_class=cls.__qualname__,
+                    alias=alias.strip(),
+                    reason="the alias is the product name of another connector",
+                )
+                continue
+            names.setdefault(product, {})[folded] = alias.strip()
     return names
 
 
@@ -143,16 +187,26 @@ def keep_allowed_product_filter(
 ) -> dict[str, Any]:
     """Narrow a ``product_filter`` *block* to the rows a hosted agent may use.
 
-    ``matches`` keeps only the products of *kept_rows*. When none is left,
-    ``known_products`` names only the products of the allowed connectors in
-    *listed* (``{connector_id: product}`` before the product filter), so a
-    product the agent may not use is never named.
+    ``matches`` keeps only the products of *kept_rows*. When none is left
+    but an allowed connector in *listed* (``{connector_id: product}`` before
+    the product filter) has a matched product, the rows were dropped by the
+    ``target`` filter: ``matches`` names those products and the hint says
+    that none fits the target. Otherwise ``known_products`` names only the
+    products of the allowed connectors in *listed*, so a product the agent
+    may not use is never named.
     """
     products = {row.get("product") for row in kept_rows}
     matches = [match for match in block.get("matches", []) if match.get("product") in products]
     if matches:
         return {**block, "matches": matches}
     allowed = {product for cid, product in listed.items() if cid in allowed_connectors}
+    allowed_matches = [m for m in block.get("matches", []) if m.get("product") in allowed]
+    if allowed_matches:
+        return {
+            "query": block.get("query"),
+            "matches": allowed_matches,
+            "hint": _NO_TARGET_FIT_HINT,
+        }
     return {
         "query": block.get("query"),
         "matches": [],

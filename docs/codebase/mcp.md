@@ -790,6 +790,12 @@ off by default).
   connector). The names of every class registered for a product count
   for that product, so one class can name them for all connectors of
   the product. The core has no vendor name of its own.
+- **A wrong value never breaks the list.** A plain string in
+  `product_aliases` is one name. Any other value that is not a list or
+  tuple is skipped, with a warning in the log that names the class. An
+  alias that is the real product name of another connector is skipped
+  too, with the same kind of warning, so it never adds rows to that
+  product.
 - **The answer says what matched.** With the switch on, a call with a
   `product` has a `product_filter` block next to `connectors`:
   - `query`: the text that was passed;
@@ -810,7 +816,9 @@ off by default).
   block: `matches` keeps only products of rows the agent may use. When
   none is left, `known_products` names only the products of the
   connectors the agent may use, so the agent can ask again
-  (`keep_allowed_product_filter`). The rows not yet reduced carry
+  (`keep_allowed_product_filter`). When rows the agent may use match the
+  product but none fits the `target`, `matches` names those products and
+  the hint says that none fits the target. The rows not yet reduced carry
   `{connector_id: product}` of every listed row under
   `_listed_products` for this; `reduce_connector_list` drops it, so no
   answer shows it.

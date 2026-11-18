@@ -796,6 +796,62 @@ async def test_switch_off_a_one_of_call_that_passes_without_the_keyword_waits_fo
     assert result.status == "awaiting_approval", result.error
 
 
+def _nullable_schema(keyword: str) -> dict[str, Any]:
+    marked = _schema()["properties"][_HIDDEN]
+    return {
+        "type": "object",
+        "properties": {
+            "options": {
+                "type": ["object", "null"],
+                "properties": {"name": {"type": "string"}, _HIDDEN: marked},
+                keyword: [
+                    {"required": [_HIDDEN]},
+                    {"type": "object", "required": ["name"]},
+                ],
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("keyword", ["oneOf", "anyOf"])
+def test_switch_off_a_branch_that_requires_the_parameter_still_matches_a_non_object(
+    keyword: str,
+) -> None:
+    schema = _nullable_schema(keyword)
+    stored = Draft202012Validator(schema)
+    checked = Draft202012Validator(checked_parameter_schema(schema))
+    shown = Draft202012Validator(visible_parameter_schema(schema))
+    calls: list[dict[str, Any]] = [
+        {"options": None},
+        {"options": {"name": "a"}},
+        {"options": {}},
+        {"options": 1},
+        {},
+    ]
+    for call in calls:
+        assert checked.is_valid(call) == stored.is_valid(call), call
+        assert shown.is_valid(call) == stored.is_valid(call), call
+    assert not checked.is_valid({"options": {"name": "a", _HIDDEN: "x"}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyword", ["oneOf", "anyOf"])
+async def test_switch_off_a_null_value_passes_dispatch_and_preview(
+    stub_embedding_service: AsyncMock, keyword: str
+) -> None:
+    await _register(stub_embedding_service, _nullable_schema(keyword))
+    params: dict[str, Any] = {"options": None}
+    result = await dispatch(
+        operator=_operator(), connector_id=_CONNECTOR, op_id=_OP, target=None, params=params
+    )
+    assert result.status == "awaiting_approval", result.error
+    preview = await preview_operation(
+        _operator(), {"connector_id": _CONNECTOR, "op_id": _OP, "params": params}
+    )
+    assert preview["status"] != "error", preview
+    _no_trace(preview, _HIDDEN, SWITCH_MARKER)
+
+
 @pytest.mark.parametrize(
     "schema",
     [schema for _, schema in _alternative_schemas()],

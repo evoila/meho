@@ -324,12 +324,19 @@ class _Walk:
         self, key: str, value: list[Any], hidden: frozenset[str], refs: frozenset[str]
     ) -> list[object]:
         """Walk the branches of *key*, each with the names hidden around it."""
+        walked = [self.node(item, hidden, refs) for item in value]
         if key in _ALTERNATIVE_KEYWORDS:
-            # A branch that requires a hidden name matches no call while the
-            # switch is off, so it is left out. Without it the other branches
-            # give the same answer as before (``oneOf`` still counts one).
-            value = [item for item in value if not _requires(self.root, item, hidden)] or value
-        return [self.node(item, hidden, refs) for item in value]
+            # A branch that requires a hidden name matches no object while the
+            # switch is off. ``required`` applies only to objects, so the branch
+            # still matches other values (such as ``null``) as it does in the
+            # stored schema. ``oneOf`` still counts the same matches.
+            needs = [_requires(self.root, item, hidden) for item in value]
+            if not all(needs):
+                walked = [
+                    {"allOf": [item, {"not": {"type": "object"}}]} if need else item
+                    for item, need in zip(walked, needs, strict=True)
+                ]
+        return walked
 
     def _keyword(
         self,
@@ -491,8 +498,9 @@ def checked_parameter_schema(schema: Any) -> Any:
     ``additionalProperties: false`` leaves it out of ``properties``, any other gets
     the schema ``false`` for it. No ``required`` or ``dependentRequired``
     list of them names it. An ``anyOf`` or ``oneOf`` branch that requires
-    it is left out, as it matches no call without it (unless every branch
-    requires it). Every other input is accepted or refused as before.
+    it matches no object, as no call gives it (unless every branch
+    requires it). The branch still matches other values, such as
+    ``null``. Every other input is accepted or refused as before.
     Returns *schema* itself when no switch it names is off.
     """
     if not _off_switches(schema):

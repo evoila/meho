@@ -64,6 +64,7 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
     register_preview_builder_switch,
 )
+from meho_backplane.operations.preview_needs_switch import register_preview_needs_switch
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 from meho_backplane.settings import get_settings
 
@@ -81,6 +82,9 @@ register_preview_builder(TARGETS_UPDATE_OP_ID, build_targets_update_preview)
 # agent's own preview gets the card only with PREVIEW_TYPED_WRITES on.
 register_preview_builder(TARGETS_REGISTER_OP_ID, build_targets_register_preview)
 register_preview_builder_switch(TARGETS_REGISTER_OP_ID, lambda: get_settings().preview_typed_writes)
+# The agent's preview of targets.register opens only with PREVIEW_TYPED_WRITES
+# on, although every call waits for approval.
+register_preview_needs_switch(TARGETS_REGISTER_OP_ID)
 register_permission_preflight(TARGETS_PROBE_OP_ID, targets_probe_preflight)
 # The card shows the realm warnings of the target as it will be after the write.
 register_card_warnings(TARGETS_REGISTER_OP_ID, targets_register_card_warnings)

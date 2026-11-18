@@ -114,6 +114,7 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.preview_needs_switch import preview_needs_switch
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import apply_connector_boundary_redaction
@@ -282,8 +283,9 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
 
     The last two rules hold only while the ``PREVIEW_TYPED_WRITES`` switch
     is on. Off (the default), a typed op previews as before: when it is
-    destructive, or when it carries ``requires_approval`` and is not a
-    credential-class op.
+    destructive, or when it carries ``requires_approval``, is not a
+    credential-class op and is not listed in
+    :mod:`~meho_backplane.operations.preview_needs_switch`.
     """
     if descriptor.source_kind == "ingested":
         return True
@@ -291,7 +293,9 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
         return True
     if not get_settings().preview_typed_writes:
         return (
-            descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            descriptor.requires_approval
+            and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            and not preview_needs_switch(descriptor.op_id)
         )
     if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
         return has_preview_builder(descriptor.op_id)

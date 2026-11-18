@@ -41,7 +41,9 @@ under `target`: name, product, host, `fqdn`, port and each `extras` key
 and value, with values under a secret-like name hidden; `result_if_run`
 says `fails` when a live target of the tenant has the name already. The
 agent's own `preview_operation` gets this card only with
-`PREVIEW_TYPED_WRITES` on; off, it gets the generic parameter echo. A
+`PREVIEW_TYPED_WRITES` on; off, its preview is `unavailable`, as for a
+typed write that needs no approval
+(`operations/preview_needs_switch.py`). A
 settings import sends each target it creates or changes as one of these
 calls ([settings.md](settings.md)). The guard
 `tests/test_targets_register_always_waits.py` fails when an operation of

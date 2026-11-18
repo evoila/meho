@@ -363,7 +363,7 @@ async def test_the_agent_preview_of_a_change_shows_the_values_only_with_the_swit
 
 @pytest.mark.parametrize("capture", [None, True], ids=["plain", "capture-set"])
 @pytest.mark.parametrize("switch", [False, True], ids=["switch-off", "switch-on"])
-async def test_the_agent_preview_of_a_create_says_it_waits(
+async def test_a_field_that_makes_a_create_wait_does_not_open_the_agent_preview(
     monkeypatch: pytest.MonkeyPatch, capture: bool | None, switch: bool
 ) -> None:
     _set_preview_typed_writes(monkeypatch, switch)
@@ -373,12 +373,34 @@ async def test_the_agent_preview_of_a_create_says_it_waits(
 
     envelope = await _agent_preview("targets.register", params)
 
-    assert envelope["status"] == "ok", envelope
+    assert envelope["status"] == ("ok" if switch else "unavailable"), envelope
     assert envelope["requires_approval"] is True
-    preview = envelope["proposed_effect"]
-    # The new-target card shows to the agent only with the switch on.
-    assert ("preview" in preview) is switch, preview
-    assert ("params_echo" in preview) is not switch, preview
+
+
+async def test_the_agent_preview_of_a_create_stays_unavailable_with_the_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_preview_typed_writes(monkeypatch, False)
+    params = {"name": "new-system", "product": "ssh", "host": "new.example", "extras": {"a": "b"}}
+
+    envelope = await _agent_preview("targets.register", params)
+
+    assert envelope["status"] == "unavailable", envelope
+    assert envelope["requires_approval"] is True
+    assert "proposed_effect" not in envelope, envelope
+    assert "new.example" not in repr(envelope)
+
+
+async def test_the_agent_preview_of_a_create_shows_the_card_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_preview_typed_writes(monkeypatch, True)
+    params = {"name": "new-system", "product": "ssh", "host": "new.example"}
+
+    envelope = await _agent_preview("targets.register", params)
+
+    assert envelope["status"] == "ok", envelope
+    assert envelope["proposed_effect"]["preview"]["target"]["host"] == "new.example"
 
 
 async def test_a_token_delete_waits_and_runs_after_approval(client: TestClient) -> None:

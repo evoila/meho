@@ -594,7 +594,9 @@ now to the cards of more changes of rights:
 | `authflow.ensure_approval_flow`, `authflow.ensure_approval_touch` | `current_binding` | the realm's browser flow, and the client's own browser flow now (id and name; `None` when the client uses the realm's flow) |
 
 The members are read in pages of 100, up to 1,000. A group with more
-members shows the first 1,000 and `members_complete: false`. When MEHO
+members shows the first 1,000 and `members_complete: false`. The
+approved run of such a request is refused: MEHO cannot check that the
+members the card did not show stayed the same. When MEHO
 cannot read the state (no live connection, an unknown user, group or
 client, an error, an odd answer), the card says
 `<key>_available: false` and has no `<key>`.

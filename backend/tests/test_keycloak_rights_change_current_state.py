@@ -55,6 +55,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.approval_rerun import _object_changed
 from meho_backplane.operations.approval_state_pin import (
     REASON_STATE_CHANGED,
+    REASON_STATE_INCOMPLETE,
     REASON_STATE_UNREADABLE,
     state_changed_since_request,
     state_pin_key,
@@ -592,6 +593,52 @@ async def test_the_run_is_refused_when_the_approver_did_not_see_the_state(
 
     assert reason == REASON_STATE_UNREADABLE
     assert built == []
+
+
+def _big_group(monkeypatch: pytest.MonkeyPatch, last: str) -> dict[str, Any]:
+    """A group with one member more than the cap; *last* is the id of the one beyond it."""
+    monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
+    monkeypatch.setattr(current_state, "MEMBER_CAP", 3)
+    state = _state()
+    members = [{"id": f"member-{i}", "username": f"member-{i}"} for i in range(3)]
+    state[f"{_BASE}/groups/{_GROUP}/members"] = [*members, {"id": last, "username": last}]
+    return state
+
+
+@pytest.mark.asyncio
+async def test_the_run_is_refused_when_a_member_beyond_the_cap_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    op_id = "keycloak.group.member.add"
+    approved = await _effect(op_id, _connector(_big_group(monkeypatch, "member-x")))
+    live = await _effect(op_id, _connector(_big_group(monkeypatch, "member-y")))
+    built = _live_effect(monkeypatch, live)
+    # Both cards are the same: the replaced member is beyond the cap.
+    assert approved["preview"]["current_group"] == live["preview"]["current_group"]
+
+    reason = await state_changed_since_request(
+        _operator(), _request(op_id, approved), None, _PARAMS[op_id]
+    )
+
+    assert reason == REASON_STATE_INCOMPLETE
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_a_complete_group_that_grew_past_the_cap_counts_as_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    op_id = "keycloak.group.member.add"
+    monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
+    monkeypatch.setattr(current_state, "MEMBER_CAP", 3)
+    approved = await _effect(op_id, _connector(_state()))
+    _live_effect(monkeypatch, await _effect(op_id, _connector(_big_group(monkeypatch, "m-x"))))
+
+    reason = await state_changed_since_request(
+        _operator(), _request(op_id, approved), None, _PARAMS[op_id]
+    )
+
+    assert reason == REASON_STATE_CHANGED
 
 
 @pytest.mark.asyncio

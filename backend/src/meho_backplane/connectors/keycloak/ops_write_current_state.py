@@ -43,7 +43,8 @@ the run is refused and the requester sends the request again.
 
 The group members are read in pages of :data:`_MEMBER_PAGE`, up to
 :data:`~.ops_write_grant.MEMBER_CAP`. A group with more members shows the
-first ones and ``members_complete: false``.
+first ones and ``members_complete: false``. The approved run of such a
+request is refused: MEHO cannot check the members the card did not show.
 
 The approval request a person reads always shows the state. What the
 caller gets back from ``preview_operation`` and from the MCP approval tools
@@ -380,9 +381,20 @@ def with_current_binding(*, client: bool = False) -> Callable[[PreviewBuilder], 
     return _with_state(CURRENT_BINDING, read)
 
 
+def _members_complete(state: Any) -> bool:
+    """Whether a ``current_group`` state lists every member of the group."""
+    return isinstance(state, dict) and state.get("members_complete") is True
+
+
+#: op_id -> whether its state on the card is the whole object.
+_COMPLETE_CHECKS: Final[dict[str, Callable[[Any], bool]]] = {
+    "keycloak.group.member.add": _members_complete,
+}
+
+
 def _register() -> None:
     for op_id, key in PINNED_STATE_OPS.items():
-        register_state_pin(op_id, key)
+        register_state_pin(op_id, key, complete=_COMPLETE_CHECKS.get(op_id))
         register_person_only_preview_keys(op_id, _cards_on, frozenset({key, f"{key}_available"}))
 
 

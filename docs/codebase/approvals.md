@@ -322,6 +322,10 @@ state:
 - the approved card did not show the state (MEHO could not read it when the
   request waited, or the request is older than the card), or MEHO cannot
   read it now: the run is refused (`REASON_STATE_UNREADABLE`).
+- the approved card showed only part of the state: the run is refused
+  (`REASON_STATE_INCOMPLETE`). A connector says when a state is only a part
+  with `register_state_pin(..., complete=<check>)`; for example a group
+  with more members than MEHO reads.
 
 The refusal has the `object_changed_since_approval` error code, in the
 shared resume check and in the re-run (`object_changed`). The Keycloak

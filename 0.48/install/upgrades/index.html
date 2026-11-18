@@ -3891,6 +3891,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>linux.script.run refuses a script over 1,048,576 bytes (1 MiB) before it waits for approval. The approver reads a longer script page by page.</td>
+<td>Keep scripts at or under 1 MiB, for example copy a large file to the host first. Requests that wait at upgrade time show no page links in the console; read their pages with <code>meho approvals show &lt;id&gt; --script-page N</code>. A request with a script over 1 MiB that waits at upgrade time is refused when it is approved. Send it again with a shorter script.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> now always gets the tenant folder check: every Vault path that a caller or a target names for it must be in the tenant's folder. With an empty <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> that folder is <code>secret/tenants/&lt;tenant id&gt;/</code>; with a non-empty setting the folder of that setting applies. With either setting, MEHO now also checks a person's read of a target's secret when a call runs on a target of such a tenant. A tenant without an entry is unchanged.</td>
 <td>For each tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code>: run <code>meho tenants use &lt;tenant&gt;</code>, then <code>meho targets list --json</code>, and look at the field <code>secret_ref</code> of each target. Move each secret whose <code>secret_ref</code> is outside the tenant's folder into the folder, and set the new <code>secret_ref</code> on the target. A call on a target that is not moved yet fails with <code>connector_error: VaultTenantScopeError</code> and the text <code>vault.kv request outside tenant namespace: requested '&lt;path&gt;' is not within tenant prefix '&lt;folder&gt;'</code>.</td>
 </tr>

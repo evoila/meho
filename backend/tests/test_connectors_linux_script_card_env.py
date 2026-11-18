@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import meho_backplane.connectors.linux  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.linux.ops_write import ENV_NOTE

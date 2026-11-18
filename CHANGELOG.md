@@ -277,6 +277,8 @@ after the upgrade" first.
 - The configurable policy record is accepted (#6659).
 - The login record names the Claude Code and Claude Desktop login clients
   (#6660).
+- A new decision record names four default roles and who changes rights.
+  Most of it is not built yet; later releases bring the code (#6685).
 
 ### Release files
 - `meho-linux-*.tar`: the install on a plain Linux server, available and in testing. Ask evoila before you use it in production. See [Ways to install MEHO](https://evoila.github.io/meho/latest/install/ways-to-install/).

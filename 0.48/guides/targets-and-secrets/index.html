@@ -2146,6 +2146,34 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#add-a-whole-vmware-cloud-foundation-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Add a whole VMware Cloud Foundation stack
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Add a whole VMware Cloud Foundation stack">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-vcf-automation-reads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What VCF Automation reads
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-record-schema" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2200,6 +2228,17 @@
     <span class="md-ellipsis">
       
         Google Secret Manager (credentialBackend: gsm)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#share-one-secret-between-targets-or-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Share one secret between targets, or not
       
     </span>
   </a>
@@ -3296,6 +3335,34 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#add-a-whole-vmware-cloud-foundation-stack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Add a whole VMware Cloud Foundation stack
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Add a whole VMware Cloud Foundation stack">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-vcf-automation-reads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What VCF Automation reads
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#the-record-schema" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3350,6 +3417,17 @@
     <span class="md-ellipsis">
       
         Google Secret Manager (credentialBackend: gsm)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#share-one-secret-between-targets-or-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Share one secret between targets, or not
       
     </span>
   </a>
@@ -3582,6 +3660,173 @@ refuses <code>product: vmware</code> with 422 <code>unknown_product</code>.</p>
   target. Update the pin with <code>--update</code>.</li>
 </ul>
 <p>You can leave <code>secret_ref</code> out entirely — see the next section.</p>
+<h3 id="add-a-whole-vmware-cloud-foundation-stack">Add a whole VMware Cloud Foundation stack<a class="headerlink" href="#add-a-whole-vmware-cloud-foundation-stack" title="Permanent link">&para;</a></h3>
+<p>VMware Cloud Foundation (VCF) is not one system. It is many systems
+that run side by side. Each part has its own address and its own login,
+so <strong>each part is its own target</strong>. Add one target for each part you
+want MEHO to operate.</p>
+<p>The <code>product</code> value of a target is the first part of the connector id
+(the name before the first dash that is followed by a digit). For
+example <code>vmware-rest-9.0</code> gives <code>vmware</code>, and <code>sddc-rest-9.0</code> gives
+<code>sddc</code>. This table lists the value for each VCF part. The connector ids
+are in the <a href="../../reference/connectors/#evoilas-enterprise-pack">connector reference</a>.</p>
+<table>
+<thead>
+<tr>
+<th>VCF part</th>
+<th><code>product</code> value</th>
+<th>Connector ids</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>vCenter</td>
+<td><code>vmware</code></td>
+<td><code>vmware-rest-9.0</code>, <code>vmware-rest-8.0</code></td>
+</tr>
+<tr>
+<td>NSX Manager</td>
+<td><code>nsx</code></td>
+<td><code>nsx-rest-9.0</code>, <code>nsx-rest-4.2</code></td>
+</tr>
+<tr>
+<td>SDDC Manager</td>
+<td><code>sddc</code></td>
+<td><code>sddc-rest-9.0</code>, <code>sddc-vcf5-5.0</code></td>
+</tr>
+<tr>
+<td>VCF Installer and Cloud Builder</td>
+<td><code>installer</code></td>
+<td><code>installer-rest-9.1</code>, <code>installer-cb-5.0</code></td>
+</tr>
+<tr>
+<td>VCF fleet management</td>
+<td><code>fleet</code></td>
+<td><code>fleet-lcm-9.0</code>, <code>fleet-rest-9.0</code></td>
+</tr>
+<tr>
+<td>VCF Operations</td>
+<td><code>vrops</code></td>
+<td><code>vrops-rest-9.0</code>, <code>vrops-vrops8-8.0</code></td>
+</tr>
+<tr>
+<td>VCF Operations for logs</td>
+<td><code>vrli</code></td>
+<td><code>vrli-rest-9.0</code>, <code>vrli-vrli8-8.0</code></td>
+</tr>
+<tr>
+<td>VCF Operations orchestrator</td>
+<td><code>vro</code></td>
+<td><code>vro-rest-9.0</code></td>
+</tr>
+<tr>
+<td>VCF Automation</td>
+<td><code>vcfa</code></td>
+<td><code>vcfa-rest-9.0</code>, <code>vcfa-vra8-8.0</code></td>
+</tr>
+<tr>
+<td>VCF Identity Broker</td>
+<td><code>idb</code></td>
+<td><code>idb-rest-9.0</code>, <code>idb-wsa-3.3</code></td>
+</tr>
+</tbody>
+</table>
+<p>The connectors for VCF come with evoila's enterprise pack. Without the
+pack, MEHO refuses these <code>product</code> values with 422 <code>unknown_product</code>.
+That answer lists the <code>valid_products</code> of your backplane. The
+same list is in <code>meho connector list</code>. Use the value from that list if
+it ever differs from this table.</p>
+<p>A stack with the main parts looks like this. The names and the
+addresses (<code>192.0.2.0/24</code>) are examples. Where a target has no
+<code>secret_ref</code>, the server derives one secret path for each target (see
+<a href="#stage-the-secret">Stage the secret</a>).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">targets</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcenter-lab</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vmware</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.0.2.21</span>
+<span class="w">    </span><span class="nt">tls_server_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcenter-lab.example.com</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nsx-lab</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nsx</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.0.2.22</span>
+<span class="w">    </span><span class="nt">tls_server_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nsx-lab.example.com</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sddc-lab</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sddc</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.0.2.23</span>
+<span class="w">    </span><span class="nt">tls_server_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sddc-lab.example.com</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcfops-lab</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vrops</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.0.2.24</span>
+<span class="w">    </span><span class="nt">tls_server_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcfops-lab.example.com</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcfa-lab</span>
+<span class="w">    </span><span class="nt">product</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcfa</span>
+<span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.0.2.25</span>
+<span class="w">    </span><span class="nt">fqdn</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcfa-lab.example.com</span><span class="w">      </span><span class="c1"># the appliance picks the organisation from this name</span>
+<span class="w">    </span><span class="nt">tls_server_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vcfa-lab.example.com</span>
+<span class="w">    </span><span class="nt">extras</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">domain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">example-org</span><span class="w">           </span><span class="c1"># the tenant organisation to log in to</span>
+<span class="w">      </span><span class="nt">provider_username</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">provider-svc</span>
+<span class="w">      </span><span class="nt">provider_secret_ref</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">tenants/&lt;tenant-id&gt;/vcfa-lab-provider</span>
+</code></pre></div>
+<p>Add the other parts (<code>fleet</code>, <code>vrli</code>, <code>vro</code>, <code>idb</code>, <code>installer</code>) the same
+way: a <code>name</code>, the <code>product</code> value from the table, and a <code>host</code>. Add
+<code>tls_ca_pin</code> or <code>tls_server_name</code> as for any target. Then
+<a href="#import-and-verify">import and probe</a> each one. A probe that is green
+for a part shows that MEHO reaches it and identified its product and version.</p>
+<h4 id="what-vcf-automation-reads">What VCF Automation reads<a class="headerlink" href="#what-vcf-automation-reads" title="Permanent link">&para;</a></h4>
+<p>VCF Automation has two login planes on one appliance: the provider plane
+and the tenant plane. The connector reads these values.</p>
+<table>
+<thead>
+<tr>
+<th>Where</th>
+<th>Name</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Target <code>fqdn</code></td>
+<td><code>fqdn</code></td>
+<td>The appliance picks the organisation from the <code>Host</code> name. When you reach it by IP, set <code>fqdn</code> to its FQDN.</td>
+</tr>
+<tr>
+<td>Target <code>extras</code></td>
+<td><code>domain</code></td>
+<td>The tenant organisation to log in to. It is a target setting, <strong>not</strong> a field in the secret.</td>
+</tr>
+<tr>
+<td>Target <code>extras</code></td>
+<td><code>provider_username</code></td>
+<td>Optional. The user name for the provider plane, when the provider plane needs another login than the tenant plane.</td>
+</tr>
+<tr>
+<td>Target <code>extras</code></td>
+<td><code>provider_secret_ref</code></td>
+<td>Optional. The <code>secret_ref</code> of a second secret that holds the login of the provider user. It follows the same rules as <code>secret_ref</code> for your credential backend.</td>
+</tr>
+<tr>
+<td>Secret</td>
+<td><code>username</code>, <code>password</code></td>
+<td>The tenant login.</td>
+</tr>
+<tr>
+<td>Secret</td>
+<td><code>refresh_token</code></td>
+<td>Optional. A VCF Automation API token. For a VCF Automation 9.1 target whose appliance does not serve the usual login, add it to the secret of the target.</td>
+</tr>
+</tbody>
+</table>
+<p>Set these with <code>meho targets update</code>, for example
+<code>meho targets update vcfa-lab --extra domain=example-org</code>. <code>--extra</code> on
+<code>update</code> replaces the whole <code>extras</code> map, so pass every key you want to
+keep.</p>
+<p>The exact rules for each product, such as which login the provider plane
+uses when you set no <code>provider_username</code>, are in the setup guide that
+comes with the enterprise pack.</p>
 <h3 id="the-record-schema">The record schema<a class="headerlink" href="#the-record-schema" title="Permanent link">&para;</a></h3>
 <p>One entry of the <code>targets:</code> list has a published JSON Schema:
 <a href="https://github.com/evoila/meho/blob/main/docs/schemas/target-record-v1.schema.json"><code>docs/schemas/target-record-v1.schema.json</code></a>.
@@ -3708,6 +3953,37 @@ registration (422 <code>secret_ref_project_not_allowed</code>), and a stored
 target in such a project fails every dispatch with
 <code>connector_error: GcpSecretManagerReadError</code> until the project is
 listed. The same list applies to <code>gsm:</code> refs in operation parameters.</p>
+<h3 id="share-one-secret-between-targets-or-not">Share one secret between targets, or not<a class="headerlink" href="#share-one-secret-between-targets-or-not" title="Permanent link">&para;</a></h3>
+<p>MEHO lets two targets name the same <code>secret_ref</code>. Use one secret for
+several targets only when one account is right for all of them. This is
+what it means:</p>
+<ul>
+<li><strong>Rights.</strong> Every call on every one of these targets runs with the
+  rights of that one account. A read-only target and a target that
+  changes things need two accounts, so give them two secrets.</li>
+<li><strong>Approvals.</strong> The approval rules depend on the operation, not on the
+  secret. A shared secret does not weaken them, and it does not make a
+  change wait less. It does mean that an approved change on one target
+  runs with an account that the other targets also use.</li>
+<li><strong>Audit.</strong> MEHO writes one audit row for each call. The row names the
+  target and the person (or agent) who made the call, also when targets
+  share a secret. The vendor sees only the one account, so the vendor's
+  own log cannot tell the targets apart. Use one secret for each target
+  when you need that in the vendor's log.</li>
+<li><strong>Logins.</strong> Some vendors allow one session for each user. For many
+  connectors, two targets of one tenant that use the same secret and the
+  same login address share one login and one token, so they do not end
+  each other's session. Targets with different secrets log in on their
+  own.</li>
+<li><strong>Rotation.</strong> When you change the shared secret, change it once. Then
+  send <code>meho targets update &lt;name&gt; --secret-ref &lt;same-ref&gt;</code> for each
+  target, to make MEHO read it again (see
+  <a href="#change-a-secret">Change a secret</a>).</li>
+</ul>
+<p>For a VCF stack, a simple rule works: one secret for each target, named
+after the target. Share a secret only for targets of the same product
+that need the same rights, for example several vCenter targets that
+use one read-only account.</p>
 <h3 id="targets-that-need-no-credential">Targets that need no credential<a class="headerlink" href="#targets-that-need-no-credential" title="Permanent link">&para;</a></h3>
 <p>Some products need no login, for example a Prometheus that you reach
 through a port-forward. If you leave <code>secret_ref</code> out, the server still
@@ -3863,20 +4139,16 @@ ports.</p>
 <td>The <code>ReadOnly</code> role.</td>
 <td>A role that may edit the object a change touches.</td>
 </tr>
-<tr>
-<td>VCF Automation</td>
-<td>HTTPS 443</td>
-<td>See the vendor guide of your version.</td>
-<td>See the vendor guide of your version.</td>
-</tr>
-<tr>
-<td>Operations for logs</td>
-<td>HTTPS 443</td>
-<td>See the vendor guide of your version.</td>
-<td>See the vendor guide of your version.</td>
-</tr>
 </tbody>
 </table>
+<p>These products of the enterprise pack have no row here: VCF Automation,
+VCF Operations for logs, VCF Installer and Cloud Builder, VCF fleet
+management, VCF Operations orchestrator, VCF Identity Broker, VMware Cloud Director, HCX, Site Recovery Manager,
+vSphere Replication, Aria Automation Config (Salt) and Holodeck. The
+port and the role of each one are in the setup guide of its connector,
+which comes with the enterprise pack. The role names are the vendor's
+own, so they can change with the product version. To get the pack, contact evoila (see the
+<a href="../../reference/connectors/#evoilas-enterprise-pack">connector reference</a>).</p>
 <p>Use a separate login for reads and for changes where you can. MEHO also
 asks a person to approve a risky change before it runs
 (<a href="../approvals-and-break-glass/">Approvals and break-glass</a>).</p>

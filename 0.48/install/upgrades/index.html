@@ -1,0 +1,4109 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.48/install/upgrades/">
+      
+      
+        <link rel="prev" href="../tls-ingress/">
+      
+      
+        <link rel="next" href="../../clients/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>Upgrades - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#upgrades" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Upgrades
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../can-do/" class="md-tabs__link">
+          
+  
+  
+  What MEHO can do
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../which-form/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../extend/connector-kit/" class="md-tabs__link">
+          
+  
+  
+  Extend MEHO
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What MEHO can do
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    What MEHO can do
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What MEHO can do
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/installation-options/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/connectors-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/approvals/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../can-do/hidden-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secret values stay hidden
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../which-form/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Which install form is right for you?
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-1-vmware-appliance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 1: VMware appliance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-2-linux-server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 2: Linux server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-3-your-kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form 3: Your Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-3-vks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install MEHO on VKS by hand
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../form-3-openshift/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install MEHO on OpenShift by hand
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../setup-page/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The setup page and the settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-start-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The first-start checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-day/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first day
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Set up login
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../laptop-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tools for your laptop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backup-restore-update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Back up, restore and update
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../move-login-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Move the login setup to another install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../common-problems/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Common problems
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ways-to-install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ways to install MEHO
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail: full detail and your own parts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../keycloak-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak break-glass: get admin access back
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../company-login-authentik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login with authentik
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openbao-unseal-key/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenBao unseal key: who keeps what
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_22" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_22" id="__nav_3_22_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_22_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_22">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Company login
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/local-users/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local users
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/ad-ldap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AD / LDAP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/entra-id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Entra ID
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../login/customer-keycloak/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your own Keycloak
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-helm-upgrade-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What helm upgrade does
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#helm-4-field-ownership-conflicts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Helm 4 field-ownership conflicts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrade-fails-with-specstrategyrollingupdate-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade fails with spec.strategy.rollingUpdate: Forbidden
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rollback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-bootstrap-job-needs-manage-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The bootstrap Job needs manage-realm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#version-specific-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Version-specific notes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#day-2-operations-beyond-upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Day-2 operations beyond upgrades
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#back-up-and-restore-the-knowledge-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Back up and restore the knowledge store
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Back up and restore the knowledge store">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-database-holds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the database holds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#take-a-backup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Take a backup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#restore-into-an-empty-database" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restore into an empty database
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#check-after-a-restore" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Check after a restore
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#if-the-restored-meho-uses-another-embedding-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        If the restored MEHO uses another embedding model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/organisation-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Organisation setup for the Claude admin
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/codex/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Codex
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/tenant-bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/several-tenants/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    One person in several tenants
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/phone-and-laptop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MEHO on your phone and laptop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/your-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your tools: sign out one tool
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/agent-sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/settings-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The settings file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/policy-file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The policy file
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/hosted-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extend MEHO
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Extend MEHO
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../extend/connector-kit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Write a connector package
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-helm-upgrade-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What helm upgrade does
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#helm-4-field-ownership-conflicts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Helm 4 field-ownership conflicts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrade-fails-with-specstrategyrollingupdate-forbidden" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade fails with spec.strategy.rollingUpdate: Forbidden
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rollback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-bootstrap-job-needs-manage-realm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The bootstrap Job needs manage-realm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#version-specific-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Version-specific notes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#day-2-operations-beyond-upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Day-2 operations beyond upgrades
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#back-up-and-restore-the-knowledge-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Back up and restore the knowledge store
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Back up and restore the knowledge store">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-database-holds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the database holds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#take-a-backup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Take a backup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#restore-into-an-empty-database" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restore into an empty database
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#check-after-a-restore" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Check after a restore
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#if-the-restored-meho-uses-another-embedding-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        If the restored MEHO uses another embedding model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/install/upgrades.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="upgrades">Upgrades<a class="headerlink" href="#upgrades" title="Permanent link">&para;</a></h1>
+<p>MEHO upgrades are a standard <code>helm upgrade</code> with two things worth
+understanding before your first one: migrations run <em>before</em> the new
+version rolls, and Helm 4's server-side apply can surface
+field-ownership conflicts on clusters where someone once hand-patched
+the Deployment.</p>
+<h2 id="what-helm-upgrade-does">What <code>helm upgrade</code> does<a class="headerlink" href="#what-helm-upgrade-does" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--version<span class="w"> </span>&lt;chart-version&gt;<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>-f<span class="w"> </span>values.yaml
+</code></pre></div>
+<ol>
+<li>The <strong>pre-upgrade migration Job</strong> runs every pending database
+   migration first. If a migration fails, the release fails and the
+   old Pods keep serving — an unmigrated schema never meets a new
+   application version. Failed Jobs are retained for ten minutes for
+   <code>kubectl logs</code>.</li>
+<li>Only after migrations succeed does the new Deployment roll.</li>
+<li>The old Pod stops before the new Pod starts (update strategy
+   <code>Recreate</code>). Old and new code never share the database. The old Pod
+   keeps serving for 5 seconds, so no request runs into a closed Pod.
+   Then it takes no new calls and lets running operations finish, for up
+   to 60 seconds. An operation that still runs then is written to the
+   audit log as <code>unfinished</code>: check its target before you run it again.
+   Then the new Pod starts.</li>
+</ol>
+<p><strong>What an update costs:</strong> about one to two minutes without MEHO: the
+drain of the old Pod plus the start of the new one. This is the price of
+never running two versions against one database. Plan updates for a quiet
+time, and tell the people who use MEHO. The values <code>shutdown.drainSeconds</code>
+and <code>shutdown.preStopSleepSeconds</code> set the two limits.</p>
+<p>An upgrade ends the approval requests that still wait. A person approves
+one exact release of MEHO, so when the new version starts, every request
+that waits from the older version expires with the reason "MEHO was
+updated; ask again". An approved request that has not run yet is refused
+and does not run. The requester asks again under the new version. Tell
+the people who wait for an approval before you upgrade.</p>
+<p>Keep the image tag pinned and immutable (<code>v&lt;x.y.z&gt;</code> or
+<code>sha-&lt;git-sha&gt;</code>) — <code>:latest</code> is never published, and <code>:main</code> is a
+moving dev alias, not a deploy target.</p>
+<h2 id="helm-4-field-ownership-conflicts">Helm 4 field-ownership conflicts<a class="headerlink" href="#helm-4-field-ownership-conflicts" title="Permanent link">&para;</a></h2>
+<p>Helm 4 applies upgrades via Kubernetes <strong>server-side apply</strong>, which
+tracks who owns every field of every object. If an operator once
+hand-patched the live Deployment (<code>kubectl patch</code> / <code>kubectl edit</code>)
+with a field a newer chart now sets, the upgrade fails with:</p>
+<div class="highlight"><pre><span></span><code>Apply failed with 1 conflict: conflict with "kubectl-patch"
+</code></pre></div>
+<p>Pre-flight check — look for foreign field managers before upgrading:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>get<span class="w"> </span>deploy<span class="w"> </span>meho<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>-o<span class="w"> </span>yaml<span class="w"> </span>--show-managed-fields<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span><span class="s1">'manager:'</span>
+</code></pre></div>
+<p>Any manager other than Helm's own, owning a field the chart renders,
+will conflict. The remedy is to hand those fields to the chart:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--version<span class="w"> </span>&lt;chart-version&gt;<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>-f<span class="w"> </span>values.yaml<span class="w"> </span>--force-conflicts
+</code></pre></div>
+<p><code>--force-conflicts</code> overwrites the conflicting fields and transfers
+ownership to Helm. (Observed in the field: <code>--take-ownership</code> is <em>not</em>
+the right flag here — it adopts whole un-owned resources, not
+individual fields, and does not clear a per-field conflict.)</p>
+<h2 id="upgrade-fails-with-specstrategyrollingupdate-forbidden">Upgrade fails with <code>spec.strategy.rollingUpdate: Forbidden</code><a class="headerlink" href="#upgrade-fails-with-specstrategyrollingupdate-forbidden" title="Permanent link">&para;</a></h2>
+<p>From v0.46.0 the chart uses the <code>Recreate</code> update strategy: the old pod
+stops before the new one starts. An install made with an older chart has
+the strategy <code>RollingUpdate</code> on its live Deployment, with a
+<code>rollingUpdate</code> block that Kubernetes filled in. Helm 4 with server-side
+apply does not remove that block, and Kubernetes refuses it together with
+<code>Recreate</code>:</p>
+<div class="highlight"><pre><span></span><code>Deployment.apps "meho" is invalid: spec.strategy.rollingUpdate: Forbidden: may not be specified when strategy `type` is 'Recreate'
+</code></pre></div>
+<p><strong>The chart fixes this itself.</strong> On such an upgrade it runs a short Job
+before the upgrade (<code>&lt;release&gt;-…-update-strategy</code>). The Job removes the
+block and sets <code>Recreate</code> on the live Deployment. No pod restarts for this.
+Helm removes the Job once it has succeeded. Helm 3 needs no Job: it removes
+the block on its own.</p>
+<p><strong>If a revision already failed</strong> with this message (an upgrade to a chart
+built between v0.45.0 and this fix), the old pod still runs the old
+version. Check with <code>helm history meho -n meho</code>. Then:</p>
+<ol>
+<li>Run <code>helm upgrade</code> again with a chart that has the fix. The Job fixes
+   the Deployment first, and the release ends <code>deployed</code>.</li>
+<li>If you must stay on the chart that failed, fix the Deployment by hand
+   and run the same <code>helm upgrade</code> again:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>patch<span class="w"> </span>deployment<span class="w"> </span>meho<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>--type<span class="o">=</span>merge<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-p<span class="w"> </span><span class="s1">'{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'</span>
+</code></pre></div>
+<ol>
+<li>Check the result. The release is <code>deployed</code>, and the Deployment has
+   <code>Recreate</code> and no <code>rollingUpdate</code> block:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>status<span class="w"> </span>meho<span class="w"> </span>-n<span class="w"> </span>meho
+kubectl<span class="w"> </span>get<span class="w"> </span>deploy<span class="w"> </span>meho<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>-o<span class="w"> </span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">'{.spec.strategy}'</span>
+</code></pre></div>
+<p><strong>Argo CD</strong> renders the chart with <code>helm template</code>, so it never runs this
+Job. With server-side apply on, run the <code>kubectl patch</code> above once, then
+sync.</p>
+<p><strong>Later, back to <code>RollingUpdate</code>:</strong> the change above belongs to the field
+manager <code>meho-update-strategy</code> (or <code>kubectl-patch</code>). If you later set
+<code>updateStrategy.type: RollingUpdate</code>, Helm 4 reports a conflict with that
+manager. Use <code>--force-conflicts</code>, as in the section above.</p>
+<h2 id="rollback">Rollback<a class="headerlink" href="#rollback" title="Permanent link">&para;</a></h2>
+<p><code>helm rollback meho</code> is supported, with one asymmetry to know:
+<strong>migrations are forward-only</strong>. A rollback reverts the application
+version but not the schema — there is no automatic downgrade, so the
+older application runs against the newer schema and relies on the
+backend tolerating it. What "verified rollback" means precisely, and
+the schema-check fallback when it cannot be, is specified in the
+<a href="https://github.com/evoila/meho/blob/main/docs/acceptance/rollback.md">rollback acceptance contract</a>.</p>
+<p>Every start writes the settings of the built-in operations into rows that
+all pods share. A start that fails changes none of them. A pod that started
+does change them, so during an update the old pod serves the new settings
+until it stops. <code>GET /api/v1/health</code> shows which release wrote the rows
+(<code>operation_catalog</code>). After a rollback, if it names another release,
+restart the pods you keep. The rollback contract above has the steps.</p>
+<p><strong>When the new version does not start</strong>, MEHO is down, because the old
+Pod has already stopped. A start that fails changes no operation row, so
+roll back to the last good revision and wait for it:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span><span class="nb">history</span><span class="w"> </span>meho<span class="w"> </span>-n<span class="w"> </span>meho
+helm<span class="w"> </span>rollback<span class="w"> </span>meho<span class="w"> </span>&lt;revision&gt;<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>--wait<span class="w"> </span>--timeout<span class="w"> </span>10m
+</code></pre></div>
+<p>Then check that <code>/healthz</code> answers and <code>/version</code> shows the previous
+release. The rollback contract has the full checklist.</p>
+<h2 id="the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code><a class="headerlink" href="#the-bootstrap-job-needs-manage-realm" title="Permanent link">&para;</a></h2>
+<p>This applies to the built-in Keycloak (<code>coreKeycloak.enabled</code>).</p>
+<p>After every install and upgrade, the bootstrap Job keeps the approval
+sign-in up to date: it makes the login flow <code>meho approval sign-in level</code>
+with the steps of the realm file, names the approval level in the realm,
+and binds the client <code>meho-cli-approve</code> to the flow. For this, its account <code>meho-admin</code> needs the realm-management role
+<code>manage-realm</code>. A new install gets the role from the realm file.</p>
+<p>An install whose first start was older, and had the company login off,
+may lack the role. What you see depends on when MEHO finds out.</p>
+<p><strong>Before the upgrade (the usual case).</strong> Before an upgrade changes
+anything, a short Job checks that <code>meho-admin</code> has the role. Without it,
+the upgrade stops, and the version that runs now keeps running. Helm's
+error names the Job, and so the role:</p>
+<div class="highlight"><pre><span></span><code>Error: UPGRADE FAILED: pre-upgrade hooks failed: ... job &lt;release&gt;-check-manage-realm failed ...
+</code></pre></div>
+<p>The Job's log says what to do. The failed Job stays until the next
+upgrade, so you can read it at any time:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>logs<span class="w"> </span>job/&lt;release&gt;-check-manage-realm
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>core_bootstrap_failed: meho-admin lacks the realm-management role manage-realm, so the bootstrap Job would stop after the upgrade. The upgrade stops now and changes nothing. ...
+</code></pre></div>
+<p>When the check cannot reach Keycloak, or cannot read the roles, its log
+says <code>role check: unknown (...)</code>, and the upgrade goes on. Then the
+bootstrap Job checks again after the upgrade.</p>
+<p><strong>After the upgrade.</strong> When the bootstrap Job still stops, the new
+version already runs. Without <code>helm upgrade --atomic</code> (for example with
+the Helm job of RKE2 or k3s), the release then ends as <code>failed</code>, and
+Helm says only:</p>
+<div class="highlight"><pre><span></span><code>post-upgrade hooks failed: ... job &lt;release&gt;-core-bootstrap failed ...
+</code></pre></div>
+<p>The reason is in the Job's log. The failed Job stays until the next
+install or upgrade:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>logs<span class="w"> </span>job/&lt;release&gt;-core-bootstrap
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>core_bootstrap_failed: login flow meho approval sign-in level: meho-admin may not read or change login flows, ...
+</code></pre></div>
+<p>With <code>helm upgrade --atomic</code>, Helm rolls the release back when the Job
+stops, so the old version keeps running until you add the role.</p>
+<p>In both cases, give <code>meho-admin</code> the role once, then run the upgrade
+again:</p>
+<ol>
+<li>Log in to the Keycloak admin console as the console admin
+   (<a href="../keycloak-realm/#the-console-admin">The console admin</a>) and pick
+   realm <code>meho</code>. Lost every admin login? See
+   <a href="../keycloak-break-glass/">Keycloak break-glass</a>.</li>
+<li><strong>Clients → meho-admin → Service account roles → Assign role →
+   Filter by clients</strong>, search for <code>realm-management</code>, select
+   <code>manage-realm</code>, <strong>Assign</strong>.</li>
+<li>Run <code>helm upgrade</code> again. The Job's log says <code>login flow meho approval
+   sign-in: kept</code> (or <code>created</code>), and <code>client meho-cli-approve: kept</code>.</li>
+</ol>
+<p>Then check it: <code>GET /api/v1/health</code> shows <code>approvals.sign_in.state: ok</code>,
+and <code>meho doctor</code> shows <code>approval sign-in</code> as OK.</p>
+<p>With this role the backplane, which also uses <code>meho-admin</code>, can change
+the login settings of realm <code>meho</code>. It could already change people,
+groups and clients.</p>
+<h2 id="version-specific-notes">Version-specific notes<a class="headerlink" href="#version-specific-notes" title="Permanent link">&para;</a></h2>
+<p>Read these when your upgrade crosses the version in question.
+Rows of the next release are in this table at once.</p>
+<table>
+<thead>
+<tr>
+<th>Crossing</th>
+<th>What changes</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>v0.15.0</strong></td>
+<td>Vault secret references became tenant-scoped by default: schemeless refs resolve under <code>secret/tenants/&lt;tenant-id&gt;/…</code>.</td>
+<td>Migrate existing target <code>secret_ref</code>s to the tenant-scoped layout, or temporarily hold the old behaviour with the <code>VAULT_KV_TENANT_SCOPE_PREFIX=""</code> env override (via <code>extraEnv</code>) until migrated. Guide: <a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault-tenant-scope.md"><code>docs/codebase/connectors-vault-tenant-scope.md</code></a>. Google Secret Manager deployments are unaffected.</td>
+</tr>
+<tr>
+<td><strong>v0.22.0</strong></td>
+<td>First release to ship the backplane startup probe in the chart.</td>
+<td>If you ever hand-patched a <code>startupProbe</code> onto the Deployment, this is the textbook field-ownership conflict above — pre-flight and use <code>--force-conflicts</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.31.0</strong></td>
+<td>The MCP tool surface became claim-scoped: a default session lists and dispatches only the 25-tool working surface; the operator-plane tools require the <code>mcp:admin</code> OAuth scope, and the approval-decision verbs have no MCP path at all.</td>
+<td>Agent sessions that used operator-plane tools break until they request elevation: add <code>mcp:admin</code> as an <strong>optional</strong> (request-only) client scope on the MCP client in your realm, then opt sessions in with <code>MEHO_MCP_SCOPES=mcp:admin</code> (Claude Code plugin) or the <code>.mcpb</code> <code>scopes</code> user config. Approval decisions move to the operator console or CLI. The migrations are additive-only; no schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.32.0</strong></td>
+<td>A new, most-restrictive <code>destructive</code> safety tier lands (<code>safe &lt; caution &lt; dangerous &lt; destructive</code>), excluded by default at every gate and reachable only through the governed-delete approval flow (a preview-hash-bound call plus a mandatory blast-radius statement). Several permanent-delete operations adopt it.</td>
+<td>Automation, agents, or service principals that previously called those operations directly are now refused — a human must approve each governed delete on the console or CLI. No config change is needed to adopt the safer default; the migrations are additive-only, so no manual schema step.</td>
+</tr>
+<tr>
+<td><strong>v0.39.0</strong>, <strong>v0.40.0</strong></td>
+<td>One person can be in several tenants. From v0.39.0 the Keycloak setup adds the <code>meho_tenant</code> attribute to the role groups and the <code>meho-tenants</code> mapper, so the login token lists the person's tenants (<code>meho_tenants</code>). From v0.40.0 MEHO reads this list and works in one current tenant per request.</td>
+<td><strong>A site with one tenant needs to do nothing.</strong> Without the list, MEHO keeps the old path. To add the list, run the setup again: <code>meho admin keycloak bootstrap-clients</code> with the same <code>--tenant-id</code> as before (your own Keycloak), or <code>helm upgrade</code> (the built-in Keycloak). The token then lists one tenant, and MEHO answers exactly as before, with no <code>Meho-Tenant</code> header. To add a second tenant, follow <a href="../../guides/several-tenants/">One person in several tenants</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.42.0</strong></td>
+<td>On the command line and REST, only a token of the approval client <code>meho-cli-approve</code> approves a request (chart <code>config.keycloakCliApproveClientId</code>). The <code>meho-web</code> client needs the <code>basic</code> and <code>acr</code> default scopes.</td>
+<td><strong>Built-in Keycloak:</strong> the upgrade adds the client and the scopes. Create the login flow <code>meho approval sign-in</code> by hand, unless the company login is on. <strong>Your own Keycloak:</strong> create <code>meho-cli-approve</code> by hand, give <code>meho-web</code> the <code>basic</code> and <code>acr</code> default scopes, and give <code>meho-cli</code> the optional <code>offline_access</code> scope (<a href="../keycloak-realm/#the-approval-client-meho-cli-approve">The approval client</a>). Do not run <code>meho admin keycloak bootstrap-clients</code> for this on an existing realm. Install the v0.42.0 CLI.</td>
+</tr>
+<tr>
+<td><strong>v0.44.0</strong></td>
+<td>The public image has no VMware connectors. They come as a separate, signed connector package that runs on top of the public image. The chart turns on request limits per person, counted in the chart's Valkey store (<code>broadcast.enabled</code>, on by default). <code>/metrics</code> and the <code>features</code> block of <code>/ready</code> need the metrics token from the Secret <code>&lt;release&gt;-metrics-auth</code>.</td>
+<td><strong>VMware users:</strong> run an overlay image built on this release that adds the VMware connector package. Keep <code>broadcast.enabled</code> on, or set <code>config.dispatchRateLimitPerMinute</code>, <code>config.dispatchMaxConcurrentOps</code> and <code>config.mcpSessionStartLimitPerMinute</code> to <code>"0"</code>. Give any scraper other than the chart's ServiceMonitor the token from <code>&lt;release&gt;-metrics-auth</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.45.0</strong></td>
+<td>The chart installs the built-in PostgreSQL, Keycloak and OpenBao by default: <code>corePostgres.enabled</code>, <code>coreKeycloak.enabled</code> and <code>coreVault.enabled</code> are <code>true</code>. The chart connects MEHO to them by itself: the database login, the OpenBao address and login role, and the key for credential writes that wait for approval. With the built-in OpenBao, each tenant reads and writes only <code>secret/tenants/&lt;tenant id&gt;/</code>.</td>
+<td><strong>An install that brings its own PostgreSQL, Keycloak or Vault:</strong> before the upgrade, set the matching key to <code>false</code> for each part you bring yourself, for example <code>--set corePostgres.enabled=false --set coreKeycloak.enabled=false --set coreVault.enabled=false</code>. Without these keys, Helm stops with an error that names the key. <strong>An install that uses the built-in parts:</strong> remove <code>vault.address</code> and <code>config.vaultAddr</code> from your values, because the chart sets the OpenBao address itself. Leave <code>postgres.credentialsSecret</code> empty, or set it to <code>&lt;release&gt;-core-postgres-meho</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.45.0</strong></td>
+<td>Every call made with a token now runs only <code>safe</code> operations at once: MCP, the command line and REST, also with a person's own token, and every agent (#3980). <code>caution</code>, <code>dangerous</code> and <code>destructive</code> changes sent this way wait for an approval click. In the web interface, <code>caution</code> still runs at once, and <code>dangerous</code> changes now wait for an approval click too. An agent's <code>dangerous</code> or <code>destructive</code> request now waits for a person's approval instead of being refused. Service principals are unchanged: their standing grants keep working. Who may approve follows the login groups (since v0.44.0): only a MEHO-SA-Operator or a MEHO-Admin approves another person's <code>dangerous</code> or <code>destructive</code> change, and only a MEHO-SA-Operator approves their own.</td>
+<td><strong>Before the upgrade</strong>, put at least one person in <code>MEHO-SA-Operators</code> (<a href="../keycloak-realm/#who-may-approve-their-own-changes">Keycloak realm setup</a>). Otherwise nobody can approve their own <code>dangerous</code> or <code>destructive</code> change, and on a site with a single admin these changes wait with nobody to approve them. Tell command-line, MCP and REST users that they will see more waiting requests. They approve them in the web interface, or with <code>meho approvals approve</code> after a fresh sign-in (with an authenticator code when your realm asks for one). A person, for example a MEHO-Operator, may approve their own <code>caution</code> change that waited only because it came with a token, with a click in the web interface. Scripts that run <code>caution</code> changes with a token now get a waiting request (<code>awaiting_approval</code>) instead of a result; give fixed automation a service principal with a standing grant. See <a href="../../guides/approvals-and-break-glass/">Approvals and break-glass</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.45.0</strong></td>
+<td>When a connector states the target versions its operations work on, MEHO runs an operation only on a target inside that range. MEHO checks this each time the operation runs. Outside the range, the call is refused with <code>unqualified_target_version</code>, and the error names the range and the target's version. For an operation from an API file, MEHO first looks for the same operation on the connector version that matches the target, and runs it there when it exists and is turned on. MEHO checks the range for operations from an API file and for multi-step operations. From v0.45.0 the VMware connectors state the target versions their multi-step operations work on, so MEHO now applies the check to them. A Sensor on a connector whose range does not include the target's version can read <code>unknown</code>. A scheduled job or another saved call on such a connector is refused.</td>
+<td><strong>Before the upgrade</strong>, list your Sensors with <code>meho sensor list --json</code> and check that each one uses the connector that matches its target's version. For example, use <code>vmware-rest-8.0</code> for a vCenter 8.0.x target and <code>vmware-rest-9.0</code> for a vCenter 9.0.x target. A Sensor cannot be changed, so delete a wrong one and create it again on the right connector. Check scheduled jobs and other saved calls the same way. See <a href="../../guides/sensors-quickstart/#pick-the-connector-version-that-matches-the-target">Pick the connector version that matches the target</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.46.0</strong></td>
+<td>The key of the hashes and fingerprints in audit rows and approval requests is a secret of its own (<code>paramsHashKey</code> in the chart). With a built-in part, the install makes it in the Secret <code>&lt;release&gt;-core-params-hash</code> and keeps it on every upgrade. A new database password then keeps every hash. New audit hashes do not match the ones made with the key from the database URL.</td>
+<td><strong>Built-in core:</strong> nothing to do. <strong>No built-in part:</strong> store at least 32 random characters in a Kubernetes Secret and set <code>paramsHashKey.secretName</code>. A request that waits for approval while you set the key still matches its own params. Without it, MEHO makes the key from the database URL, and a new database password changes it. To rotate the key, follow "Rotating <code>PARAMS_HASH_KEY</code>" in <a href="https://github.com/evoila/meho/blob/main/docs/codebase/approvals.md"><code>docs/codebase/approvals.md</code></a>.</td>
+</tr>
+<tr>
+<td><strong>v0.46.0</strong></td>
+<td>The chart uses the <code>Recreate</code> update strategy: the old pod stops before the new one starts. An install made with an older chart has <code>RollingUpdate</code> and a <code>rollingUpdate</code> block on its live Deployment.</td>
+<td><strong>Nothing to do.</strong> Before a Helm 4 upgrade from such an install, the chart runs a short Job that removes the block. If an upgrade already failed with <code>spec.strategy.rollingUpdate: Forbidden</code>, see <a href="#upgrade-fails-with-specstrategyrollingupdate-forbidden">Upgrade fails with <code>spec.strategy.rollingUpdate: Forbidden</code></a>.</td>
+</tr>
+<tr>
+<td><strong>v0.46.0</strong></td>
+<td>Fifteen database migrations (<code>0138</code> to <code>0152</code>). They only add, and change no existing row. The upgrade ends every approval request that still waits. With the built-in Keycloak, four chart values must be empty or equal the chart's value: <code>config.uiKeycloakClientId</code>, <code>checkRunner.clientId</code>, <code>keycloakAdmin.url</code> and <code>keycloakAdmin.clientId</code>. The retrieval quality check and the retire checklist are removed. Machine logins no longer write targets or topology over REST. An operation from an API file runs only on a connector class that accepts such operations (<code>accepts_ingested_operations</code>); otherwise MEHO answers <code>ingested_ops_not_accepted</code>.</td>
+<td>Back up the database, and decide waiting approval requests first. If you use connector packages, update them before this version or together with it, to a version that sets <code>accepts_ingested_operations = True</code> where it runs operations from an API file. With the built-in Keycloak, remove the four values or set the value the error message names. Machine logins use the operations <code>targets.register</code>, <code>targets.update</code>, <code>targets.remove</code> and <code>topology.*</code> through <code>call_operation</code>. On OpenShift, set the UBI OpenBao image in <code>coreVault.image</code>. Details: <a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With the built-in Keycloak, the bootstrap Job keeps the approval sign-in flow and its binding to <code>meho-cli-approve</code> up to date on every upgrade. It needs the role <code>manage-realm</code> on <code>meho-admin</code>, and it stops when the role is missing. <code>/api/v1/health</code> shows the state of the approval sign-in (<code>approvals.sign_in</code>), and <code>meho doctor</code> shows it in one line.</td>
+<td><strong>Built-in Keycloak, first started before v0.47.0 with the company login off:</strong> give <code>meho-admin</code> the role <code>manage-realm</code> before the upgrade, as <a href="#the-bootstrap-job-needs-manage-realm">The bootstrap Job needs <code>manage-realm</code></a> says. Otherwise the upgrade stops at the Job. <strong>Your own Keycloak:</strong> give the backplane's Keycloak admin client the realm-management role <code>view-realm</code>, so MEHO can check the approval sign-in, and make sure the flow is set up (<a href="../keycloak-realm/#the-approval-client-meho-cli-approve">The approval client</a>).</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>An approval sign-in carries its own level. The approval client <code>meho-cli-approve</code> signs in through the new login flow <code>meho approval sign-in level</code>, which gives the level <code>meho-approve</code> (level 2 in the realm attribute <code>acr.loa.map</code>). The new setting <code>APPROVAL_SIGN_IN_LEVEL</code> (chart <code>config.approvalSignInLevel</code>: <code>auto</code>, <code>off</code>, <code>observe</code> or <code>required</code>) says whether an approve on the command line or REST needs this level. The default <code>auto</code> requires the level as soon as MEHO's check of the approval sign-in (<code>approvals.sign_in.state</code> in <code>/api/v1/health</code>) is <code>ok</code>. MEHO only logs an approve without the level while the check shows that the realm does not give the level yet (<code>flow_missing</code>, <code>flow_differs</code>, <code>not_bound</code>), or while MEHO cannot read the realm at all (no admin client, or no right to read); <code>approvals.sign_in_level_warning</code> then says so. When the read of the realm fails (a timeout, Keycloak not reachable, an odd answer), MEHO requires the level and refuses an approve without it: "MEHO could not check the approval sign-in of the realm. Try again in a moment." The audit row of an approval records the mode in force (<code>level_in_force</code>). A CLI of an earlier release keeps working: Keycloak gives the approval level also when the CLI does not ask for it.</td>
+<td><strong>Built-in Keycloak:</strong> nothing to do. The bootstrap Job makes the flow, names the level and binds the client, so MEHO requires the level right after the upgrade. It stops with a message when another name already has level 2, or when <code>meho-cli-approve</code> has its own sign-in levels. With the company login on: once MEHO requires the level, a person with only a company account approves in the web interface. <strong>Your own Keycloak:</strong> 1. Run <code>keycloak.authflow.ensure_approval_flow</code> on the Keycloak target, or add the level and the flow by hand (<a href="../keycloak-realm/#the-approval-level">The approval level</a>). 2. Turn off direct grant and device grant on <code>meho-cli-approve</code>. 3. Give MEHO's Keycloak admin client <code>view-realm</code>, so MEHO can check the realm. 4. Check that <code>approvals.sign_in.state</code> is <code>ok</code> and <code>approvals.sign_in_level_warning</code> is empty (or run <code>meho doctor</code>). Until then MEHO only logs an approve without the level, except after a failed read of the realm. A person with only a company account approves in the web interface.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A new switch <code>AGENT_GRANT_REQUIRED</code> (<code>off</code>, <code>observe</code> or <code>on</code>; default <code>off</code>) decides what an agent may do when none of its grants matches a call. With <code>off</code>, nothing changes. With <code>on</code>, such a call is refused on every risk level, also <code>safe</code>, with the code <code>agent_no_grant</code>. With <code>observe</code>, nothing changes, and MEHO logs <code>agent_no_grant_would_deny</code> for each call that <code>on</code> would refuse. People, service accounts and runners are not changed. Migration <code>0155</code> gives every agent that exists at the upgrade one grant for every operation on every target (<code>auto-execute</code>), marked <code>meho:upgrade-read-everything</code> in the <code>CREATED_BY</code> column of <code>meho agent grant list</code>. Two kinds of agents get no such grant: a revoked agent, and an agent that already has a grant for every operation on every target (it keeps the grant it has). A grant never lets an operation above <code>safe</code> run alone, so every agent that gets this grant behaves exactly as before, also with <code>on</code>. An agent that was skipped because its grant for every operation on every target has an end date has no grant once that date passes; with <code>on</code>, MEHO then refuses all its calls. Before you set <code>on</code>, give such an agent a grant with no end date. With <code>observe</code> or <code>on</code>, <code>meho agent-principal register</code> and <code>meho agent create</code> ask for the agent's first grants (<code>--grants none</code>, <code>read-everything</code> or <code>read-targets</code>); the console forms and the REST and MCP calls ask too. An edit asks too when it points an agent definition at another agent that has no live grant yet: without a pick it is refused with 422 <code>starting_grants_required</code> (REST, MCP, <code>meho agent edit</code> and the console).</td>
+<td><strong>Nothing to do</strong> while the switch stays <code>off</code>. To narrow an existing agent, add the grants it needs, then remove its marked grant with <code>meho agent grant revoke &lt;grant-id&gt;</code>. Before you set <code>on</code> (with <code>extraEnv</code> in the chart values): run with <code>observe</code> for a while and check the logs for <code>agent_no_grant_would_deny</code>. When the switch goes <code>on</code>, a multi-step call of an agent that started to wait for approval while the switch was <code>off</code> is refused when a person approves it; the agent asks again. Scripts that register agents or create definitions need <code>--grants</code>. Scripts that edit a definition and change its <code>identity_ref</code> to an agent with no grant need <code>--grants</code> too with <code>meho agent edit</code>, or <code>starting_grants</code> in the body of <code>PATCH /api/v1/agents/{name}</code> and in the <code>meho_agents_edit</code> call. An agent registered after the upgrade with the switch <code>off</code> and no <code>--grants</code> gets no grant. Unless an admin adds one, it runs nothing when the switch goes <code>on</code>. The <code>observe</code> step finds each agent registered after the upgrade with no grant, when it makes a call: give each such agent a grant before you set <code>on</code>. See <a href="../../guides/hosted-agents/#what-the-agent-may-do-with-no-grants">Hosted agents</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>The convention text that an old migration stored is reworded: two texts named internal things (a private repository and the naming history of a lab). A new migration changes only a row that still holds an old text.</td>
+<td><strong>Nothing to do.</strong> A row that an admin edited is not touched.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>One rule for a ticket id (<code>work_ref</code>) everywhere it comes in: calls, the <code>Meho-Work-Ref</code> header, the CLI flag <code>--work-ref</code>, and every REST and MCP search filter. White space at both ends is removed. A blank value, a value with control or invisible characters (for example a line break, a tab or a zero-width space), and a value of more than 256 characters are refused. A blank search filter is refused on REST and in the <code>filter</code> of the broadcast tools. On the MCP tools <code>meho_approvals_list</code>, <code>meho_agents_list_runs</code>, <code>meho_scheduler_list</code> and <code>meho_runbook_list_runs</code>, a blank <code>work_ref</code> still means no filter. A refused value gets 400, 422 or invalid params, with a message that names the rule. A search finds the cleaned id and also the exact text stored before the upgrade, if that text follows the rule. An old id that breaks the rule (for example with a tab) can no longer be used as a filter; such rows still show in a list without a filter. Stored ticket ids are not changed.</td>
+<td><strong>Clients and agents</strong> that send such a ticket id must change it. Otherwise their calls and searches are refused.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>When a system says that the login session ended, MEHO signs in again once. A connector can now say this also for an answer other than 401, for example a 403 with a body of its own (<code>is_session_expired</code>). MEHO sends the operation again only when that cannot change the product twice: a <code>safe</code> operation, or an operation from an API file that sent one request. A write from a hand-written connector, a multi-step operation and a call that ran after an approval are not sent again. The caller then gets <code>connector_auth_failed</code> that says the change may or may not have been made. The audit row shows <code>session_relogin</code>, <code>session_resent</code> and <code>session_relogin_status</code>.</td>
+<td><strong>Nothing to do.</strong> A connector without <code>is_session_expired</code> behaves as before. After a <code>connector_auth_failed</code> with the cause <code>session_ended_&lt;status&gt;_not_resent</code>, check on the system whether the change was made before you call again. Connector package authors: see <a href="https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md"><code>docs/codebase/connector-packages.md</code></a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>In a tenant that has the announce gate on (<code>announce_gate_enabled</code>), a person is never asked for an announce claim. Agents, hosted agent runs, service logins and runner logins are asked as before: their <code>caution</code>-or-higher writes that would run at once need an active claim first, and a service login or a runner login, which cannot make a claim, is refused. A write that waits for approval is not asked. A claim counts only when it is trusted, not completed, and its TTL has not run out. The Broadcast page shows agent announcements only. The operation drawer <code>/ui/broadcast/event/{audit_id}</code> and the page filters <code>op_class</code>, <code>op_id</code> and <code>kind</code> are gone; operations are in the audit log. <code>active_only</code> keeps only trusted claims that are not completed and whose TTL has not run out. The target advisory lists only active agent claims, with <code>owner_sub</code> and <code>expires_at</code> (no <code>actor_sub</code>, no <code>op_id</code>).</td>
+<td><strong>Nothing to do.</strong></td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed (API clients).</strong> Approving a request that asks for a secret value (<code>reveal_secret: true</code>) and waits for approval runs nothing. The approve answer says <code>dispatch_status: "waiting_for_requester"</code> and holds no value. MEHO stores no value. In <code>GET /api/v1/approvals/&lt;id&gt;/result</code>, <code>result</code> is <code>null</code> until the person who asked fetches the value. After the fetch, the stored result has <code>result: null</code>, <code>handle: null</code> and <code>extras.secret_value_withheld: true</code>. A client that reads the stored result gets no value.</td>
+<td>After the approval, the person who asked fetches the value with <code>POST /api/v1/approvals/&lt;id&gt;/reveal</code> or <code>meho secret read --approval &lt;id&gt; --field &lt;name&gt;</code> (or "Show value" in the console). This works once, and only within 15 minutes of the approval. A second or late fetch is refused with <code>409</code>; then send the request again. Change every client that reads the stored result. See <a href="../../can-do/hidden-secrets/">Secret values stay hidden</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed.</strong> A runbook check step (<code>verify.type: operation_call</code>) runs with the identity of the person, agent or service login who advances the run. The check follows the token rule on every path, also from the web console: for a person, only a <code>safe</code> check runs at once, and a <code>caution</code> or higher check waits for approval. A check that reads a secret value never runs at once. A step whose check waits or is refused fails, and the message says why.</td>
+<td>An agent that advances runs needs a grant for the operation and the target of each check step. A service login needs its read scope for the target. A target that reads its login from a secret store per caller reads it as that caller. Check your runbook templates for check steps above <code>safe</code>: approve the waiting request, then retry the step with <code>meho runbook next --retry</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With <code>POLICY_CLASSIFICATION</code> on (Helm <code>config.policy.classification</code>, default off): when the install's policy file makes an operation always wait for approval, it now waits in every tenant. A tenant's entry can make more operations wait, but cannot set an install-wide "always wait" back. A tenant policy import or a single classification edit that tries it is refused, and the message names the install entry. A tenant entry stored before the upgrade that set such a wait back no longer has that effect (its category and labels still count). No database migration.</td>
+<td><strong>Nothing to do</strong> while <code>POLICY_CLASSIFICATION</code> is off. Otherwise run <code>meho policy export</code> for each tenant: an entry with a <code># Has no effect:</code> comment above it no longer ends the wait. Remove it from the file before the next import, or the import is refused. See <a href="../../guides/policy-file/#rules-that-no-file-can-loosen">Rules that no file can loosen</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With <code>POLICY_CLASSIFICATION</code> on (Helm <code>config.policy.classification</code>, default off), the stricter of the install's and the tenant's policy counts. A risk level that the install's policy file sets is now a floor for every tenant: a tenant entry with a lower level no longer lowers it. A tenant's own "always wait" now holds also under a more specific install entry with <code>always_wait: false</code>. A tenant policy import with a lower risk level than a matching install entry is refused, and the message names the install entry. For a tenant entry stored before the upgrade with such a lower level, its level does not count for the operations that the install sets higher. A wide entry still counts for its other operations. No database migration.</td>
+<td><strong>Nothing to do</strong> while <code>POLICY_CLASSIFICATION</code> is off. Otherwise run <code>meho policy export</code> for each tenant: each <code># Has no effect:</code> comment says that the level of the entry below it "does not count for <code>&lt;op&gt;</code>". A wide entry still counts for its other operations, so do not remove its level: add a tenant entry for <code>&lt;op&gt;</code> of the connector that the comment names (and with the group, when the comment names one), with the install's level or higher, or leave <code>&lt;op&gt;</code> out of the match. Fix it before the next import, or the import is refused. Check also the operations where a tenant made something wait and the install's file has <code>always_wait: false</code>: they now wait. See <a href="../../guides/policy-file/#rules-that-no-file-can-loosen">Rules that no file can loosen</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A new switch <code>POLICY_APPROVER_ROUTING</code> (Helm <code>config.policy.approverRouting</code>, default off) sends approvals to the login groups that the <code>routing</code> section of the policy file names. Migration <code>0167</code> adds two columns that may be empty to <code>approval_request</code>: <code>approver_roles</code> and <code>approver_rule</code>. No existing row changes; a request made before the upgrade keeps today's rule. With the switch on and <code>POLICY_CLASSIFICATION</code> off, a routing entry that matches on <code>category</code> fits nothing; <code>/ready</code> shows a note under <code>features.policy.notes</code>.</td>
+<td><strong>Nothing to do</strong> for the upgrade: the migration runs by itself. To use routing, add a <code>routing</code> section to the policy file, import it, and turn the switch on. Turn on <code>POLICY_CLASSIFICATION</code> too when an entry matches on <code>category</code>. See <a href="../../guides/policy-file/#who-approves-routing">Who approves: routing</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>The switch <code>POLICY_APPROVER_ROUTING</code> turns on two things: the routing of approvals and the <code>bindings</code> section of a tenant's policy file. A binding gives a login group one of the five group kinds, and so the approve flags of that kind. A tenant without stored bindings uses the shipped bindings (from <code>JWT_ROLE_GROUPS</code> and <code>JWT_SELF_APPROVER_GROUP</code>) only for a login without a tenant list, and only where they agree with the token: a shipped group alone never gives or takes the approve right. A stored binding is the tenant's own choice: there the group alone gives the flags of its kind.</td>
+<td><strong>Nothing to do</strong> while the switch is off. Before you turn it on, read the <code>bindings</code> that <code>meho policy export</code> shows. With tenant lists (<code>meho_tenants</code>), remove the shipped bindings from an exported file before you import it: after the import they are stored bindings and count for every login. See <a href="../../guides/policy-file/#which-login-group-is-which-team">Which login group is which team</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>Migration <code>0168</code> adds four columns that may be empty: <code>policy_rule</code> and <code>policy_version</code> on <code>audit_log</code> and on <code>approval_request</code>. They name the policy rule that matched a call and the version of the policy file. No existing row changes; rows made before the upgrade keep them empty. MEHO fills them only while <code>POLICY_ENGINE_SHADOW</code> (Helm <code>config.policy.engineShadow</code>, default off) is on. Then the rule is marked as one that did not decide the call: <code>(shadow)</code> on the audit row, <code>"decided": false</code> on the approval request.</td>
+<td><strong>Nothing to do.</strong> The migration runs by itself.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>Migration <code>0169</code> adds two columns that may be empty to <code>dispatch_trace</code>: <code>request_id</code> and <code>operator_sub</code>. No existing row changes. An older trace has neither and is found by time only.</td>
+<td><strong>Nothing to do.</strong> The migration runs by itself.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>Migration <code>0170</code> adds the column <code>targets.connection_changed_at</code>. Old rows get the value of <code>updated_at</code>. No other row changes. A probe no longer makes MEHO sign in to the target again. A secret that changed only in the secret store (Vault) is used after a failed login, or after a person sends the same <code>secret_ref</code> again.</td>
+<td><strong>Nothing to do</strong> for the upgrade: the migration runs by itself. After a secret changes in the store alone, send the <code>secret_ref</code> again: <code>meho targets update &lt;name&gt; --secret-ref &lt;same path&gt;</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed.</strong> An entry in <code>MEHO_TARGET_SSRF_ALLOWLIST</code> (chart <code>config.targetSsrfAllowlist</code>) may end in a port: <code>host.name:8443</code>, <code>10.1.2.3:8443</code> or <code>[fd00::5]:8443</code>. It admits that host on that port only. An entry without a port admits every port. An entry whose port is not a number from 1 to 65535 (for example <code>name:abc</code> or <code>name:0</code>) stops target connections with an error that names the entry. For SSH, PostgreSQL, MSSQL and MongoDB targets MEHO dials the target's <code>port</code> field, or the default port when the field is empty. It does not dial a port written in the host. An entry with a port matches a target only when the target has its port set.</td>
+<td>Check <code>MEHO_TARGET_SSRF_ALLOWLIST</code> before the upgrade: every port after a colon must be a number from 1 to 65535. A target of type SSH, PostgreSQL, MSSQL or MongoDB that has its port only in the host (for example <code>db-01:27018</code>) needs the port in its <code>port</code> field.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>The error text of a target secret MEHO cannot read changes. When Vault refuses to read a target's own <code>secret_ref</code>, the <code>connector_vault_forbidden</code> answer holds no <code>exception_message</code> and no "Vault said:" text, so it shows no Vault address. It says whether MEHO built the ref from the target name (<code>secret_ref_derived</code>), and for such a ref it advises a path MEHO may read plus <code>meho targets update &lt;name&gt; --secret-ref &lt;path&gt;</code>. A refused read of another Vault path on a target names that path (<code>refused_path</code>), not the target's ref. A refused read with no target (a <code>vault.*</code> operation) keeps <code>exception_message</code>. A probe (<code>POST /api/v1/targets/{name}/probe</code>, <code>meho targets probe</code>) of a target whose secret is missing or refused answers 422 with <code>target_secret_not_found</code> or <code>connector_vault_forbidden</code>; the <code>targets.probe</code> operation answers with the same <code>error_code</code> as a call.</td>
+<td><strong>Nothing to do</strong>, unless a script, a Sensor or an agent prompt reads <code>exception_message</code> or the "Vault said:" text of a target's Vault error: read <code>error_code</code>, <code>secret_ref</code>, <code>secret_ref_derived</code> and <code>refused_path</code> instead. A script that checks a probe for a 500 <code>fingerprint_failed</code> gets a 422 for these two cases.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A secret path that a caller gives in a parameter (the Kubernetes secret writes, <code>secret_env</code> of the Linux script operation, <code>password_ref</code> of the AD password operation) and that Vault refuses to read now answers with the operation's own parameter error, not <code>connector_vault_forbidden</code>. For Kubernetes the answer is <code>vault_credentials_read_error</code>. A Vault answer for a second path now says "write" when Vault refused a write, and "read" otherwise. For a target whose <code>secret_ref</code> is the default path MEHO builds, the text no longer says the target has no <code>secret_ref</code>: it says the path is the default one.</td>
+<td><strong>Nothing to do</strong>, unless a script or an agent prompt waits for <code>connector_vault_forbidden</code> after a refused secret path in one of these parameters: read the operation's own error instead (for Kubernetes, <code>vault_credentials_read_error</code>).</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>MEHO ships the "small team" policy file (<code>deploy/policy-profiles/small-team.yaml</code>). While no policy is imported for the whole install, MEHO uses this file as the install's policy. It changes no answer: every operation keeps its risk level, its approval rule and who may approve it. An install policy import (<code>--scope install</code>) that waits for a second admin during the upgrade, on an install without an imported install policy, stops at the approval with "The policy changed after this import was planned." No database migration.</td>
+<td>Run that import again after the upgrade: <code>meho policy diff --scope install &lt;file&gt;</code>, then <code>meho policy import --scope install &lt;file&gt;</code>. A second admin approves it. Tenant imports are not affected. See <a href="../../guides/policy-file/#start-from-the-small-team-file">Start from the "small team" file</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With <code>MCP_CLIENT_PER_TOOL_KIND</code> on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role <code>manage-users</code>. Migration <code>0172</code> adds one index on <code>audit_log</code> (person and time); it changes no row, and on a large audit log it takes a while.</td>
+<td><strong>Built-in Keycloak:</strong> nothing to do; <code>meho-admin</code> already has <code>manage-users</code>. <strong>Your own Keycloak:</strong> give MEHO's Keycloak admin client <code>manage-users</code> before you turn the switch on. Without the role, the button shows an error that names it. See <a href="../keycloak-realm/#the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With approval notifications on (<code>webPush.enabled: true</code>), MEHO now sends them. A browser that a person switched on before the upgrade gets its first message only after that person's next sign-in to the web console, or the next time they open the account page. Until then MEHO does not know their login groups for it. After that, a person whose last sign-in is more than 7 days old gets no message until they sign in again.</td>
+<td>Ask the people who use notifications to sign in to the web console once after the upgrade. Allow MEHO to reach the push services of the browser makers: see <a href="../#push-services-for-approval-notifications">Push services for approval notifications</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>The ticket id rule also covers the console: the ticket id search boxes of the agent runs, scheduler, audit and approvals pages, and the approvals "Approve group in order" window. A refused value now gets a 422 answer. The page then lists nothing and shows why the value was refused. A blank box still means no filter.</td>
+<td>None. Operators who search with a ticket id that holds a tab, a line break, a zero-width space or more than 256 characters see the rule text and type the id again.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed.</strong> A person must approve each <code>harbor.robot.create</code> call. A standing grant or a run approval that names <code>harbor.robot.create</code> no longer covers it: after the upgrade, each call waits until a person approves it.</td>
+<td>Tell the teams whose agents or runbooks make Harbor robots that each call now waits for a person. An agent must give <code>vault_target</code> with a path inside the tenant's Vault path (for example <code>vault:tenants/&lt;tenant_id&gt;/ci/harbor#secret</code>), so MEHO stores the robot secret in Vault.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>With <code>POLICY_APPROVER_ROUTING</code> on, the install's approver routing is a floor: a tenant's routing can only make it narrower. A person must be in the install's entry and in the tenant's entry. A tenant policy import with a wider routing entry is refused, and the message names the category and the install's groups. A wider tenant entry stored before the upgrade no longer widens anything. At the approve click MEHO also checks the install's current routing. A tenant may still give an operation another category for its own rules; the install's routing for the operation still applies, with the category that the install's file alone gives it. A call that started to wait while <code>POLICY_APPROVER_ROUTING</code> was off keeps the older rule after the switch is turned on, until it is decided or runs out. Migration <code>0173</code> adds two columns that may be empty: <code>approval_request.approver_category</code> and <code>approval_request.approver_install_category</code>. A request that already waits for routed approvers gets the empty text in both: MEHO does not know its category. At the click such a request is refused when an install entry that matches on <code>category</code> could fit it.</td>
+<td><strong>Nothing to do</strong> while <code>POLICY_APPROVER_ROUTING</code> is off. Otherwise run <code>meho policy diff --scope install</code> with the install's current file: each warning names a tenant entry that is wider. Fix those tenant files before their next import. Reject a request that waited before the upgrade and is refused for its unknown category, and start the call again. See <a href="https://evoila.github.io/meho/latest/guides/policy-file/#the-installs-routing-is-a-floor">The install's routing is a floor</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed.</strong> The Keycloak connector has no built-in managed realm any more. A Keycloak target must name its realm in <code>extras.managed_realm</code>. Without it, MEHO refuses every operation on that target before any call to Keycloak, <code>meho targets probe</code> reports it, and a create or update of the target is refused with HTTP 422. The admin realm still defaults to <code>master</code>.</td>
+<td>Before the upgrade, set the managed realm on every Keycloak target that names none: <code>meho targets update &lt;name&gt; --extra admin_realm=master --extra managed_realm=&lt;realm&gt;</code>. <code>--extra</code> replaces the whole <code>extras</code> map, so repeat every key you keep. Or set it in the console edit form ("Managed realm"). To find these targets, run <code>meho doctor</code>: it lists every Keycloak target MEHO refuses, in your tenant, or in every tenant for a platform admin. The same list is <code>GET /api/v1/targets/checks/keycloak-realm</code>. A realm is one plain name: no <code>/</code>, <code>\</code>, <code>?</code>, <code>#</code> or <code>%</code>, and no spaces around it. See <a href="https://evoila.github.io/meho/latest/guides/targets-and-secrets/#keycloak-targets-need-a-managed-realm">Keycloak targets need a managed realm</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A request for <code>keycloak.role_mapping.assign</code> or <code>keycloak.role_mapping.client.assign</code> that already waited for approval before this version does not run, in every realm. Its card holds no list of what the role gives. The refusal says: "This request was made before MEHO read what a role gives. Send it again."</td>
+<td>Send such a request again after the upgrade.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td><strong>Action needed (service logins and run approvals).</strong> These Keycloak writes are changes of rights, in every realm: <code>keycloak.realm.create</code>, <code>keycloak.realm.update</code>, <code>keycloak.client.create</code>, <code>keycloak.client.update</code>, <code>keycloak.client_scope.create</code>, <code>keycloak.client_scope.protocol_mapper.update</code>, <code>keycloak.protocol_mapper.create</code>, <code>keycloak.user.create</code>, <code>keycloak.user.update</code>, <code>keycloak.user.enable</code>, <code>keycloak.user.reset_password</code>, <code>keycloak.user.required_actions.update</code>, <code>keycloak.user.credential.delete</code>, <code>keycloak.role_mapping.assign</code>, <code>keycloak.role_mapping.client.assign</code>, <code>keycloak.group.member.add</code>, <code>keycloak.group.update_attributes</code>, <code>keycloak.authflow.ensure_approval_flow</code>, <code>keycloak.authflow.ensure_approval_touch</code> and <code>keycloak.authflow.ensure_passkey_code_skip</code>. Another admin (a tenant admin or a platform admin) must approve each call. The requester never approves their own request, and a MEHO-SA-Operator who is not an admin cannot approve it. A standing grant, an older grant row and a run approval do not cover them, a new grant or run approval that names one of them is refused, and no operation setting turns their approval off: an edit that tries is refused, and an override row with approval off does not count. This holds for every operation that is registered as a change of rights. A request that waits for approval at the upgrade follows the new rule. An install with one admin cannot get these writes approved until it has a second admin. The approval card of <code>keycloak.client.update</code> and <code>keycloak.realm.update</code> shows the values now next to the new values, and the card of <code>keycloak.protocol_mapper.create</code> shows the client's mappers now and the new one. Secret fields stay hidden. What <code>preview_operation</code>, <code>meho_approvals_get</code> and <code>meho_approvals_list</code> give back to the caller for these three writes is behind the new switch <code>KEYCLOAK_RIGHTS_CHANGE_CARDS</code> (off by default). When <code>keycloak.group.member.add</code>, <code>keycloak.role_mapping.assign</code>, <code>keycloak.role_mapping.client.assign</code>, <code>keycloak.user.update</code>, <code>keycloak.user.credential.delete</code> or <code>keycloak.group.update_attributes</code> waits for approval, MEHO reads the realm name from Keycloak (<code>GET /admin/realms/{realm}</code>) to see whether the target is MEHO's own login realm. When that read fails, MEHO treats the realm as its own login realm, and the stricter approver rules of that realm apply.</td>
+<td>A service account or an agent that ran these writes under a grant or a run approval now waits for a person on each call. Ask another admin to approve them in the console or the CLI. Remove grant rows that name them; they clear nothing. An install with one admin adds a second admin in Keycloak itself (in <code>MEHO-Admins</code> or <code>MEHO-Platform-Admins</code>) before it runs these writes. To give these tools the same cards, set the switch with Helm: <code>extraEnv: [{name: KEYCLOAK_RIGHTS_CHANGE_CARDS, value: "true"}]</code>. <strong>Your own Keycloak:</strong> give MEHO's Keycloak admin client the realm-management role <code>view-realm</code>, so it can read the realm. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>After approval, the Keycloak user writes act on the user id that the approval card shows. They do not look the username up again. This covers 13 operations: <code>keycloak.user.disable</code>, <code>.enable</code>, <code>.reset_password</code>, <code>.logout</code>, <code>.delete</code>, <code>.update</code>, <code>.required_actions.update</code> and <code>.credential.delete</code>, <code>keycloak.role_mapping.assign</code>, <code>.client.assign</code> and <code>.client.remove</code>, and <code>keycloak.group.member.add</code> / <code>.remove</code>. The approved run is refused, and nothing is changed, when the card shows no stored username (the user could not be read when the request was made), or when the username stored in Keycloak now is not the one on the card (the user was renamed while the request waited). This holds for a request by id, by username, or by both. The results of these writes show the username that is stored in Keycloak. A request for one of these operations that waits for approval at the upgrade is refused when it runs, also one that was sent by id only: its card from before the upgrade does not show the stored username, or has no user id. For <code>keycloak.user.delete</code> this holds when its card shows no username or said that the user does not exist.</td>
+<td>Send these requests again after the upgrade. Requests made after the upgrade are not affected by the upgrade.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>New switch <code>MCP_PROFILE_CONNECTOR_LISTS</code> (off): an MCP tool profile from <code>MCP_CONNECTOR_PROFILES</code> can limit a session to named connectors, and a login token with the <code>mcp_profile</code> claim works only at <code>/mcp?profile=&lt;name&gt;</code>.</td>
+<td>None. To use it, see https://github.com/evoila/meho/blob/main/docs/codebase/mcp.md and <code>meho admin keycloak bootstrap-clients --mcp-profile</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>MEHO hides more secret fields. Results, approval previews, audit rows, the call trace and the broadcast now show <code>[REDACTED:param_name]</code> in place of the value of these fields: names that end in <code>auth_key</code>, <code>priv_key</code>, <code>authentication_key</code>, <code>privacy_key</code>, <code>community_string</code>, <code>tacacs_key</code>, <code>radius_key</code>, <code>hmac_key</code>, <code>signing_key</code>, <code>store_key</code> or <code>application_key</code>, the names <code>pass_phrase</code> and <code>snmp_community</code>, and a <code>community</code> field in an SNMP place (next to an SNMP field, under an <code>snmp</code> key, or a name/value pair named <code>community</code>). Every spelling counts: <code>authKey</code>, <code>auth-key</code>, <code>AUTHKEY</code>, <code>snmpAuthKey</code>. A name that ends in <code>_ref</code> is hidden when the rest of it is such a name (<code>auth_key_ref</code>).</td>
+<td>A caller that needs such a value reads it through its secret reference, not from the result. Check scripts that read one of these fields from a result: they now get the marker. A settings file that has one of the new names under a target's <code>extras</code> is now refused by the settings check: store the value in OpenBao and use <code>secret_ref</code>. A call that sends one of the new names now shows in the broadcast in its short summary form, without its params.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A person's REST write of a target or of the topology graph made with a token (the <code>meho</code> CLI, scripts) waits for approval. <code>POST</code>, <code>PATCH</code> and <code>DELETE /api/v1/targets</code>, <code>POST /api/v1/topology/edges</code>, <code>POST /api/v1/topology/edges/bulk</code>, <code>DELETE /api/v1/topology/edges/{edge_id}</code> and <code>DELETE /api/v1/topology/nodes/{node_id}</code> answer 202 with the id of the approval request. Nothing is written until a person approves it. Only a person in the web console writes at once.</td>
+<td><strong>Upgrade the <code>meho</code> CLI together with the backplane.</strong> An older CLI reads the 202 answer as done and reports the write, but nothing is written yet. Tell CLI and script users that target and topology writes wait for approval: they approve them in the web interface or with <code>meho approvals approve</code>. <code>meho targets import</code> makes one approval request per row.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>A run approval never covers an operation that reads a credential (the <code>credential_read</code> class, for example <code>k8s.secret.read_to_ref</code>). Each call of such an operation waits for a person, the same as under a standing grant. This holds also for a run approval that a person approved before the upgrade: the entry stays on the list, and each of its calls waits. A new request that lists such an operation is accepted. The answer of the request, <code>meho approvals runs show</code> and <code>meho approvals runs approve</code> name the entry under <code>entries_that_wait</code> ("each call waits for a person"; for <code>vault.kv.read</code>, "each call with reveal_secret waits for a person"). A read that returns no secret value runs at once and gets no note.</td>
+<td>An automation run that reads credentials waits for a person on each such call. Approve each call in the console or the CLI, or leave the operation out of the run. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.47.0</strong></td>
+<td>An approved <code>secret.move</code> with a <code>vault-target:</code> side now checks that each Vault target is the one the approval showed. A request that waits for approval from before the upgrade does not show the target ids, so its approved run is refused and nothing is read or written.</td>
+<td>Before the upgrade, approve or reject each waiting <code>secret.move</code> with a <code>vault-target:</code> side. After the upgrade, send a new request for each one that was refused.</td>
+</tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
+<td>With <code>POLICY_CLASSIFICATION</code> on, a step of a multi-step operation now reads the category and labels of an override of its operation, like a direct call. This changes a step also while <code>POLICY_APPROVER_ROUTING</code> is off. With <code>POLICY_APPROVER_ROUTING</code> on too, a step waits for the same approvers as a direct call. The approval card, the "may approve" sign, the bell count and the push messages now use the install's current routing, as the approve click does. The audit row of an approval names the install entry that counted (<code>approver_floor</code>). A tenant policy import no longer refuses a wider routing entry in two cases, it warns instead: when an earlier entry of the same tenant fits each of its changes first, and when both connector patterns have a wildcard and differ. <code>meho policy export</code> of a tenant writes a <code># Has no effect where wider:</code> comment above a routing entry that is wider than the install's. A request with routed approvers but no stored install category (it started to wait while <code>POLICY_CLASSIFICATION</code> was off, or an older build of main wrote it) counts as "category not known" while <code>POLICY_CLASSIFICATION</code> is on. No schema migration.</td>
+<td>If <code>POLICY_CLASSIFICATION</code> is on, a step of a multi-step operation can now wait for approval, also while <code>POLICY_APPROVER_ROUTING</code> is off. Nothing else to do while <code>POLICY_APPROVER_ROUTING</code> is off. Otherwise reject a waiting request that the click now refuses because MEHO does not know its category, and start the call again. See <a href="https://evoila.github.io/meho/latest/guides/policy-file/#the-installs-routing-is-a-floor">The install's routing is a floor</a>.</td>
+</tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
+<td>Before v0.47.0, a probe of an OpenBao server stored the product as <code>vault</code>. Since v0.47.0 the OpenBao connector serves only a target whose stored product is <code>openbao</code>. An OpenBao 2.x target probed before the upgrade matches no connector, and every <code>vault.*</code> call on it fails with <code>no_connector</code>, even though its detected version looks right. The error now says what to do.</td>
+<td>Probe every OpenBao target again after the upgrade: <code>meho targets probe &lt;name&gt;</code>. The probe finds <code>openbao</code> and stores it, and calls work again.</td>
+</tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
+<td>MEHO now says when a change of rights cannot be approved because the tenant has only one admin: the answer of the call says "This change needs a second admin to approve it. This tenant has only one admin." with a link to the guide. <code>meho doctor</code> shows a new line "second admin", a warning when the tenant has one admin. <code>/api/v1/health</code> and <code>meho_status</code> report the number in <code>approvals.rights_change_admins</code>. See https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin.</td>
+<td>Run <code>meho doctor</code>. When the line "second admin" warns, add a second admin in Keycloak (in <code>MEHO-Admins</code> or <code>MEHO-Platform-Admins</code>). No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
+<td>New optional setting <code>VAULT_OIDC_ROLE_TENANTS</code> (through the chart's <code>extraEnv</code>): a comma-separated list of the tenant ids that may use the shared Vault login role <code>VAULT_OIDC_ROLE</code>. When it is set, a tenant that is not in the list and has no entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> gets a clear refusal, and MEHO tries no Vault login. A wrong entry stops MEHO from starting.</td>
+<td>No action needed. The default is empty, and then nothing changes. To turn it on, set it to the ids of the tenants that use the shared role, then restart MEHO. Leave it empty on the built-in Vault of the chart.</td>
+</tr>
+</tbody>
+</table>
+<p>New rows come from one small file per row in
+<a href="https://github.com/evoila/meho/tree/main/docs/upgrade-rows"><code>docs/upgrade-rows/</code></a>.
+Each release also adds the rows of that release to
+<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes"><code>docs/deploying.md</code></a>;
+release notes for each version are on the
+<a href="https://github.com/evoila/meho/releases">releases page</a> with the full
+narrative in the
+<a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>.</p>
+<h2 id="day-2-operations-beyond-upgrades">Day-2 operations beyond upgrades<a class="headerlink" href="#day-2-operations-beyond-upgrades" title="Permanent link">&para;</a></h2>
+<p>Backup/restore and observability guides land on this site with MEHO's
+disaster-recovery workstream. Until then: PostgreSQL is MEHO's durable
+<em>application</em> store and the thing to back up first (see the
+<a href="../../architecture/#state-postgresql-pgvector">reference architecture</a>);
+the Valkey activity feed is ephemeral by design. For the knowledge store,
+see <a href="#back-up-and-restore-the-knowledge-store">Back up and restore the knowledge store</a>.</p>
+<p>A PostgreSQL restore alone does not rebuild a working deployment. The
+target credentials themselves live in Vault or Google Secret Manager,
+realm and client configuration lives in Keycloak, and your TLS Secrets
+and Helm values live in the cluster and in whatever you keep them under
+version control in. Each needs its own backup or reprovisioning path
+until the full guide lands.</p>
+<h2 id="back-up-and-restore-the-knowledge-store">Back up and restore the knowledge store<a class="headerlink" href="#back-up-and-restore-the-knowledge-store" title="Permanent link">&para;</a></h2>
+<p>MEHO keeps its knowledge in the backplane database (PostgreSQL). One
+database backup holds all of it. There is no other copy.</p>
+<h3 id="what-the-database-holds">What the database holds<a class="headerlink" href="#what-the-database-holds" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>Where</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Entries</td>
+<td>table <code>documents</code>, rows with <code>source = 'kb'</code></td>
+<td>One row per entry. It holds the latest text and the metadata.</td>
+</tr>
+<tr>
+<td>Revisions</td>
+<td>table <code>kb_revision</code></td>
+<td>One row per stored text of an entry. Older texts stay readable here.</td>
+</tr>
+<tr>
+<td>Passages and embeddings</td>
+<td>table <code>documents</code>, rows with <code>source = 'kb-passage'</code></td>
+<td>The pieces of text that search ranks, with their embeddings. An embedding is a list of numbers for search by meaning. It is stored with the <code>pgvector</code> extension.</td>
+</tr>
+</tbody>
+</table>
+<p>The tenant settings file is <strong>not</strong> a backup of the knowledge store. It
+holds policies, conventions and targets, and no knowledge. See
+<a href="../ways-to-install/#backup-and-the-settings">Backup and the settings</a>.</p>
+<h3 id="take-a-backup">Take a backup<a class="headerlink" href="#take-a-backup" title="Permanent link">&para;</a></h3>
+<p>Run <code>pg_dump</code> against the backplane database, with the custom format.
+Run it from a machine or pod that has the PostgreSQL client tools. Use
+the same major version as the server, or a newer one:</p>
+<div class="highlight"><pre><span></span><code>pg_dump<span class="w"> </span>--format<span class="o">=</span>custom<span class="w"> </span>--file<span class="o">=</span>meho-backplane.dump<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"postgresql://&lt;user&gt;@&lt;host&gt;:5432/&lt;database&gt;"</span>
+</code></pre></div>
+<p>Store the file somewhere that survives the loss of the server. Take the
+backup on a schedule, and take one before each upgrade.</p>
+<h3 id="restore-into-an-empty-database">Restore into an empty database<a class="headerlink" href="#restore-into-an-empty-database" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Create an empty database on a PostgreSQL server where the <code>vector</code>
+   extension is available (the database image of the MEHO chart has it).</li>
+<li>Restore the dump into it:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>createdb<span class="w"> </span>-h<span class="w"> </span>&lt;host&gt;<span class="w"> </span>-U<span class="w"> </span>&lt;user&gt;<span class="w"> </span>&lt;new-database&gt;
+pg_restore<span class="w"> </span>--no-owner<span class="w"> </span>--exit-on-error<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--dbname<span class="o">=</span><span class="s2">"postgresql://&lt;user&gt;@&lt;host&gt;:5432/&lt;new-database&gt;"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>meho-backplane.dump
+</code></pre></div>
+<p>The dump contains the line that creates the <code>vector</code> extension, so
+   the restore creates it. If your database user may not create
+   extensions, ask a database administrator to run
+   <code>CREATE EXTENSION vector;</code> in the new database first, and leave out
+   <code>--exit-on-error</code>. <code>pg_restore</code> then reports one "already exists"
+   error for that line. It is safe to ignore.
+3. Point MEHO at the new database (the <code>DATABASE_URL</code> setting) and start it.</p>
+<p>A restore of the database alone does not bring back credentials,
+Keycloak or the Helm values. See the notes above.</p>
+<h3 id="check-after-a-restore">Check after a restore<a class="headerlink" href="#check-after-a-restore" title="Permanent link">&para;</a></h3>
+<p>Pick one entry that you know:</p>
+<ol>
+<li><strong>The entry:</strong> <code>meho kb show &lt;slug&gt;</code> returns the latest text.</li>
+<li><strong>Its revisions:</strong> in the new database, this lists every stored text:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">revision_number</span><span class="p">,</span><span class="w"> </span><span class="k">left</span><span class="p">(</span><span class="n">r</span><span class="p">.</span><span class="n">body</span><span class="p">,</span><span class="w"> </span><span class="mi">60</span><span class="p">)</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">kb_revision</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="k">JOIN</span><span class="w"> </span><span class="n">documents</span><span class="w"> </span><span class="n">d</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">d</span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">entry_id</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">d</span><span class="p">.</span><span class="k">source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'kb'</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">d</span><span class="p">.</span><span class="n">source_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'&lt;slug&gt;'</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">revision_number</span><span class="p">;</span>
+</code></pre></div>
+<p>An agent reads one older text through the MCP resource
+   <code>meho://kb/id/&lt;entry&gt;/revision/&lt;revision&gt;</code>.
+3. <strong>A search hit:</strong> <code>meho kb search "&lt;words from that entry&gt;"</code> lists
+   the entry.</p>
+<p>A test in the MEHO code (<code>test_kb_backup_restore_pg.py</code>) takes a dump
+with <code>pg_dump</code>, restores it with <code>pg_restore</code>, and checks the same three
+things.</p>
+<h3 id="if-the-restored-meho-uses-another-embedding-model">If the restored MEHO uses another embedding model<a class="headerlink" href="#if-the-restored-meho-uses-another-embedding-model" title="Permanent link">&para;</a></h3>
+<p>The dump keeps the embeddings that the old model made. Search compares
+the question, which the new model embeds, with these stored numbers.
+Numbers from two different models do not match well, so search results
+get worse.</p>
+<p>To fix it, write each entry again with the same text. MEHO sees that
+the passages came from another model and builds them again. The
+easiest way is <code>meho kb ingest</code> over the source files of your entries.
+An entry that has no source file can be written again with
+<code>meho kb add &lt;slug&gt; --body @&lt;file&gt;</code>.</p>
+<p>A new model must give vectors of the same size (384 numbers). The
+database column has that size fixed. A model with another size needs a
+database migration first.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../tls-ingress/" class="md-footer__link md-footer__link--prev" aria-label="Previous: TLS and ingress">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                TLS and ingress
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../../clients/" class="md-footer__link md-footer__link--next" aria-label="Next: Connect clients">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Connect clients
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>

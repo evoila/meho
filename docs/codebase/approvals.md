@@ -791,7 +791,11 @@ run approval never covers 'OP': it reads, writes or makes a credential, so
 a person approves each call. Leave it out." The call of an agent or a
 service login waits also at level `safe`. The approval of a parent
 multi-step run does not cover such a step: it waits for its own approval
-(`_covered_by_approved_run`). Details:
+(`_covered_by_approved_run`). When the person approves it, the multi-step
+run goes on with this step cleared; when the person rejects it, the run
+ends and the step never runs. An install or tenant override does not turn
+off the approval that the code turns on for an operation that writes or
+makes a credential. Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),
 [run-approvals.md](run-approvals.md),
 [agent-permission-grants.md](agent-permission-grants.md).

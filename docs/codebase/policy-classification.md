@@ -150,7 +150,10 @@ always waits.
    `destructive` always waits. So a level never goes below the code's
    value, and `always_wait: false` only goes back to the code's value;
 3. the floors: an operation that connects to an address the caller gives
-   is at least `caution` and always waits.
+   is at least `caution` and always waits. An operation that writes or
+   makes a credential (class `credential_write` or `credential_mint`)
+   keeps the approval its code turns on, also when an install or tenant
+   override turns it off (`_with_floors`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they

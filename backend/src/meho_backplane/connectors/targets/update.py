@@ -80,6 +80,7 @@ __all__ = [
     "build_targets_update_preview",
     "register_targets_update_operation",
     "targets_update",
+    "targets_update_card_warnings",
 ]
 
 TARGETS_UPDATE_OP_ID: Final[str] = "targets.update"
@@ -397,6 +398,24 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
     if not ctx.agent_preview or get_settings().preview_typed_writes:
         preview["changes"] = _preview_changes(row, ctx.params, ctx)
     return preview
+
+
+async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
+    """The realm warnings for the target as it will be after ``targets.update``.
+
+    A sent ``product`` or ``extras`` replaces the stored one; a field that is
+    not sent keeps its stored value. No live target gives no warning: the
+    call would fail.
+    """
+    target_id = _parse_target_id(ctx.params)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await resolve_target_by_id(session, ctx.operator.tenant_id, target_id)
+    if row is None:
+        return []
+    return keycloak_realm_warnings(
+        ctx.params.get("product", row.product), ctx.params.get("extras", row.extras)
+    )
 
 
 async def register_targets_update_operation(

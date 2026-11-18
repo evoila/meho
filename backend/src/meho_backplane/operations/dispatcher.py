@@ -418,6 +418,7 @@ from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
     blast_radius_missing_reason,
+    build_card_warnings,
     build_permission_preflight,
     build_proposed_effect,
     describe_preview_provenance,
@@ -3355,8 +3356,10 @@ async def _build_proposed_effect(
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
         # A setting of the target that is allowed but risky, for example a
-        # Keycloak target that manages MEHO's own sign-in realm.
-        risky_settings = target_warnings(target)
+        # Keycloak target that manages MEHO's own sign-in realm. A write that
+        # creates or changes a target gives its own lines, from the target as
+        # it will be after the write.
+        risky_settings = [*target_warnings(target), *await build_card_warnings(ctx)]
         if risky_settings:
             base["target_warnings"] = risky_settings
         # Stamp the reviewer-facing preview provenance onto every parked

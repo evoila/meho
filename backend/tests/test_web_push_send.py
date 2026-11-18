@@ -49,7 +49,13 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.targets.ops import TARGETS_REGISTER_OP_ID
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, Tenant
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
+    AuditLog,
+    Tenant,
+    TenantPolicy,
+)
 from meho_backplane.operations import approval_queue, reset_dispatcher_caches
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
@@ -400,6 +406,38 @@ async def test_a_routed_request_reaches_only_the_routed_groups(
     assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
     assert [m["title"] for m in push_service.to(sa_operator)] == ["An approval waits"]
     assert push_service.to(approver) == []
+
+
+async def test_a_routed_request_reaches_only_the_groups_of_the_install_routing_now(
+    push_service: _FakePushService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install's routing as it is now counts, as at the approve click."""
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
+    get_settings.cache_clear()
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=None,
+                document={
+                    "classifications": [],
+                    "routing": [{"match": {"risk": "caution"}, "approvers": ["Admins"]}],
+                },
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    admin, sa_operator = _browser("admin"), _browser("sa")
+    await _subscribe(admin, sub="admin", login="admin")
+    await _subscribe(sa_operator, sub="sa-op", login="sa")
+    request = _request(level="caution")
+    # Stored before the install's routing was made narrower.
+    request.approver_roles = ["SA-Operators", "Admins"]
+    request.approver_rule = "install:routing[0]"
+
+    await _step(request)
+
+    assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
+    assert push_service.to(sa_operator) == []
 
 
 @pytest.mark.parametrize(

@@ -3929,6 +3929,7 @@ meho operation groups <connector_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--include-raw` — also count raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 
 ### `meho operation preview`
@@ -3986,6 +3987,7 @@ meho operation search <connector_id> [query] [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
+- `--include-raw` — also show raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits

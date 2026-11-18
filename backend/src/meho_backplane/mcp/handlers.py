@@ -101,6 +101,7 @@ from meho_backplane.connectors.result_handle_store import (
 )
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.audit import write_mcp_audit_row
+from meho_backplane.mcp.field_path import field_path
 from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.profiles import (
     profile_admits,
@@ -222,7 +223,7 @@ def _drop_empty_optional_text(arguments: dict[str, Any], schema: dict[str, Any])
     }
 
 
-def _schema_error_text(exc: jsonschema.ValidationError) -> str:
+def _schema_error_text(exc: jsonschema.ValidationError, *, with_path: bool = False) -> str:
     """Return the human-readable part of a schema-violation message.
 
     ``jsonschema``'s own ``maxLength`` message repeats the whole offending
@@ -230,10 +231,13 @@ def _schema_error_text(exc: jsonschema.ValidationError) -> str:
     free-text argument is the one case where that is both useless and
     costly — the value can be tens of kilobytes — so it is rendered as
     ``<field>: at most <n> characters`` instead. Every other violation keeps
-    the library's message.
+    the library's message. With *with_path* (the tool's
+    ``input_error_path``), that message starts with the path of the wrong
+    input, for example ``query.filter[0].op: ...`` (#4174).
     """
     if exc.validator != "maxLength":
-        return exc.message
+        path = field_path(exc.absolute_path) if with_path else ""
+        return f"{path}: {exc.message}" if path else exc.message
     field = ".".join(str(part) for part in exc.path) or "value"
     return f"{field}: at most {exc.validator_value} characters"
 
@@ -622,7 +626,8 @@ async def handle_tools_call(
         except jsonschema.ValidationError as exc:
             status_code = 400
             raise McpInvalidParamsError(
-                f"tools/call {name!r}: arguments failed inputSchema: {_schema_error_text(exc)}",
+                f"tools/call {name!r}: arguments failed inputSchema: "
+                f"{_schema_error_text(exc, with_path=defn.input_error_path)}",
             ) from exc
 
         # #6099: a stored result keeps the session's profile when it has a

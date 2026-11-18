@@ -813,6 +813,7 @@ import logging  # noqa: E402
 
 import pydantic  # noqa: E402
 import structlog  # noqa: E402
+from structlog.tracebacks import ExceptionDictTransformer  # noqa: E402
 
 from meho_backplane.auth.operator import TenantRole  # noqa: E402
 
@@ -840,7 +841,8 @@ def _configure_log_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

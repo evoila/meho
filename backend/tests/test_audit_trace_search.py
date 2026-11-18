@@ -288,7 +288,8 @@ async def test_route_as_an_agent_reads_nothing_when_the_tenant_switch_is_off(
 ) -> None:
     await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=False)
     rid = uuid.uuid4()
-    await _seed(tenant_id=_TENANT_A, request_id=rid, operator_sub="u1", when=datetime.now(UTC))
+    # The trace is the agent's own, so only the tenant switch keeps it back.
+    await _seed(tenant_id=_TENANT_A, request_id=rid, operator_sub="op-1", when=datetime.now(UTC))
     agent = _get(client, f"?request_id={rid}", principal_kind="agent")
     assert agent.status_code == 200, agent.text
     assert agent.json()["items"] == []
@@ -333,3 +334,15 @@ async def test_route_as_a_person_lists_every_trace_of_the_tenant(client: TestCli
     assert len(person.json()["items"]) == 3
     by_caller = _get(client, "?caller=person-1", sub="person-2")
     assert len(by_caller.json()["items"]) == 1
+
+
+async def test_route_as_a_service_login_lists_only_its_own_traces(client: TestClient) -> None:
+    await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=True)
+    now = datetime.now(UTC)
+    own = await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="svc-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="person-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub=None, when=now)
+    for query in ("?caller=person-1", "", "?caller=svc-1"):
+        service = _get(client, query, principal_kind="service", sub="svc-1")
+        assert service.status_code == 200, service.text
+        assert [item["audit_id"] for item in service.json()["items"]] == [str(own)], query

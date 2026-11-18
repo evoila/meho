@@ -568,3 +568,32 @@ async def test_trace_with_no_stored_caller_is_not_shown_to_an_agent(client: Test
     person = _get_trace(client, audit_id, principal_kind=None)
     assert person.status_code == 200, person.text
     assert person.json()["trace_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_trace_service_login_gets_only_the_trace_of_its_own_call(
+    client: TestClient,
+) -> None:
+    await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
+    own = await _seed_audit_row(tenant_id=_TENANT_A, second=1)
+    await _seed_trace(
+        audit_id=own, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans(), operator_sub="svc-1"
+    )
+    other = await _seed_audit_row(tenant_id=_TENANT_A, second=2)
+    await _seed_trace(
+        audit_id=other,
+        tenant_id=_TENANT_A,
+        spans=_vendor_and_flux_spans(),
+        operator_sub="person-sub",
+    )
+    no_caller = await _seed_audit_row(tenant_id=_TENANT_A, second=3)
+    await _seed_trace(audit_id=no_caller, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
+
+    mine = _get_trace(client, own, principal_kind="service", sub="svc-1")
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["trace_present"] is True
+    for audit_id in (other, no_caller):
+        resp = _get_trace(client, audit_id, principal_kind="service", sub="svc-1")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["trace_present"] is False
+        assert "vendor.example" not in resp.text

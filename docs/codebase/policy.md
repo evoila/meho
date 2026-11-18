@@ -210,7 +210,10 @@ category AND the ones the tenant allows for the tenant's category.
 login group, matched by its full path or its group attribute, counts as
 the kind its binding gives it ([policy-bindings.md](policy-bindings.md)).
 A tenant entry is narrower than an install entry when every kind it names
-is also named by the install entry.
+is also named by the install entry. So the floor works per group kind,
+not per login group. The tenant's `bindings` decide which of its login
+groups belong to a kind: when a tenant binds one more login group to
+`Admins`, the people in it count as Admins for the install's routing too.
 
 **Which install entries a tenant entry is checked against.** Every
 install entry that can route a change the tenant entry also routes. Two
@@ -226,6 +229,31 @@ apart:
 A field that one entry leaves out fits everything. All of this is decided
 from the two files, at import time.
 
+**Refused or only a warning.** The import refuses a wider tenant entry,
+with two exceptions. In these cases the import accepts the file and gives
+a warning with the same sentence and one more (`tenant_floor_warnings`):
+
+- An earlier entry of the same tenant fits every change that the wider
+  entry shares with the install entry. The first tenant entry that fits
+  counts, so the wider entry does not count for those changes. Example:
+  `routing[0]` is `{category: network} -> [Admins]` and `routing[1]` is
+  `{risk: caution} -> [every group]`. The warning ends "`routing[0]` comes
+  first and fits each of these changes, so `routing[1]` does not count for
+  them."
+- Both entries set a `connector` pattern with a wildcard, and the patterns
+  differ. MEHO cannot tell from the two patterns whether they fit the same
+  connector.
+
+Both are safe as warnings: at the run and at the click, the install's
+groups are the floor, so a wider entry never lets more people approve.
+
+**Export.** With `POLICY_APPROVER_ROUTING` on, `meho policy export` of a
+tenant writes a `# Has no effect where wider: ...` comment above each
+routing entry that names more groups than an install entry it can share a
+change with (`tenant_wider_notes`), the same sentence as the import. It
+is the same idea as the `# Has no effect:` comment of a classification
+entry.
+
 **At the run and at the click.** When a request starts to wait, the first
 install entry that fits counts, then the first tenant entry that fits. The
 stored group kinds are the kinds of both (`approver_rule` names both, the
@@ -234,21 +262,44 @@ the approve click MEHO first routes the request again with the install's
 current file and the stored install category
 (`approval_request.approver_install_category`, migration `0173`; the
 tenant's category is in `approver_category`), then checks the stored
-kinds. So a tenant entry stored
+kinds. The approval card, the "may approve" sign and the push recipients
+read the install's routing as it is now too (`InstallFloor`), so they say
+what the click decides. The approve audit row names the install entry
+that counted at the click (`approver_floor`).
+
+A step of a multi-step operation gets the same categories as a direct
+call of the same operation: the step gate reads the classification
+entries and the override rows of the operation (`classify_step`). So a
+step and a direct call wait for the same people. So a tenant entry stored
 before this rule, or an install file that changed later, never widens
 anything: where a tenant entry is wider, its extra groups do not count.
 Nothing fails open: an install routing that is not valid refuses the
 click. A request that waited with stored groups before migration `0173`
 has the empty text as both categories: MEHO does not know them. Such a request is
 refused when an install entry that matches on a `category` could fit it;
-reject it and start the call again. A request without stored group kinds
+reject it and start the call again. A request can have stored group
+kinds but no stored install category (NULL) in two cases:
+
+- It started to wait while `POLICY_CLASSIFICATION` was off. No change has
+  a category then, so MEHO stored none.
+- A build of main between 15 November 2026 and pull request #6542 wrote
+  it. Those builds stored the group kinds but not the install category.
+
+MEHO does the same in both cases. While `POLICY_CLASSIFICATION` is on,
+the category counts as "not known", like the empty text: the click is
+refused when an install entry that matches on a `category` could fit the
+request. Reject it and start the call again. While the switch is off, a
+`category` entry fits nothing for it, as when it started to wait, and the
+other install entries decide. A request without stored group kinds
 (it started to wait while the switch was off) keeps today's rule until it
 is decided or expires: the install's routing is not checked for it.
 
 **A change of the install's file.** The preview of an install import
 (`meho policy diff --scope install`) lists the tenants whose stored
 routing no longer fits: the diff key `routing_floor` (one item per tenant,
-with `tenant_id` and `entries`) and one warning per entry. The key is
+with `tenant_id` and `entries`) and one warning per entry. It lists also
+the entries a tenant import only warns about (an earlier entry fits first,
+or two connector patterns MEHO cannot compare). The key is
 there only while `POLICY_APPROVER_ROUTING` is on. Those entries
 stay stored, but where they are wider they do not count.
 
@@ -263,6 +314,16 @@ install's classification entries give the operation two categories (an
 operation registered after the install's import can match two such
 entries). Then explain shows no group for the call too, and the click
 refuses it, when an install entry that matches on a `category` could fit.
+
+**Two install categories: the rule** (decided on 17 November 2026).
+Nobody may approve such a change when any install entry that matches on a
+`category` could fit it, also when no install entry names either of the
+two categories. The reasons: MEHO stores only "category not known", not
+the two categories, so it cannot tell which install entry would count;
+and the cause is a mistake in the install's file that only the install's
+admin can fix (the install import refuses two categories for an operation
+it knows). So MEHO fails closed. Fix the install's file so the operation
+has one category, reject the waiting request, and start the call again.
 
 All of this runs only while `POLICY_APPROVER_ROUTING` is on.
 
@@ -403,4 +464,7 @@ round trip and no change over every operation),
 diff and export, the "separated duties" file, the stored approver kinds
 and the click), `backend/tests/test_policy_routing_floor.py` (the
 install's routing as a floor: import, run, click, install diff),
+`backend/tests/test_policy_routing_step_floor.py` (a step and a direct
+call get the same approvers, warnings and export marks, the card and the
+approve audit row),
 `cli/internal/cmd/policy/file_test.go`.

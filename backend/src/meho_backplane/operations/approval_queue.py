@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -104,6 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     classify_op,
     holds_hidden_param_values,
@@ -180,11 +181,14 @@ from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
 from meho_backplane.policy.routing import (
     ROUTING_INVALID_RULE,
+    group_names,
     routing_enabled,
     routing_refusal,
     stamp_approver_set,
+    stored_kinds,
+    today_kinds,
 )
-from meho_backplane.policy.routing_floor import install_floor_refusal
+from meho_backplane.policy.routing_floor import load_install_floor
 from meho_backplane.version import running_release_id
 from meho_backplane.work_ref import work_ref_filter_values
 
@@ -247,6 +251,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "rights_change_note",
     "take_approval_lock",
     "withdraw_request",
 ]
@@ -481,8 +486,9 @@ class SelfApprovalForbiddenError(ApprovalError):
     Break-glass never covers a ``dangerous`` or ``destructive`` change
     (*high_risk*). The route layer maps this to 403.
 
-    The message says who can approve instead. For a lower-risk change it
-    also names the break-glass switch.
+    The message says who can approve instead and where to ask: the groups
+    in *approver_kinds* (:func:`_approver_kinds`), on the Approvals page.
+    The text names no setting and no other way to approve the change.
 
     Reject is deliberately *not* guarded — an operator withdrawing their
     own pending request is not a privilege escalation.
@@ -493,38 +499,35 @@ class SelfApprovalForbiddenError(ApprovalError):
         request_id: uuid.UUID,
         *,
         principal_sub: str,
+        approver_kinds: Sequence[str],
         high_risk: bool = False,
         web_click_allowed: bool = False,
     ) -> None:
         self.request_id = request_id
         self.principal_sub = principal_sub
         self.high_risk = high_risk
-        if high_risk:
-            who_can = (
-                f"Ask {_HIGH_RISK_APPROVERS_TEXT} to approve this dangerous or destructive change."
-            )
-        elif web_click_allowed:
+        if web_click_allowed:
             # #3980: the change waits only because it came with a token.
             who_can = (
                 "This change waits only because it came with a token, so you may "
                 "approve it yourself with a click in the web interface."
             )
+        elif approver_kinds:
+            who_can = (
+                f"Ask another person in {group_names(approver_kinds)} to approve it. "
+                "They find it on the Approvals page of the web interface."
+            )
         else:
-            who_can = "Ask another operator, an admin or an approver to approve it."
+            who_can = "No group may approve this change, so it waits until it expires."
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
             "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
             f"changes. {who_can}"
         )
-        break_glass = (
-            ""
-            if high_risk
-            else " (set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)"
-        )
         super().__init__(
             f"operator {principal_sub!r} may not approve approval_request "
-            f"{request_id}: {self.reason_text}{break_glass}"
+            f"{request_id}: {self.reason_text}"
         )
 
 
@@ -1834,6 +1837,26 @@ async def create_pending_request(
     return request
 
 
+async def rights_change_note(request: ApprovalRequest) -> str | None:
+    """The note for a change of rights that no other admin could approve (#6641).
+
+    The request is stored all the same, so an admin added later can still
+    approve it. ``None`` for any other request, when another admin could
+    approve, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+
+    The note is extra help only. When reading it fails, the answer is
+    ``None`` and the request still waits for approval as stored.
+    """
+    if not is_rights_change(request):
+        return None
+    try:
+        return await only_admin_note(request.tenant_id, request.principal_sub)
+    except Exception:
+        _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
+        return None
+
+
 async def _audit_routing_refusal(
     operator: Operator, request: ApprovalRequest, audit_id: uuid.UUID, routing_error: str
 ) -> None:
@@ -2150,6 +2173,10 @@ async def approve_request(
     }
     if reason:
         extra["reason"] = reason
+    # The install's routing entry that counted at this click (the floor).
+    floor = getattr(request, "_approver_floor", None)
+    if floor is not None:
+        extra["approver_floor"] = floor
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     extra.update(_approver_client_fields(operator, user_agent))
@@ -3837,8 +3864,29 @@ def _check_self_approval(
         return ApprovalRule.BREAK_GLASS_SELF_APPROVAL
 
     raise SelfApprovalForbiddenError(
-        request.id, principal_sub=operator.sub, high_risk=high_risk, web_click_allowed=token_wait
+        request.id,
+        principal_sub=operator.sub,
+        approver_kinds=_approver_kinds(request),
+        high_risk=high_risk,
+        web_click_allowed=token_wait,
     )
+
+
+def _approver_kinds(request: ApprovalRequest) -> tuple[str, ...]:
+    """The login group kinds that may approve *request* for another person.
+
+    The same rules the approve checks: today's group rule
+    (:func:`~meho_backplane.policy.routing.today_kinds`), and with approver
+    routing on, only the kinds the request stored as well. Used for the
+    "who may approve" part of :class:`SelfApprovalForbiddenError`.
+    """
+    kinds = today_kinds(_request_safety_level(request), request.op_id)
+    if not routing_enabled():
+        return kinds
+    stored = stored_kinds(request.approver_roles)
+    if stored is None:
+        return kinds
+    return tuple(kind for kind in kinds if kind in stored)
 
 
 def _check_approver_group(
@@ -3935,9 +3983,14 @@ async def _check_install_floor(
     install's file as it is now, then the stored group kinds
     (:func:`_check_routed_approver`). Does nothing while the
     ``POLICY_APPROVER_ROUTING`` switch is off
-    (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+    (:class:`~meho_backplane.policy.routing_floor.InstallFloor`). When an
+    install entry counted, its place is kept on *request* for the approve
+    audit row (``approver_floor``).
     """
-    refusal = await install_floor_refusal(session, operator, request)
+    floor = await load_install_floor(session)
+    if floor is None:
+        return
+    refusal = floor.refusal(operator, request)
     if refusal is not None:
         raise ApprovalRoutingError(
             request.id,
@@ -3945,6 +3998,9 @@ async def _check_install_floor(
             role=operator.tenant_role.value,
             reason=refusal,
         )
+    found = floor.check(request)
+    if found is not None and found.floor is not None:
+        request._approver_floor = found.floor  # type: ignore[attr-defined]
 
 
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:

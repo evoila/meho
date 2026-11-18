@@ -4,8 +4,8 @@
 """A parameter that waits behind a switch that is off by default.
 
 A parameter schema can carry the keyword ``x-meho-switch: "<switch name>"``.
-The keyword counts at any depth, like ``x-meho-caller-address``. A property
-also counts as marked when it is a local ``$ref`` (for example
+The keyword goes on a property schema, at any depth. A property also counts
+as marked when it is a local ``$ref`` (for example
 ``#/$defs/...``) to a marked schema. While the named switch is off, MEHO
 treats the parameter as if the operation did not have it:
 
@@ -14,16 +14,18 @@ treats the parameter as if the operation did not have it:
   the console and the CLI), also from ``required``, ``example``,
   ``examples`` and ``default`` (:func:`visible_parameter_schema`);
 * a call that gives the parameter is refused before it can wait for
-  approval (:func:`checked_parameter_schema`): the parameter gets a schema
-  that accepts no value. All other inputs are accepted or refused exactly
-  as before.
+  approval (:func:`checked_parameter_schema`), with the answer of an
+  undeclared parameter. All other inputs are accepted or refused exactly
+  as before;
+* examples and hints in ``llm_instructions`` that name it are not shown
+  (:func:`visible_llm_instructions`).
 
 While the switch is on, the parameter shows and is accepted as usual.
 
 The known switch names are in :data:`KNOWN_SWITCHES`: each maps to the
 setting that holds the switch. A keyword with another name stops the
-operation from registering (:func:`check_switch_names`), so a typo never
-shows a parameter.
+operation from registering, and so does a keyword that is not on a property
+(:func:`~meho_backplane.operations.switch_registration.check_switch_names`).
 
 MEHO applies the rule where the operation row is read for the caller
 (:func:`~meho_backplane.operations.op_policy.apply_effective_policy` and
@@ -33,6 +35,7 @@ the other readers of a stored schema). The stored schema is never changed.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Mapping
 from typing import Any, Final
@@ -43,10 +46,11 @@ __all__ = [
     "FILE_REF_PARAMS_SWITCH",
     "KNOWN_SWITCHES",
     "SWITCH_MARKER",
-    "check_switch_names",
     "checked_parameter_schema",
+    "hidden_parameter_names",
     "schema_for_checks",
     "switch_names",
+    "visible_llm_instructions",
     "visible_parameter_schema",
 ]
 
@@ -70,6 +74,8 @@ _KEEP: Final[object] = object()
 _BRANCH_KEYWORDS: Final[tuple[str, ...]] = ("allOf", "anyOf", "oneOf")
 #: Keywords whose value is one schema that describes the same value.
 _SINGLE_BRANCH_KEYWORDS: Final[tuple[str, ...]] = ("then", "else")
+#: Branch keywords where the value must match one or more branches, not all.
+_ALTERNATIVE_KEYWORDS: Final[tuple[str, ...]] = ("anyOf", "oneOf")
 
 
 def switch_names(schema: object) -> set[str]:
@@ -85,16 +91,6 @@ def switch_names(schema: object) -> set[str]:
         for item in schema:
             found |= switch_names(item)
     return found
-
-
-def check_switch_names(schema: object, *, op_id: str) -> None:
-    """Raise :class:`ValueError` when *schema* names a switch MEHO does not know."""
-    unknown = sorted(switch_names(schema) - KNOWN_SWITCHES.keys())
-    if unknown:
-        raise ValueError(
-            f"op {op_id!r} names the unknown switch {unknown[0]!r} in "
-            f"{SWITCH_MARKER!r}; the known switches are {sorted(KNOWN_SWITCHES)}"
-        )
 
 
 def _switch_is_on(name: str) -> bool:
@@ -286,10 +282,7 @@ class _Walk:
         result = {key: self._keyword(node, key, hidden, refs) for key in node}
         result = {key: value for key, value in result.items() if value is not _KEEP}
         if not self.show and hidden:
-            properties = result.setdefault("properties", {})
-            if isinstance(properties, dict):
-                for name in hidden:
-                    properties[name] = False
+            _refuse(result, hidden)
         return result
 
     def _beside_ref(self, node: dict[str, Any]) -> set[str]:
@@ -326,6 +319,17 @@ class _Walk:
         branches = walked.get("allOf")
         walked["allOf"] = [linked, *(branches if isinstance(branches, list) else [])]
         return walked
+
+    def _branch_list(
+        self, key: str, value: list[Any], hidden: frozenset[str], refs: frozenset[str]
+    ) -> list[object]:
+        """Walk the branches of *key*, each with the names hidden around it."""
+        if key in _ALTERNATIVE_KEYWORDS:
+            # A branch that requires a hidden name matches no call while the
+            # switch is off, so it is left out. Without it the other branches
+            # give the same answer as before (``oneOf`` still counts one).
+            value = [item for item in value if not _requires(self.root, item, hidden)] or value
+        return [self.node(item, hidden, refs) for item in value]
 
     def _keyword(
         self,
@@ -365,10 +369,52 @@ class _Walk:
                 if name not in hidden
             }
         if key in _BRANCH_KEYWORDS and isinstance(value, list):
-            return [self.node(item, hidden, refs) for item in value]
+            return self._branch_list(key, value, hidden, refs)
         if key in _SINGLE_BRANCH_KEYWORDS:
             return self.node(value, hidden, refs)
         return self.node(value, refs=refs)
+
+
+def _requires(root: object, schema: object, names: frozenset[str]) -> bool:
+    """Return whether *schema* requires one of *names* (also through ``allOf`` and links)."""
+    pending = [schema]
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, dict) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        required = node.get("required")
+        if isinstance(required, list) and names.intersection(required):
+            return True
+        branches = node.get("allOf")
+        pending.extend(branches if isinstance(branches, list) else [])
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            pending.append(_pointer(root, ref))
+    return False
+
+
+def _refuse(result: dict[str, Any], hidden: frozenset[str]) -> None:
+    """Make the object *result* refuse each name in *hidden*.
+
+    An object that refuses undeclared names (``additionalProperties:
+    false``) loses the name from ``properties``: a call that gives it gets
+    the answer of an unknown name, and the error lists only shown names.
+    Any other object (or a name that a pattern property matches) gets the
+    schema ``false`` for it.
+    """
+    properties = result.setdefault("properties", {})
+    if not isinstance(properties, dict):
+        return
+    patterns = result.get("patternProperties")
+    pattern_list = list(patterns) if isinstance(patterns, dict) else []
+    closed = result.get("additionalProperties") is False
+    for name in hidden:
+        if closed and not any(_pattern_matches(str(p), name) for p in pattern_list):
+            properties.pop(name, None)
+        else:
+            properties[name] = False
 
 
 def _transform(root: object, node: object, *, show: bool) -> object:
@@ -439,18 +485,70 @@ def visible_parameter_schema(schema: Any) -> Any:
 def checked_parameter_schema(schema: Any) -> Any:
     """Return *schema* as a call is checked against it while a switch is off.
 
-    Each parameter whose switch is off gets the schema ``false``, which
-    accepts no value, so a call that gives it is refused. The object that
-    has it, and each branch of that object (``allOf``, ``anyOf``,
-    ``oneOf``, ``then``, ``else``), refuses it, and no ``required`` or
-    ``dependentRequired`` list of them names it. Every other input is
-    accepted or refused as before.
+    A call that gives a parameter whose switch is off is refused. The
+    object that has it, and each branch of that object (``allOf``,
+    ``anyOf``, ``oneOf``, ``then``, ``else``), refuses it: an object with
+    ``additionalProperties: false`` leaves it out of ``properties``, any other gets
+    the schema ``false`` for it. No ``required`` or ``dependentRequired``
+    list of them names it. An ``anyOf`` or ``oneOf`` branch that requires
+    it is left out, as it matches no call without it (unless every branch
+    requires it). Every other input is accepted or refused as before.
     Returns *schema* itself when no switch it names is off.
     """
     if not _off_switches(schema):
         return schema
     root = copy.deepcopy(schema)
     return _transform(root, root, show=False)
+
+
+def hidden_parameter_names(schema: object) -> set[str]:
+    """Return the name of every property of *schema* that is hidden now, at any depth."""
+    if not _off_switches(schema):
+        return set()
+    found: set[str] = set()
+    pending = [schema]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, list):
+            pending.extend(node)
+        elif isinstance(node, dict):
+            found |= _hidden_names(schema, node)
+            pending.extend(
+                value
+                for key, value in node.items()
+                if key not in _DATA_KEYWORDS and key not in _EXAMPLE_KEYWORDS and key != "examples"
+            )
+    return found
+
+
+def visible_llm_instructions(llm_instructions: Any, schema: object) -> Any:
+    """Return *llm_instructions* without what names a hidden parameter of *schema*.
+
+    An example (in ``examples`` or ``example_call``) that names a hidden
+    parameter is left out, and so is the ``parameter_hints`` entry of a
+    hidden parameter. All other keys stay as they are. Returns
+    *llm_instructions* itself when nothing is hidden.
+    """
+    names = hidden_parameter_names(schema)
+    if not names or not isinstance(llm_instructions, Mapping):
+        return llm_instructions
+    words = re.compile(
+        r"(?<![A-Za-z0-9_])(?:" + "|".join(map(re.escape, sorted(names))) + r")(?![A-Za-z0-9_])"
+    )
+
+    def names_hidden(value: object) -> bool:
+        return words.search(json.dumps(value, default=str)) is not None
+
+    shown = dict(llm_instructions)
+    listed = shown.get("examples")
+    if isinstance(listed, list):
+        shown["examples"] = [item for item in listed if not names_hidden(item)]
+    if "example_call" in shown and names_hidden(shown["example_call"]):
+        del shown["example_call"]
+    hints = shown.get("parameter_hints")
+    if isinstance(hints, Mapping):
+        shown["parameter_hints"] = {name: hint for name, hint in hints.items() if name not in names}
+    return shown
 
 
 def schema_for_checks(descriptor: object) -> Any:

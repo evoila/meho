@@ -48,11 +48,11 @@ from meho_backplane.operations.meta_tools import (
 from meho_backplane.operations.switch_params import (
     FILE_REF_PARAMS_SWITCH,
     SWITCH_MARKER,
-    check_switch_names,
     checked_parameter_schema,
     switch_names,
     visible_parameter_schema,
 )
+from meho_backplane.operations.switch_registration import check_switch_names
 from meho_backplane.settings import get_settings
 
 _SWITCH = "FILE_REF_PARAMS"
@@ -136,7 +136,11 @@ async def _handler(operator: Operator, target: Any, params: dict[str, Any]) -> d
     return {"echo": params}
 
 
-async def _register(embedding: AsyncMock, schema: dict[str, Any] | None = None) -> None:
+async def _register(
+    embedding: AsyncMock,
+    schema: dict[str, Any] | None = None,
+    llm_instructions: dict[str, Any] | None = None,
+) -> None:
     register_connector_v2(product="widget", version="1.x", impl_id="widget", cls=_WidgetConnector)
     await register_typed_operation(
         product="widget",
@@ -150,6 +154,7 @@ async def _register(embedding: AsyncMock, schema: dict[str, Any] | None = None) 
         safety_level="caution",
         when_to_use=None,
         embedding_service=embedding,
+        llm_instructions=llm_instructions,
     )
 
 
@@ -309,7 +314,9 @@ def test_visible_schema_follows_local_refs() -> None:
     assert shown["examples"] == [{"name": "a", "options": {"mode": "m"}}]
     assert set(shown["components"]["schemas"]) == {"Options"}
     checked = checked_parameter_schema(_ref_schema())
-    assert checked["properties"][_HIDDEN] is False
+    # The closed root leaves the name out, so it is refused as undeclared.
+    assert _HIDDEN not in checked["properties"]
+    assert not Draft202012Validator(checked).is_valid({"name": "a", _HIDDEN: "x"})
     options = checked["components"]["schemas"]["Options"]
     assert options["properties"][_NESTED_HIDDEN] is False
 
@@ -681,8 +688,250 @@ async def test_switch_on_shows_and_accepts_the_parameter(
 
 
 # ---------------------------------------------------------------------------
+# Switch off: the answer of an unknown parameter
+# ---------------------------------------------------------------------------
+
+
+async def _errors(params: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+    """Return the validation errors of a call and of its preview."""
+    result = await dispatch(
+        operator=_operator(), connector_id=_CONNECTOR, op_id=_OP, target=None, params=params
+    )
+    assert result.extras is not None
+    preview = await preview_operation(
+        _operator(), {"connector_id": _CONNECTOR, "op_id": _OP, "params": params}
+    )
+    return result.extras["validation_errors"], preview["extras"]["validation_errors"]
+
+
+@pytest.mark.asyncio
+async def test_switch_off_a_hidden_parameter_gets_the_answer_of_an_unknown_one(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(stub_embedding_service)
+    hidden = await _errors({"name": "a", _HIDDEN: "x"})
+    unknown = await _errors({"name": "a", "unknown_x": "x"})
+
+    # The answers are the same, but for the name the caller sent.
+    renamed = json.loads(json.dumps(hidden).replace(_HIDDEN, "unknown_x"))
+    assert renamed == json.loads(json.dumps(unknown))
+    assert unknown[0][0]["validator"] == "additionalProperties"
+    assert 'declared params are: "name", "options"' in unknown[0][0]["remediation"]
+    # No answer names a hidden parameter the caller did not send.
+    _no_trace(unknown, _HIDDEN, _NESTED_HIDDEN, SWITCH_MARKER)
+    _no_trace(hidden, _NESTED_HIDDEN, SWITCH_MARKER)
+    assert await _approval_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_switch_off_a_hidden_parameter_of_an_open_object_names_nothing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(stub_embedding_service)
+    for errors in await _errors({"name": "a", "options": {"mode": "m", _NESTED_HIDDEN: "r"}}):
+        assert errors == [
+            {
+                "path": "$.options",
+                "validator": "additionalProperties",
+                "expected": "undeclared property (not in the op's declared params)",
+                "remediation": "remove the undeclared property",
+            }
+        ]
+    assert await _approval_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Switch off: the same answers as without the keyword
+# ---------------------------------------------------------------------------
+
+
+def _alternative_schemas() -> list[tuple[str, dict[str, Any]]]:
+    marked = _schema()["properties"][_HIDDEN]
+    found = []
+    for keyword in ("oneOf", "anyOf"):
+        found.append(
+            (
+                keyword,
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}, _HIDDEN: marked},
+                    keyword: [
+                        {"required": [_HIDDEN]},
+                        {"allOf": [{"$ref": "#/$defs/NeedsHidden"}]},
+                        {"required": ["name"]},
+                    ],
+                    "$defs": {"NeedsHidden": {"required": [_HIDDEN, "name"]}},
+                },
+            )
+        )
+    return found
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [schema for _, schema in _alternative_schemas()],
+    ids=[name for name, _ in _alternative_schemas()],
+)
+def test_switch_off_a_branch_that_requires_the_parameter_gives_the_same_answers(
+    schema: dict[str, Any],
+) -> None:
+    stored = Draft202012Validator(schema)
+    checked = Draft202012Validator(checked_parameter_schema(schema))
+    calls: list[dict[str, Any]] = [{}, {"name": "a"}, {"name": 1}, {"other": 1}]
+    for call in calls:
+        assert checked.is_valid(call) == stored.is_valid(call), call
+    assert not checked.is_valid({"name": "a", _HIDDEN: "x"})
+    shown = visible_parameter_schema(schema)
+    _no_trace(shown, _HIDDEN, "NeedsHidden")
+
+
+@pytest.mark.asyncio
+async def test_switch_off_a_one_of_call_that_passes_without_the_keyword_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(stub_embedding_service, _alternative_schemas()[0][1])
+    result = await dispatch(
+        operator=_operator(), connector_id=_CONNECTOR, op_id=_OP, target=None, params={"name": "a"}
+    )
+    assert result.status == "awaiting_approval", result.error
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [schema for _, schema in _alternative_schemas()],
+    ids=[name for name, _ in _alternative_schemas()],
+)
+def test_switch_on_a_branch_that_requires_the_parameter_stays(
+    monkeypatch: pytest.MonkeyPatch, schema: dict[str, Any]
+) -> None:
+    _switch_on(monkeypatch)
+    assert checked_parameter_schema(schema) is schema
+    assert visible_parameter_schema(schema) is schema
+
+
+# ---------------------------------------------------------------------------
+# llm_instructions
+# ---------------------------------------------------------------------------
+
+
+def _instructions() -> dict[str, Any]:
+    return {
+        "examples": [{"name": "a"}, {"name": "a", _HIDDEN: "x"}, f"pass {_HIDDEN} too"],
+        "example_call": {"params": {"name": "a", "options": {_NESTED_HIDDEN: "r"}}},
+        "parameter_hints": {"name": "The widget name.", _HIDDEN: "The checksum."},
+        "when_to_call": "To upload a widget.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_switch_off_hides_instruction_examples_that_name_the_parameter(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPERATION_CONTRACT_GUIDANCE", "true")
+    get_settings.cache_clear()
+    await _register(stub_embedding_service, llm_instructions=_instructions())
+
+    exact = await search_operations(_operator(), {"connector_id": _CONNECTOR, "op_id": _OP})
+    contract = exact["operation"]
+    _no_trace(contract, _HIDDEN, _NESTED_HIDDEN)
+    assert {"source": "llm_instructions", "param": None, "value": {"name": "a"}} in contract[
+        "examples"
+    ]
+    assert contract["guidance"]["parameter_hints"] == {"name": "The widget name."}
+
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == _OP))
+        ).scalar_one()
+    assert row.llm_instructions == _instructions()
+    described = await describe_descriptor(_operator(), row.id)
+    assert described is not None
+    _no_trace(described.llm_instructions, _HIDDEN, _NESTED_HIDDEN)
+    assert described.llm_instructions == {
+        "examples": [{"name": "a"}],
+        "parameter_hints": {"name": "The widget name."},
+        "when_to_call": "To upload a widget.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_switch_on_shows_instruction_examples_that_name_the_parameter(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPERATION_CONTRACT_GUIDANCE", "true")
+    _switch_on(monkeypatch)
+    await _register(stub_embedding_service, llm_instructions=_instructions())
+    exact = await search_operations(_operator(), {"connector_id": _CONNECTOR, "op_id": _OP})
+    assert _HIDDEN in json.dumps(exact["operation"]["examples"])
+    assert exact["operation"]["guidance"]["parameter_hints"][_HIDDEN] == "The checksum."
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
+
+
+def _misplaced_schemas() -> list[tuple[str, dict[str, Any]]]:
+    marker = {SWITCH_MARKER: FILE_REF_PARAMS_SWITCH}
+    shared = {"$defs": {"Marked": {"type": "string", **marker}}}
+    return [
+        ("root", {"type": "object", **marker}),
+        ("items", {"properties": {"files": {"type": "array", "items": marker}}}),
+        ("additional", {"properties": {"map": {"additionalProperties": marker}}}),
+        ("pattern", {"properties": {"map": {"patternProperties": {"^f": marker}}}}),
+        ("branch-of-property", {"properties": {"x": {"anyOf": [marker, {"type": "null"}]}}}),
+        ("link-from-items", {"properties": {"x": {"items": {"$ref": "#/$defs/Marked"}}}, **shared}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema",
+    [schema for _, schema in _misplaced_schemas()],
+    ids=[name for name, _ in _misplaced_schemas()],
+)
+async def test_a_keyword_not_on_a_property_stops_a_typed_operation_from_registering(
+    stub_embedding_service: AsyncMock, schema: dict[str, Any]
+) -> None:
+    with pytest.raises(ValueError, match="belongs on a property"):
+        await _register(stub_embedding_service, schema)
+    async with get_sessionmaker()() as session:
+        rows = (
+            await session.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == _OP))
+        ).all()
+    assert rows == []
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [schema for _, schema in _misplaced_schemas()],
+    ids=[name for name, _ in _misplaced_schemas()],
+)
+def test_a_keyword_not_on_a_property_stops_an_ingested_operation_from_registering(
+    schema: dict[str, Any],
+) -> None:
+    proto = EndpointDescriptorProto(
+        op_id="GET:/v1/widget",
+        method="GET",
+        path="/v1/widget",
+        summary="Read a widget.",
+        description="Read a widget.",
+        parameter_schema=schema,
+        safety_level="safe",
+        requires_approval=False,
+    )
+    with pytest.raises(ValueError, match="belongs on a property"):
+        apply_safety_floor(product="widget", version="1.x", impl_id="widget", proto=proto)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [_schema(), _ref_schema(), *(schema for _, schema, _ in _linked_required_schemas())],
+)
+def test_a_keyword_on_a_property_or_a_linked_shared_schema_registers(
+    schema: dict[str, Any],
+) -> None:
+    check_switch_names(schema, op_id="widget.x")
 
 
 @pytest.mark.asyncio

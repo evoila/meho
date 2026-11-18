@@ -162,7 +162,7 @@ from meho_backplane.operations.embed import (
     compute_embedding_text_hash,
     encode_endpoint_text,
 )
-from meho_backplane.operations.switch_params import check_switch_names
+from meho_backplane.operations.switch_registration import check_switch_names
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha

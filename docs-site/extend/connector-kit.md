@@ -226,8 +226,9 @@ shows them to agents. Mark such an input with
 `kit.SWITCH_MARKER: kit.FILE_REF_PARAMS_SWITCH`. While the switch is off,
 MEHO leaves the input out of every place that shows the operation and
 refuses a call that gives it, like any unknown input. When the switch is
-on, the input shows and works as usual. Any other switch name stops the
-operation from registering. This needs kit 1.5 or higher:
+on, the input shows and works as usual. Any other switch name, or the
+keyword on something that is not an input (for example on `items`),
+stops the operation from registering. This needs kit 1.5 or higher:
 `meho-connector-kit>=1.5,<2`.
 
 **A preview for a change.** Register a preview with

@@ -42,7 +42,7 @@ from meho_backplane.operations.credential_read import (
 from meho_backplane.operations.ingest.catalog import safety_overlay_for
 from meho_backplane.operations.ingest.exceptions import InvalidOpClassError
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
-from meho_backplane.operations.switch_params import check_switch_names
+from meho_backplane.operations.switch_registration import check_switch_names
 
 __all__ = [
     "FLOOR_OP_CLASSES",

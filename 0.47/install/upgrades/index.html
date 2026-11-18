@@ -3871,6 +3871,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.48.0</strong></td>
+<td>Before v0.47.0, a probe of an OpenBao server stored the product as <code>vault</code>. Since v0.47.0 the OpenBao connector serves only a target whose stored product is <code>openbao</code>. An OpenBao 2.x target probed before the upgrade matches no connector, and every <code>vault.*</code> call on it fails with <code>no_connector</code>, even though its detected version looks right. The error now says what to do.</td>
+<td>Probe every OpenBao target again after the upgrade: <code>meho targets probe &lt;name&gt;</code>. The probe finds <code>openbao</code> and stores it, and calls work again.</td>
+</tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
 <td>MEHO now says when a change of rights cannot be approved because the tenant has only one admin: the answer of the call says "This change needs a second admin to approve it. This tenant has only one admin." with a link to the guide. <code>meho doctor</code> shows a new line "second admin", a warning when the tenant has one admin. <code>/api/v1/health</code> and <code>meho_status</code> report the number in <code>approvals.rights_change_admins</code>. See https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin.</td>
 <td>Run <code>meho doctor</code>. When the line "second admin" warns, add a second admin in Keycloak (in <code>MEHO-Admins</code> or <code>MEHO-Platform-Admins</code>). No schema action.</td>
 </tr>

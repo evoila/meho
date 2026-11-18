@@ -289,18 +289,6 @@ _HISTORY_PARTIALS: Final[frozenset[str]] = frozenset({"", _HISTORY_PARTIAL_ROWS}
 #: toggle. A foreign value is rejected (422).
 _HISTORY_ORDERS: Final[frozenset[str]] = frozenset({"", "oldest", "newest"})
 
-#: Operator-docs page the self-approval guidance deep-links to (#2669).
-#: Mirrors ``ui/maturity.py``'s ``MATURITY_INDEX_URL`` convention -- the
-#: console links to the published MkDocs site's ``latest`` alias so a solo
-#: operator who hits ``self_approval_forbidden`` reaches the two
-#: single-operator patterns (the recommended agent-requester and the
-#: audited break-glass) without reading source. The wire ``403`` /
-#: MCP-error text stays authoritative (it names the flag); this UI-only
-#: link is the docs-URL convention the field asked for.
-_SINGLE_OPERATOR_DOCS_URL: Final[str] = (
-    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
-)
-
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
 #: parse against a paste-from-clipboard accident. Shared with the REST
@@ -995,7 +983,7 @@ async def _render_detail_modal(
     ``error_*`` arguments let the decision handlers re-render this modal
     with a typed banner (e.g. a server-side self-approval 403) without a
     second round-trip; ``self_approval_error`` promotes that banner from a
-    bare error to the actionable single-operator guidance (#2669), and
+    bare error to the own-change banner, and
     ``fresh_sign_in_error`` to the "sign in again" guidance with the link
     to a new sign-in. ``error_hint`` is a sentence the banner shows after
     the refusal text (#3329: an approve refusal says the web interface is
@@ -1028,8 +1016,6 @@ async def _render_detail_modal(
         "approve_right": right,
         "approve_blocked": not right.may_approve,
         "self_approval_blocked": self_approval_blocked,
-        "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
-        "self_approval_docs_url": _SINGLE_OPERATOR_DOCS_URL,
         "self_approval_error": self_approval_error,
         "fresh_sign_in_error": fresh_sign_in_error,
         "approve_needs_sign_in": approve_needs_sign_in,
@@ -1087,8 +1073,8 @@ async def _decide(
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         # A rejected self-approval (the service 403 the operator reached by
         # forging the disabled Approve button) is the one error worth more
-        # than a bare banner: re-render with the actionable single-operator
-        # guidance (both patterns + docs link) instead (#2669). Keyed on the
+        # than a bare banner: re-render with the own-change banner, which
+        # says who may approve and where to ask. Keyed on the
         # service error, because the detail is the plain refusal text (#3328).
         self_approval_error = isinstance(exc.__cause__, SelfApprovalForbiddenError)
         # The session's sign-in is too old to approve, or it already

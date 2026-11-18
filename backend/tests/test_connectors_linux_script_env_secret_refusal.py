@@ -30,6 +30,8 @@ _SCRIPT = "#!/bin/bash\nset -eu\ntar -cf /tmp/out.tar /etc/app\n"
 # Made-up values, built in parts so a secret scanner does not read them as real.
 _JWT = "eyJ" + "h" * 30 + "." + "p" * 30 + "." + "s" * 30
 _PEM_BODY = "madeupkeybody" * 4
+_URL_PASSWORD = "made" + "up-pw"
+_URL_WITH_PASSWORD = "https://deploy:" + _URL_PASSWORD + "@" + "repo.example.com/app.git"
 _PEM = "-----BEGIN " + "PRIVATE KEY-----\n" + _PEM_BODY + "\n-----END " + "PRIVATE KEY-----"
 
 
@@ -100,7 +102,7 @@ async def test_env_name_with_a_secret_word_is_refused(
 @pytest.mark.parametrize(
     ("value", "secret"),
     [
-        ("https://deploy:s3cr3t-pw@repo.example.com/app.git", "s3cr3t-pw"),
+        (_URL_WITH_PASSWORD, _URL_PASSWORD),
         (_JWT, _JWT),
         ("Bearer abcdefghijklmnop0123", "abcdefghijklmnop0123"),
         (_PEM, _PEM_BODY),

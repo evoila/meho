@@ -1496,7 +1496,10 @@ install routing (`install_floor`), so it names the groups the click
 allows now. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, Operators or
 Readers) must be in the stored kinds. `kind_of` reads the role and the
-approve flags, and a binding of the policy file can set those flags
+`approver` flag: a `read_only` person with the flag (a customer role)
+counts as Operators, because they approve what an Operator approves. So
+when no routing entry narrows the kinds, they keep their right. A binding
+of the policy file can set the role and the flag
 ([policy-bindings.md](policy-bindings.md)). So a binding can set the kind
 that the routing checks: a person whose group is bound to `Operators`
 approves a change routed to Operators. If not, `ApprovalRoutingError` (a
@@ -4435,7 +4438,12 @@ database. So each subscription keeps the person's login facts in its tenant:
 `tenant_role`, `approver`, `self_approver`, `platform_admin`, and when they
 were read (`facts_read_at`). MEHO reads them from the login when the person
 switches the messages on, at each console sign-in (also when they pick a
-tenant), and each time they open the account page.
+tenant), and each time they open the account page. No default group sets
+`approver` or `self_approver`: a login in MEHO-Approvers or
+MEHO-SA-Operators stores both as false. Only a login with the `approver`
+claim of a customer role stores `approver` as true. Migration `0175` set
+both flags to false on the rows that existed at the upgrade; the next
+sign-in stores the person's current flags.
 
 For each request, `web_push/recipients.py` builds a person from each row's
 facts and asks `approve_right_any_status` (`operations/approval_rights.py`)

@@ -217,9 +217,9 @@ attribute values with the tenant's name in them.
 ## Other places that read the kind
 
 - Approver routing (`policy/routing.py`, [approvals.md](approvals.md)):
-  at the click, `kind_of` reads the role and the `approver` and
-  `self_approver` flags. A binding sets these flags, so it sets the kind
-  that the routing checks.
+  at the click, `kind_of` reads the role and the `approver` flag (a
+  `read_only` person with the flag counts as Operators). A binding sets
+  the role and the flag, so it sets the kind that the routing checks.
 
 - A delegated agent run (`delegated_operator` in `auth/delegation.py`)
   clears `bound_kind` and `bound_categories`, next to the `approver` and

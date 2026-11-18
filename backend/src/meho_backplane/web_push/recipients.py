@@ -5,7 +5,7 @@
 
 The login groups are in the login token, not in the database. So each
 subscription keeps the person's login facts in its tenant
-(:class:`LoginFacts`: role, approver flag, SA-Operator flag, platform admin
+(:class:`LoginFacts`: role, approver flag, self-approval flag, platform admin
 flag) and when they were read. MEHO reads them from the login when the
 person switches the notifications on, at each console sign-in and each
 time the account page opens.
@@ -112,11 +112,8 @@ def _operator_of(row: PushSubscription) -> Operator | None:
         raw_jwt="",
         tenant_id=row.tenant_id,
         tenant_role=role,
-        # The stored approver and self-approval flags are read as off: no
-        # default group sets them, and a row stored by an old group must
-        # not give a "a change waits for you" message.
-        approver=False,
-        self_approver=False,
+        approver=row.approver,
+        self_approver=row.self_approver,
         platform_admin=row.platform_admin,
         web_session=True,
     )

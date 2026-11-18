@@ -41,7 +41,10 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.handlers import _tool_result_is_error
 from meho_backplane.mcp.registry import ToolDefinition
-from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.delivery_budget import (
+    measure_delivered_wire_bytes,
+    sent_wire_bytes,
+)
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
@@ -214,15 +217,17 @@ def test_declaring_tool_result_carries_matching_structured_content(
     )
     assert result["structuredContent"] == json.loads(result["content"][0]["text"])
 
-    # #3641: the delivery budget measures exactly these two blocks as they
-    # sit in the response body. Both encoded blocks are found verbatim in the
-    # raw bytes, and the measurement is their summed length (no factor).
+    # #3641: the real size count is exactly these two blocks as they sit in
+    # the response body. Both encoded blocks are found verbatim in the raw
+    # bytes, and the count is their summed length (no factor). The ceilings
+    # count the text with spaces, so their count is never smaller.
     text_block = _body_encode(result["content"][0]["text"])
     structured_block = _body_encode(result["structuredContent"])
     assert text_block in response.content
     assert structured_block in response.content
-    measured = measure_delivered_wire_bytes(result["structuredContent"])
-    assert measured == len(text_block) + len(structured_block)
+    sent = len(text_block) + len(structured_block)
+    assert sent_wire_bytes(result["structuredContent"]) == sent
+    assert measure_delivered_wire_bytes(result["structuredContent"]) > sent
 
 
 @pytest.mark.parametrize(

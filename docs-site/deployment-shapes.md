@@ -256,14 +256,13 @@ approval, and audit stay central; a gateway never self-authorises.
 
 The consequence is worth stating plainly to whoever is planning the
 rollout: **an enclave served only by a satellite gateway gets
-observation and, at most, small approved changes.** A tenant admin can
-turn on a write tier for one runner. Then `caution` operations on that
-runner's allowlist run there, each after a person approves it.
-`dangerous` and `destructive` operations never run on a satellite: they
-need the central backplane to reach the target itself. Design the
-segment map around that before anyone promises otherwise. How the write
-tier works:
-[Writes through a satellite](guides/satellite-gateway.md#writes-through-a-satellite).
+observation only.** A satellite runs `safe` reads. Changes through a
+satellite are not built yet. `dangerous` and `destructive` operations never
+run on a satellite: they need the central backplane to reach the target
+itself. Design the
+segment map around that before anyone promises otherwise. How a
+satellite works today:
+[What is not built yet](guides/satellite-gateway.md#what-is-not-built-yet).
 Implementation detail:
 [`docs/codebase/satellite-runner.md`](https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md).
 The satellite gateway is a **Beta** feature — see the

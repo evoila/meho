@@ -54,8 +54,9 @@ type SearchHit struct {
 // GET /api/v1/operations/search. Hand-typed for the same reason as
 // SearchHit above.
 type SearchResponse struct {
-	Hits            []SearchHit `json:"hits"`
-	QueryDurationMs float64     `json:"query_duration_ms"`
+	Hits            []SearchHit    `json:"hits"`
+	QueryDurationMs float64        `json:"query_duration_ms"`
+	RawOperations   *RawOperations `json:"raw_operations,omitempty"`
 }
 
 // rateLimitedError is returned when the backplane answers the search
@@ -109,6 +110,7 @@ func rateLimitedEnvelope(body []byte) *rateLimitedError {
 //	  [--group <key>]                          # narrow within one group
 //	  [--limit N]                              # 1..50, default 10
 //	  [--scores]                               # ranking scores (tenant_admin only)
+//	  [--include-raw]                          # also show raw operations
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
@@ -121,6 +123,7 @@ func newSearchCmd() *cobra.Command {
 		limit             int
 		opID              string
 		scores            bool
+		includeRaw        bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -157,6 +160,7 @@ func newSearchCmd() *cobra.Command {
 				GroupKey:          groupKey,
 				Limit:             limit,
 				Scores:            scores,
+				IncludeRaw:        includeRaw,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -170,6 +174,9 @@ func newSearchCmd() *cobra.Command {
 		"show this one operation's call contract instead of ranked hits")
 	cmd.Flags().BoolVar(&scores, "scores", false,
 		"add ranking scores to each hit (honoured for tenant_admin only)")
+	cmd.Flags().BoolVar(&includeRaw, "include-raw", false,
+		"also show raw operations made from the vendor API description "+
+			"(matters only while the backplane switch SEARCH_TYPED_FIRST is on)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -184,6 +191,7 @@ type searchOptions struct {
 	GroupKey          string
 	Limit             int
 	Scores            bool
+	IncludeRaw        bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -254,6 +262,10 @@ func getSearch(ctx context.Context, client operationsAPI, opts searchOptions) (*
 		scores := true
 		params.IncludeScores = &scores
 	}
+	if opts.IncludeRaw {
+		includeRaw := true
+		params.IncludeRaw = &includeRaw
+	}
 	body, err := fetchSearch(ctx, client, params)
 	if err != nil {
 		return nil, err
@@ -303,6 +315,7 @@ func fetchSearch(
 func printSearchTable(w io.Writer, connectorID, query string, r *SearchResponse, scores bool) {
 	fmt.Fprintf(w, "search %s %q — %d hit(s) in %.0fms\n",
 		connectorID, query, len(r.Hits), r.QueryDurationMs)
+	defer printRawNote(w, r.RawOperations)
 	if len(r.Hits) == 0 {
 		return
 	}

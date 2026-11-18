@@ -1413,6 +1413,10 @@ category is the one the classification gave the looked-up operation
 `apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
 install's category is `EndpointDescriptor.policy_install_category`: the
 category from the install's classification entries and overrides alone.
+A step of a multi-step operation reads the override rows of its operation
+too (`apply_step_classification` passes them to `classify_step`), so a
+step and a direct call of the same operation get the same categories and
+the same approvers.
 When those entries give the operation two categories, it is the empty
 text: MEHO does not know it (an operation registered after the install's
 import can match two such entries). Then no group may approve the change
@@ -1425,9 +1429,18 @@ without a category fits only entries without `category`.
 in their order: a person only, the read-only check, still pending, the
 deadline, the rights-change and group rules (also the rules on own
 changes), the role floor. Then `_check_install_floor`
-(`install_floor_refusal` in `policy/routing_floor.py`): MEHO routes the
+(`InstallFloor.refusal` in `policy/routing_floor.py`): MEHO routes the
 request again with the install's file as it is now, the stored risk level
-and the stored `approver_install_category`. A request without stored
+and the stored `approver_install_category`. A request with stored kinds
+can have no stored install category (NULL) in two cases: it started to
+wait while `POLICY_CLASSIFICATION` was off (no change has a category
+then), or a build of main between 15 November 2026 and pull request #6542
+wrote it (those builds did not store the install category). In both
+cases the category counts as "not known" while `POLICY_CLASSIFICATION` is
+on, like the empty text, so the click is refused when an install entry
+that matches on a `category` could fit. With that switch off, a
+`category` entry fits nothing, as when the request started to wait. A
+request without stored
 kinds (it started to wait while the switch was off) is not checked here:
 it keeps today's rule until it is decided or expires. When an install
 entry fits and the
@@ -1458,10 +1471,13 @@ params check and the destructive preview binding still run after it.
 Routing also narrows an own click: a MEHO-SA-Operator whose own network
 change is routed to Admins only cannot approve it.
 
-`approve_right` gives the same answer with the reason `not_routed`. So the
-console sign, the REST fields `may_approve` / `may_approve_reason`, the
-"waiting for you" order and the push recipients
-(`approve_right_any_status`) all follow the routing. The shadow mode of
+`approve_right` gives the same answer with the reason `not_routed`. Its
+callers load the install's routing as it is now once
+(`load_install_floor` or `current_install_floor`) and pass it as
+`floor=`, so `approve_right` checks it first, as the click does. So the
+console sign and the approval card, the REST fields `may_approve` /
+`may_approve_reason`, the "waiting for you" order, the bell count and the
+push recipients (`approve_right_any_status`) all follow the routing. The shadow mode of
 "may approve" compares the evaluator with today's answer before routing.
 
 **When the routing changes.** A waiting request keeps the group kinds it
@@ -1469,14 +1485,19 @@ stored when it started to wait. A tenant file that is imported later
 applies only to new requests, not to the ones already waiting. The
 install's file is different: the click always checks the install's
 current routing too, so a narrower install file counts at once for the
-requests that already wait. `approve_right` (the console sign, the push
-recipients) uses only the stored kinds, so in that case the sign can say
-"may approve" and the click still refuses. Run approvals are different: they store no kinds, so they use the policy that
+requests that already wait. `approve_right` (the console sign, the
+approval card, the push recipients) reads the install's current routing
+too, so the sign says what the click decides. The "Who can approve" text
+still names the stored kinds. Run approvals are different: they store no kinds, so they use the policy that
 is stored at the moment of the click.
 
 **Audit rows.** When a request has stored kinds, its audit rows carry
 `approver_rule` and `approver_roles`: the `approval.request` row and the
-`approval.decision` row of the approve. The approve audit row of a run
+`approval.decision` row of the approve. When an install entry counted at
+the click, the `approval.decision` row of the approve also carries
+`approver_floor`: the place of that install entry (for example
+`install:routing[0]`), from the install's file as it was at the click. The
+approve audit row of a run
 approval carries `approver_routing`: the rule and the kinds of each routed
 entry, also when the list is refused. When the stored routing in the
 policy file is not valid, the request does not wait. One
@@ -1519,7 +1540,7 @@ the policy that is stored at the moment a person approves it
 Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
 `tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
 `tests/test_web_push_send.py`,
-`tests/test_policy_routing_floor.py`,
+`tests/test_policy_routing_floor.py`, `tests/test_policy_routing_step_floor.py`,
 `tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`,
 `tests/migrations/test_migration_0173_add_approval_request_approver_category.py`.
 

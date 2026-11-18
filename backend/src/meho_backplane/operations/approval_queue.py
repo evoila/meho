@@ -184,7 +184,7 @@ from meho_backplane.policy.routing import (
     routing_refusal,
     stamp_approver_set,
 )
-from meho_backplane.policy.routing_floor import install_floor_refusal
+from meho_backplane.policy.routing_floor import load_install_floor
 from meho_backplane.version import running_release_id
 from meho_backplane.work_ref import work_ref_filter_values
 
@@ -2150,6 +2150,10 @@ async def approve_request(
     }
     if reason:
         extra["reason"] = reason
+    # The install's routing entry that counted at this click (the floor).
+    floor = getattr(request, "_approver_floor", None)
+    if floor is not None:
+        extra["approver_floor"] = floor
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     extra.update(_approver_client_fields(operator, user_agent))
@@ -3935,9 +3939,14 @@ async def _check_install_floor(
     install's file as it is now, then the stored group kinds
     (:func:`_check_routed_approver`). Does nothing while the
     ``POLICY_APPROVER_ROUTING`` switch is off
-    (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+    (:class:`~meho_backplane.policy.routing_floor.InstallFloor`). When an
+    install entry counted, its place is kept on *request* for the approve
+    audit row (``approver_floor``).
     """
-    refusal = await install_floor_refusal(session, operator, request)
+    floor = await load_install_floor(session)
+    if floor is None:
+        return
+    refusal = floor.refusal(operator, request)
     if refusal is not None:
         raise ApprovalRoutingError(
             request.id,
@@ -3945,6 +3954,9 @@ async def _check_install_floor(
             role=operator.tenant_role.value,
             reason=refusal,
         )
+    found = floor.check(request)
+    if found is not None and found.floor is not None:
+        request._approver_floor = found.floor  # type: ignore[attr-defined]
 
 
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:

@@ -188,7 +188,11 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref, tenant_secret_ref
-from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import (
+    effective_tenant_scope_template,
+    is_plain_kv_path,
+    rendered_tenant_prefix,
+)
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
@@ -1082,11 +1086,11 @@ def _build_secret_ref_outside_tenant_scope_detail(
 def _tenant_prefix_or_empty(operator: Operator) -> str:
     """Render *operator*'s tenant prefix, normalised; ``""`` when the prefix check is off.
 
-    An empty ``VAULT_KV_TENANT_SCOPE_PREFIX`` (mid-migration deploy) has no
-    subtree to enforce, so only the plain-path rule applies, as at
-    dispatch time.
+    The prefix check is off when ``VAULT_KV_TENANT_SCOPE_PREFIX`` is empty
+    and the tenant has no Vault login role of its own; then only the
+    plain-path rule applies, as at dispatch time.
     """
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    template = effective_tenant_scope_template(operator)
     if not template:
         return ""
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
@@ -1195,17 +1199,15 @@ def _enforce_secret_ref_tenant_scope(
       relative to the mount, and the dispatch-time read addresses the
       default ``secret`` mount
       (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
-    * the operator's prefix is rendered from
-      :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-      (:func:`_tenant_prefix_or_empty`);
+    * the operator's prefix comes from :func:`_tenant_prefix_or_empty`;
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
     * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
       refused with any prefix setting, also an empty one
       (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
-    * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
-      mid-migration state) turns off only the prefix match: any plain
-      ref passes.
+    * an **empty** ``VAULT_KV_TENANT_SCOPE_PREFIX`` turns off only the
+      prefix match, and only for a tenant without its own Vault login role
+      (no entry in ``VAULT_OIDC_ROLE_BY_TENANT``): any plain ref passes.
 
     Only an *explicitly supplied* ``secret_ref`` is checked. The
     server-derived default

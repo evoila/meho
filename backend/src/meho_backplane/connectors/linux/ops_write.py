@@ -90,9 +90,11 @@ from meho_backplane.connectors.linux.ops_host import (
     validate_unit_name,
 )
 from meho_backplane.connectors.linux.script_preview import (
+    has_secret_shape,
     script_matches_expected,
     script_preview_fields,
 )
+from meho_backplane.redaction.command_line import is_secret_shaped_name
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -1186,6 +1188,41 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     return preview
 
 
+#: The ``linux.script.run`` card keys only a person reads. Every read of a
+#: stored request by an agent or a token gets the ``env`` names only.
+_PERSON_ONLY_SCRIPT_RUN_KEYS: Final[frozenset[str]] = frozenset({"env", "env_note"})
+
+_SEND_IN_SECRET_ENV: Final[str] = (
+    "Send it in secret_env, as a Vault path and field, not in env: "
+    "the approver sees every env value."
+)
+
+
+async def _refuse_secret_in_env(ctx: PreviewContext) -> str | None:
+    """Refuse a ``linux.script.run`` call with a secret in ``env``, before it waits.
+
+    The approval card shows every ``env`` value, so a secret must not be
+    there. Refused are a name with a secret word (the command-line rule:
+    ``PASSWORD``, ``TOKEN``, ``SECRET``, ``KEY``, ...) and a value with a
+    secret shape (the rules of the script text: a password in a URL, a
+    JWT, a bearer token, a private key block, a token with a known vendor
+    prefix). The answer names the env name, never the value.
+    """
+    env = ctx.params.get("env")
+    if not isinstance(env, dict):
+        return None
+    for name, value in env.items():
+        if is_secret_shaped_name(str(name)):
+            return f"env var {str(name)!r} has a secret word in its name. {_SEND_IN_SECRET_ENV}"
+        if await asyncio.to_thread(has_secret_shape, str(value)):
+            return f"The value of env var {str(name)!r} looks like a secret. {_SEND_IN_SECRET_ENV}"
+    return None
+
+
+def _person_only_keys_shown_to_agents() -> bool:
+    return False
+
+
 def register_linux_write_previews() -> None:
     """Register the two credential-class bespoke preview builders (import-time).
 
@@ -1197,10 +1234,18 @@ def register_linux_write_previews() -> None:
     non-secret dangerous ops (``sysctl.write`` / ``firewall.load``) register no
     bespoke builder -- they preview via the generic params-echo default.
     """
-    from meho_backplane.operations._preview import register_preview_builder
+    from meho_backplane.operations._park_check import register_park_check
+    from meho_backplane.operations._preview import (
+        register_person_only_preview_keys,
+        register_preview_builder,
+    )
 
     register_preview_builder("linux.file.write", _linux_file_write_preview)
     register_preview_builder("linux.script.run", _linux_script_run_preview)
+    register_park_check("linux.script.run", _refuse_secret_in_env)
+    register_person_only_preview_keys(
+        "linux.script.run", _person_only_keys_shown_to_agents, _PERSON_ONLY_SCRIPT_RUN_KEYS
+    )
 
 
 # ===========================================================================

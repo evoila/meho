@@ -6,14 +6,16 @@
 * A waiting request holds each ``env`` name with its value, and one line that
   secrets belong in ``secret_env``.
 * ``secret_env`` shows only its references, never a value.
-* The console approval window and the MCP approval read show the ``env``
-  values; the console shows a control character as a visible escape.
+* The console approval window shows the ``env`` values, a control
+  character as a visible escape. The MCP approval reads get the ``env``
+  names only, also for a request that another principal sent.
 * The params hash binds the ``env`` values: an approval with another value
   is refused.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -165,11 +167,41 @@ def test_console_window_shows_env_values_with_control_characters_escaped() -> No
     assert ENV_NOTE in table
 
 
-def test_mcp_approval_read_keeps_the_env_values() -> None:
+def test_mcp_approval_read_gets_the_env_names_only() -> None:
     effect = _effect({"TAR_OPTIONS": "x"})
     shown = proposed_effect_for_agent(
         "linux.script.run", effect, params=None, connector_id="linux-ssh", tenant=None
     )
     assert shown is not None
-    assert shown["preview"]["env"] == {"TAR_OPTIONS": "x"}
-    assert shown["preview"]["env_note"] == ENV_NOTE
+    assert "env" not in shown["preview"]
+    assert "env_note" not in shown["preview"]
+    assert shown["preview"]["env_var_names"] == ["TAR_OPTIONS"]
+    assert shown["preview"]["script"] == _SCRIPT
+    assert effect["preview"]["env"] == {"TAR_OPTIONS": "x"}
+
+
+@pytest.mark.asyncio
+async def test_stored_request_shows_env_values_in_the_console_and_names_only_over_mcp(
+    linux_write_registered: None,  # noqa: F811 -- fixture
+) -> None:
+    from meho_backplane.mcp.tools.approvals import _get_handler, _list_handler
+
+    request_id = await _park({"script": _SCRIPT, "env": {"TAR_OPTIONS": "env-card-value"}})
+    effect = await _proposed_effect(request_id)
+
+    # The console seeds its own copy of the stored card (it runs its own loop).
+    body = await asyncio.to_thread(_render_modal, effect)
+    assert "env-card-value" in body
+    assert ENV_NOTE in body
+
+    # _REVIEWER is another principal than the one that sent the request.
+    got = await _get_handler(_REVIEWER, {"approval_request_id": str(request_id)})
+    listed = await _list_handler(_REVIEWER, {"status": "pending"})
+    rows = [row for row in listed["items"] if row["id"] == str(request_id)]
+    assert len(rows) == 1
+    for row in (got, rows[0]):
+        preview = row["proposed_effect"]["preview"]
+        assert preview["env_var_names"] == ["TAR_OPTIONS"]
+        assert "env" not in preview
+        assert "env_note" not in preview
+        assert "env-card-value" not in repr(row)

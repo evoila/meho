@@ -50,6 +50,7 @@ __all__ = [
     "SCRIPT_CHECK_MATCHES",
     "SCRIPT_CHECK_MISMATCH",
     "SCRIPT_SHOWN_MAX_BYTES",
+    "has_secret_shape",
     "script_matches_expected",
     "script_preview_fields",
     "script_sha256",
@@ -92,6 +93,16 @@ def _hide_secret_values(script: str) -> tuple[str, bool]:
     if not isinstance(shown, str):  # pragma: no cover -- str in, str out
         raise TypeError("redaction returned a non-string for a string")
     return shown, shown != script or bool(result.manifest)
+
+
+def has_secret_shape(text: str) -> bool:
+    """Whether *text* holds a value the script preview would hide as a secret.
+
+    The same rules as for the script text: a secret on a command line, a
+    password in a URL, a JWT, a bearer token, a private key block, a token
+    with a known vendor prefix.
+    """
+    return _hide_secret_values(text)[1]
 
 
 def _cut(text: str, max_bytes: int) -> tuple[str, bool]:

@@ -105,7 +105,10 @@ change what a tool runs (for example `TAR_OPTIONS` or `GIT_SSH_COMMAND`).
 The run uses exactly these values; a call with other values needs a new
 approval. Secrets do not belong in `env`. Send them in `secret_env`, as a
 Vault path and field: the request shows only that reference, never the
-secret.
+secret. MEHO refuses a call with a secret-looking `env` name (for example
+`DB_PASSWORD`) or value (for example a token or a password in a URL)
+before it waits for approval. The `env` values are for the person who
+approves: the MCP approval tools show the `env` names only.
 
 When several requests belong to one change ticket and depend on each
 other, approve them as a group, oldest first:

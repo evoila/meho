@@ -120,6 +120,40 @@ spec:
 - An item in MEHO but not in the file is reported as "not in file" and left
   alone. **Nothing is ever deleted.** (A later `--prune` is its own Task.)
 
+### Policies that change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs. A
+file that loosens one of them applies only for a person in the web console
+(`runs_at_once` in `api/v1/_wait_for_approval.py`). The rule and the list
+are in `instance_settings/console_only.py`.
+
+| Policy | Widens an approval, turns a gate off, or changes who approves? | With a token |
+|---|---|---|
+| `run_approval_target_kinds` | Yes: `true` lets one run approval cover a whole target kind ([run-approvals.md](run-approvals.md)) | `false` -> `true` refused; `true` -> `false` applies |
+| `announce_gate_enabled` | Yes: `false` turns the announce gate off | `true` -> `false` refused; `false` -> `true` applies |
+| `flight_recorder.*` | No. Its own route `PATCH /api/v1/tenants/flight-recorder-policy` writes at once for a token | applies |
+| `mail_recipient_allowlist` | No. Its own route `PATCH /api/v1/tenants/mail-recipient-policy` writes at once for a token | applies |
+| `knowledge_wiki_collection` | No. It names a docs collection that knowledge search also reads, and each read still checks the caller's own entitlement to that collection | applies |
+
+The file has no install-level part, so an import writes no install setting.
+Tenant rows and conventions change no approval or gate.
+
+- A call with a token (the CLI, a script, an AI tool with a person's login)
+  that applies a file with such a change gets 403. The reason names each
+  path, for example `spec.tenants[0].policies.run_approval_target_kinds`.
+  MEHO writes nothing from the file, also not its other parts, and makes no
+  revision.
+- `policies: null` resets every policy. When the gate is on, that turns it
+  off, so the same rule applies.
+- A file with mistakes answers 422 first.
+- The preview with a token works. It shows the change in `diff` and names
+  each such path in `warnings`. It writes nothing.
+- A value equal to the stored one is no change and is not refused.
+- The console has no settings page yet. Until it has one, no caller can
+  make these two changes; they have no REST route of their own.
+
+Tests: `tests/test_settings_import_console_policies.py`.
+
 ## Never in the file
 
 The schema refuses unknown keys, so none of these can be added by hand; the

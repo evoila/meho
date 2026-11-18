@@ -520,22 +520,6 @@ def test_tenant_id_may_be_left_out_in_a_one_tenant_file(client: TestClient) -> N
 
 
 @pytest.mark.asyncio
-async def test_import_turns_on_run_approval_target_kinds(client: TestClient) -> None:
-    """The settings file turns on target kinds in run approvals (#4126)."""
-    content = (
-        "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        "spec:\n  tenants:\n    - policies: {run_approval_target_kinds: true}\n"
-    )
-    key = make_rsa_keypair("kid-run-approval-kinds")
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        resp = _import(client, _token(key), content)
-    assert resp.status_code == 200, resp.text
-    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
-    assert tenant.run_approval_target_kinds_enabled is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("value", "stored"), [("team-wiki", "team-wiki"), ('""', None)])
 async def test_import_sets_the_knowledge_wiki_collection(
     client: TestClient, value: str, stored: str | None

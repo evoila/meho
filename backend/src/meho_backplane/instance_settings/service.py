@@ -64,6 +64,11 @@ from meho_backplane.db.models import (
     TenantConvention,
 )
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.instance_settings.console_only import (
+    console_only_changes,
+    console_only_refusal,
+    console_only_warnings,
+)
 from meho_backplane.instance_settings.diff import DEFAULT_POLICIES, diff_specs, is_empty, summarise
 from meho_backplane.instance_settings.schema import (
     API_VERSION,
@@ -367,6 +372,8 @@ class ImportPlan:
     file_sha256: str = ""
     api_version: str = API_VERSION
     exported_from: dict[str, Any] | None = None
+    #: File paths of policy changes that apply only in the web console.
+    console_only: list[str] = field(default_factory=list)
 
 
 def _detail_sentence(path: str, detail: Any) -> str:
@@ -702,6 +709,8 @@ async def build_plan(
         policies, tenant_plan.policies = _plan_policies(entry, current["policies"])
         if tenant_plan.policies == current["policies"]:
             tenant_plan.policies = None
+        else:
+            plan.console_only.extend(console_only_changes(ti, current["policies"], policies))
         desired_view[str(tid)] = {
             "id": str(tid),
             "policies": policies,
@@ -729,18 +738,25 @@ async def build_plan(
 
     if plan.mistakes:
         return plan
+    plan.warnings.extend(console_only_warnings(operator, plan.console_only))
 
-    tenants_not_in_file: list[str] = []
-    if operator.platform_admin:
-        all_ids = (await session.execute(select(Tenant.id))).scalars()
-        tenants_not_in_file = sorted(str(t) for t in all_ids if t not in tenant_ids)
     plan.diff = diff_specs(
         plan.before,
         desired_view,
         in_file=in_file,
-        tenants_not_in_file=tenants_not_in_file,
+        tenants_not_in_file=await _tenants_not_in_file(session, operator, tenant_ids),
     )
     return plan
+
+
+async def _tenants_not_in_file(
+    session: AsyncSession, operator: Operator, tenant_ids: list[uuid.UUID]
+) -> list[str]:
+    """The other tenants' ids, for a platform_admin; an empty list for anyone else."""
+    if not operator.platform_admin:
+        return []
+    all_ids = (await session.execute(select(Tenant.id))).scalars()
+    return sorted(str(t) for t in all_ids if t not in tenant_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +893,9 @@ async def apply_import(
     commits the one transaction after the route returns.
     """
     plan = await build_plan(session, operator, content)
+    refusal = None if plan.mistakes else console_only_refusal(operator, plan.console_only)
+    if refusal is not None:
+        raise SettingsForbiddenError(refusal)
     result = ImportResult(plan=plan)
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff

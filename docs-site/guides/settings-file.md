@@ -95,6 +95,30 @@ spec:
 - When a `tenant_admin` imports a file with only their own tenant, the
   tenant `id` may be left out.
 
+### Approval policies change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs:
+
+- `run_approval_target_kinds: true` lets one run approval cover a whole
+  target kind, not only one target.
+- `announce_gate_enabled: false` turns the announce gate off.
+
+Only a person in the web console applies a file that makes one of these
+two changes. When you send such a file with a token (the CLI, a script or
+an AI tool), MEHO answers `403`, names each policy, and saves nothing
+from the file, also not its other parts. This includes `policies: null`
+when the gate is on, because it turns the gate off.
+
+- The preview works with a token. It shows the change in `diff` and
+  names it in `warnings`.
+- The other direction (`run_approval_target_kinds: false`,
+  `announce_gate_enabled: true`) applies with a token.
+- A value that is the same as the stored one is no change.
+- The other policies apply with a token.
+
+The web console does not have the settings file yet. Until it does,
+these two changes cannot be made with a token.
+
 ### What is never in the file
 
 - Passwords, tokens and keys of any kind.

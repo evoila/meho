@@ -64,6 +64,7 @@ from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     names_missing_rights,
     register_rights_check,
 )
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
@@ -626,4 +627,6 @@ async def _passkey_code_skip_preview(ctx: PreviewContext) -> dict[str, Any] | No
     }
 
 
-register_rights_check(ENSURE_PASSKEY_CODE_SKIP_OP_ID, _ROLES, _passkey_code_skip_preview)
+register_rights_check(
+    ENSURE_PASSKEY_CODE_SKIP_OP_ID, _ROLES, with_current_binding()(_passkey_code_skip_preview)
+)

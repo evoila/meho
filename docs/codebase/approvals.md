@@ -307,6 +307,33 @@ A request without a card object (no blast radius) is not checked. The
 re-run path reports the three checks as `target_changed`,
 `preview_changed` and `object_changed`.
 
+**State on the card.** Some approval cards show the object as it is now,
+next to what the call changes (for example the roles a user has now). A
+connector registers such an operation with `register_state_pin(op_id,
+card_key)` (`operations/approval_state_pin.py`). The card holds the state
+under `card_key` and says `<card_key>_available: true`. Right before every
+approved run, with or without a preview hash,
+`state_changed_since_request` builds the card again and compares the
+state:
+
+- the same state: the run goes ahead;
+- another state: the run is refused (`REASON_STATE_CHANGED`: "The object
+  changed since the approval; send the request again.");
+- the approved card did not show the state (MEHO could not read it when the
+  request waited, or the request is older than the card), or MEHO cannot
+  read it now: the run is refused (`REASON_STATE_UNREADABLE`).
+
+A connector can name the part of the state that the run compares with
+`register_state_pin(..., compared=<function>)`. Keycloak's
+`group.member.add` compares only the group id and its roles, not the
+member list. A re-run after a first run that failed part way is refused
+when the first run already changed the object.
+
+The refusal has the `object_changed_since_approval` error code, in the
+shared resume check and in the re-run (`object_changed`). The Keycloak
+writes that use it are listed in
+[connectors-keycloak.md](connectors-keycloak.md#writes-that-are-changes-of-rights).
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -1943,6 +1970,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
+| An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.
@@ -2367,17 +2395,21 @@ One rule for every view: `result_state_of_envelope` in
 console all read it. Every view gives the same advice: do not run it again,
 check the target first. No view says "failed" or "did not succeed" for it.
 
-Four cases end as `uncertain`:
+Five cases end as `uncertain`:
 
 | Case | Where | Stored result |
 |---|---|---|
 | The audit record could not be saved after the change ran. | `result_audit_commit_failed` | `error_code` `audit_commit_failed` |
 | A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
+| The product ended the login session after MEHO sent a change, and MEHO did not send it again. | `result_connector_auth_failed(..., changes_target=True)` | `error_code` `connector_auth_failed`, `retry: false`, advice `LOGIN_ENDED_ADVICE` |
 | MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
 | An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
 
-A connect timeout, a pool timeout and a refused connection stay plain errors,
-because nothing was sent. A timeout of a read operation (`safety_level`
+A connect timeout, a pool timeout, a refused connection and a refused login
+(`connector_auth_failed` at stage `establish`) stay plain errors, because
+nothing was sent. An approved change always starts with a fresh login
+(`drop_login_before_approved_change`, see `backend.md`), so a login that ended
+while the change waited does not end the run. A timeout of a read operation (`safety_level`
 `safe`) stays a plain error. Any other level counts as a change
 (`changes_target`).
 

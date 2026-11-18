@@ -2656,6 +2656,14 @@ class Settings(BaseModel):
     #: the connector has no such operation. Off: both are as before. Set via
     #: ``SEARCH_TYPED_FIRST``.
     search_typed_first: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Each group's typed and multi-step operations in
+    #: ``list_operation_groups`` (#4713), behind a switch that is off by
+    #: default. When on, each group lists them with ``op_id``, a one-line
+    #: summary, the risk level and the approval flag, and an answer is paged
+    #: so that it stays under a size limit
+    #: (:mod:`meho_backplane.operations._group_listing_operations`). Off: the
+    #: listing is as before. Set via ``GROUP_LISTING_OPERATIONS``.
+    group_listing_operations: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
     #: switch that is off by default. When on, each node row also has
     #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
@@ -2671,12 +2679,14 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    #: What ``preview_operation`` gives back for three Keycloak changes of
+    #: What ``preview_operation`` gives back for Keycloak changes of
     #: rights. The approval request a person reads always shows their cards:
     #: for ``keycloak.client.update`` and ``keycloak.realm.update`` the values
     #: now of each field the request sends next to the new values, for
     #: ``keycloak.protocol_mapper.create`` the client's mappers now and the
     #: new one (:mod:`meho_backplane.connectors.keycloak.ops_write_rights_card`).
+    #: More changes of rights show the object as it is now, such as the roles a
+    #: user has now (:mod:`meho_backplane.connectors.keycloak.ops_write_current_state`).
     #: On, ``preview_operation`` shows the same cards. Off (the default), it
     #: gives back the same answers as before. Set via
     #: ``KEYCLOAK_RIGHTS_CHANGE_CARDS``.
@@ -3788,6 +3798,9 @@ def get_settings() -> Settings:
         ),
         search_typed_first=parse_bool_env(
             os.environ.get("SEARCH_TYPED_FIRST"),
+        ),
+        group_listing_operations=parse_bool_env(
+            os.environ.get("GROUP_LISTING_OPERATIONS"),
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),

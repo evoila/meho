@@ -198,6 +198,16 @@ async def get_groups(
         ),
     ),
     include_raw: bool = Query(default=False, description=_INCLUDE_RAW_DESCRIPTION),
+    group: str | None = Query(
+        default=None,
+        max_length=256,
+        description=(
+            "A `group_key`: list only this group. Used only while the "
+            "backplane switch `GROUP_LISTING_OPERATIONS` is on; then each "
+            "group also lists its typed and multi-step `operations`, and an "
+            "answer ends early (with `next_cursor`) to stay under 12 KB."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """List enabled operation groups for *connector_id*.
@@ -226,6 +236,7 @@ async def get_groups(
                 "limit": limit,
                 "cursor": cursor,
                 "include_raw": include_raw,
+                "group": group,
             },
         )
     except ConnectorNotIngestedError as exc:

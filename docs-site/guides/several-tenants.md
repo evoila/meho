@@ -239,6 +239,14 @@ leaves the Vault groups of Step 6 (item 4), and you check each role
     [deploying.md](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes)
     (row v0.35.13).
 
+    Optional: set `VAULT_OIDC_ROLE_TENANTS` to the tenant ids that may
+    use the shared login role `VAULT_OIDC_ROLE`, separated by commas. A
+    tenant that is not in this list and has no entry in
+    `VAULT_OIDC_ROLE_BY_TENANT` then gets a clear refusal, and MEHO tries
+    no Vault login. The list also covers the login of checks (Sensors)
+    and of incoming events when `VAULT_CHECK_RUNNER_ROLE` is empty.
+    Leave it empty on the built-in Vault.
+
 4. **Take the person out of the Vault groups of Step 6.** The roles
    above log in with `user_claim: sub` on the same auth mount as the
    shared role. So every login of the person, with any role, lands on

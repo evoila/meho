@@ -118,6 +118,7 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._connector_classification import (
     CLASSIFICATION_PROPERTIES,
     CLASSIFICATION_TEXT,
@@ -150,6 +151,7 @@ from meho_backplane.mcp.tools._connector_shared import (
     raise_invalid_params_for_edit_value_error,
     raise_invalid_params_for_legacy_tenant_copy,
 )
+from meho_backplane.mcp.tools._short_tool_texts import CONNECTOR_LIST_SHORT
 from meho_backplane.operations._catalog_guard import catalog_refuses_target
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
@@ -980,6 +982,7 @@ register_mcp_tool(
         },
         required_role=TenantRole.OPERATOR,
         op_class=_OP_CLASS_READ,
+        for_settings=with_short_text(CONNECTOR_LIST_SHORT),
     ),
     handler=_list_handler,
 )

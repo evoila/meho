@@ -9,6 +9,26 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.48.0](https://github.com/evoila/meho/releases/tag/v0.48.0) — 2026-11-18
+
+- **MEHO says when a change of rights needs a second admin.** When the
+  only admin of a tenant asks for such a change, the answer says so.
+  `meho doctor` shows a new line "second admin".
+- **An approved change starts with a fresh login.** Before MEHO sends a
+  change that a person approved, it signs in to the target again. A change
+  whose login was refused after MEHO sent it is stored as "outcome
+  unknown": check the target first, then make a new request.
+- **New help for agents, behind switches.** Typed operations first in
+  search, required parameters in search hits, operations in the group
+  list, a short guide to the call flow, and clearer `result_query`
+  answers. All are off by default.
+- **More operations.** A Vault operation that makes a password that meets
+  given rules, and reads of Keycloak login and admin events.
+- **Reset a lost second factor.** A host command on the appliance and on
+  the Linux server install resets the code app of a local account.
+- **No database migration.** After the upgrade, probe every OpenBao
+  target again.
+
 ## [v0.47.0](https://github.com/evoila/meho/releases/tag/v0.47.0) — 2026-11-17
 
 - **Keycloak writes that change rights need another admin.** Giving a

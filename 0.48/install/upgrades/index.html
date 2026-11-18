@@ -3884,6 +3884,11 @@ Rows of the next release are in this table at once.</p>
 <td>New optional setting <code>VAULT_OIDC_ROLE_TENANTS</code> (through the chart's <code>extraEnv</code>): a comma-separated list of the tenant ids that may use the shared Vault login role <code>VAULT_OIDC_ROLE</code>. When it is set, a tenant that is not in the list and has no entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> gets a clear refusal, and MEHO tries no Vault login. A wrong entry stops MEHO from starting.</td>
 <td>No action needed. The default is empty, and then nothing changes. To turn it on, set it to the ids of the tenants that use the shared role, then restart MEHO. Leave it empty on the built-in Vault of the chart.</td>
 </tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
+<td>A tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> now always gets the tenant folder check: every Vault path that a caller or a target names for it must be in the tenant's folder. With an empty <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> that folder is <code>secret/tenants/&lt;tenant id&gt;/</code>; with a non-empty setting the folder of that setting applies. With either setting, MEHO now also checks a person's read of a target's secret when a call runs on a target of such a tenant. A tenant without an entry is unchanged.</td>
+<td>For each tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code>: run <code>meho tenants use &lt;tenant&gt;</code>, then <code>meho targets list --json</code>, and look at the field <code>secret_ref</code> of each target. Move each secret whose <code>secret_ref</code> is outside the tenant's folder into the folder, and set the new <code>secret_ref</code> on the target. A call on a target that is not moved yet fails with <code>connector_error: VaultTenantScopeError</code> and the text <code>vault.kv request outside tenant namespace: requested '&lt;path&gt;' is not within tenant prefix '&lt;folder&gt;'</code>.</td>
+</tr>
 </tbody>
 </table>
 <p>New rows come from one small file per row in

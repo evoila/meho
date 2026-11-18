@@ -3613,7 +3613,18 @@ Step 6 do not go away on their own: Vault keeps them on the person's
 identity and adds them to every login, with any role. So the person also
 leaves the Vault groups of Step 6 (item 4), and you check each role
 (item 5).</p>
-<ol>
+<p>A tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> also always gets the
+MEHO folder check. Every Vault path that a caller or a target names for
+this tenant must be in the tenant's folder:</p>
+<ul>
+<li>When <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> is empty, the folder is
+  <code>secret/tenants/&lt;tenant-uuid&gt;/</code>.</li>
+<li>When <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> is not empty, the folder of that
+  setting applies.</li>
+<li>
+<p>With either setting, MEHO also checks a person's read of a target's
+  secret when a call runs on that target.</p>
+</li>
 <li>
 <p><strong>Write a policy for this tenant's path only.</strong> Put the tenant UUID
    into the path itself. A read-only example:</p>
@@ -3724,7 +3735,7 @@ swapped. A <code>read</code> on the other tenant's path means the person is
 still in a Vault group of that tenant (item 4), or the policy has
 the wrong UUID (item 1).</p>
 </li>
-</ol>
+</ul>
 <p>Agent, service and runner logins have no <code>meho_tenants</code> list, so Vault
 refuses them for a role that is bound only on <code>meho_tenants</code>. Plan their
 Vault access before you add the tenant to <code>VAULT_OIDC_ROLE_BY_TENANT</code>.</p>

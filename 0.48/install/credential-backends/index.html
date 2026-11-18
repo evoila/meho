@@ -3424,9 +3424,12 @@ has the path shapes.</p>
 <p>The per-tenant prefix is the setting <code>VAULT_KV_TENANT_SCOPE_PREFIX</code>,
 which <strong>defaults to <code>secret/tenants/{tenant_id}/</code></strong> — the cross-tenant
 credential guard is on out of the box, and this is the secure baseline.
-Emptying it (<code>VAULT_KV_TENANT_SCOPE_PREFIX=""</code>) turns the guard off:
+Emptying it (<code>VAULT_KV_TENANT_SCOPE_PREFIX=""</code>) turns the guard off
+for each tenant without an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code>:
 schemeless references then resolve unscoped and the Vault
-target-registration guard becomes a no-op. That is a <strong>documented
+target-registration guard becomes a no-op for that tenant. A tenant
+with an entry (its own Vault login role) always keeps the guard, with
+the folder <code>secret/tenants/&lt;tenant-uuid&gt;/</code>. Emptying it is a <strong>documented
 downgrade</strong>, valid only mid-migration (while a tenant's secrets are
 being relocated under the prefix) or on a genuinely single-tenant
 install. Never empty it on a multi-tenant deployment. It is a backend

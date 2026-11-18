@@ -119,6 +119,7 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._memory_evidence import (
     SEARCH_OUTPUT_SCHEMA,
     bounded_search_response,
@@ -130,6 +131,7 @@ from meho_backplane.mcp.tools._search_filters import (
     header_filter_terms,
     time_window_from,
 )
+from meho_backplane.mcp.tools._short_tool_texts import SEARCH_MEMORY_SHORT
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
@@ -514,6 +516,7 @@ register_mcp_tool(
         outputSchema=SEARCH_OUTPUT_SCHEMA,
         required_role=TenantRole.OPERATOR,
         op_class=_OP_CLASS_READ,
+        for_settings=with_short_text(SEARCH_MEMORY_SHORT),
     ),
     handler=_search_memory_handler,
 )

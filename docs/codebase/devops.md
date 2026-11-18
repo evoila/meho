@@ -2773,6 +2773,33 @@ number, so they stopped working when the value moved. When a value
 cannot carry a comment on its own line (for example a shell line that
 ends in `\`), move it to a line that can.
 
+### Private name check (`private-names-check.yml`)
+
+The job `Private name check` keeps internal names out of public text. It
+reads only the lines a pull request adds, in every file except
+`CHANGELOG.md`, and compares them with a list of patterns.
+
+- The list is the repository secret `PRIVATE_NAME_LIST`: one pattern per
+  line, case does not matter. It is not stored in this repository, and
+  the job never prints it.
+- On a hit the job prints the file and the line number and the sentence
+  "this line holds a word of the private name list". It never prints the
+  word, the pattern or the line.
+- It runs on `pull_request` and on `merge_group`, with no path filter.
+  A pull request from a fork gets no secrets, so the job prints a note
+  and passes. The merge queue checks the same lines before the merge.
+- With no secret set, a pull request gets a warning and passes, and so
+  does the CI of a fork. In the merge queue of this repository a missing
+  secret fails the job, so the check cannot go quiet unnoticed.
+- The logic is in `scripts/ci/check_private_names.py`. Its tests use made-up
+  words only (`backend/tests/test_ci_check_private_names.py`).
+- Why not hashes of the words in the repository: most names are short, so
+  anyone can guess them one by one from a list of hashes.
+- The source of the list is kept outside this repository. A maintainer
+  sets or changes the secret. To make the check required, register the
+  context `Private name check` in branch protection (a manual step, as for
+  the other required contexts).
+
 ### Coverage handoff to SonarCloud
 
 Coverage runs **once a night**, not after every merge (#4910). `ci.yml`

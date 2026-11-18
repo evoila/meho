@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Tests for ``scripts/ci/check_private_names.py``.
+
+The script runs as a subprocess against a small throw-away git repository.
+The word list is made up (``forbiddenword-a``). The tests prove that a hit
+names the file and the line, and that the output never holds the word.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPT = _REPO_ROOT / "scripts" / "ci" / "check_private_names.py"
+_WORD_A = "forbiddenword-a"
+_WORD_B = "forbidden-b[0-9]+"
+
+
+def _git(root: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
+def _commit(root: Path, files: dict[str, str]) -> None:
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "change")
+
+
+def _repo(tmp_path: Path) -> Path:
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _commit(
+        tmp_path, {"old.txt": f"this old line has {_WORD_A} in it\n", "CHANGELOG.md": "# log\n"}
+    )
+    return tmp_path
+
+
+def _run(root: Path, word_list: str | None, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k != "PRIVATE_NAME_LIST"}
+    if word_list is not None:
+        env["PRIVATE_NAME_LIST"] = word_list
+    return subprocess.run(
+        [sys.executable, str(_SCRIPT), "--base", "HEAD~1", *args],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_hit_names_file_and_line_but_not_the_word(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"src/app.txt": f"first\nsecond\nthird has {_WORD_A.upper()} here\n"})
+    result = _run(root, f"{_WORD_A}\n{_WORD_B}\n")
+    assert result.returncode == 1
+    assert "src/app.txt:3: this line holds a word of the private name list" in result.stdout
+    output = result.stdout + result.stderr
+    assert "forbidden" not in output.lower()
+    assert "third has" not in output
+
+
+def test_pattern_entry_matches_and_line_numbers_follow_hunks(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "a.txt").write_text("keep\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base file")
+    _commit(root, {"a.txt": "keep\nclean\nforbidden-b42 here\n", "b.txt": "ok\n"})
+    result = _run(root, _WORD_B)
+    assert result.returncode == 1
+    assert "a.txt:3:" in result.stdout
+    assert "b.txt" not in result.stdout
+
+
+def test_clean_change_passes(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"src/app.txt": "nothing special\n"})
+    result = _run(root, f"{_WORD_A}\n")
+    assert result.returncode == 0
+    assert "No added line holds a word" in result.stdout
+
+
+def test_old_lines_and_removed_lines_do_not_count(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"old.txt": "the word is gone now\n"})
+    assert _run(root, f"{_WORD_A}\n").returncode == 0
+
+
+def test_changelog_is_not_checked(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"CHANGELOG.md": f"# log\n- {_WORD_A}\n"})
+    assert _run(root, f"{_WORD_A}\n").returncode == 0
+
+
+def test_missing_list_passes_with_a_note(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"src/app.txt": f"{_WORD_A}\n"})
+    for value in (None, "", "\n \n"):
+        result = _run(root, value)
+        assert result.returncode == 0
+        assert "not set" in result.stdout
+
+
+def test_missing_list_fails_when_it_is_required(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"src/app.txt": "clean\n"})
+    result = _run(root, None, "--require-list")
+    assert result.returncode == 1
+    assert "PRIVATE_NAME_LIST" in result.stderr
+
+
+def test_bad_pattern_fails_without_showing_the_list(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"src/app.txt": "clean\n"})
+    result = _run(root, "forbidden(unclosed\n")
+    assert result.returncode == 2
+    assert "forbidden" not in (result.stdout + result.stderr)
+
+
+def test_unknown_base_is_an_error(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--base", "no-such-rev"],
+        cwd=root,
+        env={**os.environ, "PRIVATE_NAME_LIST": _WORD_A},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2

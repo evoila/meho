@@ -17,6 +17,9 @@ Route inventory
   tenant. Optional ``?status=`` filter (default ``pending``) and
   ``?order=oldest|newest`` sort (default ``newest``). Access:
   approvals-plane (see below).
+* ``GET /api/v1/approvals/{request_id}/script?page=N`` — one page (64 KiB) of
+  the script of a waiting ``linux.script.run`` request. Access:
+  approvals-plane, same as ``GET /{request_id}``.
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
   Body: :class:`ApproveRequestBody` (``params`` dict + optional
@@ -102,6 +105,7 @@ from meho_backplane.auth.rbac import (
     require_fresh_approval_sign_in,
     require_human_principal,
 )
+from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
@@ -165,6 +169,12 @@ from meho_backplane.operations.approval_rerun import (
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
+from meho_backplane.operations.approval_script import (
+    ApprovalScriptGoneError,
+    ApprovalScriptMissingError,
+    ApprovalScriptUnreadableError,
+    read_script_page,
+)
 from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write_reveal
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
@@ -372,6 +382,28 @@ class PersonBehindView(BaseModel):
     why: str
     #: The same reason in words, for example ``Set up by``.
     why_text: str
+
+
+class ApprovalScriptPageView(BaseModel):
+    """One page of the script of a waiting ``linux.script.run`` request."""
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    #: The page number, from 1.
+    page: int
+    #: How many pages the script has.
+    pages: int
+    #: The script text of this page. Values that look like secrets are hidden.
+    #: ``None`` when MEHO could not check the script for them.
+    script: str | None = None
+    #: The size of the whole script in UTF-8 bytes.
+    script_bytes: int
+    #: SHA-256 of the whole script. The same on every page. Left out when
+    #: values were hidden.
+    script_sha256: str | None = None
+    script_values_hidden: bool = False
+    script_unavailable: str | None = None
 
 
 class ApprovalRequestView(BaseModel):
@@ -1085,6 +1117,55 @@ async def get_approval_request(
         delegation = await get_decision_delegation(session, row)
         floor = await load_install_floor(session)
     return _view(row, reviewer_context, delegation, approve_right(operator, row, floor=floor))
+
+
+@router.get("/{request_id}/script", response_model=ApprovalScriptPageView)
+async def get_approval_script_page(
+    request_id: Annotated[uuid.UUID, Path()],
+    page: Annotated[int, Query(ge=1, description="Page number, from 1.")] = 1,
+    operator: Operator = _require_approvals_access,
+) -> ApprovalScriptPageView:
+    """Read one page of the script of a ``linux.script.run`` request that waits for approval.
+
+    The pages are 64 KiB each, cut after values that look like secrets are
+    hidden over the whole script. Reading a page does not delete the stored
+    script. Same access as ``GET /{id}``. Only while the request waits for
+    approval: after the decision MEHO no longer keeps the script (410).
+    A request that has no script, and a page that does not exist, are 404.
+    A stored script that MEHO cannot read back (it cannot be decrypted) is
+    409 with a plain sentence.
+    """
+    async with get_sessionmaker()() as session:
+        try:
+            row = await get_request(session, tenant_id=operator.tenant_id, request_id=request_id)
+            fields = await read_script_page(session, row, page)
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="approval_request_not_found",
+            ) from exc
+        except ApprovalScriptGoneError as exc:
+            raise HTTPException(status_code=http_status.HTTP_410_GONE, detail=str(exc)) from exc
+        except ApprovalScriptUnreadableError as exc:
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ApprovalScriptMissingError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+        except ScriptPageOutOfRangeError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+    return ApprovalScriptPageView(
+        approval_request_id=row.id,
+        page=page,
+        pages=fields.get("script_pages", 1),
+        script=fields.get("script"),
+        script_bytes=fields["script_bytes"],
+        script_sha256=fields.get("script_sha256"),
+        script_values_hidden=bool(fields.get("script_values_hidden")),
+        script_unavailable=fields.get("script_unavailable"),
+    )
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)

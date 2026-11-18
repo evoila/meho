@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from meho_backplane.auth.jwt import _operator_from_claims
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AddonPairing,
@@ -302,6 +303,47 @@ async def test_a_runner_counts_who_registered_and_owns_it() -> None:
     )
 
     people = await _find("runner", sub="runner-sa", client_id="runner:edge")
+
+    assert _pairs(people) == {("runner-maker", "registered"), ("runner-owner", "owns")}
+
+
+async def test_a_runner_token_finds_its_record_by_the_runner_id_claim() -> None:
+    """A runner token has no username and no client id; its runner_id finds the record."""
+    runner_id = uuid.uuid4()
+    await _add(
+        RunnerPrincipal(
+            id=runner_id,
+            tenant_id=_TENANT,
+            name="edge",
+            keycloak_client_id="runner:edge",
+            keycloak_internal_id="kc-edge",
+            owner_sub="runner-owner",
+            created_by_sub="runner-maker",
+        )
+    )
+    operator = _operator_from_claims(
+        {
+            "sub": "9f1c2d3e-runner-service-account",
+            "azp": "runner:edge",
+            "tenant_id": str(_TENANT),
+            "tenant_role": "operator",
+            "principal_kind": "runner",
+            "runner_id": str(runner_id),
+        },
+        "raw.jwt.token",
+        get_settings(),
+    )
+    assert operator.client_id is None
+
+    async with get_sessionmaker()() as session:
+        people = await find_people_behind(
+            session,
+            tenant_id=operator.tenant_id,
+            sub=operator.sub,
+            client_id=operator.client_id,
+            kind=operator.principal_kind.value,
+            runner_id=operator.runner_id,
+        )
 
     assert _pairs(people) == {("runner-maker", "registered"), ("runner-owner", "owns")}
 

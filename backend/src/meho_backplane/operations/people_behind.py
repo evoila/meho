@@ -20,7 +20,8 @@ another person (:func:`~meho_backplane.operations.approval_queue._check_self_app
 * **Service login:** who paired or owns its add-on
   (:class:`~meho_backplane.db.models.AddonPairing`) and who gave one of
   its standing grants in force.
-* **Runner:** who registered or owns the runner.
+* **Runner:** who registered or owns the runner, found by the verified
+  ``runner_id`` of its token (the runner record's id) or by its client id.
 * **Every machine login:** who started or handed over a runbook run that
   is assigned to it and has not ended.
 
@@ -38,7 +39,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import or_, select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS, PrincipalKind
@@ -188,14 +189,16 @@ async def _service_people(
 
 
 async def _runner_people(
-    session: AsyncSession, tenant_id: uuid.UUID, ids: set[str]
+    session: AsyncSession, tenant_id: uuid.UUID, ids: set[str], runner_id: uuid.UUID | None
 ) -> list[tuple[str | None, str]]:
     found: list[tuple[str | None, str]] = []
+    runner_match: ColumnElement[bool] = RunnerPrincipal.keycloak_client_id.in_(ids)
+    if runner_id is not None:
+        runner_match = or_(runner_match, RunnerPrincipal.id == runner_id)
     for owner, creator in await _scalars(
         session,
         select(RunnerPrincipal.owner_sub, RunnerPrincipal.created_by_sub).where(
-            RunnerPrincipal.tenant_id == tenant_id,
-            RunnerPrincipal.keycloak_client_id.in_(ids),
+            RunnerPrincipal.tenant_id == tenant_id, runner_match
         ),
     ):
         found += [(creator, "registered"), (owner, "owns")]
@@ -241,12 +244,14 @@ async def find_people_behind(
     sub: str,
     client_id: str | None,
     kind: str | None,
+    runner_id: uuid.UUID | None = None,
 ) -> list[dict[str, Any]] | None:
     """Return the people behind the login *sub*, or ``None`` for a person.
 
     *kind* is the login's ``principal_kind``; *client_id* its OAuth client
-    id, when known. See the module docstring for who counts. The requester
-    itself is never in the list.
+    id, when known; *runner_id* the verified ``runner_id`` of a runner
+    token. See the module docstring for who counts. The requester itself
+    is never in the list.
     """
     machine = _machine_kind(kind)
     if machine is None:
@@ -259,7 +264,7 @@ async def find_people_behind(
     elif machine is PrincipalKind.SERVICE:
         found += await _service_people(session, tenant_id, sub, client_id, now)
     else:
-        found += await _runner_people(session, tenant_id, ids)
+        found += await _runner_people(session, tenant_id, ids, runner_id)
     found += await _runbook_people(session, tenant_id, ids)
     pairs = sorted(
         {(person, why) for person, why in found if person and person not in ids},

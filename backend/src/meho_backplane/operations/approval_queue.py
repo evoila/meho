@@ -1772,6 +1772,7 @@ async def create_pending_request(
             sub=operator.sub,
             client_id=operator.client_id,
             kind=principal_kind,
+            runner_id=operator.runner_id,
         )
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the

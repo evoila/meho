@@ -124,6 +124,15 @@ made from the vendor API description, come back with `--include-raw`
 other operations. The answer's `raw_operations` part says what was left
 out. You can still call a raw operation by its `op_id`.
 
+**Operations in the group list (optional setting).** An operator can turn
+on the backplane setting `GROUP_LISTING_OPERATIONS` (off by default). Then
+each group in the group list also lists its typed and multi-step
+operations, each with a one-line summary and its safety flags. You can
+pick an operation from the list and get its full contract with
+`search_operations` and `op_id`, without a search query. `--group` lists
+one group. A long list comes in pages: pass `--cursor` with the
+`next_cursor` of the last answer.
+
 ## Step 3 — preview (when you want the wire truth)
 
 `preview_operation` resolves the exact operation + target + params a

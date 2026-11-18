@@ -19,7 +19,11 @@ builds the three tools from the registered MCP tools instead, like
   ``SEARCH_TYPED_FIRST`` switch like ``tools/list`` does
   (:func:`~meho_backplane.mcp.tools._include_raw.include_raw_for_settings`):
   with it off they have no ``include_raw`` input and no line about it. So
-  the toolset builds these tools for each run, not once at import.
+  the toolset builds these tools for each run, not once at import;
+* ``list_operation_groups`` follows the ``GROUP_LISTING_OPERATIONS`` switch
+  the same way
+  (:func:`~meho_backplane.mcp.tools._group_operations.group_operations_for_settings`):
+  with it off it has no ``group`` input and no ``operations`` field.
 
 The handlers are the shared ones in
 :mod:`meho_backplane.operations.meta_tools`, the same ones the older copies
@@ -58,6 +62,7 @@ from meho_backplane.mcp.registry import ToolDefinition, get_tool
 # Imported for its registration side effect: it registers the three MCP
 # tools, so get_tool can resolve them below.
 from meho_backplane.mcp.tools import operations as _operations_mcp_tools  # noqa: F401
+from meho_backplane.mcp.tools._group_operations import group_operations_for_settings
 from meho_backplane.mcp.tools._include_raw import (
     INCLUDE_RAW_INPUT_PROPERTY,
     include_raw_for_settings,
@@ -193,6 +198,8 @@ def _build(name: str) -> MetaToolSpec:
     definition, _mcp_handler = entry
     if name in INCLUDE_RAW_TOOLS:
         definition = include_raw_for_settings(definition)
+    if name == _LIST_OPERATION_GROUPS:
+        definition = group_operations_for_settings(definition)
     left_out = LEFT_OUT_FIELDS[name]
     return MetaToolSpec(
         name=name,

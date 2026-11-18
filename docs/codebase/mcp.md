@@ -2009,11 +2009,14 @@ Sizes are UTF-8 bytes of the whole `tools/list` entry as compact JSON.
 | Full default list (26 tools) | 92,106 | 45,132 | 10,961 / 10,916 / 10,753 |
 
 The tokens are counted on the list as one compact JSON text. The byte
-count divided by 4 is a little higher than every tokenizer count, so the
-CI check counts bytes: it needs no tokenizer download.
+count divided by 4 is a little higher than every tokenizer count.
 `tests/test_mcp_tool_text_budget.py` fails when a lean profile is over
-24,000 bytes (6,000 tokens at 4 bytes per token) or `query_topology` is
-over 6,000 bytes.
+6,000 tokens of the test model (Qwen2.5), over 24,000 bytes (6,000
+tokens at 4 bytes per token), or when `query_topology` is over 6,000
+bytes. The test downloads the Qwen2.5 tokenizer file from Hugging Face at
+a fixed revision and checks its SHA-256. In CI a failed download fails
+the test; without network on a local machine only the token test is
+skipped.
 
 Tests:
 
@@ -2022,8 +2025,8 @@ Tests:
   shorter and takes the same inputs, and no other tool changes.
 - `tests/test_mcp_tool_text_budget.py`: with the switch on, the whole
   default list is at most 47,000 characters and at least 30% smaller;
-  each tool profile is at most 24,000 bytes; `query_topology` is at most
-  6,000 bytes.
+  each tool profile is at most 6,000 tokens of the test model and at most
+  24,000 bytes; `query_topology` is at most 6,000 bytes.
 - `tests/test_mcp_structured_content.py`: with the switch on, `tools/list`
   has no output schema and `tools/call` returns no `structuredContent`.
 - `tests/test_mcp_surface_conformance.py` runs every test in both states.

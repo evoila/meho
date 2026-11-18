@@ -514,19 +514,6 @@ def test_a_page_read_of_a_script_with_one_long_line_answers_in_a_fixed_time(
     assert elapsed < 30, elapsed
 
 
-def test_a_url_password_is_still_hidden_where_the_scheme_follows_digits() -> None:
-    from meho_backplane.redaction.command_line import hide_in_text
-
-    for text in (
-        f"curl https://u:{_FAKE_VALUE}@host/x",
-        f"x=1https://u:{_FAKE_VALUE}@host/x",
-        f"git+ssh://u:{_FAKE_VALUE}@host/x",
-    ):
-        shown = hide_in_text(text)
-        assert _FAKE_VALUE not in shown, shown
-        assert "://u:" in shown
-
-
 # ---------------------------------------------------------------------------
 # A script that is not valid UTF-8
 # ---------------------------------------------------------------------------

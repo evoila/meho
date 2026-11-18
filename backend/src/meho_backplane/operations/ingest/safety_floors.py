@@ -42,6 +42,7 @@ from meho_backplane.operations.credential_read import (
 from meho_backplane.operations.ingest.catalog import safety_overlay_for
 from meho_backplane.operations.ingest.exceptions import InvalidOpClassError
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
+from meho_backplane.operations.switch_params import check_switch_names
 
 __all__ = [
     "FLOOR_OP_CLASSES",
@@ -153,6 +154,7 @@ def apply_safety_floor(
     *, product: str, version: str, impl_id: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
     """Apply the connector floor, the catalog overlay, then the two marker floors, to *proto*."""
+    check_switch_names(proto.parameter_schema, op_id=proto.op_id)
     floor = _FLOORS.get((product, impl_id))
     floored = floor(version, proto) if floor is not None else proto
     _check_op_class(floored)

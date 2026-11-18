@@ -2670,6 +2670,12 @@ class Settings(BaseModel):
     #: them. Off: the same answers and tool texts as before. Set via
     #: ``SEARCH_HIT_CALL_HINTS``.
     search_hit_call_hints: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: File parameters on operations, behind a switch that is off by default.
+    #: A parameter whose schema has ``x-meho-switch: "file_ref_params"`` is
+    #: left out of every place that shows the schema, and a call that gives
+    #: it is refused like any unknown parameter, until this is on. See
+    #: ``operations/switch_params.py``. Set via ``FILE_REF_PARAMS``.
+    file_ref_params: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3751,6 +3757,7 @@ def get_settings() -> Settings:
         search_hit_call_hints=parse_bool_env(
             os.environ.get("SEARCH_HIT_CALL_HINTS"),
         ),
+        file_ref_params=parse_bool_env(os.environ.get("FILE_REF_PARAMS")),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
         ).strip(),

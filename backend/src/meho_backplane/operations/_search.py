@@ -72,6 +72,7 @@ from meho_backplane.operations._search_call_hints import (
     search_hit_call_hints,
 )
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
+from meho_backplane.operations.switch_params import visible_parameter_schema
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 from meho_backplane.settings import get_settings
@@ -695,7 +696,9 @@ async def _hydrate_hits(
                 category=policy.category,
                 labels=dict(policy.labels),
                 required_params=(
-                    required_param_names(descriptor.parameter_schema) if call_hints else []
+                    required_param_names(visible_parameter_schema(descriptor.parameter_schema))
+                    if call_hints
+                    else []
                 ),
                 target_required=call_hints and descriptor_requires_target(descriptor),
                 fused_score=entry.fused_score,

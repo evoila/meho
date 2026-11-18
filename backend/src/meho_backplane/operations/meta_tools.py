@@ -137,6 +137,7 @@ from meho_backplane.operations.op_policy import (
     effective_policy_map,
     hidden_classification_fields,
 )
+from meho_backplane.operations.switch_params import visible_parameter_schema
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -2030,7 +2031,7 @@ async def describe_descriptor(
             group_id=descriptor.group_id,
             group_key=group_key,
             tags=list(descriptor.tags or []),
-            parameter_schema=dict(descriptor.parameter_schema or {}),
+            parameter_schema=dict(visible_parameter_schema(descriptor.parameter_schema) or {}),
             response_schema=(
                 dict(descriptor.response_schema) if descriptor.response_schema else None
             ),

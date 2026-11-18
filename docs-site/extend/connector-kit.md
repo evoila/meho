@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.4**.
+The kit version this page describes: **1.5**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -81,6 +81,8 @@ part that starts with an underscore is private by its name too.
 | Register | `register_retired_operations` | List the operations a later version of your package removed, so MEHO deletes their stored rows at start. |
 | Register | `RetiredOp` | One entry of that list: product, version, implementation id and operation id. |
 | Register | `CALLER_ADDRESS_MARKER` | The schema keyword `x-meho-caller-address`. Put `CALLER_ADDRESS_MARKER: True` on each input that holds an address MEHO connects to. See "An input that holds an address" below. |
+| Register | `SWITCH_MARKER` | The schema keyword `x-meho-switch`. Put `SWITCH_MARKER: FILE_REF_PARAMS_SWITCH` on an input that stays hidden until a MEHO switch is on. While the switch is off, MEHO shows no trace of the input and refuses a call that gives it, like any unknown input. |
+| Register | `FILE_REF_PARAMS_SWITCH` | The name of the switch for the file inputs. It is the only switch name MEHO knows today. A keyword with another name stops the operation from registering. |
 | Register | `EmbeddingService` | The type of the `embedding_service` value that MEHO hands to your registering function. Pass it on unchanged. |
 | Connector | `Connector` | The base class of every connector. |
 | Connector | `HttpConnector` | The base class for an HTTP API. It brings MEHO's checks for TLS (secure, encrypted connections), addresses, redirects and answer size. |
@@ -218,6 +220,15 @@ yourself too, so your code says what MEHO does. Do not mark an input
 that only stores or names an address and never connects to it, for
 example a host name written into an inventory record. MEHO's sensors run
 only `safe` operations, so a sensor cannot use a marked operation.
+
+**An input that waits behind a switch.** Some inputs ship before MEHO
+shows them to agents. Mark such an input with
+`kit.SWITCH_MARKER: kit.FILE_REF_PARAMS_SWITCH`. While the switch is off,
+MEHO leaves the input out of every place that shows the operation and
+refuses a call that gives it, like any unknown input. When the switch is
+on, the input shows and works as usual. Any other switch name stops the
+operation from registering. This needs kit 1.5 or higher:
+`meho-connector-kit>=1.5,<2`.
 
 **A preview for a change.** Register a preview with
 `kit.register_preview_builder`. It shows the person who approves what the

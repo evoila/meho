@@ -83,6 +83,7 @@ from meho_backplane.operations.caller_address import (
 )
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.grant_approval import is_rights_change_op
+from meho_backplane.operations.switch_params import visible_parameter_schema
 from meho_backplane.policy.classification import Classification
 from meho_backplane.policy.store import (
     InvalidStoredPolicyError,
@@ -446,6 +447,7 @@ async def apply_effective_policy(
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
+    row.parameter_schema = visible_parameter_schema(row.parameter_schema)
     _set_classification(row, policy)
     return row
 

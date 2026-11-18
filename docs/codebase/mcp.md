@@ -1919,6 +1919,32 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
+A parameter of an operation can wait behind a switch. Its schema carries
+`x-meho-switch: "<switch name>"` (`SWITCH_MARKER` in the connector kit;
+`operations/switch_params.py`). The keyword counts at any depth. MEHO
+knows one switch name today: `file_ref_params`, the setting
+`FILE_REF_PARAMS` (off by default, listed by `GET /version`).
+
+| Switch (off by default) | Where | With the switch off |
+| --- | --- | --- |
+| `FILE_REF_PARAMS` | `search_operations` (`required_params`), the exact-op contract, `preview_operation`, the operation read of REST, the console and the CLI | The marked parameter is left out of the shown schema and out of its `required` list. A call that gives it is refused like any unknown parameter (`invalid_params`), before it can wait for approval, so no approval request is stored. The hash of a call that does not give it is the same. |
+
+* The stored schema is not changed. MEHO leaves the parameter out when it
+  reads the operation row for the caller (`apply_effective_policy` and
+  the operation read by id).
+* A keyword that names another switch stops the operation from
+  registering, for typed, multi-step and ingested operations.
+* With the switch on, the parameter shows and is accepted as usual.
+* No new MCP tool and no new field.
+
+Measurement before the switch goes on by default: run the benchmark job
+list on the same build with the switch off and on, with the same models.
+Record the pass rate of a small model and of Claude, and the size of an
+operation read. Turn it on only if the small model does not get worse,
+Claude does not get worse, and the answers grow by less than 10%. Then
+run once on the sandbox through the agent surface. A later pull request
+turns the switch on and links the numbers.
+
 Three switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |

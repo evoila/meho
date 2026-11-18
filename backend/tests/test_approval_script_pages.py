@@ -511,7 +511,6 @@ def test_a_page_read_of_a_script_with_one_long_line_answers_in_a_fixed_time(
     elapsed = time.monotonic() - started
     assert response.status_code == 200, response.text
     assert response.json()["script"] == "a" * SCRIPT_SHOWN_MAX_BYTES
-    # The pass reads a long word once; before, it took about half an hour here.
     assert elapsed < 30, elapsed
 
 

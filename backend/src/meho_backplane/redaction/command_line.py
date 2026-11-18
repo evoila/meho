@@ -96,9 +96,9 @@ _QUOTED_STRING = re.compile(r"'[^']*'|" r'"(?:[^"\\]|\\[\s\S])*"')
 _ASSIGNMENT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)=")
 
 #: The password in a URL that carries a user and password before the ``@``.
-#: The scheme starts at its first letter. The look-behind and ``[0-9+.-]*``
-#: make a match try only where a run of scheme characters starts, so one long
-#: word is read once and not once per letter.
+#: A match starts only where a run of scheme characters starts (not right
+#: after a letter, digit, ``+``, ``.`` or ``-``). The scheme may start with
+#: digits, ``+``, ``.`` or ``-``, but it holds at least one letter.
 _URL_PASSWORD = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<head>[0-9+.-]*[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@"
 )

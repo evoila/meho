@@ -2389,17 +2389,21 @@ One rule for every view: `result_state_of_envelope` in
 console all read it. Every view gives the same advice: do not run it again,
 check the target first. No view says "failed" or "did not succeed" for it.
 
-Four cases end as `uncertain`:
+Five cases end as `uncertain`:
 
 | Case | Where | Stored result |
 |---|---|---|
 | The audit record could not be saved after the change ran. | `result_audit_commit_failed` | `error_code` `audit_commit_failed` |
 | A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
+| The product ended the login session after MEHO sent a change, and MEHO did not send it again. | `result_connector_auth_failed(..., changes_target=True)` | `error_code` `connector_auth_failed`, `retry: false`, advice `LOGIN_ENDED_ADVICE` |
 | MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
 | An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
 
-A connect timeout, a pool timeout and a refused connection stay plain errors,
-because nothing was sent. A timeout of a read operation (`safety_level`
+A connect timeout, a pool timeout, a refused connection and a refused login
+(`connector_auth_failed` at stage `establish`) stay plain errors, because
+nothing was sent. An approved change always starts with a fresh login
+(`drop_login_before_approved_change`, see `backend.md`), so a login that ended
+while the change waited does not end the run. A timeout of a read operation (`safety_level`
 `safe`) stays a plain error. Any other level counts as a change
 (`changes_target`).
 

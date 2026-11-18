@@ -229,6 +229,42 @@ def test_visible_schema_off_strips_examples_and_defaults_at_any_depth() -> None:
     assert shown["dependentRequired"] == {"name": []}
 
 
+def test_visible_schema_off_strips_examples_inside_maps_and_lists() -> None:
+    marked = _schema()["properties"][_HIDDEN]
+    entry = {"type": "object", "properties": {"mode": {"type": "string"}, _HIDDEN: marked}}
+    stored = {
+        "type": "object",
+        "properties": {
+            "entries": {"type": "object", "additionalProperties": entry},
+            "named": {"type": "object", "patternProperties": {"^n_": entry}},
+            "pair": {"type": "array", "prefixItems": [entry], "items": {"type": "string"}},
+        },
+        "example": {
+            "entries": {"first": {"mode": "m", _HIDDEN: "x"}},
+            "named": {"n_one": {"mode": "m", _HIDDEN: "x"}},
+            "pair": [{"mode": "m", _HIDDEN: "x"}, "tail"],
+        },
+    }
+    shown = visible_parameter_schema(stored)
+    _no_trace(shown, _HIDDEN, SWITCH_MARKER)
+    assert shown["example"] == {
+        "entries": {"first": {"mode": "m"}},
+        "named": {"n_one": {"mode": "m"}},
+        "pair": [{"mode": "m"}, "tail"],
+    }
+
+
+def test_checked_schema_off_refuses_the_parameter_in_every_branch() -> None:
+    marked = _schema()["properties"][_HIDDEN]
+    stored = {
+        "type": "object",
+        "anyOf": [{"properties": {_HIDDEN: marked}}, {"required": ["name"]}],
+    }
+    checked = checked_parameter_schema(stored)
+    assert checked["properties"][_HIDDEN] is False
+    assert checked["anyOf"][1]["required"] == ["name"]
+
+
 def _ref_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -381,12 +417,44 @@ def _open_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
         ],
         "required": ["name", _HIDDEN],
     }
+    marked = _schema()["properties"][_HIDDEN]
+    any_of = {
+        "type": "object",
+        "anyOf": [
+            {"properties": {_HIDDEN: marked}, "required": [_HIDDEN]},
+            {"required": ["name"]},
+        ],
+    }
+    dependent = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, _HIDDEN: marked},
+        "dependentRequired": {"name": [_HIDDEN]},
+    }
+    sibling_required = {
+        "type": "object",
+        "allOf": [
+            {"properties": {"name": {"type": "string"}, _HIDDEN: marked}},
+            {"required": ["name", _HIDDEN]},
+        ],
+    }
+    linked_required = {
+        "type": "object",
+        "allOf": [
+            {"properties": {"name": {"type": "string"}, _HIDDEN: marked}},
+            {"$ref": "#/$defs/Needs"},
+        ],
+        "$defs": {"Needs": {"required": ["name", _HIDDEN]}},
+    }
     return [
         ("no-rule", no_rule, {"name": "a", "other": 1}),
         ("open", open_true, {"name": "a", "other": 1}),
         ("typed", open_typed, {"name": "a", "other": "x"}),
         ("pattern", pattern, {"name": "a", "x_other": "x"}),
         ("all-of", branches, {"name": "a", "label": "x"}),
+        ("any-of", any_of, {"name": "a"}),
+        ("dependent-required", dependent, {"name": "a"}),
+        ("all-of-required", sibling_required, {"name": "a"}),
+        ("linked-required", linked_required, {"name": "a"}),
     ]
 
 
@@ -400,6 +468,8 @@ async def test_switch_off_refuses_only_the_parameter_of_an_open_schema(
     stub_embedding_service: AsyncMock, schema: dict[str, Any], other: dict[str, Any]
 ) -> None:
     await _register(stub_embedding_service, schema)
+    exact = await search_operations(_operator(), {"connector_id": _CONNECTOR, "op_id": _OP})
+    _no_trace(exact, _HIDDEN, SWITCH_MARKER)
     result = await dispatch(
         operator=_operator(),
         connector_id=_CONNECTOR,

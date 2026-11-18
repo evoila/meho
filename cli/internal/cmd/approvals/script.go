@@ -80,8 +80,8 @@ func printScript(w io.Writer, indent string, effect map[string]interface{}) {
 		return
 	}
 	fmt.Fprintf(w, "%sScript to run:\n", indent)
-	if size, ok := preview["script_bytes"].(float64); ok {
-		fmt.Fprintf(w, "%s  Size:             %d bytes\n", indent, int64(size))
+	if size, ok := intField(preview["script_bytes"]); ok {
+		fmt.Fprintf(w, "%s  Size:             %d bytes\n", indent, size)
 	}
 	for _, field := range []struct{ key, label string }{
 		{"script_sha256", "SHA-256:         "},
@@ -229,11 +229,13 @@ func fetchScriptPage(
 }
 
 // renderScriptPageError prints a failed page read. The backplane answers
-// 404 and 410 with a plain sentence in "detail" (no script on the request,
-// no such page, MEHO no longer keeps the script): print that sentence.
+// 404, 409 and 410 with a plain sentence in "detail" (no script on the
+// request, no such page, MEHO cannot read the stored script, MEHO no longer
+// keeps the script): print that sentence.
 func renderScriptPageError(cmd *cobra.Command, backplaneURL string, err error, jsonOut bool) error {
 	var he *httpResponseError
-	if errors.As(err, &he) && (he.statusCode == http.StatusNotFound || he.statusCode == http.StatusGone) {
+	if errors.As(err, &he) && (he.statusCode == http.StatusNotFound ||
+		he.statusCode == http.StatusConflict || he.statusCode == http.StatusGone) {
 		var body struct {
 			Detail string `json:"detail"`
 		}

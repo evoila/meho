@@ -43,6 +43,7 @@ size and names.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Final
 
 from meho_backplane.redaction.command_line import hide_shell_script
@@ -56,11 +57,14 @@ __all__ = [
     "SCRIPT_MAX_BYTES",
     "SCRIPT_SHOWN_MAX_BYTES",
     "ScriptPageOutOfRangeError",
+    "ShownScript",
     "script_matches_expected",
     "script_page_fields",
     "script_preview_fields",
     "script_sha256",
     "script_too_large_message",
+    "shown_script",
+    "shown_script_page_fields",
 ]
 
 #: The most script text, in UTF-8 bytes, one page of the approval preview holds.
@@ -144,34 +148,73 @@ def _pages(text: str, page_bytes: int) -> list[str]:
     return pages
 
 
-def script_page_fields(script: str, page: int = 1) -> dict[str, Any]:
-    """The script fields for page *page* (from 1) of *script*.
+@dataclass(frozen=True)
+class ShownScript:
+    """A script as the approver sees it: values hidden, cut into pages.
+
+    It holds no value that looks like a secret, so it may be kept for later
+    page reads (:func:`shown_script_page_fields`). ``pages`` is ``None`` when
+    the redaction pass failed: then no text and no hash is shown.
+    """
+
+    script_bytes: int
+    pages: tuple[str, ...] | None
+    values_hidden: bool
+    sha256: str | None
+
+
+def shown_script(script: str) -> ShownScript:
+    """Run the redaction pass over the whole *script* once and cut the result into pages.
 
     Values that look like secrets are hidden over the whole script first, then
     the hidden text is cut into pages, so a secret that crosses a page border
-    is hidden. ``script_sha256`` is the hash of the whole script, the same on
-    every page, and left out when values were hidden. Raises
-    :class:`ScriptPageOutOfRangeError` when *page* is not a page of the text.
+    is hidden. ``sha256`` is the hash of the whole script, left out when values
+    were hidden.
     """
-    fields: dict[str, Any] = {"script_bytes": len(script.encode("utf-8"))}
+    size = len(script.encode("utf-8"))
     try:
         shown, hidden = _hide_secret_values(script)
     except Exception:
         # Fail closed: without the redaction pass, show no text and no hash.
+        return ShownScript(script_bytes=size, pages=None, values_hidden=False, sha256=None)
+    return ShownScript(
+        script_bytes=size,
+        pages=tuple(_pages(shown, SCRIPT_SHOWN_MAX_BYTES)),
+        values_hidden=hidden,
+        sha256=None if hidden else script_sha256(script),
+    )
+
+
+def shown_script_page_fields(shown: ShownScript, page: int = 1) -> dict[str, Any]:
+    """The script fields for page *page* (from 1) of *shown*.
+
+    Raises :class:`ScriptPageOutOfRangeError` when *page* is not a page of the
+    text.
+    """
+    fields: dict[str, Any] = {"script_bytes": shown.script_bytes}
+    if shown.pages is None:
         if page != 1:
-            raise ScriptPageOutOfRangeError(page, 1) from None
+            raise ScriptPageOutOfRangeError(page, 1)
         fields["script_unavailable"] = _UNAVAILABLE_REASON
         return fields
-    pages = _pages(shown, SCRIPT_SHOWN_MAX_BYTES)
-    if not 1 <= page <= len(pages):
-        raise ScriptPageOutOfRangeError(page, len(pages))
-    fields["script"] = pages[page - 1]
-    fields["script_pages"] = len(pages)
-    if hidden:
+    if not 1 <= page <= len(shown.pages):
+        raise ScriptPageOutOfRangeError(page, len(shown.pages))
+    fields["script"] = shown.pages[page - 1]
+    fields["script_pages"] = len(shown.pages)
+    if shown.values_hidden:
         fields["script_values_hidden"] = True
-    else:
-        fields["script_sha256"] = script_sha256(script)
+    if shown.sha256 is not None:
+        fields["script_sha256"] = shown.sha256
     return fields
+
+
+def script_page_fields(script: str, page: int = 1) -> dict[str, Any]:
+    """The script fields for page *page* (from 1) of *script*.
+
+    :func:`shown_script`, then :func:`shown_script_page_fields`. Raises
+    :class:`ScriptPageOutOfRangeError` when *page* is not a page of the text.
+    """
+    return shown_script_page_fields(shown_script(script), page)
 
 
 def script_preview_fields(params: dict[str, Any]) -> dict[str, Any]:

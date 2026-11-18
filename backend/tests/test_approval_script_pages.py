@@ -442,3 +442,151 @@ def test_rest_page_that_does_not_exist_and_a_request_with_no_script_are_404(
     other_op = _seed("echo hi\n", op_id="linux.file.write")
     none = _get(client, f"/api/v1/approvals/{other_op}/script", role=TenantRole.OPERATOR)
     assert none.status_code == 404, none.text
+
+
+def test_rest_page_read_of_a_script_that_cannot_be_decrypted_is_a_plain_refusal(
+    client: TestClient,
+) -> None:
+    from sqlalchemy import update
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
+
+    request_id = _seed("echo hi\n")
+
+    async def _spoil() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            await session.execute(
+                update(ApprovalExecutionPayload)
+                .where(ApprovalExecutionPayload.request_id == request_id)
+                .values(ciphertext=b"not-a-fernet-token")
+            )
+
+    asyncio.run(_spoil())
+    response = _get(client, f"/api/v1/approvals/{request_id}/script", role=TenantRole.OPERATOR)
+    assert response.status_code == 409, response.text
+    assert "MEHO cannot read the stored script of this request" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# The redaction pass: once per request, in a fixed time
+# ---------------------------------------------------------------------------
+
+
+def test_reading_ten_pages_runs_the_redaction_pass_once(client: TestClient) -> None:
+    from unittest.mock import patch
+
+    from meho_backplane.connectors.linux import script_preview
+
+    script = _text(SCRIPT_SHOWN_MAX_BYTES * 10)
+    request_id = _seed(script)
+    real = script_preview._hide_secret_values
+    with patch.object(script_preview, "_hide_secret_values", side_effect=real) as spy:
+        pages = []
+        for page in range(1, 11):
+            response = _get(
+                client,
+                f"/api/v1/approvals/{request_id}/script?page={page}",
+                role=TenantRole.OPERATOR,
+            )
+            assert response.status_code == 200, response.text
+            pages.append(response.json()["script"])
+    assert spy.call_count == 1
+    assert "".join(pages) == script
+
+
+def test_a_page_read_of_a_script_with_one_long_line_answers_in_a_fixed_time(
+    client: TestClient,
+) -> None:
+    import time
+
+    script = "a" * SCRIPT_MAX_BYTES
+    request_id = _seed(script)
+    started = time.monotonic()
+    response = _get(
+        client, f"/api/v1/approvals/{request_id}/script?page=3", role=TenantRole.OPERATOR
+    )
+    elapsed = time.monotonic() - started
+    assert response.status_code == 200, response.text
+    assert response.json()["script"] == "a" * SCRIPT_SHOWN_MAX_BYTES
+    # The pass reads a long word once; before, it took about half an hour here.
+    assert elapsed < 30, elapsed
+
+
+def test_a_url_password_is_still_hidden_where_the_scheme_follows_digits() -> None:
+    from meho_backplane.redaction.command_line import hide_in_text
+
+    for text in (
+        f"curl https://u:{_FAKE_VALUE}@host/x",
+        f"x=1https://u:{_FAKE_VALUE}@host/x",
+        f"git+ssh://u:{_FAKE_VALUE}@host/x",
+    ):
+        shown = hide_in_text(text)
+        assert _FAKE_VALUE not in shown, shown
+        assert "://u:" in shown
+
+
+# ---------------------------------------------------------------------------
+# A script that is not valid UTF-8
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_script_that_is_not_valid_utf8_is_refused_with_plain_words(
+    linux_write_registered: None,  # noqa: F811 -- fixture
+) -> None:
+    dumped = await _dispatch_script("echo hi\n\ud800\n")
+    assert dumped["status"] == "error", dumped
+    assert "invalid_params" in dumped["error"]
+    assert "The script is not valid UTF-8 text." in repr(dumped["extras"])
+    assert await _count_requests() == 0
+
+
+# ---------------------------------------------------------------------------
+# The whole way: read a page, approve, run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_a_page_then_approve_and_the_run_gets_the_whole_stored_script(
+    linux_write_registered: None,  # noqa: F811 -- fixture
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._validate import params_hash_matches
+    from meho_backplane.operations.approval_queue import (
+        approve_request,
+        resume_dispatch_after_approval,
+    )
+    from meho_backplane.operations.approval_script import read_script_page
+
+    script = "é" * 100 + "\n" + _text(SCRIPT_SHOWN_MAX_BYTES * 2)
+    dumped = await _dispatch_script(script)
+    assert dumped["status"] == "awaiting_approval", dumped
+    request_id = uuid.UUID(dumped["extras"]["approval_request_id"])
+
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        page = await read_script_page(session, row, 2)
+    assert page["script_pages"] == 3
+    assert page["script_sha256"] == _sha(script)
+
+    approver = _OPERATOR.model_copy(update={"sub": "script-approver", "self_approver": True})
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(session, request_id, operator=approver)
+        await session.commit()
+
+    handler = AsyncMock(return_value={"stdout": "", "stderr": "", "exit_status": 0})
+    with patch("meho_backplane.connectors.linux.ops_write.linux_script_run", handler):
+        await resume_dispatch_after_approval(operator=approver, request=approved)
+
+    handler.assert_awaited_once()
+    call = handler.await_args
+    ran = call.kwargs.get("params", call.args[2] if len(call.args) > 2 else None)
+    assert isinstance(ran, dict), handler.await_args
+    assert ran["script"] == script
+    assert _sha(ran["script"]) == _sha(script)
+    assert params_hash_matches(ran, approved.params_hash)

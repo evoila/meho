@@ -191,6 +191,7 @@ from meho_backplane.operations.approval_rights import (
 from meho_backplane.operations.approval_script import (
     ApprovalScriptGoneError,
     ApprovalScriptMissingError,
+    ApprovalScriptUnreadableError,
     read_script_page,
 )
 from meho_backplane.policy.routing import routing_enabled
@@ -989,9 +990,12 @@ async def _render_script_page(
     """Render the script block at page *page*, the fragment the page links swap in.
 
     The same access as ``GET /api/v1/approvals/{id}/script``: a person who may
-    not read the request gets no page.
+    not read the request gets no page. When the request was decided since the
+    modal opened, or the stored script cannot be read back, the block says so
+    in plain words and has no page links.
     """
     require_approvals_access(await _resolve_operator(session))
+    fields: dict[str, object] = {}
     async with get_sessionmaker()() as db_session:
         try:
             row = await get_request(db_session, tenant_id=session.tenant_id, request_id=request_id)
@@ -1000,12 +1004,15 @@ async def _render_script_page(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
             ) from exc
-        except ApprovalScriptGoneError as exc:
-            raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+        except (ApprovalScriptGoneError, ApprovalScriptUnreadableError) as exc:
+            return get_templates().TemplateResponse(
+                request,
+                "approvals/_script.html",
+                {"fields": {"script_unavailable": str(exc)}, "script_request_id": None},
+            )
         except (ApprovalScriptMissingError, ScriptPageOutOfRangeError) as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     preview = (row.proposed_effect or {}).get("preview")
-    fields: dict[str, object] = {}
     if isinstance(preview, dict):
         fields.update({k: v for k, v in preview.items() if k in ("script_ref", "script_check")})
     fields.update(page_fields)

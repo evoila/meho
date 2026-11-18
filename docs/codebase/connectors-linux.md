@@ -670,10 +670,21 @@ approver reads every page: `GET /api/v1/approvals/{id}/script?page=N`
 block. All three use `operations/approval_script.py`, which decrypts the
 stored script without deleting it (`approval_handoff.read`; only the
 approved run uses `consume`), hides secret values over the whole script and
-then cuts pages (`script_page_fields`). The checksum is of the whole script
-and is the same on every page; with hidden values no page shows one. After
-the decision MEHO no longer keeps the script, and the read answers 410 with
-a plain sentence. There is no MCP tool for it.
+then cuts pages (`shown_script`). The redaction pass runs once per request,
+in a worker thread and not in the event loop. Its result holds no secret
+values; the last 8 are kept in memory, so reading the other pages does not
+run it again. The checksum is of the whole script and is the same on every
+page; with hidden values no page shows one. After the decision MEHO no
+longer keeps the script: the REST read answers 410 with a plain sentence,
+the console block has no page links and says that only page 1 is shown, and
+a page link of a modal opened before the decision shows that sentence. A
+stored script that MEHO cannot decrypt gives 409 (REST) or a plain sentence
+(console), not a server error. A script that is not valid UTF-8 (a lone
+surrogate) is refused when the request is made, with a plain text. The
+console shows control and format characters of the script (an escape code,
+a right-to-left override, a zero-width space) as visible marks such as
+`\u202e`, the same set the CLI escapes (`ui/templating.py`,
+`visible_marks`). There is no MCP tool for it.
 
 ### Approval + secret hygiene
 

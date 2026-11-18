@@ -171,6 +171,7 @@ from meho_backplane.operations.approval_rights import ApproveRight, approve_righ
 from meho_backplane.operations.approval_script import (
     ApprovalScriptGoneError,
     ApprovalScriptMissingError,
+    ApprovalScriptUnreadableError,
     read_script_page,
 )
 from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write_reveal
@@ -1088,6 +1089,8 @@ async def get_approval_script_page(
     script. Same access as ``GET /{id}``. Only while the request waits for
     approval: after the decision MEHO no longer keeps the script (410).
     A request that has no script, and a page that does not exist, are 404.
+    A stored script that MEHO cannot read back (it cannot be decrypted) is
+    409 with a plain sentence.
     """
     async with get_sessionmaker()() as session:
         try:
@@ -1100,6 +1103,8 @@ async def get_approval_script_page(
             ) from exc
         except ApprovalScriptGoneError as exc:
             raise HTTPException(status_code=http_status.HTTP_410_GONE, detail=str(exc)) from exc
+        except ApprovalScriptUnreadableError as exc:
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except ApprovalScriptMissingError as exc:
             raise HTTPException(
                 status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)

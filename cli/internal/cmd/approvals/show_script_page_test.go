@@ -86,7 +86,8 @@ func TestShowScriptPageTwoPrintsPageTwoOfTwo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runShow: %v", err)
 	}
-	for _, want := range []string{"Script to run:", "Page:             2 of 2", "| last line"} {
+	// The size of the whole script is on every page, also on a page read with --script-page.
+	for _, want := range []string{"Script to run:", "Size:             70000 bytes", "Page:             2 of 2", "| last line"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output misses %q in:\n%s", want, out)
 		}
@@ -110,6 +111,14 @@ func TestShowScriptPageAfterTheDecisionSaysMEHODoesNotKeepIt(t *testing.T) {
 	body := `{"detail":"MEHO no longer keeps this script. It keeps the script only while the request waits for approval."}`
 	_, stderr, err := runShowAgainst(t, 2, false, 410, body)
 	if err == nil || !strings.Contains(stderr, "MEHO no longer keeps this script") {
+		t.Errorf("err=%v stderr=%q", err, stderr)
+	}
+}
+
+func TestShowScriptPageOfAScriptMEHOCannotReadSaysSo(t *testing.T) {
+	body := `{"detail":"MEHO cannot read the stored script of this request, so it cannot show it."}`
+	_, stderr, err := runShowAgainst(t, 2, false, 409, body)
+	if err == nil || !strings.Contains(stderr, "MEHO cannot read the stored script") {
 		t.Errorf("err=%v stderr=%q", err, stderr)
 	}
 }

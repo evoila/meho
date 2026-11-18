@@ -1175,6 +1175,9 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 def _check_script_size(params: dict[str, Any]) -> dict[str, Any] | None:
     """Params check of ``linux.script.run``: refuse a script over the size limit.
 
+    A script that is not valid UTF-8 (it holds a lone surrogate) is refused
+    too, with a plain sentence, since it has no size in bytes and cannot run.
+
     Runs before the call can wait for approval. The schema ``maxLength``
     counts characters; this counts UTF-8 bytes, which is what the limit means.
     When ``maxLength`` fails too, this plain sentence replaces its error
@@ -1183,11 +1186,19 @@ def _check_script_size(params: dict[str, Any]) -> dict[str, Any] | None:
     script = params.get("script")
     if not isinstance(script, str):
         return None
-    size = len(script.encode("utf-8"))
-    if size <= SCRIPT_MAX_BYTES:
-        return None
     from meho_backplane.operations._validate import params_problem
 
+    try:
+        size = len(script.encode("utf-8"))
+    except UnicodeEncodeError:
+        # A lone surrogate (JSON ``"\ud800"``) has no UTF-8 form.
+        return params_problem(
+            "script",
+            "a script that is valid UTF-8 text",
+            "The script is not valid UTF-8 text. Send the script as UTF-8 text.",
+        )
+    if size <= SCRIPT_MAX_BYTES:
+        return None
     return params_problem(
         "script",
         f"a script of at most {SCRIPT_MAX_BYTES:,} bytes",

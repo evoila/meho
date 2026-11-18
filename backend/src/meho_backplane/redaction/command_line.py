@@ -96,7 +96,12 @@ _QUOTED_STRING = re.compile(r"'[^']*'|" r'"(?:[^"\\]|\\[\s\S])*"')
 _ASSIGNMENT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)=")
 
 #: The password in a URL that carries a user and password before the ``@``.
-_URL_PASSWORD = re.compile(r"(?P<head>[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@")
+#: The scheme starts at its first letter. The look-behind and ``[0-9+.-]*``
+#: make a match try only where a run of scheme characters starts, so one long
+#: word is read once and not once per letter.
+_URL_PASSWORD = re.compile(
+    r"(?<![A-Za-z0-9+.-])(?P<head>[0-9+.-]*[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@"
+)
 
 #: Tokens with a known vendor prefix (GitHub, GitLab, Slack, AWS key id).
 _KNOWN_TOKEN = re.compile(

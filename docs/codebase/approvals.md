@@ -2106,11 +2106,14 @@ The park-time preview of `linux.script.run` holds page 1 of the script (64 KiB).
 full script is in the encrypted hand-off store until the approved call runs
 (`consume` deletes it). While the request waits, the approver reads the other
 pages with `GET /api/v1/approvals/{id}/script?page=N` (same access as
-`GET /api/v1/approvals/{id}`; 410 with a plain sentence after the decision; 404
-for a request with no script or a page that does not exist), with `meho
+`GET /api/v1/approvals/{id}`; 410 with a plain sentence after the decision; 409
+when the stored script cannot be decrypted; 404 for a request with no script or
+a page that does not exist), with `meho
 approvals show <id> --script-page N`, and with the page links of the console
 block (`GET /ui/approvals/{id}/script?page=N`). The read does not delete the stored
-script (`approval_handoff.read`). Details and limits: [`connectors-linux.md`](connectors-linux.md).
+script (`approval_handoff.read`). After the decision the console block has no
+page links and says that only page 1 is shown. Details and limits:
+[`connectors-linux.md`](connectors-linux.md).
 
 ## Surfacing the approved dispatch's result to the originating consumer (#3209)
 

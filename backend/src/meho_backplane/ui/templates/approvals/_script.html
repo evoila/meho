@@ -7,10 +7,14 @@
   preview carries a ``script`` text or a ``script_unavailable`` reason, so
   it serves every operation whose preview uses these keys
   (``linux.script.run``). The text is shown as it is stored, autoescaped,
-  in a ``<pre>`` so line breaks and indents stay. A script of more than one
-  page (``script_pages``) shows "page N of M" and, while the request waits
-  (``script_request_id`` is set), "previous page" and "next page" links that
-  load the page into this block.
+  in a ``<pre>`` so line breaks and indents stay. Control and format
+  characters (an escape code, a right-to-left override, a zero-width space)
+  show as visible marks such as ``\u202e`` (``visible_marks``), as the CLI
+  shows them. A script of more than one page (``script_pages``) shows "page N
+  of M" and, while the request waits (``script_request_id`` is set),
+  "previous page" and "next page" links that load the page into this block.
+  After the decision there are no links: MEHO no longer keeps the script, and
+  the block says that only page 1 is shown.
 -#}
 {% set script = fields.get("script") %}
 {% set unavailable = fields.get("script_unavailable") %}
@@ -75,6 +79,9 @@
       <p class="mt-2 text-xs font-semibold" data-testid="approval-script-truncated">
         {% if script_request_id and pages > 1 %}
           The script has more than one page. Read every page before you approve.
+        {% elif pages > 1 %}
+          Only page 1 is shown. MEHO keeps the script only while the request
+          waits for approval, so the other pages are no longer shown.
         {% elif fields.get("script_sha256") %}
           The script is longer than the text below. Compare its SHA-256 with a
           reviewed copy before you approve.
@@ -85,7 +92,7 @@
       </p>
     {% endif %}
     {% if script is string %}
-      <pre class="mt-2 max-h-96 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs whitespace-pre" data-testid="approval-script-body">{{ script }}</pre>
+      <pre class="mt-2 max-h-96 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs whitespace-pre" data-testid="approval-script-body">{{ script | visible_marks }}</pre>
     {% else %}
       <p class="mt-2 text-xs" data-testid="approval-script-unavailable">{{ unavailable }}</p>
     {% endif %}

@@ -12869,7 +12869,7 @@
           "approvals"
         ],
         "summary": "Get Approval Script Page",
-        "description": "Read one page of the script of a ``linux.script.run`` request that waits for approval.\n\nThe pages are 64 KiB each, cut after values that look like secrets are\nhidden over the whole script. Reading a page does not delete the stored\nscript. Same access as ``GET /{id}``. Only while the request waits for\napproval: after the decision MEHO no longer keeps the script (410).\nA request that has no script, and a page that does not exist, are 404.",
+        "description": "Read one page of the script of a ``linux.script.run`` request that waits for approval.\n\nThe pages are 64 KiB each, cut after values that look like secrets are\nhidden over the whole script. Reading a page does not delete the stored\nscript. Same access as ``GET /{id}``. Only while the request waits for\napproval: after the decision MEHO no longer keeps the script (410).\nA request that has no script, and a page that does not exist, are 404.\nA stored script that MEHO cannot read back (it cannot be decrypted) is\n409 with a plain sentence.",
         "operationId": "get_approval_script_page_api_v1_approvals__request_id__script_get",
         "parameters": [
           {

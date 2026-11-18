@@ -226,6 +226,8 @@ def test_modal_of_a_decided_long_script_shows_no_page_links() -> None:
     assert "page 1 of 2" in block
     assert "/script?page=" not in block
     assert 'data-testid="approval-script-truncated"' in block
+    assert "Only page 1 is shown." in block
+    assert "the other pages are no longer shown" in block
 
 
 def test_modal_of_a_one_page_script_shows_no_page_line() -> None:
@@ -257,10 +259,51 @@ def test_script_page_route_gives_the_last_page_with_a_previous_link() -> None:
 
 
 def test_script_page_route_after_the_decision_says_the_script_is_not_kept() -> None:
+    # A page link of a modal opened before the decision: the block is replaced
+    # by a plain sentence, with no page links, instead of showing nothing.
     rid = _seed_script_request(_text(SCRIPT_SHOWN_MAX_BYTES + 100), status_value="rejected")
     response = _get_script_page(rid, 2)
-    assert response.status_code == 410  # type: ignore[attr-defined]
-    assert "MEHO no longer keeps this script" in response.text  # type: ignore[attr-defined]
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    text = response.text  # type: ignore[attr-defined]
+    assert "MEHO no longer keeps this script" in text
+    assert 'id="approval-script-block"' in text
+    assert "/script?page=" not in text
+    assert "echo aaaa" not in text
+
+
+def test_script_page_route_of_a_script_that_cannot_be_decrypted_says_so() -> None:
+    from sqlalchemy import update
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
+
+    rid = _seed_script_request(_text(SCRIPT_SHOWN_MAX_BYTES + 100))
+
+    async def _spoil() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            await session.execute(
+                update(ApprovalExecutionPayload)
+                .where(ApprovalExecutionPayload.request_id == rid)
+                .values(ciphertext=b"not-a-fernet-token")
+            )
+
+    asyncio.run(_spoil())
+    response = _get_script_page(rid, 2)
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    assert "MEHO cannot read the stored script of this request" in response.text  # type: ignore[attr-defined]
+
+
+def test_modal_shows_control_and_format_characters_as_visible_marks() -> None:
+    # A right-to-left override, an escape code, a zero-width space and a NUL.
+    script = "echo safe\u202e;tpircs-live\nprintf '\x1b[2J'\u200b\x00\n\tindented\n"
+    body = _render_modal(_effect({"script": script, "script_bytes": len(script.encode("utf-8"))}))
+    shown = _block(body).split('data-testid="approval-script-body">')[1].split("</pre>")[0]
+    for raw in ("\u202e", "\x1b", "\u200b", "\x00"):
+        assert raw not in shown
+    assert "echo safe\\u202e;tpircs-live" in shown
+    assert "printf &#39;\\x1b[2J&#39;\\u200b\\x00" in shown
+    # A new line and a tab stay as they are.
+    assert "\n\tindented\n" in shown
 
 
 def test_script_page_route_refuses_a_page_that_does_not_exist() -> None:

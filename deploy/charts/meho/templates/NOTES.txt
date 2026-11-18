@@ -107,7 +107,7 @@ Next steps:
 {{- end }}
 {{- end }}
 {{- if .Values.coreKeycloak.enabled }}
-{{- if .Values.coreKeycloak.firstLogin.approverUsername }}
+{{- if ne (toString .Values.coreKeycloak.firstLogin.approverUsername) "approver" }}
 
 Note: coreKeycloak.firstLogin.approverUsername is not used. The install makes one Admin login, so the value is ignored.
 {{- end }}

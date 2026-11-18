@@ -1617,6 +1617,9 @@ coreKeycloak:
     # -- User name of the one Admin login (in MEHO-Admins and
     # MEHO-Platform-Admins, with platform_admin).
     adminUsername: admin
+    # -- Not used. MEHO ignores this value: the install makes only one Admin
+    # login. The key stays so that an existing values file still works.
+    approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of
     # the master client `meho-realm` except `impersonation`), for example to connect a user

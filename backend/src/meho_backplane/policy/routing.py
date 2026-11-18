@@ -175,11 +175,12 @@ def kind_of(operator: Operator) -> str:
 
     Admins have the ``tenant_admin`` role (also a platform admin who works
     in a tenant without a role group there). Operators have the ``operator``
-    role. Everyone else is a Reader.
+    role, or the ``approver`` flag of a customer role: such a person
+    approves what an Operator approves. Everyone else is a Reader.
     """
     if operator.tenant_role == TenantRole.TENANT_ADMIN:
         return RoleGroup.ADMINS.value
-    if operator.tenant_role == TenantRole.OPERATOR:
+    if operator.tenant_role == TenantRole.OPERATOR or operator.approver:
         return RoleGroup.OPERATORS.value
     return RoleGroup.READERS.value
 

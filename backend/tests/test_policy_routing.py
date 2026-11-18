@@ -280,7 +280,8 @@ def test_an_operation_with_the_admin_role_floor_goes_to_admins_only() -> None:
         (TenantRole.OPERATOR, False, False, "Operators"),
         (TenantRole.OPERATOR, True, False, "Operators"),
         (TenantRole.TENANT_ADMIN, False, False, "Admins"),
-        (TenantRole.READ_ONLY, False, True, "Readers"),
+        # A customer role with the approver flag approves what an Operator approves.
+        (TenantRole.READ_ONLY, False, True, "Operators"),
     ],
 )
 def test_each_login_has_one_group_kind(

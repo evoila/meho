@@ -12,6 +12,8 @@
 * An Admin approves their own change at every risk level. An Operator
   approves their own token ``caution`` change only with a console click.
 * A policy file with an old group kind loads and reads it as the new kind.
+* A login with the ``approver`` claim and no old group keeps the approval
+  right with routing on, and its push row keeps the flag.
 """
 
 from __future__ import annotations
@@ -30,7 +32,9 @@ from meho_backplane.auth.rbac import require_approvals_access
 from meho_backplane.operations.approval_queue import may_approve_high_risk
 from meho_backplane.operations.approval_rights import ApproveRightReason, approve_right
 from meho_backplane.policy.document import document_of, parse_policy_file
+from meho_backplane.policy.routing import DEFAULT_RULE, today_kinds
 from meho_backplane.settings import get_settings
+from meho_backplane.web_push.recipients import login_facts_for
 from tests.test_approval_group_rules import _OTHER, _REQUESTER, _person
 from tests.test_approval_rights import _row, _token_call_row
 
@@ -42,7 +46,12 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    for name in ("JWT_SELF_APPROVER_GROUP", "JWT_TENANTS_CLAIM_NAME", "JWT_ROLE_GROUPS"):
+    for name in (
+        "JWT_SELF_APPROVER_GROUP",
+        "JWT_TENANTS_CLAIM_NAME",
+        "JWT_ROLE_GROUPS",
+        "POLICY_APPROVER_ROUTING",
+    ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
     yield
@@ -136,6 +145,72 @@ def test_another_source_of_the_approver_claim_still_counts() -> None:
     )
 
     assert operator.approver is True
+
+
+def _custom_approver() -> Operator:
+    """A ``read_only`` login with the ``approver`` claim and no old group."""
+    return _login(
+        {
+            "sub": _OTHER,
+            "tenant_id": str(_TENANT),
+            "tenant_role": "read_only",
+            "approver": True,
+            "groups": ["MEHO-Readers"],
+        }
+    )
+
+
+def _routed(level: str, kinds: tuple[str, ...]) -> Any:
+    """A waiting request with stored routing *kinds* and the default rule."""
+    row = _row(level)
+    row.approver_roles = list(kinds)
+    row.approver_rule = DEFAULT_RULE
+    return row
+
+
+def test_with_routing_on_a_custom_approver_keeps_the_approval_right(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No routing entry narrows access: the default kinds let the custom approver approve."""
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
+    get_settings.cache_clear()
+    approver = _custom_approver()
+
+    caution = approve_right(approver, _routed("caution", today_kinds("caution", "")))
+    dangerous = approve_right(approver, _routed("dangerous", today_kinds("dangerous", "")))
+    admins_only = approve_right(approver, _routed("caution", ("Admins",)))
+
+    assert caution.may_approve is True
+    assert dangerous.may_approve is False
+    assert admins_only.may_approve is False
+
+
+@pytest.mark.parametrize("form", _FORMS)
+def test_with_routing_on_a_person_in_approvers_approves_nothing(
+    form: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
+    get_settings.cache_clear()
+    reader = _approver(form).model_copy(update={"sub": _OTHER})
+
+    right = approve_right(reader, _routed("caution", today_kinds("caution", "")))
+
+    assert right.may_approve is False
+
+
+@pytest.mark.parametrize("form", _FORMS)
+def test_a_login_of_an_old_group_stores_no_approval_flags_for_push(form: str) -> None:
+    for operator in (_sa_operator(form), _approver(form)):
+        facts = login_facts_for(operator)
+        assert facts.approver is False
+        assert facts.self_approver is False
+
+
+def test_a_custom_approver_login_stores_the_approver_flag_for_push() -> None:
+    facts = login_facts_for(_custom_approver())
+
+    assert facts.tenant_role == TenantRole.READ_ONLY.value
+    assert facts.approver is True
 
 
 def test_an_admin_approves_their_own_change_at_every_risk_level() -> None:

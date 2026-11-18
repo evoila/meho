@@ -17,6 +17,16 @@ It records the rank of the first correct operation, and whether it is
 first (top-1) or in the first three (top-3). A task whose connector this
 install cannot search is "not run" and does not count.
 
+Only some tasks have raw operations next to the typed answer. For the
+others both searches give the same hits. So each search also records how
+many of its hits are raw, and the report sums up twice: over all tasks,
+and over only the tasks with at least one raw hit in the ``raw_visible``
+search (``summary_tasks_with_raw_hits``).
+
+The report also holds the states of the search switches the run used.
+They are the settings of the process that runs the test, not of an
+install.
+
 The model run of the same tasks (tokens, steps, wrong picks) belongs to
 the benchmark lane, which reads the same task file.
 
@@ -29,7 +39,9 @@ settings)::
 
 Only the report goes to stdout; logs go to stderr. The entry module
 ``scripts.typed_first_eval`` sends the logs of the imports to stderr too,
-so start the test through it, not through this module.
+so start the test through it, not through this module. Started as
+``python -m scripts.retrieval_eval.typed_first``, this module ends with an
+error that names the right start.
 """
 
 from __future__ import annotations
@@ -48,6 +60,7 @@ from typing import Annotated, Final, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from meho_backplane.settings import get_settings
 from scripts.retrieval_eval.corpus import CorpusValidationError
 from scripts.retrieval_eval.operation_search import (
     SearchOperationsCallable,
@@ -146,6 +159,9 @@ class ModeResult(BaseModel):
     rank: int | None = None
     #: The first three hits, to see what came first instead.
     top_op_ids: list[str] = Field(default_factory=list)
+    #: How many of the first :data:`SEARCH_DEPTH` hits are raw operations;
+    #: ``None`` when the search did not run.
+    raw_hit_count: int | None = None
     not_run_reason: str | None = None
 
     @property
@@ -166,6 +182,11 @@ class TaskResult(BaseModel):
     connector_id: str
     raw_visible: ModeResult
     raw_hidden: ModeResult
+
+    @property
+    def has_raw_hits(self) -> bool:
+        """At least one raw operation was a hit with raw operations visible."""
+        return bool(self.raw_visible.raw_hit_count)
 
 
 class ModeSummary(BaseModel):
@@ -189,8 +210,12 @@ class SearchOnlyReport(BaseModel):
 
     tasks_file_version: int
     search_depth: int
+    #: The search switches of the process that ran the test, by setting name.
+    search_switches: dict[str, bool]
     tasks: list[TaskResult]
     summary: dict[Mode, ModeSummary]
+    #: The same summary over only the tasks with a raw hit (``has_raw_hits``).
+    summary_tasks_with_raw_hits: dict[Mode, ModeSummary]
 
 
 def _rank(op_ids: list[str], expected: list[str]) -> int | None:
@@ -216,7 +241,12 @@ async def _search_one(
     )
     if found.not_run_reason is not None:
         return ModeResult(not_run_reason=found.not_run_reason)
-    return ModeResult(rank=_rank(found.op_ids, task.expected_op_ids), top_op_ids=found.op_ids[:3])
+    hits = found.op_ids[:SEARCH_DEPTH]
+    return ModeResult(
+        rank=_rank(hits, task.expected_op_ids),
+        top_op_ids=hits[:3],
+        raw_hit_count=sum(1 for op_id in hits if op_id in found.raw_op_ids),
+    )
 
 
 def _summarise(results: list[ModeResult]) -> ModeSummary:
@@ -258,15 +288,31 @@ async def run_search_only(
                 raw_hidden=hidden,
             )
         )
+    with_raw = [r for r in results if r.has_raw_hits]
     return SearchOnlyReport(
         tasks_file_version=tasks.version,
         search_depth=SEARCH_DEPTH,
+        search_switches=_search_switches(),
         tasks=results,
-        summary={
-            "raw_visible": _summarise([r.raw_visible for r in results]),
-            "raw_hidden": _summarise([r.raw_hidden for r in results]),
-        },
+        summary=_summarise_modes(results),
+        summary_tasks_with_raw_hits=_summarise_modes(with_raw),
     )
+
+
+def _summarise_modes(results: list[TaskResult]) -> dict[Mode, ModeSummary]:
+    return {
+        "raw_visible": _summarise([r.raw_visible for r in results]),
+        "raw_hidden": _summarise([r.raw_hidden for r in results]),
+    }
+
+
+def _search_switches() -> dict[str, bool]:
+    """The switches that change which operations search finds, and their order."""
+    settings = get_settings()
+    return {
+        "AGENT_READS_CUSTOM_DESCRIPTION": settings.agent_reads_custom_description,
+        "SEARCH_PLAIN_SENTENCES": settings.search_plain_sentences,
+    }
 
 
 async def _run_and_close(tasks: TypedFirstTasks, tenant_id: uuid.UUID) -> SearchOnlyReport:
@@ -298,3 +344,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         args.out.write_text(text, encoding="utf-8")
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(
+        "Start this test with: uv run python -m scripts.typed_first_eval "
+        "--tenant-id <tenant-uuid> (from backend/)."
+    )

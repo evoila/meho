@@ -21,6 +21,14 @@
 #   test_retrieval_eval_typed_first.py checks this.
 # * Names in requests are made up. No host name, IP address, lab or
 #   customer name.
+#
+# Only 20 of the 40 tasks (GitHub and Harbor) have raw operations next
+# to the typed answer. For the other 20, hiding raw operations changes
+# nothing, so they make the gap between the two search modes smaller.
+# The report therefore records per task how many raw operations were
+# among the hits (raw_hit_count), and gives the summary twice: over all
+# tasks, and over only the tasks with a raw hit
+# (summary_tasks_with_raw_hits).
 # * Connectors with raw operations next to typed ones come first
 #   (gh-rest-3, harbor-rest-2.x). Tasks for connectors that are not in
 #   this repo live in a private file of the same format.

@@ -422,7 +422,21 @@ operation in the first 10 hits and the first three hits, and per mode
 the run count and the top-1 and top-3 counts and rates. A task whose
 connector this install cannot search is "not run": it has a reason and
 does not count. A search error stops the run; it is never scored as a
-miss.
+miss. A correct operation that is turned off for the tenant is not a
+search candidate, so it counts as a miss in both modes.
+
+Only 20 of the 40 tasks (GitHub and Harbor) have raw operations next to
+the typed answer. For the other 20, hiding raw operations changes
+nothing, so they make the gap between the modes smaller. So each search
+also records `raw_hit_count`: how many of its first 10 hits are raw.
+The report gives the summary twice: over all tasks (`summary`), and over
+only the tasks with at least one raw hit in the `raw_visible` search
+(`summary_tasks_with_raw_hits`).
+
+The report records the states of the search switches it ran with
+(`search_switches`: `AGENT_READS_CUSTOM_DESCRIPTION` and
+`SEARCH_PLAIN_SENTENCES`). The run uses the settings of its own process,
+not of an install, so set them for the test process.
 
 Run it on an install, from `backend/` with the install's database
 settings:
@@ -433,7 +447,9 @@ uv run python -m scripts.typed_first_eval --tenant-id <tenant-uuid> > report.jso
 
 Only the report goes to stdout. The logs go to stderr, also the logs
 that the connector imports write while they load. `--out <file>` writes
-the report to a file instead.
+the report to a file instead. The old start,
+`python -m scripts.retrieval_eval.typed_first`, ends with an error and a
+non-zero exit code that names this start.
 
 The SQLite search of the unit tests ranks by substring only, so its
 numbers say nothing about real ranking. Real numbers come from an

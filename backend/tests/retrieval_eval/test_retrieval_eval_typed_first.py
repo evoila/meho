@@ -194,14 +194,19 @@ async def test_search_only_ranks_both_modes_and_sums_up() -> None:
     search = _ScriptedSearch(
         {
             # First with raw hidden only.
-            ("request a", False): hits(op_ids=["raw.1", "raw.2", "raw.3", "op.a"]),
+            ("request a", False): hits(
+                op_ids=["raw.1", "raw.2", "raw.3", "op.a"],
+                raw_op_ids=frozenset({"raw.1", "raw.2", "raw.3"}),
+            ),
             ("request a", True): hits(op_ids=["op.a", "op.x"]),
             # Second correct answer counts; third place is top-3.
-            ("request b", False): hits(op_ids=["raw.1", "raw.2", "op.b2"]),
+            ("request b", False): hits(
+                op_ids=["raw.1", "raw.2", "op.b2"], raw_op_ids=frozenset({"raw.1", "raw.2"})
+            ),
             ("request b", True): hits(op_ids=["op.b2"]),
-            # Not found at all, and an empty answer.
-            ("request c", False): hits(op_ids=["raw.1"]),
-            ("request c", True): hits(op_ids=[]),
+            # No raw hit: hiding raw operations changes nothing.
+            ("request c", False): hits(op_ids=["op.y"]),
+            ("request c", True): hits(op_ids=["op.y"]),
             # Not run: does not count in either mode.
             ("request d", False): hits(not_run_reason="no operations"),
             ("request d", True): hits(not_run_reason="no operations"),
@@ -215,11 +220,16 @@ async def test_search_only_ranks_both_modes_and_sums_up() -> None:
     assert by_id["a"].raw_visible.rank == 4
     assert by_id["a"].raw_visible.top_op_ids == ["raw.1", "raw.2", "raw.3"]
     assert by_id["a"].raw_hidden.rank == 1
+    assert (by_id["a"].raw_visible.raw_hit_count, by_id["a"].raw_hidden.raw_hit_count) == (3, 0)
+    assert by_id["b"].raw_visible.raw_hit_count == 2
+    assert by_id["c"].raw_visible.raw_hit_count == 0
+    assert by_id["d"].raw_visible.raw_hit_count is None
+    assert [r.task_id for r in report.tasks if r.has_raw_hits] == ["a", "b"]
     assert by_id["b"].raw_visible.rank == 3
     assert by_id["b"].raw_visible.top_3 and not by_id["b"].raw_visible.top_1
     assert by_id["c"].raw_visible.rank is None
     assert by_id["c"].raw_hidden.rank is None
-    assert by_id["c"].raw_hidden.top_op_ids == []
+    assert by_id["c"].raw_hidden.top_op_ids == ["op.y"]
     assert by_id["d"].raw_visible.not_run_reason == "no operations"
     assert by_id["d"].raw_visible.rank is None
 
@@ -231,6 +241,13 @@ async def test_search_only_ranks_both_modes_and_sums_up() -> None:
     hidden = report.summary["raw_hidden"]
     assert (hidden.top_1_count, hidden.top_3_count) == (2, 2)
     assert hidden.top_1_rate == pytest.approx(2 / 3)
+
+    # Over only the tasks with a raw hit (a and b): task c no longer
+    # waters down the gap between the modes.
+    with_raw = report.summary_tasks_with_raw_hits
+    assert (with_raw["raw_visible"].run_count, with_raw["raw_visible"].not_run_count) == (2, 0)
+    assert (with_raw["raw_visible"].top_1_count, with_raw["raw_visible"].top_3_count) == (0, 1)
+    assert (with_raw["raw_hidden"].top_1_count, with_raw["raw_hidden"].top_1_rate) == (2, 1.0)
 
     assert {(c["query"], c["typed_only"]) for c in search.calls} == set(search.answers)
     assert {c["limit"] for c in search.calls} == {SEARCH_DEPTH}
@@ -251,6 +268,26 @@ async def test_search_only_with_no_task_run_has_no_rates() -> None:
         assert (summary.run_count, summary.not_run_count) == (0, 1)
         assert summary.top_1_rate is None
         assert summary.top_3_rate is None
+    for summary in report.summary_tasks_with_raw_hits.values():
+        assert (summary.run_count, summary.not_run_count, summary.top_1_rate) == (0, 0, None)
+
+
+@pytest.mark.asyncio
+async def test_report_holds_the_search_switches_of_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_PLAIN_SENTENCES", "true")
+    get_settings.cache_clear()
+
+    async def found(**_: Any) -> OperationSearchResult:
+        return OperationSearchResult(op_ids=["op.a"])
+
+    report = await run_search_only(_tasks(("a", ["op.a"])), tenant_id=_TENANT, search_fn=found)
+
+    assert report.search_switches == {
+        "AGENT_READS_CUSTOM_DESCRIPTION": False,
+        "SEARCH_PLAIN_SENTENCES": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -317,6 +354,20 @@ def test_stdout_holds_only_the_json_report(tmp_path: Path) -> None:
     assert "connector_registered" in done.stderr
     report = json.loads(done.stdout)
     assert report["summary"]["raw_visible"]["not_run_count"] == 1
+
+
+def test_old_start_fails_and_names_the_right_one() -> None:
+    done = subprocess.run(
+        [sys.executable, "-m", "scripts.retrieval_eval.typed_first", "--tenant-id", str(_TENANT)],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert done.returncode != 0
+    assert "scripts.typed_first_eval" in done.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -390,5 +441,8 @@ async def test_real_search_hides_raw_operations(monkeypatch: pytest.MonkeyPatch)
     assert result.raw_visible.not_run_reason is None
     assert result.raw_visible.top_op_ids[0].startswith("GET:")
     assert result.raw_visible.rank == 4
+    assert result.raw_visible.raw_hit_count == 3
+    assert result.raw_hidden.raw_hit_count == 0
+    assert result.has_raw_hits
     assert result.raw_hidden.top_op_ids == ["vault.kv.read"]
     assert result.raw_hidden.rank == 1

@@ -65,6 +65,7 @@ from meho_backplane.connectors.vault.ops_token_role import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationGroup
+from meho_backplane.logging import configure_logging
 from meho_backplane.operations import dispatch
 from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
 from meho_backplane.settings import get_settings
@@ -425,6 +426,10 @@ async def test_write_preflight_denies_without_create_and_update(
 async def test_write_preflight_probe_fault_is_fail_soft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The probe logs the fault with its traceback. Use the app's logging
+    # setup, which leaves local variables out of tracebacks, so the fake
+    # client's test data is not printed when this test runs alone.
+    configure_logging()
     fake = install_fake_client(monkeypatch)
     fake.sys.raise_on_get_capabilities = hvac.exceptions.VaultDown("sealed")
 

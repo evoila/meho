@@ -62,7 +62,9 @@ func newEditCmd() *cobra.Command {
 			"you: when MEHO needs a pick and --grants is missing, it prints " +
 			"the three choices and changes nothing. With --grants, the CLI " +
 			"shows the agent's grants after the edit (--json adds them as " +
-			"\"grants\").",
+			"\"grants\"). Without --grants, it shows the agent's live " +
+			"grants when it has some: then no pick is needed (--json has " +
+			"them as \"live_grants\").",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -1286,6 +1286,7 @@ review payload also carries `classified_safety_level` /
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
 | `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
+| `requires_approval=false` on an operation registered as a change of rights (`register_rights_change_op`, `register_grant_op`) | anyone | - | always refused, `approval_off_rights_change`; an older override row with approval off does not count either |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective
@@ -1716,6 +1717,24 @@ rows. Three branches:
   `call_operation` and the ingest-time info log is the upstream
   signal. A genuinely novel `(product, version)` triple is
   unchanged by #1753.
+
+**Several versions under one name (#4728).** Only classes written by hand
+count in this check. A class made by an earlier ingest (the bare auto-shim,
+or the profiled class made when `--auth-scheme` is set; both are made in
+`connector_registration.py`) covers only the label it was made for, so
+`_find_class_covering_version()` skips it. So `networker-rest` 19.14 followed
+by `networker-rest` 19.12 works and makes `networker-rest-19.12`, the same
+way `vmware-rest-8.0` and `vmware-rest-9.0` coexist. A label outside the
+range of a hand-written class is still refused. The 422 `detail` is an
+object with `kind` (`uncovered_version_label`) and `message`; the CLI
+prints both.
+
+**Names that end in digits (#4728).** `IngestionPipelineService.ingest`
+refuses an `impl_id` that has a dash followed by a digit (for example
+`networker-rest-1912`) with `ImplIdEndsInDigitsError` (REST 422, MCP
+`-32602`, `kind` `impl_id_ends_in_digits`). The connector id
+`<impl_id>-<version>` is split at the first dash followed by a digit, so
+such a name would turn `1912-19.12` into the version.
 
 Called from `register_ingested_operations` (real path) and from
 `IngestionPipelineService._run_dry_run` (dry-run path) so an

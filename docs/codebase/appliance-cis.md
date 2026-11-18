@@ -139,6 +139,11 @@ unit and `firewall_state`. In order:
      of step 6 runs in the same process, which got its `PATH` from sudo
      before the change, so `harden.sh` takes `/snap/bin` out of its own
      `PATH` too.
+     A login shell of root (`sudo -i`, the VM screen) also runs
+     `/etc/profile.d/apps-bin-path.sh` of the snapd package, which adds
+     `/snap/bin` again. The scan starts no login shell, so it does not see
+     this. `harden.sh` deletes the file; it is a config file of the
+     package, so a snapd update does not bring it back.
    - `/etc/cron.allow` in the group `crontab` (CIS 2.4.1.8): after the
      fixes it is in the group `root`.
    - AIDE skips `/var/lib/rancher`, `/var/lib/kubelet`,

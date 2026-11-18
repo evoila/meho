@@ -3577,7 +3577,7 @@ class AgentAnnouncement(Base):
       backfill (newest-first tenant scan) and the retention prune's
       bounded ``created_at < cutoff`` delete.
     * ``agent_announcement_tenant_work_ref_idx`` --
-      ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
+      ``(tenant_id, work_ref)``. Drives the ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
     * ``agent_announcement_tenant_principal_created_at_idx`` --
@@ -4573,7 +4573,7 @@ class AgentRun(Base):
       the reaper's "what leases have expired" query without
       scanning the table. T4 #825.
     * ``agent_run_tenant_work_ref_idx`` -- composite b-tree on
-      ``(tenant_id, work_ref)``. Drives the tenant-scoped exact-match
+      ``(tenant_id, work_ref)``. Drives the tenant-scoped
       ``--work-ref`` filter on the agent-run list (work_ref I3-T2 #1662).
     """
 
@@ -4706,7 +4706,7 @@ class AgentRun(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T2 #1662 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # agent-run list surfaces. Mirrors runbook_runs_tenant_work_ref_idx.
         Index(
             "agent_run_tenant_work_ref_idx",
@@ -4896,6 +4896,10 @@ class OperationRun(Base):
       lock-step by the lifecycle service.
     * ``created_at`` / ``started_at`` / ``ended_at`` -- lifecycle
       timestamps.
+    * ``mcp_profile`` -- the MCP tool profile of the session that started
+      the run, when that profile has a connector list (#6099, migration
+      ``0174``); NULL otherwise. Only a session of the same profile reads
+      the run over MCP.
     """
 
     __tablename__ = "operation_run"
@@ -4923,6 +4927,7 @@ class OperationRun(Base):
         nullable=True,
         default=None,
     )
+    mcp_profile: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -6937,7 +6942,7 @@ class ScheduledTrigger(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T3 #1663 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # scheduled-trigger list surfaces. Mirrors
         # agent_run_tenant_work_ref_idx / runbook_runs_tenant_work_ref_idx.
         Index(
@@ -7326,7 +7331,7 @@ class ApprovalRequest(Base):
       after the approval binds the list again, so the call and every step
       of a multi-step operation stay on targets of those connectors. NULL
       for a caller without a connector list and on rows saved before this
-      column. Added by migration ``0174``.
+      column. Added by migration ``0175``.
 
     Indexes
     -------
@@ -7582,7 +7587,7 @@ class ApprovalRequest(Base):
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     approver_install_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # The connector list of the hosted agent that asked. See the class
-    # docstring. Added by migration ``0174``.
+    # docstring. Added by migration ``0175``.
     allowed_connectors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict

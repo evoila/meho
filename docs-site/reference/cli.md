@@ -118,6 +118,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
 - `--mcp-client-id` — public client_id for the MCP browser-flow client
 - `--mcp-offline-session-idle` — how many seconds an unused MCP login stays valid: sets the `client.offline.session.idle.timeout` attribute on the MCP browser-flow client. Default 48h. Without it the realm's Offline Session Idle applies (30 days by default)
+- `--mcp-profile` — also make a login client `meho-mcp-profile-<name>` for this MCP tool profile (repeat for more). Every token of that client carries the claim `mcp_profile: <name>`, and MEHO takes it only at `/mcp?profile=<name>`
 - `--mcp-redirect-uri` — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
@@ -395,7 +396,7 @@ meho agent run-list [flags]
 
 - `--agent-name` — filter by agent definition name (exact match); an unknown name returns an empty list
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit the raw []AgentRunSummaryResponse JSON instead of the table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--offset` — rows to skip for paging into the result set (default 0)
@@ -500,7 +501,7 @@ meho approvals list [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference, exact match
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
@@ -859,7 +860,7 @@ meho audit count [flags]
 
 - `--audit-id` — count only this audit-id (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — count only the rows of one change-ticket reference
+- `--filter-work-ref` — count only the rows of one ticket id (whole id; white space at the ends is ignored)
 - `--json` — print the backplane's answer as it came instead of the summary
 - `--op-class` — count only one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — count only one op-id (glob with * wildcards)
@@ -895,7 +896,7 @@ meho audit query [flags]
 - `--audit-id` — exact audit-id lookup (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
-- `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored) — "show every write authorised by ticket X"
 - `--full-row-lost` — only the short rows: the database refused the full row, so MEHO stored the row without the target's answer and the error text
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
@@ -1288,7 +1289,7 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
-- `--filter-work-ref` — exact work-reference filter
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
@@ -3928,6 +3929,7 @@ meho operation groups <connector_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--include-raw` — also count raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 
 ### `meho operation preview`
@@ -3985,6 +3987,7 @@ meho operation search <connector_id> [query] [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
+- `--include-raw` — also show raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits
@@ -4487,7 +4490,7 @@ meho runbook runs [flags]
 
 - `--assignee` — filter by assignee subject (tenant_admin only; operators see own regardless)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw RunbookListRunsResponse JSON instead of the human table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--status` — filter by run state: in_progress, completed, or abandoned
@@ -4629,7 +4632,7 @@ meho scheduler list [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw ListResponse JSON instead of the human table
 - `--kind` — filter by trigger kind: cron | one_off | event
 - `--limit` — max triggers per page (1..500, server default 100 when omitted)

@@ -3,8 +3,8 @@
 
 """Save a hosted agent's connector list on its approval request.
 
-Revision ID: 0174
-Revises: 0173
+Revision ID: 0175
+Revises: 0174
 Create Date: 2026-11-17
 
 A hosted agent with a connector list may use only targets of those
@@ -25,8 +25,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0174"
-down_revision: str | None = "0173"
+revision: str = "0175"
+down_revision: str | None = "0174"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

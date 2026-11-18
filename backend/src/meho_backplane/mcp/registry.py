@@ -466,6 +466,13 @@ class ToolDefinition(BaseModel):
     ``None`` by default. internal: dropped from the wire shape like the
     RBAC fields.
 
+    ``input_error_path`` (#4174): when ``True``, an error of the
+    ``tools/call`` input check starts with the path of the wrong input (for
+    example ``query.filter[0]: ...``). ``False`` by default, so the error
+    text stays as it was. A tool sets it from its ``for_settings`` function
+    while its switch is on. internal: dropped from the wire shape like the
+    RBAC fields.
+
     ``for_settings`` is an optional function that gives the tool as it is
     shown under the current settings, to the session of the given
     :class:`Operator` (a session can ask for the short tool texts, see
@@ -500,6 +507,7 @@ class ToolDefinition(BaseModel):
     broadcast_omit_args: frozenset[str] = frozenset()
     approver_may_call: bool = False
     caller_check: Callable[[Operator], None] | None = None
+    input_error_path: bool = False
     for_settings: Callable[[ToolDefinition, Operator], ToolDefinition] | None = None
     annotations: ToolAnnotations | None = None
     meta: dict[str, Any] | None = None
@@ -771,10 +779,25 @@ def get_tool(name: str) -> tuple[ToolDefinition, ToolHandler] | None:
 
 
 def tool_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
-    """Return *definition* as *operator*'s session sees it under the current settings."""
-    if definition.for_settings is None:
-        return definition
-    return definition.for_settings(definition, operator)
+    """Return *definition* as *operator*'s session sees it under the current settings.
+
+    A session that sees the short tool texts (``MCP_SHORT_TOOL_TEXTS``, or
+    ``?texts=short``; see :mod:`meho_backplane.mcp.short_texts`) also gets
+    no ``outputSchema`` (#4714). The output schema is optional in MCP, and
+    the result stays the same JSON in the text block. The ``tools/call``
+    handler uses this tool too, so it sends ``structuredContent`` only when
+    the session's listing has an output schema.
+    """
+    shown = (
+        definition
+        if definition.for_settings is None
+        else definition.for_settings(definition, operator)
+    )
+    if shown.outputSchema is not None and (
+        get_settings().mcp_short_tool_texts or operator.mcp_short_tool_texts
+    ):
+        return shown.model_copy(update={"outputSchema": None})
+    return shown
 
 
 def registered_tool_names() -> frozenset[str]:

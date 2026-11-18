@@ -117,10 +117,18 @@
       </tr>
     {% endfor %}
   {% else %}
-    <tr>
-      <td colspan="8" class="text-center text-sm opacity-60 py-6">
-        No scheduled triggers match the current filter.
-      </td>
-    </tr>
+    {% if work_ref_error %}
+      <tr>
+        <td colspan="8" class="py-6">
+          <div role="alert" class="alert alert-error text-sm" data-work-ref-refused>{{ work_ref_error }}</div>
+        </td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="8" class="text-center text-sm opacity-60 py-6">
+          No scheduled triggers match the current filter.
+        </td>
+      </tr>
+    {% endif %}
   {% endif %}
 </tbody>

@@ -58,7 +58,9 @@ func newCreateCmd() *cobra.Command {
 			"agent has no grant yet. The CLI never picks for you: when MEHO " +
 			"needs a pick and --grants is missing, it prints the three choices " +
 			"and creates nothing. With --grants, the CLI shows the agent's " +
-			"grants after creation (--json adds them as \"grants\").",
+			"grants after creation (--json adds them as \"grants\"). " +
+			"Without --grants, it shows the agent's live grants when it has " +
+			"some: then no pick is needed (--json has them as \"live_grants\").",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -190,16 +192,19 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 // printSaved prints the created or edited definition. After a starting
 // grant pick it also reads and shows the grants of the definition's
 // agent, so the person sees what the pick wrote (--json adds them as
-// "grants").
+// "grants"). Without a pick it shows the agent's live grants from the
+// answer: then MEHO asked for no pick, and these grants say what the
+// agent may do (--json has them as "live_grants").
 func printSaved(
-	cmd *cobra.Command, backplaneURL, verb string, entry *api.AgentDefinitionRead, picked, jsonOut bool,
+	cmd *cobra.Command, backplaneURL, verb string, entry *api.AgentDefinitionSaved, picked, jsonOut bool,
 ) error {
 	if !picked {
 		if jsonOut {
 			return output.PrintJSON(cmd.OutOrStdout(), entry)
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "%s agent definition %q\n", verb, entry.Name)
-		printDefinitionSummary(cmd.OutOrStdout(), entry)
+		printDefinitionSummary(cmd.OutOrStdout(), savedDefinition(entry))
+		startinggrants.PrintLiveGrants(cmd.OutOrStdout(), entry.IdentityRef, entry.LiveGrants, entry.LiveGrantsTruncated)
 		return nil
 	}
 	grants, readErr := readAgentGrants(cmd.Context(), backplaneURL, entry.IdentityRef)
@@ -211,13 +216,35 @@ func printSaved(
 		return output.PrintJSON(cmd.OutOrStdout(), out)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s agent definition %q\n", verb, entry.Name)
-	printDefinitionSummary(cmd.OutOrStdout(), entry)
+	printDefinitionSummary(cmd.OutOrStdout(), savedDefinition(entry))
 	outcome := "created"
 	if verb != "created" {
 		outcome = "changed"
 	}
 	startinggrants.PrintGrants(cmd.OutOrStdout(), outcome, entry.IdentityRef, grants, readErr)
 	return nil
+}
+
+// savedDefinition returns the definition part of a create or edit answer.
+func savedDefinition(s *api.AgentDefinitionSaved) *api.AgentDefinitionRead {
+	if s == nil {
+		return nil
+	}
+	return &api.AgentDefinitionRead{
+		CreatedAt:    s.CreatedAt,
+		CreatedBySub: s.CreatedBySub,
+		Enabled:      s.Enabled,
+		Id:           s.Id,
+		IdentityRef:  s.IdentityRef,
+		ModelTier:    s.ModelTier,
+		Name:         s.Name,
+		OutputSchema: s.OutputSchema,
+		SystemPrompt: s.SystemPrompt,
+		TenantId:     s.TenantId,
+		Toolset:      s.Toolset,
+		TurnBudget:   s.TurnBudget,
+		UpdatedAt:    s.UpdatedAt,
+	}
 }
 
 // readAgentGrants reads the grants of the definition's agent after the

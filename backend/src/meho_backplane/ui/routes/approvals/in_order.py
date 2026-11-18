@@ -127,6 +127,7 @@ from meho_backplane.operations.approved_reveal import (
     is_write_reveal,
 )
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
+from meho_backplane.policy.routing_floor import InstallFloor, load_install_floor
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
@@ -137,8 +138,13 @@ from meho_backplane.ui.routes.approvals.render import (
     project_request_to_view,
     set_csrf_cookie,
 )
-from meho_backplane.ui.routes.work_ref_form import filter_work_ref
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_in_order_router", "group_warnings"]
 
@@ -232,7 +238,9 @@ def build_in_order_router() -> APIRouter:
         work_ref: str = Query(),
     ) -> HTMLResponse:
         """Render the in-order modal with the steps and a Start button."""
-        ref = _ticket(work_ref)
+        ref, refused = _ticket(work_ref)
+        if refused is not None:
+            return _render_refused(request, refused)
         operator = await _routes._resolve_operator(session)
         run = _Run(steps=await _load_steps(operator, ref))
         run.warnings = group_warnings([s.row for s in run.steps])
@@ -248,7 +256,9 @@ def build_in_order_router() -> APIRouter:
         step_id: list[str] = Form(default_factory=list),
     ) -> HTMLResponse:
         """Run the steps in order; render what happened to each."""
-        ref = _ticket(work_ref)
+        ref, refused = _ticket(work_ref)
+        if refused is not None:
+            return _render_refused(request, refused)
         operator = await _routes._resolve_operator(session)
         confirmed = _parse_confirm_id(confirm_id)
         shown = {_parse_request_id(raw, "step_id") for raw in step_id}
@@ -274,15 +284,31 @@ def build_in_order_router() -> APIRouter:
     return router
 
 
-def _ticket(raw: str) -> str:
+def _ticket(raw: str) -> tuple[str, str | None]:
     """The change ticket of the page, checked like the approvals search box.
 
-    The page needs a ticket, so a blank value is a 422 too.
+    Returns the ticket, or the refusal text when the value breaks the rule.
+    The page needs a ticket, so a blank value is refused too. The ticket is
+    kept as typed, so the window lists the same requests as the Pending tab
+    filtered by the same text.
     """
-    ref = filter_work_ref(raw)
+    try:
+        ref = filter_work_ref(raw)
+    except WorkRefError as exc:
+        return raw, refused_filter_text(exc)
     if ref is None:
-        raise HTTPException(status_code=422, detail="work_ref must name a change ticket")
-    return ref
+        blank = WorkRefError("work_ref must name a change ticket", rule="empty")
+        return raw, refused_filter_text(blank)
+    return ref, None
+
+
+def _render_refused(request: Request, text: str) -> HTMLResponse:
+    """The modal for a refused ticket id: the rule text, no steps, a 422."""
+    response = get_templates().TemplateResponse(
+        request, "approvals/_in_order_refused.html", {"work_ref_error": text}
+    )
+    mark_work_ref_refused(response)
+    return response
 
 
 def _parse_confirm_id(raw: str) -> uuid.UUID | None:
@@ -318,6 +344,7 @@ async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
     """
     rows: list[ApprovalRequest] = []
     async with get_sessionmaker()() as db_session:
+        floor = await load_install_floor(db_session)
         while True:
             page = await list_pending(
                 db_session,
@@ -332,15 +359,17 @@ async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
             if len(page) < _PAGE:
                 break
     return [
-        _Step(step=n, row=row, right=_right_if_pending(operator, row))
+        _Step(step=n, row=row, right=_right_if_pending(operator, row, floor))
         for n, row in enumerate(rows, start=1)
     ]
 
 
-def _right_if_pending(operator: Operator, row: ApprovalRequest) -> ApproveRight | None:
+def _right_if_pending(
+    operator: Operator, row: ApprovalRequest, floor: InstallFloor | None
+) -> ApproveRight | None:
     if row.status != ApprovalRequestStatus.PENDING.value:
         return None
-    return approve_right(operator, row)
+    return approve_right(operator, row, floor=floor)
 
 
 def _next_refused(run: _Run) -> _Step | None:

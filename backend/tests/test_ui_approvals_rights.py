@@ -256,7 +256,7 @@ def test_an_ordinary_approval_shows_no_self_approval_line() -> None:
 
 
 def test_a_forced_own_destructive_approve_shows_the_refusal_text() -> None:
-    """The 403 text of the approve is shown as it is, with the guidance."""
+    """The 403 text of the approve is shown as it is: who may approve, and where."""
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _own_destructive_request()
     resume_mock = AsyncMock(return_value=_dispatch_result())
@@ -265,11 +265,12 @@ def test_a_forced_own_destructive_approve_shows_the_refusal_text() -> None:
 
     body = response.text  # type: ignore[attr-defined]
     assert "You cannot approve your own request" in body
-    assert "Ask a MEHO-SA-Operator or a MEHO-Admin to approve this" in body
-    assert "agent-requester" in body
+    assert "Ask another person in MEHO-SA-Operators or MEHO-Admins to approve it" in body
+    for word in ("APPROVAL_ALLOW_SELF_APPROVAL", "agent-requester", "break-glass", "re-park"):
+        assert word.lower() not in body.lower(), word
     # The refusal says where to approve (#3329), after the refusal text.
     assert 'data-testid="approval-refusal-hint"' in body
-    assert body.index("Ask a MEHO-SA-Operator") < body.index(WEB_APPROVAL_HINT)
+    assert body.index("Ask another person in MEHO-SA-Operators") < body.index(WEB_APPROVAL_HINT)
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
 

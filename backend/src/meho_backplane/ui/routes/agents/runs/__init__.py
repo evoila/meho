@@ -18,7 +18,7 @@ Module layout
 * :mod:`~meho_backplane.ui.routes.agents.runs.list_view` -- ``GET
   /ui/agents/runs``. One handler serves the full page (browser nav) and the
   table-rows fragment (HTMX filter swap). Filters: ``status`` (closed enum)
-  + ``work_ref`` (exact match). Operator-readable.
+  + ``work_ref`` (whole ticket id). Operator-readable.
 * :mod:`~meho_backplane.ui.routes.agents.runs.detail` -- ``GET
   /ui/agents/runs/{handle}``. The full run state; the status panel polls
   while the run is non-terminal and renders statically once terminal.

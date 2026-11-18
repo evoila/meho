@@ -28,7 +28,15 @@ User docs: `docs-site/install/first-start-checks.md`.
 4. `check_clock` compares `now()` with the `Date` header of the Keycloak
    discovery answer (a successful answer only; an error page from a proxy
    does not count) and with PostgreSQL `now()` (`CLOCK_MAX_SKEW_S` = 60).
-   A source that cannot be read is red, not green.
+   Each reader returns a time or a `NoClockReading` that holds the message.
+   A source that cannot be read is red, not green, and the message names the
+   cause: no answer (`httpx.TransportError`), an answer MEHO cannot read, or
+   the HTTP status of an error answer. The Keycloak fix names the setting in
+   use: `KEYCLOAK_DISCOVERY_URL` when it is set, else `KEYCLOAK_ISSUER_URL`.
+   A successful answer with no readable `Date` header is a `NoClockReading`
+   with `red=False`: Keycloak is left out, the line compares with PostgreSQL
+   only, and the message says why. The Keycloak of the built-in core sends no
+   `Date` header. A `Date` with the zone `-0000` is read as UTC.
 5. `check_reachability` calls `resolve_connector_or_label` and
    `connector.fingerprint(target, operator=operator)` for every live target.
    It stores nothing (unlike `probe_and_store_fingerprint`). The console page
@@ -59,6 +67,8 @@ session maker, the connector resolver.
 
 ## Known issues
 
+- Behind a proxy, the `Date` header of the Keycloak answer comes from the
+  proxy, so the clock line compares with the clock of the proxy.
 - The destination check needs MEHO to reach its own public address from
   inside the cluster. A site where that is not possible gets a red
   certificate line first ("could not connect").

@@ -163,7 +163,12 @@ from meho_backplane.agent.toolset_discovery import (
     build_write_meta_tools,
     keep_allowed_connectors,
 )
-from meho_backplane.agent.toolset_operations import build_operation_meta_tools, check_arguments
+from meho_backplane.agent.toolset_operations import (
+    INCLUDE_RAW_TOOLS,
+    build_operation_meta_tools,
+    check_arguments,
+    with_include_raw_input,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
@@ -235,8 +240,9 @@ def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
 #: are the older hand-written copies. They differ from the MCP tools in
 #: :mod:`meho_backplane.mcp.tools.operations` (no exact-op mode, no
 #: ``preview_hash``). With the ``agent_operation_tools_from_mcp`` setting on,
-#: :func:`_active_catalog` uses :data:`_MCP_OPERATIONS_META_TOOLS` in their
-#: place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
+#: :func:`_active_catalog` uses the tools of
+#: :func:`~meho_backplane.agent.toolset_operations.build_operation_meta_tools`
+#: in their place (#4754). The full :data:`_META_TOOL_CATALOG` appends the discovery,
 #: broadcast and context tools.
 #:
 #: Each handler first checks the arguments against the tool's own
@@ -244,7 +250,7 @@ def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
 #: tools built from the MCP tools run. Each schema has
 #: ``additionalProperties: false``, so a field it does not name goes back to
 #: the model as a retry and never reaches the handler.
-_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
+_HAND_WRITTEN_OPERATION_TOOLS: tuple[MetaToolSpec, ...] = (
     MetaToolSpec(
         name="list_operation_groups",
         handler=list_operation_groups,
@@ -336,6 +342,23 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
         required_role=TenantRole.OPERATOR,
     ),
 )
+_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
+    *_HAND_WRITTEN_OPERATION_TOOLS
+)
+
+#: The hand-written discovery tools with the ``include_raw`` input, by name.
+#: They take the place of the plain copies while ``SEARCH_TYPED_FIRST`` is on
+#: (#4712), because the shared handlers then hide raw operations.
+_OPERATIONS_META_TOOLS_WITH_RAW: dict[str, MetaToolSpec] = {
+    spec.name: spec
+    for spec in _with_argument_check(
+        *(
+            with_include_raw_input(spec)
+            for spec in _HAND_WRITTEN_OPERATION_TOOLS
+            if spec.name in INCLUDE_RAW_TOOLS
+        )
+    )
+}
 
 
 #: The full agent meta-tool catalog: the connector-execution tools, the
@@ -354,13 +377,6 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *build_docs_meta_tools(),
 )
 
-#: The operation tools built from the MCP tools (#4754), by name. They take
-#: the place of the hand-written copies when the
-#: ``agent_operation_tools_from_mcp`` setting is on.
-_MCP_OPERATIONS_META_TOOLS: dict[str, MetaToolSpec] = {
-    spec.name: spec for spec in build_operation_meta_tools()
-}
-
 
 def _active_catalog() -> tuple[MetaToolSpec, ...]:
     """Return the catalog for a run, with the operation tools the setting picks.
@@ -368,10 +384,20 @@ def _active_catalog() -> tuple[MetaToolSpec, ...]:
     Off (the default): :data:`_META_TOOL_CATALOG` as it is. On: the same
     catalog, with the three operation tools built from the MCP tools in the
     place of the hand-written copies. Tool names and order do not change.
+
+    The ``include_raw`` input of the two discovery tools follows the
+    ``SEARCH_TYPED_FIRST`` switch in both forms (#4712). So the MCP-based
+    tools are built here, for each run, and with the setting off the
+    hand-written copies with the input take the place of the plain ones.
     """
-    if not get_settings().agent_operation_tools_from_mcp:
+    settings = get_settings()
+    if settings.agent_operation_tools_from_mcp:
+        swap = {spec.name: spec for spec in build_operation_meta_tools()}
+    elif settings.search_typed_first:
+        swap = _OPERATIONS_META_TOOLS_WITH_RAW
+    else:
         return _META_TOOL_CATALOG
-    return tuple(_MCP_OPERATIONS_META_TOOLS.get(m.name, m) for m in _META_TOOL_CATALOG)
+    return tuple(swap.get(m.name, m) for m in _META_TOOL_CATALOG)
 
 
 #: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).

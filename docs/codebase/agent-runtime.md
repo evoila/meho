@@ -188,7 +188,7 @@ JSON-shaped (so it can grow without a migration):
   `target_connector_mismatch` check, before the policy gate: one audit row,
   no approval request, nothing sent. A call that waits for approval stores
   the list on its request (`approval_request.allowed_connectors`, migration
-  `0174`). `_dispatch_resume_with_bound_context` binds it again for the run,
+  `0175`). `_dispatch_resume_with_bound_context` binds it again for the run,
   so a person who approves after the agent stopped waiting runs the call and
   its steps with the same list. Test:
   `tests/test_agent_target_connector_limit.py`.
@@ -563,9 +563,19 @@ it):
 | `work_ref` | MEHO sets the run's change reference itself, from the trigger that started the run. The model must not replace it on the audit rows. The same rule holds for `work_ref` on `broadcast_announce`. |
 | `async`, `run_id`, `wait_seconds` | The hosted tool waits until each call ends, also while the call waits for an approval. A background call and its status check are not needed. |
 
-`list_operation_groups` and `search_operations` leave out nothing. The
-hosted `call_operation` text is the MCP text without the part about `async`,
+`list_operation_groups` and `search_operations` leave out nothing. Their
+`include_raw` input and its description line follow the `SEARCH_TYPED_FIRST`
+switch, as in `tools/list` (#4712). So the toolset builds the three tools
+for each run, not once at start. The hosted `call_operation` text is the MCP text without the part about `async`,
 plus one sentence that says each call waits until it ends.
+
+With the setting off, the hand-written `list_operation_groups` and
+`search_operations` follow the `SEARCH_TYPED_FIRST` switch too. While it is
+on, they get the `include_raw` input and the same description line
+(`with_include_raw_input` in `agent/toolset_operations.py`). The shared
+handlers then hide raw operations, and the note in the answer names
+`include_raw`, so the hosted run must be able to send it. While the switch
+is off, the catalog is the same as before.
 
 Two checks run before each handler:
 

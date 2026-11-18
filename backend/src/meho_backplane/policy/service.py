@@ -63,7 +63,12 @@ from meho_backplane.policy.document import (
     parse_policy_file,
 )
 from meho_backplane.policy.routing import category_routing_warnings
-from meho_backplane.policy.routing_floor import floor_warnings, tenants_wider
+from meho_backplane.policy.routing_floor import (
+    floor_warnings,
+    tenant_floor_warnings,
+    tenant_wider_notes,
+    tenants_wider,
+)
 from meho_backplane.policy.store import _lock_tenant_policy, _override_entries_for
 from meho_backplane.policy.validate import KnownOp, check_document, load_known_ops
 from meho_backplane.settings import get_settings
@@ -419,6 +424,8 @@ async def build_plan(
         plan.mistakes = [f"The install's stored policy is not valid: {exc} Import it again first."]
     if plan.mistakes:
         return plan
+    if scope == "tenant":
+        plan.warnings.extend(tenant_floor_warnings(document, install_document))
     old_side, new_side = _sides(
         before,
         document,
@@ -582,7 +589,10 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
 
     In a tenant's file, each part of an entry that tries to set back an
     "always wait" or a risk level of the install's policy gets a
-    ``# Has no effect:`` comment above the entry.
+    ``# Has no effect:`` comment above the entry. With the
+    ``POLICY_APPROVER_ROUTING`` switch on, a ``routing`` entry that names
+    more groups than an install entry gets a ``# Has no effect where
+    wider:`` comment: the install's routing is a floor.
 
     A tenant's file holds its stored bindings. When it has none and the
     ``POLICY_APPROVER_ROUTING`` switch is on, it holds the shipped bindings
@@ -594,23 +604,39 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
     for key in ("description", "taxonomy"):
         if key in document:
             head[key] = document[key]
-    tail: dict[str, Any] = {}
-    if document.get("routing"):
-        tail["routing"] = list(document["routing"])
+    routes = list(document.get("routing") or [])
+    bindings: dict[str, Any] = {}
     if document.get("bindings"):
-        tail["bindings"] = list(document["bindings"])
+        bindings["bindings"] = list(document["bindings"])
     elif scope == "tenant" and routing_enabled():
-        tail["bindings"] = shipped_binding_documents(get_settings())
+        bindings["bindings"] = shipped_binding_documents(get_settings())
     entries = list(document.get("classifications") or [])
-    if not entries:
-        return _dump({**head, "classifications": [], **tail})
+    route_notes = (
+        tenant_wider_notes(document, await _stored_document(session, "install", None))
+        if scope == "tenant"
+        else {}
+    )
+    if not entries and not route_notes:
+        tail = {"routing": routes} if routes else {}
+        return _dump({**head, "classifications": [], **tail, **bindings})
     notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
-    parts = [_dump(head), "classifications:\n"]
-    for index, entry in enumerate(entries):
-        parts.extend(f"# Has no effect: {note}\n" for note in notes.get(index, []))
-        parts.append(_dump([entry]))
-    if tail:
-        parts.append(_dump(tail))
+    parts = [_dump(head)]
+    parts.append(_noted("classifications", entries, notes, "Has no effect"))
+    if routes:
+        parts.append(_noted("routing", routes, route_notes, "Has no effect where wider"))
+    if bindings:
+        parts.append(_dump(bindings))
+    return "".join(parts)
+
+
+def _noted(key: str, items: list[Any], notes: dict[int, list[str]], label: str) -> str:
+    """The list *key* of a policy file, with a ``# <label>:`` comment above each noted item."""
+    if not items:
+        return _dump({key: []})
+    parts = [f"{key}:\n"]
+    for index, item in enumerate(items):
+        parts.extend(f"# {label}: {note}\n" for note in notes.get(index, []))
+        parts.append(_dump([item]))
     return "".join(parts)
 
 

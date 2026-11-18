@@ -58,6 +58,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "search_hit_call_hints",
         "search_plain_sentences",
         "search_typed_first",
+        "secret_move_linux_target_card",
         "team_knowledge_recall",
     }
 )

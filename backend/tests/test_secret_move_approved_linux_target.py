@@ -10,6 +10,11 @@
   refuses the run before the sudo password lookup, before the source read
   and before any SSH call.
 * When nothing changed, the approved run writes to the target on the card.
+* The sink drops an SSH login this process keeps for a target that another
+  server changed, and dials the host the row holds now.
+* What a caller reads about a ``linux:`` side (``preview_operation`` and the
+  MCP approval tools) is behind ``SECRET_MOVE_LINUX_TARGET_CARD``, off by
+  default; the card a person reads always shows it.
 
 The Vault source is faked at the ``_build_client`` seam and the SSH channel
 at ``run_capped``; the targets and the approval rows are real rows.
@@ -20,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -30,15 +36,21 @@ from sqlalchemy import select, update
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.secret.move_preview import build_secret_move_preview
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch
-from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._handler_resolve import (
+    _CONNECTOR_INSTANCE_CACHE,
+    forget_target_if_changed,
+)
+from meho_backplane.operations._preview import PreviewContext, proposed_effect_for_agent
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
 from .test_secret_broker_linux_sink import _SUDO_CANARY, _Wire
@@ -312,3 +324,157 @@ async def test_a_name_with_no_target_at_park_refuses_the_run_once_it_finds_one(
     result = await _approve_and_run(row.id)
 
     _assert_refused(result, "cannot tell what was approved", fake, ssh)
+
+
+# -- a kept SSH login of a changed target --------------------------------
+
+
+class _Conn:
+    """A fake SSH connection that remembers the address it was opened to."""
+
+    def __init__(self, host: str, port: int | None) -> None:
+        self.address = (host, port)
+        self.closed = False
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+async def _row(name: str) -> TargetORM:
+    async with get_sessionmaker()() as session:
+        found = await session.execute(select(TargetORM).where(TargetORM.name == name))
+        return found.scalar_one()
+
+
+async def test_the_sink_drops_a_kept_login_of_a_target_changed_on_another_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    wire = _Wire(stdout="===MEHO_SINK_OK===\n", home="/home/app")
+    connector = LinuxSshConnector()
+    connector._resolve_secret = AsyncMock(  # type: ignore[method-assign]
+        return_value={"username": "ops", "sudo_password": _SUDO_CANARY}
+    )
+    connector._auth_config = AsyncMock(return_value={"known_hosts": None})  # type: ignore[method-assign]
+    opened: list[_Conn] = []
+
+    async def _dial(target: Any, auth_kwargs: dict[str, Any]) -> _Conn:
+        opened.append(_Conn(target.host, target.port))
+        return opened[-1]
+
+    _CONNECTOR_INSTANCE_CACHE[LinuxSshConnector] = connector
+    with (
+        patch("meho_backplane.connectors.adapters.ssh._dial", _dial),
+        patch("meho_backplane.connectors.linux._sudo.run_capped", wire.run_capped),
+        patch(
+            "meho_backplane.connectors.linux.secret_endpoint.get_or_create_connector_instance",
+            return_value=connector,
+        ),
+    ):
+        # This server ran a call on the target and keeps the login.
+        old = await _row("linux-a")
+        await forget_target_if_changed(old)
+        for caller in (_OPERATOR, _reviewer()):
+            await connector._connect(old, caller)
+        kept = list(opened)
+        # Another server changes the host; this server runs no drop hook.
+        await _update(
+            "linux-a", host="host-c.test.invalid", connection_changed_at=datetime.now(UTC)
+        )
+        row = await _ask({"from": _SRC, "to": _DST})
+        assert _card(row)["sink"]["host"] == "host-c.test.invalid"
+
+        result = await _approve_and_run(row.id)
+
+    _CONNECTOR_INSTANCE_CACHE.pop(LinuxSshConnector, None)
+    assert result.status == "ok", result
+    assert all(conn.closed for conn in kept)
+    used = [conn for conn in opened if conn not in kept]
+    assert [conn.address for conn in used] == [("host-c.test.invalid", None)]
+    assert len(wire.commands) == 2
+
+
+# -- what a caller reads (SECRET_MOVE_LINUX_TARGET_CARD) ------------------
+
+
+def _set_switch(monkeypatch: pytest.MonkeyPatch, on: bool) -> None:
+    if on:
+        monkeypatch.setenv("SECRET_MOVE_LINUX_TARGET_CARD", "true")
+    else:
+        monkeypatch.delenv("SECRET_MOVE_LINUX_TARGET_CARD", raising=False)
+    get_settings.cache_clear()
+
+
+async def _agent_preview() -> dict[str, Any] | None:
+    ctx = PreviewContext(
+        descriptor=object(),  # type: ignore[arg-type]  # the builder does not read it
+        connector_instance=None,
+        operator=_OPERATOR,
+        target=None,
+        params={"from": _SRC, "to": _DST},
+        agent_preview=True,
+    )
+    return await build_secret_move_preview(ctx)
+
+
+async def test_with_the_switch_off_the_agent_preview_shows_the_refs_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_switch(monkeypatch, on=False)
+
+    preview = await _agent_preview()
+
+    assert preview is not None
+    assert preview["sink"] == {"kind": "linux", "ref": f"{_ALIAS}/home/app/.config/app/key#app"}
+    assert preview["source"]["target"] == "vault-src"
+
+
+async def test_with_the_switch_on_the_agent_preview_names_the_linux_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_switch(monkeypatch, on=True)
+
+    preview = await _agent_preview()
+
+    assert preview is not None
+    assert preview["sink"]["target"] == _ALIAS
+    assert "target_id" not in preview["sink"]  # the agent preview makes no lookup
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["off", "on"])
+async def test_the_approval_tools_show_the_linux_card_only_with_the_switch_on(
+    on: bool, monkeypatch: pytest.MonkeyPatch, ssh: _Ssh
+) -> None:
+    install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask({"from": _SRC, "to": _DST})
+    stored = dict(row.proposed_effect)
+    _set_switch(monkeypatch, on=on)
+
+    shown = proposed_effect_for_agent(
+        "secret.move",
+        stored,
+        params=dict(row.params or {}),
+        connector_id="secret-broker-1.x",
+        tenant=str(_TENANT_ID),
+    )
+
+    assert shown is not None
+    sink = shown["preview"]["sink"]
+    if on:
+        assert shown == stored
+    else:
+        assert sink == {
+            "kind": "linux",
+            "ref": f"{_ALIAS}/home/app/.config/app/key#app",
+            "secret_exists": "not known",
+        }
+        assert shown["preview"]["source"] == stored["preview"]["source"]
+    # The stored card a person reads keeps every field.
+    assert stored["preview"]["sink"]["host"] == "host-a.test.invalid"
+    assert _card(row)["sink"]["target_id"] == await _target_id("linux-a")

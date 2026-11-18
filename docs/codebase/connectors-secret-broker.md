@@ -230,6 +230,17 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   or written. Send a new request". The check runs before the sudo password
   lookup, before the source is read and before any SSH call. A `vault:`
   side names no MEHO target.
+- Before the `linux:` store uses SSH, it drops the SSH logins this server
+  keeps for the target when a person changed the target since this server
+  last saw it (`forget_target_if_changed`). So the script goes to the host
+  and port the row holds now, also when another server made the change.
+- What a caller reads about a `linux:` side is behind the switch
+  `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
+  `preview_operation` shows only `kind` and `ref` for a `linux:` side, and
+  `meho_approvals_get` and `meho_approvals_list` leave out `target`,
+  `target_id`, `target_name`, `host` and `port`. On, they show them. The
+  card a person reads in the console and the check of the approved run do
+  not depend on the switch.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.

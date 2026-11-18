@@ -53,6 +53,7 @@ from meho_backplane.operations.approval_rights import (
 from meho_backplane.policy.approve import may_approve
 from meho_backplane.policy.shadow import approval_ask_of, asker_of
 from meho_backplane.settings import get_settings
+from meho_backplane.web_push.send import _snapshot as push_snapshot
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000b0101")
 _AGENT_SUB = "agent-sa-sub"
@@ -148,10 +149,12 @@ async def _approve(request_id: uuid.UUID, approver: Operator) -> ApprovalRequest
 
 
 async def _surfaces_agree(request_id: uuid.UUID, approver: Operator) -> bool:
-    """The "may I approve?" answers and the policy evaluator; they must agree."""
+    """The "may I approve?" answers, web push and the policy evaluator; they must agree."""
     row = await _load(request_id)
     right = approve_right(approver, row)
     assert approve_right_any_status(approver, row).may_approve == right.may_approve
+    push_copy = push_snapshot(_TENANT, row)
+    assert approve_right_any_status(approver, push_copy).may_approve == right.may_approve
     allowed, _ = may_approve(asker_of(approver), approval_ask_of(approver, row))
     assert allowed == right.may_approve
     return right.may_approve

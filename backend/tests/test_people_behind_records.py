@@ -16,11 +16,14 @@ import pytest
 
 from meho_backplane.agents.schemas import AgentDefinitionUpdate
 from meho_backplane.agents.service import AgentDefinitionService
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentDefinition, RunbookRun
 from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.runs_schemas import ReassignRunRequest
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth.middleware import UISessionContext
+from meho_backplane.ui.routes.agents.forms import submit_toggle
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000b0201")
 
@@ -61,6 +64,47 @@ async def test_an_edit_records_who_changed_the_definition() -> None:
         row = await session.get(AgentDefinition, definition_id)
         assert row is not None
         assert row.updated_by_sub == "editor-1"
+        assert row.created_by_sub == "author-1"
+
+
+async def test_a_console_toggle_records_who_changed_the_definition() -> None:
+    definition_id = uuid.uuid4()
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentDefinition(
+                id=definition_id,
+                tenant_id=_TENANT,
+                name="weekly",
+                identity_ref="agent:weekly",
+                model_tier="standard",
+                system_prompt="prompt",
+                toolset={},
+                turn_budget=5,
+                enabled=False,
+                created_by_sub="author-1",
+            )
+        )
+        await session.commit()
+
+    admin = Operator(
+        sub="toggler-1",
+        name=None,
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+    )
+    session_ctx = UISessionContext(
+        session_id=uuid.uuid4(), operator_sub="toggler-1", tenant_id=_TENANT
+    )
+    await submit_toggle(session_ctx, admin, name="weekly", enabled=True)
+
+    async with get_sessionmaker()() as session:
+        row = await session.get(AgentDefinition, definition_id)
+        assert row is not None
+        assert row.enabled is True
+        assert row.updated_by_sub == "toggler-1"
         assert row.created_by_sub == "author-1"
 
 

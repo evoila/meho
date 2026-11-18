@@ -3577,8 +3577,9 @@ output schema then sends one short line as its text, and the full result
 only in <code>structuredContent</code>. Errors and tools without an output schema
 still send the full text. Use it only with a client that gives the model
 <code>structuredContent</code>: a client that reads only the text (for example
-Cursor) would see only the short line. A value other than <code>structured</code> is
-refused with HTTP 400.</p>
+Cursor) would see only the short line. With <code>texts=short</code>, no tool
+declares an output schema, so this option then changes nothing. A value
+other than <code>structured</code> is refused with HTTP 400.</p>
 <h2 id="the-operator-planes-behind-mcpadmin">The operator planes (behind <code>mcp:admin</code>)<a class="headerlink" href="#the-operator-planes-behind-mcpadmin" title="Permanent link">&para;</a></h2>
 <p>The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,

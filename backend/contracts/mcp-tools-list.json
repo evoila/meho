@@ -5549,6 +5549,12 @@
                     "op_id": {
                       "type": "string"
                     },
+                    "required_params": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
                     "requires_approval": {
                       "type": "boolean"
                     },
@@ -5566,6 +5572,9 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "target_required": {
+                      "type": "boolean"
                     }
                   },
                   "required": [

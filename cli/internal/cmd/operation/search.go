@@ -26,6 +26,10 @@ import (
 // asks for them (--scores, #3668); omitempty keeps them out of the
 // --json output when the backend did not send them.
 //
+// RequiredParams and TargetRequired are only on the wire while the
+// backend's SEARCH_HIT_CALL_HINTS switch is on (#4331); omitempty and
+// the pointer keep them out of the --json output otherwise.
+//
 // Kept hand-written for the same reason as GroupSummary (see
 // groups.go): the FastAPI route types its response as
 // `dict[str, Any]`, so the oapi-codegen generator emits no
@@ -33,15 +37,17 @@ import (
 // response to a typed model so the generator picks it up is a
 // separate backend Task explicitly out of scope for G0.12-T2 #1260.
 type SearchHit struct {
-	OpID             string   `json:"op_id"`
-	Summary          *string  `json:"summary"`
-	Description      *string  `json:"description"`
-	GroupKey         *string  `json:"group_key"`
-	SafetyLevel      string   `json:"safety_level"`
-	RequiresApproval bool     `json:"requires_approval"`
-	FusedScore       float64  `json:"fused_score,omitempty"`
-	Bm25Score        *float64 `json:"bm25_score,omitempty"`
-	CosineScore      *float64 `json:"cosine_score,omitempty"`
+	OpID             string    `json:"op_id"`
+	Summary          *string   `json:"summary"`
+	Description      *string   `json:"description"`
+	GroupKey         *string   `json:"group_key"`
+	SafetyLevel      string    `json:"safety_level"`
+	RequiresApproval bool      `json:"requires_approval"`
+	RequiredParams   *[]string `json:"required_params,omitempty"`
+	TargetRequired   *bool     `json:"target_required,omitempty"`
+	FusedScore       float64   `json:"fused_score,omitempty"`
+	Bm25Score        *float64  `json:"bm25_score,omitempty"`
+	CosineScore      *float64  `json:"cosine_score,omitempty"`
 }
 
 // SearchResponse is the JSON envelope returned by

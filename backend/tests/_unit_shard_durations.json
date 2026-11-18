@@ -1055,6 +1055,7 @@
   "tests/test_search_docs_fanout_rrf.py": 0.67,
   "tests/test_search_docs_route.py": 7.1,
   "tests/test_search_filters.py": 1.67,
+  "tests/test_search_hit_call_hints.py": 8.0,
   "tests/test_search_plain_sentences.py": 1.07,
   "tests/test_secret_broker_handoff.py": 3.92,
   "tests/test_secret_broker_keycloak_client_secret_source.py": 1.69,

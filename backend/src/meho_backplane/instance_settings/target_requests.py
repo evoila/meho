@@ -15,10 +15,14 @@ values for a new target, the old and the new value of each changed field
 for a changed one. The target is written only when a person approves its
 request. An import that creates or changes no target writes no request.
 
-When a request for the same target already waits (a second import of the
+When a request for the same call already waits (a second import of the
 same file, for example), the import makes no new request. It lists the
-waiting request with ``already_waiting`` set, so the caller sees its id. A
-call that runs at once is listed in ``written``.
+waiting request with ``already_waiting`` set, so the caller sees its id. The
+call is the same only when the operation and every param match the waiting
+request. When a request for the same target waits with other values, the
+import sends nothing for that target and says so in ``failed``: a person
+approves or rejects the waiting request first, then imports again. A call
+that runs at once is listed in ``written``.
 
 The calls run before the import writes anything else, so a request row and
 the import's own transaction never wait for each other. A target in a tenant
@@ -89,15 +93,32 @@ def _same_target(request: ApprovalRequest, write: TargetWrite) -> bool:
     return write.target_id is None and params.get("name") == write.name
 
 
-async def _waiting_request(tenant_id: uuid.UUID, write: TargetWrite) -> uuid.UUID | None:
-    """The id of a request for the same target that still waits, or ``None``."""
+@dataclass(frozen=True)
+class _Waiting:
+    """A request for the same target that still waits."""
+
+    request_id: uuid.UUID
+    #: Whether the request asks for the same call: same operation, same params.
+    same_call: bool
+
+
+async def _waiting_request(
+    tenant_id: uuid.UUID, write: TargetWrite, op_id: str, params: dict[str, Any]
+) -> _Waiting | None:
+    """A request for the same target that still waits, or ``None``.
+
+    A request for the same call comes first. Else the oldest request for
+    the same target is returned with ``same_call`` false.
+    """
     from meho_backplane.connectors.targets.ops import (
         TARGETS_REGISTER_OP_ID,
         TARGETS_REGISTRY_CONNECTOR_ID,
     )
     from meho_backplane.connectors.targets.update import TARGETS_UPDATE_OP_ID
+    from meho_backplane.operations._validate import params_hash_matches
     from meho_backplane.operations.approval_queue import _is_overdue_pending
 
+    other: _Waiting | None = None
     async with get_sessionmaker()() as session:
         rows = await session.scalars(
             select(ApprovalRequest)
@@ -110,9 +131,13 @@ async def _waiting_request(tenant_id: uuid.UUID, write: TargetWrite) -> uuid.UUI
             .order_by(ApprovalRequest.created_at)
         )
         for row in rows:
-            if _same_target(row, write) and not _is_overdue_pending(row):
-                return row.id
-    return None
+            if not _same_target(row, write) or _is_overdue_pending(row):
+                continue
+            if row.op_id == op_id and params_hash_matches(params, row.params_hash):
+                return _Waiting(row.id, same_call=True)
+            if other is None:
+                other = _Waiting(row.id, same_call=False)
+    return other
 
 
 async def _ask(operator: Operator, write: TargetWrite, asks: TargetAsks) -> None:
@@ -121,10 +146,17 @@ async def _ask(operator: Operator, write: TargetWrite, asks: TargetAsks) -> None
 
     op_id, params = _call_of(write)
     entry: dict[str, Any] = {"path": write.path, "name": write.name, "op_id": op_id}
-    waiting_id = await _waiting_request(operator.tenant_id, write)
-    if waiting_id is not None:
+    waiting = await _waiting_request(operator.tenant_id, write, op_id, params)
+    if waiting is not None and waiting.same_call:
         asks.waiting.append(
-            {**entry, "approval_request_id": str(waiting_id), "already_waiting": True}
+            {**entry, "approval_request_id": str(waiting.request_id), "already_waiting": True}
+        )
+        return
+    if waiting is not None:
+        asks.failed.append(
+            f"`{write.path}` ({write.name}) was not sent for approval: request "
+            f"{waiting.request_id} for this target waits with other values. Approve "
+            "or reject that request, then import the file again."
         )
         return
     result = await dispatch(

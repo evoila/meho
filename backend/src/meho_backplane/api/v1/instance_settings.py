@@ -137,9 +137,10 @@ class SettingsImportResponse(BaseModel):
     the new revision (``null`` when nothing changed). ``waiting_for_approval``
     lists each target the file creates or changes: it is not written yet, and
     a person approves each one (``meho approvals``, or the console). When a
-    request for that target already waits, the import lists that request
-    (``already_waiting``) and makes no new one. ``targets_written`` lists a
-    target call that ran at once.
+    request with the same values already waits, the import lists that request
+    (``already_waiting``) and makes no new one. When a request for that target
+    waits with other values, ``failed`` names the target and the waiting
+    request. ``targets_written`` lists a target call that ran at once.
     """
 
     model_config = ConfigDict(frozen=True)

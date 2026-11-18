@@ -18,6 +18,9 @@ the call ``meho settings import`` makes):
   answer says to import the file again.
 * **The same file imported twice** -- the second import makes no new
   request while the first one waits; it lists the waiting request.
+* **The same target imported again with other values** -- the import sends
+  nothing for it while the first request waits, and says which request
+  waits. This holds for a new target and for a changed one.
 * **A target call that runs at once** -- it is listed in ``targets_written``.
 """
 
@@ -248,6 +251,39 @@ async def test_a_second_import_lists_the_waiting_request_and_makes_no_new_one(
     assert [w["approval_request_id"] for w in second["waiting_for_approval"]] == [
         w["approval_request_id"] for w in first["waiting_for_approval"]
     ]
+
+
+@pytest.mark.parametrize(
+    ("index", "name", "op_id"),
+    [(0, "new-01", "targets.register"), (1, "old-01", "targets.update")],
+)
+async def test_other_values_for_a_waiting_target_are_not_sent(
+    client: TestClient, index: int, name: str, op_id: str
+) -> None:
+    await _tenant()
+    await _insert_target(tenant_id=_TENANT, name="old-01", product="ssh", host="old.example")
+    targets = [
+        {"name": "new-01", "product": "ssh", "host": "new.example"},
+        {"name": "old-01", "product": "ssh", "host": "old-moved.example"},
+    ]
+    first = _import(_file([{"id": str(_TENANT), "targets": targets}]), client)
+    targets[index]["host"] = "other.example"
+    clear_jwks_cache()  # the second import signs with a new key under the same kid
+
+    second = _import(_file([{"id": str(_TENANT), "targets": targets}]), client)
+
+    requests = await _requests()
+    assert len(requests) == 2
+    assert all(r.params["host"] != "other.example" for r in requests if r.params)
+    waiting_first = {w["name"]: w["approval_request_id"] for w in first["waiting_for_approval"]}
+    assert [w["name"] for w in second["waiting_for_approval"]] == [
+        n for n in ("new-01", "old-01") if n != name
+    ]
+    (failed,) = second["failed"]
+    assert failed.startswith(f"`spec.tenants[0].targets[{index}]` ({name}) was not sent")
+    assert waiting_first[name] in failed
+    assert "waits with other values" in failed
+    assert next(r for r in requests if str(r.id) == waiting_first[name]).op_id == op_id
 
 
 async def test_a_target_call_that_runs_at_once_is_listed(

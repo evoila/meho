@@ -341,9 +341,14 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
   (`instance_settings/target_requests.py`). Each call waits for approval;
   the import writes no target. `waiting_for_approval` lists one entry per
   target: `{path, name, op_id, approval_request_id, already_waiting}`.
-  When a request for the same target still waits (the same file imported
+  When a request for the same call still waits (the same file imported
   twice, for example), the import makes no new request: it lists that
-  request with `already_waiting: true`. A call that runs at once is listed
+  request with `already_waiting: true`. The call is the same only when the
+  operation and every param match (`params_hash`). When a request for the
+  same target waits with other values (the host changed in the file, for
+  example), the import sends nothing for that target. `failed` names the
+  waiting request: a person approves or rejects it, then imports the file
+  again. A call that runs at once is listed
   in `targets_written` (`{path, name, op_id}`). The approval card
   shows the values: the new target's fields, or the old and the new value
   of each changed field (also `extras`). A person approves each request in

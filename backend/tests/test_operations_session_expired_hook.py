@@ -34,6 +34,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.flight_recorder import capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._errors import result_connector_auth_failed
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._session_expired_hook import (
     mark_session_relogin,
@@ -924,3 +925,74 @@ async def test_failing_drop_hook_does_not_stop_the_send(
 
     assert result.status == "ok", result.error
     assert connector.calls == 1
+
+
+_RETRY_WORDS = ("retry", "try again", "call again")
+
+
+def _asks_for_a_retry(text: str) -> bool:
+    lowered = text.lower().replace("did not try again", "")
+    return any(word in lowered for word in _RETRY_WORDS)
+
+
+def test_unknown_outcome_after_401_without_a_session_hook_asks_for_no_retry() -> None:
+    """A change answered with 401 by a connector without a session hook."""
+    target = _FakeTarget(name="lab-target", host="vcfops.example.test")
+    target.secret_ref = "kv/lab-target"
+
+    result = result_connector_auth_failed(
+        "POST:/api/v1/things", _make_http_status_error(), target, 1.0, changes_target=True
+    )
+
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert result.extras["retry"] is False
+    for text in (result.error or "", result.extras["remediation"]):
+        assert not _asks_for_a_retry(text), text
+        assert "A person must check the target first" in text
+        assert "Then make a new request" in text
+    assert "meho vault kv put" in result.extras["remediation"]
+
+
+@pytest.mark.parametrize(
+    "remediation",
+    [
+        "Check the account on the product, then retry.",
+        "Try again. If it fails again, check the account on the product.",
+        "Fix the role, then call again.",
+    ],
+)
+def test_unknown_outcome_drops_the_retry_advice_of_the_connector(remediation: str) -> None:
+    exc = ConnectorAuthError(
+        "refused",
+        status_code=401,
+        cause="session_dispatch_401",
+        target_name="lab-target",
+        remediation=remediation,
+        stage="call",
+    )
+
+    result = result_connector_auth_failed(
+        "POST:/api/v1/things", exc, _FakeTarget(), 1.0, changes_target=True
+    )
+
+    assert result.extras["execution_outcome"] == "uncertain"
+    for text in (result.error or "", result.extras["remediation"]):
+        assert not _asks_for_a_retry(text), text
+        assert "A person must check the target first" in text
+
+
+def test_refused_login_before_the_send_keeps_its_retry_advice() -> None:
+    exc = ConnectorAuthError(
+        "login refused",
+        status_code=401,
+        cause="session_establish_401",
+        target_name="lab-target",
+        remediation="Check the account on the product, then retry.",
+    )
+
+    result = result_connector_auth_failed(
+        "POST:/api/v1/things", exc, _FakeTarget(), 1.0, changes_target=True
+    )
+
+    assert "execution_outcome" not in result.extras
+    assert result.extras["remediation"] == "Check the account on the product, then retry."

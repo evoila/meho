@@ -526,6 +526,15 @@
           "enum": ["true", "false"],
           "description": "Send a short text for the biggest tools on the default MCP tool list, and no output schemas. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
         },
+        "mcpProfileConnectorLists": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "The profiles of `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use only the connectors of that profile. Rendered into `MCP_PROFILE_CONNECTOR_LISTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpConnectorProfiles": {
+          "type": "string",
+          "description": "Extra MCP tool profiles as one JSON object, each with a base tool list and a connector list. Rendered into `MCP_CONNECTOR_PROFILES`. Empty means none; a bad value stops the start. Read only when `mcpProfileConnectorLists` is `\"true\"`. See `docs/codebase/mcp.md`."
+        },
         "mcpClientPerToolKind": {
           "type": "string",
           "enum": ["true", "false"],

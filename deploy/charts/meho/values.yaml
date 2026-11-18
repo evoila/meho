@@ -738,6 +738,16 @@ config:
   # text, and no tool sends an output schema. The inputs they accept stay
   # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- `mcpProfileConnectorLists` is rendered into
+  # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of
+  # `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use
+  # only the connectors of that profile. See `docs/codebase/mcp.md`.
+  mcpProfileConnectorLists: "false"
+  # -- `mcpConnectorProfiles` is rendered into `MCP_CONNECTOR_PROFILES`: the
+  # extra MCP tool profiles as one JSON object, for example
+  # `{"k8s": {"tools": "investigate", "connectors": ["kubernetes"]}}`. Empty
+  # means none. A bad value stops the start. See `docs/codebase/mcp.md`.
+  mcpConnectorProfiles: ""
   # -- `mcpClientPerToolKind` is rendered into `MCP_CLIENT_PER_TOOL_KIND`.
   # When `"true"`, Claude Code and Claude Desktop sign in with their own
   # login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client

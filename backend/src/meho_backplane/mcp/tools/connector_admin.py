@@ -110,6 +110,7 @@ from meho_backplane.connectors.resolver import (
     resolve_connector,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.mcp.profiles import profile_admits_connector, profile_connectors
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -130,6 +131,7 @@ from meho_backplane.mcp.tools._connector_product_filter import (
     PRODUCT_FILTER_KEY,
     connector_list_product_aliases,
     filter_by_product,
+    keep_allowed_product_filter,
     listed_products,
     reduce_product_filter,
 )
@@ -171,6 +173,7 @@ from meho_backplane.targets.resolver import (
 
 __all__ = [
     "CONNECTOR_LIST_NAME",
+    "keep_connector_rows",
     "list_connector_rows",
     "reduce_connector_list",
 ]
@@ -463,6 +466,62 @@ async def _load_target(operator: Operator, name: str) -> Any:
                 ) from exc
 
 
+def keep_connector_rows(
+    result: dict[str, Any],
+    allowed_connectors: frozenset[str],
+    *,
+    no_connector_hint: str,
+) -> dict[str, Any]:
+    """Return a :func:`list_connector_rows` *result* with only the allowed rows.
+
+    Shared by the hosted agents' connector allow-list (#4233) and the MCP
+    tool profiles with a connector list (#6099). A ``product_filter`` block
+    keeps only the products of the allowed rows
+    (:func:`keep_allowed_product_filter`). When a ``target_fit`` summary had
+    rows and none of them is allowed, the summary says ``no_connector`` with
+    *no_connector_hint*.
+    """
+    rows = result.get("connectors", [])
+    kept = [row for row in rows if row.get("connector_id") in allowed_connectors]
+    narrowed = {**result, "connectors": kept}
+    product_filter = result.get(PRODUCT_FILTER_KEY)
+    if product_filter is not None:
+        narrowed[PRODUCT_FILTER_KEY] = keep_allowed_product_filter(
+            product_filter, kept, result.get(LISTED_PRODUCTS_KEY, {}), allowed_connectors
+        )
+    target_fit = result.get("target_fit")
+    if target_fit is not None and rows and not kept:
+        narrowed["target_fit"] = {
+            **target_fit,
+            "result": "no_connector",
+            "hint": no_connector_hint,
+        }
+    return narrowed
+
+
+#: The ``target_fit`` hint when connectors fit the target but the session's
+#: profile allows none of them (#6099).
+_NO_PROFILE_CONNECTOR_HINT: Final[str] = (
+    "Connectors in MEHO fit the target, but your tool profile allows none of them. "
+    "Connect with a profile that has one of them."
+)
+
+
+def _keep_profile_connectors(operator: Operator, result: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the rows of the session's profile; no profile keeps all (#6099)."""
+    profile = operator.mcp_tool_profile
+    if profile_connectors(profile) is None:
+        return result
+    listed = {row.get("connector_id") for row in result.get("connectors", [])}
+    listed |= set(result.get(LISTED_PRODUCTS_KEY, {}))
+    allowed = frozenset(
+        connector_id
+        for connector_id in listed
+        if isinstance(connector_id, str) and profile_admits_connector(profile, connector_id)
+    )
+    return keep_connector_rows(result, allowed, no_connector_hint=_NO_PROFILE_CONNECTOR_HINT)
+
+
 #: Blocks of the answer that are not rows: they stay next to a handle.
 _SUMMARY_KEYS: Final[tuple[str, ...]] = (PRODUCT_FILTER_KEY, "target_fit")
 
@@ -502,8 +561,13 @@ async def _list_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """List the connectors; a long list comes back as a handle (#4121)."""
-    return await reduce_connector_list(operator, await list_connector_rows(operator, arguments))
+    """List the connectors; a long list comes back as a handle (#4121).
+
+    A session whose tool profile has a connector list sees only those
+    connectors (#6099). The filter runs first, so a handle holds only them.
+    """
+    rows = _keep_profile_connectors(operator, await list_connector_rows(operator, arguments))
+    return await reduce_connector_list(operator, rows)
 
 
 async def _review_handler(

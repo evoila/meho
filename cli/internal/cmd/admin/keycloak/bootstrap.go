@@ -118,6 +118,12 @@ type BootstrapOptions struct {
 	// which is 30 days on a default Keycloak realm.
 	MCPOfflineSessionIdleSeconds int
 
+	// MCPProfiles names the MCP tool profiles that get a login client of
+	// their own (`--mcp-profile`): `meho-mcp-profile-<name>`, with the
+	// settings of the MCP client plus a fixed `mcp_profile` claim. See
+	// profileclients.go.
+	MCPProfiles []string
+
 	// DryRun true → log in, read the realm, and print each change a
 	// real run would make, without changing anything: every request
 	// other than a read is answered in the process (dryRunTransport).
@@ -250,6 +256,9 @@ func (o BootstrapOptions) validate() error {
 		return errors.New(
 			"--mcp-offline-session-idle must be a positive number of " +
 				"seconds (omit the flag to use the 48h default)")
+	}
+	if err := o.validateProfiles(); err != nil {
+		return err
 	}
 	return o.validateTenants()
 }
@@ -667,6 +676,9 @@ type Result struct {
 	AdminUserUUID    string
 	MapperEventsLog  []string // human-readable bullet list (one line per client / mapper / scope / group event)
 	ConfigKeysToSet  []string // chart values + env vars the operator must set
+
+	// ProfileMCPClientIDs are the clientIds of the clients of --mcp-profile.
+	ProfileMCPClientIDs []string
 }
 
 // Bootstrap is the public entry point. It mints an admin token, then
@@ -880,6 +892,12 @@ func Bootstrap(
 		res.MapperEventsLog = append(res.MapperEventsLog, events...)
 	}
 
+	// --- Clients of the MCP tool profiles (--mcp-profile) -------------------
+
+	if err := reconcileProfileMCPClients(ctx, c, opts, createdScopes, res); err != nil {
+		return nil, err
+	}
+
 	// --- Console login flow with the passkey touch level (#6213) -----------
 
 	touchEvents, err := reconcileTouch(ctx, c, opts.WebClientID)
@@ -984,6 +1002,7 @@ func dryRunSummary(opts BootstrapOptions, out io.Writer) {
 		fmt.Fprintf(out, "==> MCP client of %s: %s (same settings as %s)\n",
 			t.Tool, t.ID, opts.MCPClientID)
 	}
+	dryRunProfileSummary(opts, out)
 	fmt.Fprintf(out, "==> login flow of the console client %s (when the realm has it): %q "+
 		"(level %s asks for a passkey touch; made if missing)\n", opts.WebClientID, touchFlowAlias, touchACR)
 	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
@@ -1502,7 +1521,7 @@ func reconcileUser(
 // operator must set on the backplane side to match the realm config
 // this verb just provisioned. Printed at the end of the bootstrap.
 func buildConfigKeySummary(opts BootstrapOptions) []string {
-	return []string{
+	return append([]string{
 		"config.keycloakCliClientId: " + opts.CLIClientID,
 		"  (env: KEYCLOAK_CLI_CLIENT_ID=" + opts.CLIClientID + ")",
 		"# Surfaced via GET /api/v1/auth-config as `cli_client_id`;",
@@ -1516,5 +1535,5 @@ func buildConfigKeySummary(opts BootstrapOptions) []string {
 		"Clients of the AI tool kinds: meho-mcp-code (Claude Code), meho-mcp-desktop (Claude Desktop).",
 		"# Set MCP_CLIENT_PER_TOOL_KIND=true on the backplane to list them in GET /api/v1/auth-config;",
 		"# then each tool signs in with its own client and keeps a saved login of its own.",
-	}
+	}, profileConfigKeySummary(opts)...)
 }

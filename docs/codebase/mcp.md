@@ -967,6 +967,37 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     live run on a test install: set a `custom_description`, search
     with words that appear only in it, check the hit shows the new
     text, set it to `null`, check the original is back.
+- **How to call a hit, behind a switch (#4331).** The backplane switch
+  `SEARCH_HIT_CALL_HINTS` (an env var, off by default) adds two small
+  fields to each ranked hit, so an agent can make a right first call
+  without a second lookup:
+  - `required_params`: the names in the top-level `required` list of the
+    operation's stored `parameter_schema`, in that order. `call_operation`
+    checks `params` against that same schema. Names only, no schemas: the
+    full schema stays in exact-op mode. An operation with no `required`
+    list gives `[]`.
+  - `target_required`: `true` when a call needs a `target`. It uses the
+    dispatcher's own rule, `descriptor_requires_target` in
+    `operations/dispatcher.py`, which the exact-op contract's
+    `target.required` also uses. So the two always agree. Every generic
+    (ingested) operation needs a target; a typed or multi-step operation
+    needs one when its handler reaches the connector through the target.
+  - **Off (default):** both keys are left out, and the handler of a hit is
+    not even imported, so every answer is the same as before. The
+    registered `outputSchema` names both fields; while the switch is off,
+    `call_hints_schema_for_settings`
+    (`mcp/tools/_search_call_hints_schema.py`) takes them out of the
+    schema that `tools/list` sends. The REST `GET /api/v1/operations/search`
+    answer follows the same switch; the CLI `meho operation search --json`
+    prints the fields when the backplane sends them.
+  - **Before turning it on** (measurement plan of the pull request): on
+    the benchmark lane, compare the job score with the switch off and on,
+    for a small model and for Claude, and the size of a search answer
+    (it must grow by less than 10%). Turn it on only if the small model's
+    score goes up and Claude's does not go down. Then one live run on a
+    test install through the agent surface. Code:
+    `operations/_search_call_hints.py`. Tests:
+    `backend/tests/test_search_hit_call_hints.py`.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op
@@ -1206,10 +1237,129 @@ same token works with and without a profile. Whether each client's
 login flow accepts a server URL with a query has not been tried in a
 lab yet.
 
-A profile does not change what the person may do. `call_operation` in
-the `investigate` profile can still run a change, under the person's
-role, the operation's risk level and the approval rules. The profile
-only makes the tool list shorter.
+A built-in profile does not change what the person may do.
+`call_operation` in the `investigate` profile can still run a change,
+under the person's role, the operation's risk level and the approval
+rules. The built-in profile only makes the tool list shorter.
+
+### Profiles with a connector list (#6099)
+
+An admin can add profiles that also limit what a session may do, on the
+server. Two settings, both off by default:
+
+- `MCP_PROFILE_CONNECTOR_LISTS` (`true` / `false`, default `false`) is
+  the switch. When it is off, MEHO does not know the extra profile names.
+  It stays off until a model test and a sandbox run show it helps.
+- `MCP_CONNECTOR_PROFILES` is one JSON object of profiles. A bad value
+  stops the start (`mcp_profile_config.py`):
+
+  ```json
+  {
+    "k8s": {"tools": "investigate", "connectors": ["kubernetes"]},
+    "k8s-ops": {"tools": "operate", "connectors": ["kubernetes"], "read_only": false}
+  }
+  ```
+
+  - `tools`: the built-in list the profile starts from.
+  - `connectors`: one or more connector families. A name counts for the
+    connector with exactly that id and for every connector whose id
+    starts with the name and a dash. So `kubernetes` counts for every
+    version of every Kubernetes connector. Make each name as narrow as
+    you can: `vmware` counts for `vmware-rest-9.0` and for every other
+    connector whose id starts with `vmware-`; write `vmware-rest` when
+    the profile needs only that one.
+  - `read_only`: `true` when left out.
+  - A name is lower-case letters, digits and dashes, and not
+    `investigate` or `operate`.
+
+What such a profile does (`mcp/profiles.py`):
+
+- Every tool that takes a `connector_id` (`call_operation`,
+  `preview_operation`, `search_operations`, `list_operation_groups`)
+  refuses a connector outside the profile before the handler runs
+  (`_refuse_connector_outside_profile` in `mcp/handlers.py`). The answer
+  says "is not in your profile", with `reason: connector_not_in_profile`.
+  The check compares the `connector_id` argument, so it also covers a
+  raw `METHOD:/path` operation. A value that is not text is refused too.
+- `meho_connector_list` shows only the profile's connectors. The filter
+  runs before the list becomes a result handle. It is the same filter the
+  hosted agents use for their connector list (`keep_connector_rows` in
+  `mcp/tools/connector_admin.py`).
+- A call runs on the connector that its target resolves to, and that
+  can differ from the `connector_id` argument. So the policy gate also
+  refuses a target whose connector is outside the profile, or whose
+  connector cannot be found (`profile_target_denial` in
+  `mcp/profiles.py`). This holds for a call, a preview, the steps of a
+  multi-step operation and the checks of a runbook, because they all ask
+  the policy gate. A preview on such a target is refused before it shows
+  the request (`denied`), and nothing is sent and no approval request is
+  made.
+- `list_targets` shows only the targets whose connector is in the
+  profile, with and without a `connector_id` argument. Such a page can
+  hold fewer targets than `limit` and still have a `next_cursor`.
+- MEHO applies the stricter of the person's rules and the profile's
+  rules. The policy gate (`policy_gate` in `operations/_validate.py`)
+  denies a connector outside the profile, and in a read-only profile
+  every operation that changes something (a method other than `GET` or
+  `HEAD`, or a typed operation that is not `safe`). The deny comes before
+  the person's grants are read.
+- A read-only profile also has no MEHO write tools (`add_to_memory`,
+  `add_to_knowledge`, `meho_broadcast_announce`, the runbook run tools),
+  because they do not check grants.
+- Every audit row of a session with a profile names it in the
+  `mcp_profile` payload field (`apply_client_block`). It is never put
+  into `actor_sub`, which names an agent.
+- A stored result keeps the profile of the session that made it
+  (`result_profile_var` in `connectors/result_handle_store.py`, set by
+  `handle_tools_call`). A read under another profile, or without a
+  profile, is "not found". Only a profile with a connector list keeps
+  its results apart (`result_profile_scope`). No profile, a built-in
+  profile, and every session while the switch is off keep and read
+  results as before, also results made before the upgrade or through
+  REST.
+- A background run of `call_operation` keeps the profile the same way
+  (`operation_run.mcp_profile`, migration `0174`). Reading it with the
+  `run_id` under another profile, or without a profile, gives
+  `unknown_run` (`poll_call` in `mcp/tools/_call_operation_async.py`).
+- After a person approves a waiting request, the approved run is not
+  checked against the profile again. The approval runs outside the MCP
+  session, so its result is stored without the profile.
+- `/ready` says only whether `MCP_PROFILE_CONNECTOR_LISTS` is on
+  (`profile_connector_lists`). It needs no login, so it does not name
+  the profiles.
+
+Not filtered: the MCP resources (`resources/list`, `resources/read`).
+They hold tenant info, conventions, knowledge and memory, and no
+connector data.
+
+### A login token for one profile
+
+A login client can be made for one profile:
+`meho admin keycloak bootstrap-clients --mcp-profile <name>` makes
+`meho-mcp-profile-<name>`. It has the settings of `meho-mcp`, plus a
+fixed claim mapper that writes `mcp_profile: <name>` into every token.
+The mapper is on the client, so a session cannot get a token without it.
+
+- MEHO reads the claim when it checks the token
+  (`auth/mcp_profile_claim.py`). A value it cannot read (also `null`) gives 403
+  `malformed_mcp_profile_claim`; a profile it does not know gives 403
+  `unknown_mcp_profile_claim`, at every entrance.
+- `verify_jwt_for_audience` refuses such a token with 403
+  `mcp_profile_scope_violation` unless the caller allows it. Only the MCP
+  route allows it (`verify_mcp_jwt`). So a new entrance refuses a profile
+  token by default.
+- The MCP route takes it only when `?profile=` names the same profile
+  (`_apply_url_options`). `/mcp` without a profile, or another profile,
+  gives 403. It is 403, not 401, so the client does not start a new login.
+- A token without the claim works as before, with or without
+  `?profile=`. This check needs no switch: no token has the claim today.
+
+Limit: this stops the reuse of the profile's token at another address.
+It does not stop the same person from signing in again through another
+login client.
+
+Tests: `tests/test_mcp_profile_connectors.py`,
+`tests/test_mcp_profile_targets.py`, `tests/test_mcp_profile_token.py`.
 
 ## The current tenant of a session (#5239)
 

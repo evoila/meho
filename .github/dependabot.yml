@@ -160,7 +160,7 @@ updates:
       prefix: "chore(deps)"
 
   # When other language manifests land, add per-ecosystem blocks below.
-  # Reference (MEHO.X conventions):
+  # Example block:
   #
   # - package-ecosystem: "pip"
   #   directory: "/"

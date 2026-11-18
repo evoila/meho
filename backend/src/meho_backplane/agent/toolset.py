@@ -162,7 +162,12 @@ from meho_backplane.agent.toolset_discovery import (
     build_write_meta_tools,
     keep_allowed_connectors,
 )
-from meho_backplane.agent.toolset_operations import build_operation_meta_tools, check_arguments
+from meho_backplane.agent.toolset_operations import (
+    INCLUDE_RAW_TOOLS,
+    build_operation_meta_tools,
+    check_arguments,
+    with_include_raw_input,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
@@ -243,7 +248,7 @@ def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
 #: tools built from the MCP tools run. Each schema has
 #: ``additionalProperties: false``, so a field it does not name goes back to
 #: the model as a retry and never reaches the handler.
-_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
+_HAND_WRITTEN_OPERATION_TOOLS: tuple[MetaToolSpec, ...] = (
     MetaToolSpec(
         name="list_operation_groups",
         handler=list_operation_groups,
@@ -335,6 +340,23 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
         required_role=TenantRole.OPERATOR,
     ),
 )
+_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = _with_argument_check(
+    *_HAND_WRITTEN_OPERATION_TOOLS
+)
+
+#: The hand-written discovery tools with the ``include_raw`` input, by name.
+#: They take the place of the plain copies while ``SEARCH_TYPED_FIRST`` is on
+#: (#4712), because the shared handlers then hide raw operations.
+_OPERATIONS_META_TOOLS_WITH_RAW: dict[str, MetaToolSpec] = {
+    spec.name: spec
+    for spec in _with_argument_check(
+        *(
+            with_include_raw_input(spec)
+            for spec in _HAND_WRITTEN_OPERATION_TOOLS
+            if spec.name in INCLUDE_RAW_TOOLS
+        )
+    )
+}
 
 
 #: The full agent meta-tool catalog: the connector-execution tools, the
@@ -361,13 +383,19 @@ def _active_catalog() -> tuple[MetaToolSpec, ...]:
     catalog, with the three operation tools built from the MCP tools in the
     place of the hand-written copies. Tool names and order do not change.
 
-    The MCP-based tools are built here, for each run, because their text and
-    schema follow the ``SEARCH_TYPED_FIRST`` switch (#4712).
+    The ``include_raw`` input of the two discovery tools follows the
+    ``SEARCH_TYPED_FIRST`` switch in both forms (#4712). So the MCP-based
+    tools are built here, for each run, and with the setting off the
+    hand-written copies with the input take the place of the plain ones.
     """
-    if not get_settings().agent_operation_tools_from_mcp:
+    settings = get_settings()
+    if settings.agent_operation_tools_from_mcp:
+        swap = {spec.name: spec for spec in build_operation_meta_tools()}
+    elif settings.search_typed_first:
+        swap = _OPERATIONS_META_TOOLS_WITH_RAW
+    else:
         return _META_TOOL_CATALOG
-    from_mcp = {spec.name: spec for spec in build_operation_meta_tools()}
-    return tuple(from_mcp.get(m.name, m) for m in _META_TOOL_CATALOG)
+    return tuple(swap.get(m.name, m) for m in _META_TOOL_CATALOG)
 
 
 #: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).

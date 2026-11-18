@@ -23,8 +23,12 @@ from uuid import UUID
 
 import jsonschema
 import pytest
+from pydantic_ai import ModelRetry, RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 from sqlalchemy import select
 
+from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.api.v1.operations import get_groups, get_search
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
@@ -209,6 +213,56 @@ async def test_switch_off_groups_count_every_operation(
     assert counts == {"library": 3, "tagging": 1}
     assert "raw_operations" not in answer
     assert await _groups(include_raw=True) == answer
+
+
+# ---------------------------------------------------------------------------
+# Hosted agent runs with the hand-written tools (the default form)
+# ---------------------------------------------------------------------------
+
+
+def _hosted_tools() -> dict[str, Any]:
+    assert get_settings().agent_operation_tools_from_mcp is False
+    return {t.name: t for t in resolve_agent_tools({}, _operator())}
+
+
+def _ctx() -> RunContext[Operator]:
+    return RunContext(deps=_operator(), model=TestModel(), usage=RunUsage())
+
+
+async def test_hosted_switch_off_tools_take_no_include_raw(
+    mixed_connector: dict[str, UUID],
+) -> None:
+    tools = _hosted_tools()
+    with pytest.raises(ModelRetry, match="invalid arguments"):
+        await tools["search_operations"].function(
+            _ctx(), connector_id=_CONNECTOR, query="delete content library item", include_raw=True
+        )
+    answer = await tools["search_operations"].function(
+        _ctx(), connector_id=_CONNECTOR, query="delete content library item"
+    )
+    assert _RAW_DELETE in _ids(answer)
+    assert "raw_operations" not in answer
+
+
+async def test_hosted_retry_with_include_raw_shows_raw(
+    monkeypatch: pytest.MonkeyPatch, mixed_connector: dict[str, UUID]
+) -> None:
+    """The note names ``include_raw``; the hosted tool must take it (#4712)."""
+    _switch_on(monkeypatch)
+    tools = _hosted_tools()
+    first = await tools["search_operations"].function(
+        _ctx(), connector_id=_CONNECTOR, query="attach tag"
+    )
+    assert "include_raw" in first["raw_operations"]["note"]
+    retry = await tools["search_operations"].function(
+        _ctx(), connector_id=_CONNECTOR, query="attach tag", include_raw=True
+    )
+    assert _RAW_TAG in _ids(retry)
+    assert retry["raw_operations"]["included"] is True
+    groups = await tools["list_operation_groups"].function(
+        _ctx(), connector_id=_CONNECTOR, include_raw=True
+    )
+    assert {g["group_key"] for g in groups["groups"]} == {"library", "tagging"}
 
 
 # ---------------------------------------------------------------------------

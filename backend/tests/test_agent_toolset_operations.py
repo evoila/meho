@@ -10,8 +10,8 @@
   ``test_switch_on_uses_the_mcp_tools`` — the setting picks the form; off is
   the default.
 * ``test_include_raw_follows_the_typed_first_switch`` — with the setting
-  on, the hosted ``include_raw`` input and its description line follow the
-  ``SEARCH_TYPED_FIRST`` switch, like ``tools/list`` (#4712).
+  on or off, the hosted ``include_raw`` input and its description line
+  follow the ``SEARCH_TYPED_FIRST`` switch, like ``tools/list`` (#4712).
 * ``test_hosted_run_gets_the_exact_op_contract`` — a hosted run calls
   ``search_operations`` with ``op_id`` and gets the contract back.
 * ``test_call_operation_passes_preview_hash_to_the_dispatcher`` — the hosted
@@ -164,11 +164,12 @@ def test_switch_off_keeps_the_hand_written_tools() -> None:
     assert "preview_hash" not in call["properties"]
 
 
-@pytest.mark.usefixtures("switch_on")
+@pytest.mark.parametrize("from_mcp", [False, True])
 @pytest.mark.parametrize("typed_first", [False, True])
 def test_include_raw_follows_the_typed_first_switch(
-    monkeypatch: pytest.MonkeyPatch, typed_first: bool
+    monkeypatch: pytest.MonkeyPatch, from_mcp: bool, typed_first: bool
 ) -> None:
+    monkeypatch.setenv("AGENT_OPERATION_TOOLS_FROM_MCP", "true" if from_mcp else "false")
     monkeypatch.setenv("SEARCH_TYPED_FIRST", "true" if typed_first else "false")
     get_settings.cache_clear()
     tools = {t.name: t for t in toolset_mod.resolve_agent_tools({}, _operator())}
@@ -179,6 +180,8 @@ def test_include_raw_follows_the_typed_first_switch(
     call = tools["call_operation"].tool_def
     assert "include_raw" not in call.parameters_json_schema["properties"]
     assert INCLUDE_RAW_LINE not in (call.description or "")
+    if not from_mcp and not typed_first:
+        assert toolset_mod._active_catalog() is toolset_mod._META_TOOL_CATALOG
 
 
 @pytest.mark.usefixtures("switch_on")

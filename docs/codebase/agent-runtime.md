@@ -554,6 +554,14 @@ switch, as in `tools/list` (#4712). So the toolset builds the three tools
 for each run, not once at start. The hosted `call_operation` text is the MCP text without the part about `async`,
 plus one sentence that says each call waits until it ends.
 
+With the setting off, the hand-written `list_operation_groups` and
+`search_operations` follow the `SEARCH_TYPED_FIRST` switch too. While it is
+on, they get the `include_raw` input and the same description line
+(`with_include_raw_input` in `agent/toolset_operations.py`). The shared
+handlers then hide raw operations, and the note in the answer names
+`include_raw`, so the hosted run must be able to send it. While the switch
+is off, the catalog is the same as before.
+
 Two checks run before each handler:
 
 - The arguments are checked against the MCP input schema without the

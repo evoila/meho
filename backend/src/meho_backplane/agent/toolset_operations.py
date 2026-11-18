@@ -38,7 +38,9 @@ does not check the arguments against the schema:
 The toolset uses these tools only when the setting
 ``agent_operation_tools_from_mcp`` is on (off by default). With the setting
 off, the hand-written copies run :func:`check_arguments` against their own
-schema.
+schema. While ``SEARCH_TYPED_FIRST`` is on, their two discovery tools get the
+``include_raw`` input and its line too (:func:`with_include_raw_input`), so
+a hosted run can follow the note that names the flag.
 """
 
 from __future__ import annotations
@@ -56,15 +58,21 @@ from meho_backplane.mcp.registry import ToolDefinition, get_tool
 # Imported for its registration side effect: it registers the three MCP
 # tools, so get_tool can resolve them below.
 from meho_backplane.mcp.tools import operations as _operations_mcp_tools  # noqa: F401
-from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
+from meho_backplane.mcp.tools._include_raw import (
+    INCLUDE_RAW_INPUT_PROPERTY,
+    include_raw_for_settings,
+)
 from meho_backplane.operations import meta_tools as _meta_tools
+from meho_backplane.operations._search_typed_first import INCLUDE_RAW_LINE
 from meho_backplane.operations.meta_tools import UnknownOperationError
 
 __all__ = [
+    "INCLUDE_RAW_TOOLS",
     "LEFT_OUT_FIELDS",
     "OPERATION_TOOL_NAMES",
     "build_operation_meta_tools",
     "check_arguments",
+    "with_include_raw_input",
 ]
 
 
@@ -102,7 +110,7 @@ LEFT_OUT_FIELDS: dict[str, tuple[str, ...]] = {
 
 #: The tools whose ``include_raw`` input follows the ``SEARCH_TYPED_FIRST``
 #: switch.
-_INCLUDE_RAW_TOOLS: frozenset[str] = frozenset({_LIST_OPERATION_GROUPS, _SEARCH_OPERATIONS})
+INCLUDE_RAW_TOOLS: frozenset[str] = frozenset({_LIST_OPERATION_GROUPS, _SEARCH_OPERATIONS})
 
 #: Where the MCP ``call_operation`` text starts to explain ``async`` mode.
 #: The hosted text stops here.
@@ -183,7 +191,7 @@ def _build(name: str) -> MetaToolSpec:
     if entry is None:  # pragma: no cover - defensive; the import registers all three
         raise RuntimeError(f"hosted operation tools need MCP tool {name!r} to be registered")
     definition, _mcp_handler = entry
-    if name in _INCLUDE_RAW_TOOLS:
+    if name in INCLUDE_RAW_TOOLS:
         definition = include_raw_for_settings(definition)
     left_out = LEFT_OUT_FIELDS[name]
     return MetaToolSpec(
@@ -205,3 +213,25 @@ def build_operation_meta_tools() -> tuple[MetaToolSpec, ...]:
     for each run.
     """
     return tuple(_build(name) for name in OPERATION_TOOL_NAMES)
+
+
+def with_include_raw_input(spec: MetaToolSpec) -> MetaToolSpec:
+    """Return a hand-written discovery tool with the ``include_raw`` input.
+
+    For the hand-written copies while ``SEARCH_TYPED_FIRST`` is on: the same
+    input and description line as the MCP tool. The shared handler reads
+    the flag. *spec* has no argument check yet; the caller adds it, so the
+    check uses the new schema.
+    """
+    schema = spec.parameter_schema
+    return MetaToolSpec(
+        name=spec.name,
+        handler=spec.handler,
+        description=spec.description + INCLUDE_RAW_LINE,
+        parameter_schema={
+            **schema,
+            "properties": {**schema["properties"], **INCLUDE_RAW_INPUT_PROPERTY},
+        },
+        required_role=spec.required_role,
+        required_capability=spec.required_capability,
+    )

@@ -27,6 +27,7 @@ from structlog.testing import capture_logs
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations import approval_queue
 from meho_backplane.operations.approval_queue import (
     ApprovalError,
     ApprovalGroupForbiddenError,
@@ -238,13 +239,42 @@ def test_a_refusal_shows_the_text_of_the_approve() -> None:
     assert right.message == expected
 
 
-def test_an_own_lower_risk_change_names_the_break_glass_switch() -> None:
-    low = approve_right(_person(_REQUESTER), _row("caution"))
-    high = approve_right(_person(_REQUESTER), _row("destructive"))
+@pytest.mark.parametrize(
+    ("level", "groups"),
+    [
+        ("caution", "MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or MEHO-Approvers"),
+        ("destructive", "MEHO-SA-Operators or MEHO-Admins"),
+    ],
+)
+def test_an_own_change_names_only_who_may_approve_and_where(level: str, groups: str) -> None:
+    right = approve_right(_person(_REQUESTER), _row(level))
 
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in low.message
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" not in high.message
-    assert "MEHO-SA-Operator or a MEHO-Admin" in high.message
+    assert right.may_approve is False
+    assert f"Ask another person in {groups} to approve it." in right.message
+    assert "Approvals page" in right.message
+    for word in ("APPROVAL_ALLOW_SELF_APPROVAL", "agent-requester", "break-glass", "re-park"):
+        assert word.lower() not in right.message.lower()
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (["Admins", "Readers"], "Ask another person in MEHO-Admins to approve it."),
+        ([], "No group may approve this change, so it waits until it expires."),
+    ],
+)
+def test_an_own_change_names_the_routed_groups(
+    stored: list[str], expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With approver routing on, the refusal names the groups the request stored."""
+    monkeypatch.setattr(approval_queue, "routing_enabled", lambda: True)
+    row = _row("caution")
+    row.approver_roles = stored
+
+    right = approve_right(_person(_REQUESTER), row)
+
+    assert right.may_approve is False
+    assert expected in right.message
 
 
 def _token_call_row() -> ApprovalRequest:
@@ -441,3 +471,89 @@ async def test_rest_a_rejection_carries_no_self_approval_fields(
     assert response.status_code == 200, response.text
     assert response.json()["self_approved"] is None
     assert response.json()["approval_rule"] is None
+
+
+# The own-change refusal texts an agent can read: the REST and CLI 403 text
+# (``str`` of the error) and the "may I approve this?" message. Each entry is
+# the text on the main branch and the only changes this text has against it.
+# Every change removes or corrects text; nothing new is added for an agent.
+_MAIN_STEM = (
+    "You cannot approve your own change. Only members of the MEHO-SA-Operators "
+    "and MEHO-Admins groups may approve their own changes. "
+)
+_MAIN_REST_SUFFIX = (
+    " (set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)"
+)
+_MAIN_RIGHTS_SUFFIX = (
+    " Or a deployment admin turns on APPROVAL_ALLOW_SELF_APPROVAL for an audited break-glass."
+)
+_MAIN_LOW_WHO = "Ask another operator, an admin or an approver to approve it."
+_MAIN_HIGH_WHO = (
+    "Ask a MEHO-SA-Operator or a MEHO-Admin to approve this dangerous or destructive change."
+)
+_MAIN_TOKEN_WHO = (
+    "This change waits only because it came with a token, so you may "
+    "approve it yourself with a click in the web interface."
+)
+_WHERE = " They find it on the Approvals page of the web interface."
+
+
+def _corrected_who(groups: str) -> str:
+    return f"Ask another person in {groups} to approve it.{_WHERE}"
+
+
+_LOW_GROUPS = "MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or MEHO-Approvers"
+_TEXT_CASES = {
+    # case: (main "who may approve" sentence, main has the switch hint, listed change)
+    "caution": (_MAIN_LOW_WHO, True, _corrected_who(_LOW_GROUPS)),
+    "destructive": (_MAIN_HIGH_WHO, False, _corrected_who("MEHO-SA-Operators or MEHO-Admins")),
+    "token-call": (_MAIN_TOKEN_WHO, True, _MAIN_TOKEN_WHO),
+    "routed": (_MAIN_LOW_WHO, True, _corrected_who("MEHO-Admins")),
+    "routed-none": (
+        _MAIN_LOW_WHO,
+        True,
+        "No group may approve this change, so it waits until it expires.",
+    ),
+}
+
+
+def _case_row(case: str) -> ApprovalRequest:
+    if case == "token-call":
+        return _token_call_row()
+    row = _row("destructive" if case == "destructive" else "caution")
+    if case == "routed":
+        row.approver_roles = ["Admins", "Readers"]
+    elif case == "routed-none":
+        row.approver_roles = []
+    return row
+
+
+@pytest.mark.parametrize("case", sorted(_TEXT_CASES))
+def test_own_change_texts_differ_from_main_only_by_the_listed_changes(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each agent-facing refusal text is main's text with only the listed changes.
+
+    The listed changes: the "who may approve" sentence names the groups the
+    approve check allows and the Approvals page (or says no group may
+    approve), and the setting hint is removed. Any other change fails here.
+    """
+    monkeypatch.setattr(approval_queue, "routing_enabled", lambda: case.startswith("routed"))
+    main_who, main_has_hint, who = _TEXT_CASES[case]
+    row = _case_row(case)
+    person = _person(_REQUESTER)
+
+    with pytest.raises(approval_queue.SelfApprovalForbiddenError) as refused:
+        approval_queue._check_self_approval(person, row)
+    right = approve_right(person, row)
+
+    prefix = f"operator {_REQUESTER!r} may not approve approval_request {row.id}: "
+    main_rest = prefix + _MAIN_STEM + main_who + (_MAIN_REST_SUFFIX if main_has_hint else "")
+    main_rights = _MAIN_STEM + main_who + (_MAIN_RIGHTS_SUFFIX if main_has_hint else "")
+    listed = [(main_who, who), (_MAIN_REST_SUFFIX, ""), (_MAIN_RIGHTS_SUFFIX, "")]
+    for old, new in listed:
+        main_rest = main_rest.replace(old, new)
+        main_rights = main_rights.replace(old, new)
+
+    assert str(refused.value) == main_rest
+    assert right.message == main_rights

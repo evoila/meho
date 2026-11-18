@@ -40,6 +40,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "agent_reads_custom_description",
         "checks_agent_events",
         "connector_list_product_aliases",
+        "group_listing_operations",
         "jsonflux_answer_ready",
         "k8s_node_list_resources",
         "kb_similar_check",

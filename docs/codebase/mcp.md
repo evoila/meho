@@ -2105,13 +2105,18 @@ once, in order, how to find and call an operation:
 5. the call (`call_operation`);
 6. large results come back as a handle, read with `result_query`;
 7. a call that waits for a person's approval: `status` is
-   `awaiting_approval`, nothing has run, do not call again.
+   `awaiting_approval`, nothing has run, do not call again. A call with
+   `reveal_secret: true` is different: the approval runs nothing. With
+   `MCP_REVEAL_FETCH` on, the guide says to call `call_operation` again
+   with `approval_request_id` to get the value. With it off, the guide
+   says the person who asked gets the value in the console or on the
+   command line.
 
 - **Off (default):** the session-start text does not change.
 - **On:** the guide comes first, before the other bands. The full guide
-  is about 220 words, 406 tokens by the same estimate the
-  `mcp_preamble_receipt` log uses (`estimate_tokens`). A test keeps it at
-  450 or less.
+  is about 235 words, 434 tokens by the same estimate the
+  `mcp_preamble_receipt` log uses (`estimate_tokens`), and 446 tokens with
+  `MCP_REVEAL_FETCH` on. A test keeps both at 450 or less.
 - The text is the same for every client. It names only tools the
   session can see (`all_tools_for`, the filter `tools/list` uses). A step
   whose tool is not on the list is left out, and the steps are numbered

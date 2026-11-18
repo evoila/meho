@@ -12,7 +12,10 @@ These tests check:
 * with the ``MCP_CALL_FLOW_GUIDE`` switch off, the session-start text does
   not change;
 * with the switch on, the text starts with the guide, and the guide names
-  only tools on the session's tool list.
+  only tools on the session's tool list;
+* an approved ``reveal_secret`` call does not run by itself: with
+  ``MCP_REVEAL_FETCH`` on too, the guide says to call ``call_operation``
+  again with ``approval_request_id``, as the ``call_operation`` text does.
 """
 
 from __future__ import annotations
@@ -64,8 +67,9 @@ def _named_tools(text: str) -> set[str]:
     return {name for name in _CODE.findall(text) if get_tool(name) is not None}
 
 
-def _set_switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+def _set_switch(monkeypatch: pytest.MonkeyPatch, *, on: bool, reveal_fetch: bool = False) -> None:
     monkeypatch.setenv("MCP_CALL_FLOW_GUIDE", "true" if on else "false")
+    monkeypatch.setenv("MCP_REVEAL_FETCH", "true" if reveal_fetch else "false")
     get_settings.cache_clear()
 
 
@@ -88,8 +92,9 @@ async def _instructions(operator: Operator) -> str | None:
         return await _session_instructions(operator)
 
 
-def test_full_guide_fits_the_token_limit() -> None:
-    guide = call_flow_guide(ALL_GUIDE_TOOLS)
+@pytest.mark.parametrize("reveal_fetch", [False, True])
+def test_full_guide_fits_the_token_limit(reveal_fetch: bool) -> None:
+    guide = call_flow_guide(ALL_GUIDE_TOOLS, reveal_fetch=reveal_fetch)
     assert estimate_tokens(guide) <= MAX_GUIDE_TOKENS
     assert len(_STEP_LINE.findall(guide)) == len(CALL_FLOW_STEPS)
 
@@ -185,3 +190,42 @@ async def test_investigate_profile_has_no_preview_step(monkeypatch: pytest.Monke
     assert instructions.startswith(CALL_FLOW_BLOCK_START)
     assert "call_operation" in instructions
     assert "preview_operation" not in instructions
+
+
+def _approval_step(guide: str) -> str:
+    return next(line for line in guide.splitlines() if "`awaiting_approval`" in line)
+
+
+@pytest.mark.asyncio
+async def test_reveal_fetch_on_says_to_call_again_with_the_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_switch(monkeypatch, on=True, reveal_fetch=True)
+    operator = _operator(TenantRole.OPERATOR)
+    instructions = await _instructions(operator)
+    assert instructions is not None
+    step = _approval_step(instructions)
+    assert "`reveal_secret: true`" in step
+    assert "approval runs nothing" in step
+    assert "call `call_operation` again" in step
+    assert "`approval_request_id` to get the value" in step
+    # The guide matches the tool: call_operation takes the fetch input.
+    call_tool = next(defn for defn in all_tools_for(operator) if defn.name == "call_operation")
+    assert "approval_request_id" in call_tool.inputSchema["properties"]
+    assert instructions.startswith(call_flow_guide(ALL_GUIDE_TOOLS, reveal_fetch=True))
+
+
+@pytest.mark.asyncio
+async def test_reveal_fetch_off_does_not_offer_the_fetch_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_switch(monkeypatch, on=True, reveal_fetch=False)
+    operator = _operator(TenantRole.OPERATOR)
+    instructions = await _instructions(operator)
+    assert instructions is not None
+    step = _approval_step(instructions)
+    assert "approval runs nothing" in step
+    assert "`approval_request_id` to get the value" not in step
+    assert "MEHO console or command line" in step
+    call_tool = next(defn for defn in all_tools_for(operator) if defn.name == "call_operation")
+    assert "approval_request_id" not in call_tool.inputSchema["properties"]

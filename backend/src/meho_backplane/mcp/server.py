@@ -457,11 +457,16 @@ def _session_call_flow_guide(operator: Operator) -> str:
     Only with the ``MCP_CALL_FLOW_GUIDE`` switch on. The guide names only
     tools on the session's tool list, read with the same filter as
     :func:`_session_can_announce`. The guide names no add-on tools, so no
-    add-on families are passed.
+    add-on families are passed. The ``MCP_REVEAL_FETCH`` switch picks how
+    the guide says to get the value of an approved ``reveal_secret`` call.
     """
-    if not get_settings().mcp_call_flow_guide:
+    settings = get_settings()
+    if not settings.mcp_call_flow_guide:
         return ""
-    return call_flow_guide({defn.name for defn in all_tools_for(operator)})
+    return call_flow_guide(
+        {defn.name for defn in all_tools_for(operator)},
+        reveal_fetch=settings.mcp_reveal_fetch,
+    )
 
 
 async def _session_instructions(operator: Operator) -> str | None:

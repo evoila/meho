@@ -61,6 +61,7 @@ from meho_backplane.operations.deny_reasons import (
     is_agent_no_grant,
 )
 from meho_backplane.operations.uncertain_outcome import (
+    LOGIN_ENDED_ADVICE,
     UNCERTAIN_ADVICE,
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
@@ -2616,8 +2617,15 @@ def result_connector_auth_failed(
     duration_ms: float,
     *,
     relogin: Literal["not_available", "attempted_failed", "reestablished"] = "not_available",
+    changes_target: bool = False,
 ) -> OperationResult:
     """Connector raised an upstream **auth/session failure** on dispatch.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the refusal came after the change was sent (any stage but
+    ``establish``), the result carries ``execution_outcome: uncertain`` and
+    ``retry: False`` with the advice that a person checks the target first.
+    A refused login (stage ``establish``) stays a plain failure.
 
     T5 (#1804) of the G0.26 v0.16.0 dogfood-hardening Initiative (#1800),
     the auth-class sibling of :func:`result_connector_http_403` (#1649)
@@ -2777,6 +2785,14 @@ def result_connector_auth_failed(
     if upstream_response is not None:
         _add_upstream_fault(extras, upstream_response)
     _add_attached_upstream_fault(extras, exc)
+    if changes_target and stage != "establish":
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        if LOGIN_ENDED_ADVICE not in remediation:
+            remediation = f"{remediation} {LOGIN_ENDED_ADVICE}"
+            extras["remediation"] = remediation
+        if LOGIN_ENDED_ADVICE not in summary:
+            summary = f"{summary} {LOGIN_ENDED_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,

@@ -110,12 +110,13 @@ class _Fake:
 
     def create_or_update_secret(
         self, path: str, secret: dict[str, Any], cas: int | None = None, mount_point: str = "secret"
-    ) -> None:
+    ) -> dict[str, Any]:
         versions = self.kv.setdefault((mount_point, path), [])
         if cas is not None and cas != len(versions):
             raise hvac.exceptions.InvalidRequest("check-and-set parameter did not match")
         self.kv_writes.append({"path": path, "cas": cas})
         versions.append(dict(secret))
+        return {"data": {"version": len(versions)}}
 
     # --- sys
     def list_auth_methods(self) -> dict[str, Any]:

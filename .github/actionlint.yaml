@@ -4,9 +4,8 @@
 # actionlint configuration.
 # Declares custom self-hosted runner labels used by this repo so actionlint
 # stops emitting unknown-label warnings on the bare `runs-on: meho-runners-ci`
-# (and the legacy `meho-runners` form during the migration window — see
-# #715 cutover and claude-rdc-hetzner-dc#611 retirement of the rke2-meho
-# pool). Drop `meho-runners` here when #611 retires that pool.
+# (and the legacy `meho-runners` form during the migration window).
+# Drop `meho-runners` here when the old pool is retired.
 # The two heavy sets: `meho-runners-ci-heavy-queue` (merge-queue runs only)
 # and `meho-runners-ci-heavy` (every other event).
 #

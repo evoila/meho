@@ -386,6 +386,75 @@ production `"retrieve"` path. Two search builders ship:
 The report (`PassageBenchReport`) holds only labels and numbers. It
 never holds a query or a body, and it never averages across groups.
 
+### Typed-first discovery test (#4717)
+
+Five changes make a model find typed and multi-step operations before
+raw ones (raw operations are made from a vendor API file). The first is
+the switch `SEARCH_TYPED_FIRST` (#4712), which hides raw operations from
+search. This test measures such changes before and after. It is test
+tooling in the eval package, like the passage benchmark: no route, no
+setting, no product code.
+
+**Tasks** (`backend/scripts/retrieval_eval/typed_first_tasks.yaml`,
+loaded by `load_typed_first_tasks` in `typed_first.py`). 40 ops
+requests in plain words. Each names its connector and its correct
+answers (`expected_op_ids`, the first is the main one): only typed or
+multi-step operations that MEHO registers at start-up. A unit test
+checks this against the registrars. The file has a `version`; the
+loader refuses another version, a task id used twice, an empty field and
+an unknown key. Tasks for connectors that are not in this repo live in a
+private file of the same format; `--tasks` reads it.
+
+**Pass rule**, the same for every task:
+
+- Search only (this module): the request is the search text. Top-1 when
+  a correct operation is the first hit, top-3 when one is in the first
+  three.
+- Model run (the benchmark lane, which reads the same file): the first
+  `call_operation` names a correct operation.
+
+**Search-only run** (`run_search_only`). Each task is searched twice
+through `search_corpus_operations`, the ranked search of
+`search_operations`: `raw_visible` (raw operations are candidates, as
+with the switch off) and `raw_hidden` (`typed_only=True`, as with the
+switch on). The report holds per task the rank of the first correct
+operation in the first 10 hits and the first three hits, and per mode
+the run count and the top-1 and top-3 counts and rates. A task whose
+connector this install cannot search is "not run": it has a reason and
+does not count. A search error stops the run; it is never scored as a
+miss. A correct operation that is turned off for the tenant is not a
+search candidate, so it counts as a miss in both modes.
+
+Only 20 of the 40 tasks (GitHub and Harbor) have raw operations next to
+the typed answer. For the other 20, hiding raw operations changes
+nothing, so they make the gap between the modes smaller. So each search
+also records `raw_hit_count`: how many of its first 10 hits are raw.
+The report gives the summary twice: over all tasks (`summary`), and over
+only the tasks with at least one raw hit in the `raw_visible` search
+(`summary_tasks_with_raw_hits`).
+
+The report records the states of the search switches it ran with
+(`search_switches`: `AGENT_READS_CUSTOM_DESCRIPTION` and
+`SEARCH_PLAIN_SENTENCES`). The run uses the settings of its own process,
+not of an install, so set them for the test process.
+
+Run it on an install, from `backend/` with the install's database
+settings:
+
+```bash
+uv run python -m scripts.typed_first_eval --tenant-id <tenant-uuid> > report.json
+```
+
+Only the report goes to stdout. The logs go to stderr, also the logs
+that the connector imports write while they load. `--out <file>` writes
+the report to a file instead. The old start,
+`python -m scripts.retrieval_eval.typed_first`, ends with an error and a
+non-zero exit code that names this start.
+
+The SQLite search of the unit tests ranks by substring only, so its
+numbers say nothing about real ranking. Real numbers come from an
+install with the connectors' raw operations ingested.
+
 ## Dependencies
 
 - **pgvector** — `vector(384)` column on `documents.embedding`; the
@@ -438,8 +507,9 @@ never holds a query or a body, and it never averages across groups.
   `backend/scripts/retrieval_eval/`, outside the wheel. Two callers use
   it: the `eval-gate` workflow (`scripts/ci/run_eval_gate.py`, a stub
   search scored against `ci/eval-baseline.json`) and the kb and memory
-  acceptance tests (the real search). MEHO has no eval route, CLI verb
-  or console tab.
+  acceptance tests (the real search). The typed-first discovery test
+  (`typed_first.py`) is a script an operator runs on an install. MEHO
+  has no eval route, CLI verb or console tab.
 - **Retrieval eval counts passages.** `backend/scripts/retrieval_eval/runner.py`
   asks for `k` rows and folds passages of one entry into one slug, so
   fewer than `k` slugs can come back.

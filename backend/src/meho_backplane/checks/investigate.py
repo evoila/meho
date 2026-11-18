@@ -122,7 +122,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
@@ -160,8 +160,10 @@ from meho_backplane.checks.notify import (
     schedule_finding_notification,
 )
 from meho_backplane.checks.rollup import (
+    _STALE_GRACE_SECONDS,
     MemberEvaluation,
     MemberState,
+    _as_utc,
     evaluate_member,
     fold,
 )
@@ -538,8 +540,8 @@ async def _claim_dashboard_transition(
         ]
         claimed = False
         dashboard_edge = current != previous_memo
-        # #6008: no claim while a new Dashboard waits for members; its first ok is silent.
-        waiting = _is_waiting_first_state(previous_memo, current, evaluations)
+        # #6008: no claim while a Dashboard waits for members; a new one's first ok is silent.
+        waiting = _is_waiting_first_state(previous_memo, current, evaluations, now)
         silent_first = previous_memo is None and current == "ok"
         if dashboard_edge and not waiting:
             # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
@@ -582,21 +584,38 @@ def _is_waiting_first_state(
     previous_memo: str | None,
     current: str,
     evaluations: list[_MemberRow],
+    now: datetime,
 ) -> bool:
-    """True for a new Dashboard that is red only because members have not reported.
+    """True when the Dashboard is red only because members wait for a first result.
 
-    A Dashboard with no memo yet and a ``degraded`` / ``critical`` fold, where
-    every failing member is only waiting for its first confirmed result
-    (:func:`_awaits_first_result`), is not alerted. The memo stays ``NULL`` so
-    every later evaluation in the wait is judged the same way.
+    Holds when the fold is ``degraded`` / ``critical`` and every failing member
+    is only waiting for its first confirmed result (:func:`_awaits_first_result`).
+    No claim is made, so the stored state stays and every later evaluation in
+    the wait is judged the same way.
+
+    A new Dashboard (no memo) waits without a limit (#6008). A Dashboard that
+    already has a state (#6711, a member was added to it) waits only while no
+    waiting member is overdue: ``next_fire_at`` plus the rollup's grace. After
+    that the member alerts as ``degraded``, so a check that never runs is
+    still noticed.
     """
-    if previous_memo is not None or current not in ("degraded", "critical"):
+    if current not in ("degraded", "critical"):
         return False
-    return all(
-        _awaits_first_result(s, ev)
-        for _, s, ev in evaluations
-        if ev.effective_state in ("degraded", "critical")
-    )
+    failing = [
+        (s, ev) for _, s, ev in evaluations if ev.effective_state in ("degraded", "critical")
+    ]
+    if not all(_awaits_first_result(s, ev) for s, ev in failing):
+        return False
+    if previous_memo is None:
+        return True
+    return not any(_is_overdue(s, now) for s, _ in failing)
+
+
+def _is_overdue(sensor: Sensor, now: datetime) -> bool:
+    """True when the Sensor is past its due time plus the rollup's grace."""
+    if sensor.next_fire_at is None:
+        return False
+    return _as_utc(now) > _as_utc(sensor.next_fire_at) + timedelta(seconds=_STALE_GRACE_SECONDS)
 
 
 def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:

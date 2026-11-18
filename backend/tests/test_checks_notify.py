@@ -1734,6 +1734,144 @@ async def test_new_dashboard_failure_after_a_silent_first_state_mails(
     assert "ok -> critical" in fake.calls[0]["subject"]
 
 
+async def _make_overdue(sensor_id: UUID) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(Sensor, sensor_id)
+        assert row is not None
+        row.next_fire_at = datetime.now(UTC) - timedelta(minutes=5)
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_member_added_to_an_ok_dashboard_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: a never-run member added to an ``ok`` Dashboard is not an alert."""
+    fake = _install_transport(monkeypatch)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    published: list[Any] = []
+
+    async def _record_publish(*args: Any, **kwargs: Any) -> None:
+        published.append(args)
+
+    monkeypatch.setattr(inv, "_publish_dashboard_event", _record_publish)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+
+    await _evaluate(sid_a)
+    await _evaluate(sid_a)
+
+    assert fake.calls == []
+    assert fired == []
+    assert published == []
+    assert await _rollup_memo(dash) == "ok", "the stored state stays"
+    assert await _member_memo(dash, sid_b) is None, "member memos stay as they are"
+
+
+@pytest.mark.asyncio
+async def test_member_added_to_an_ok_dashboard_waits_for_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: a new member whose first results wait for confirmation sends nothing."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", evaluated=False, retry_times=2
+    )
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+
+    start = datetime.now(UTC) - timedelta(minutes=5)
+    for tick in range(3):
+        await _record(sid_b, "ok", start + timedelta(seconds=tick * 10))
+        await _evaluate(sid_b)
+        assert fake.calls == []
+        assert await _rollup_memo(dash) == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_state", ["degraded", "critical"])
+async def test_member_added_to_an_ok_dashboard_alerts_on_a_confirmed_failure(
+    monkeypatch: pytest.MonkeyPatch, bad_state: str
+) -> None:
+    """#6711: a new member whose first confirmed result is bad alerts at once."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+
+    await _set_sensor_state(sid_b, bad_state)
+    await _evaluate(sid_b)
+
+    assert len(fake.calls) == 1
+    assert f"ok -> {bad_state}" in fake.calls[0]["subject"]
+
+
+@pytest.mark.asyncio
+async def test_overdue_member_added_to_an_ok_dashboard_alerts_as_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: a new member that never ran and is overdue alerts as ``degraded``."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+    await _make_overdue(sid_b)
+
+    await _evaluate(sid_a)
+
+    assert len(fake.calls) == 1
+    assert "ok -> degraded" in fake.calls[0]["subject"]
+    assert await _rollup_memo(dash) == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_member_added_to_an_ok_dashboard_does_not_hide_a_real_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: another member that really fails at the same time still alerts."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    await _seed_dashboard(name="old-board", sensor_ids=[sid_a, sid_b], last_rollup_state="ok")
+
+    await _evaluate(sid_a)
+
+    assert len(fake.calls) == 1
+    assert "ok -> critical" in fake.calls[0]["subject"]
+
+
 @pytest.mark.asyncio
 async def test_member_recovery_on_a_red_dashboard_is_silent(
     monkeypatch: pytest.MonkeyPatch,

@@ -40,6 +40,21 @@ failure after that is a normal change from `ok` and alerts. When a
 member already really fails while the Dashboard has no state yet, the
 alert goes out at once, as before.
 
+**A member added to a Dashboard that already has a state (#6711).** The
+same wait holds when a Dashboard already has a state, for example `ok`,
+and you add a Sensor to it. The new Sensor has not run, so it counts as
+`unknown` and the Dashboard would fold to `degraded`. While every failing
+member only waits for its first confirmed result (it never ran, or its
+results wait for confirmation), MEHO claims no change. The stored state
+stays, and nothing is sent: no mail, no investigation, no broadcast event.
+The member memos stay as they are. The wait has a limit: a member waits
+only until it is overdue, which is its `next_fire_at` plus the 60 seconds
+of grace the rollup uses (`_STALE_GRACE_SECONDS`). After that the Dashboard
+alerts as `degraded`, so a Sensor that never runs is still noticed. A new
+member whose first confirmed result is `degraded` or `critical`, and
+another member that really fails at the same time, alert at once. The
+rule for a new Dashboard (no state) has no time limit and is unchanged.
+
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator
 (`docs/codebase/checks-investigator.md`), which fires on a **worsening**

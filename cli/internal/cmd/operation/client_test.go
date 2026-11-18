@@ -253,7 +253,7 @@ func TestGetGroupsPassesTypedConnectorIdParam(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: body},
 		},
 	}
-	got, err := getGroups(context.Background(), f, "vault-1.x", false)
+	got, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
 	if err != nil {
 		t.Fatalf("getGroups: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestGetGroupsRefreshesOn401AndRetries(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: body},
 		},
 	}
-	if _, err := getGroups(context.Background(), f, "vault-1.x", false); err != nil {
+	if _, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{}); err != nil {
 		t.Fatalf("getGroups after refresh: %v", err)
 	}
 	if f.refreshCount != 1 {
@@ -294,7 +294,7 @@ func TestGetGroupsClassifies403AsApiResponseError(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(403), Body: []byte(`{"detail":"forbidden"}`)},
 		},
 	}
-	_, err := getGroups(context.Background(), f, "vault-1.x", false)
+	_, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
 	if err == nil {
 		t.Fatalf("expected non-2xx error; got nil")
 	}
@@ -315,7 +315,7 @@ func TestGetGroupsTransportErrorPropagates(t *testing.T) {
 	f := &fakeOperationsClient{
 		groupsErrors: []error{transportErr},
 	}
-	_, err := getGroups(context.Background(), f, "vault-1.x", false)
+	_, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
 	if !errors.Is(err, transportErr) {
 		t.Fatalf("expected transport error to propagate verbatim; got %v", err)
 	}

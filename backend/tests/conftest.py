@@ -24,9 +24,11 @@ This module hosts:
 
 The autouse sweep is deliberately conservative on its capture surface:
 it reads ``capfd`` (the file-descriptor-level stdout/stderr capture) and
-the stdlib ``caplog``. Tests that drive their own structlog capture into
-a private buffer (the ``test_observability.py`` / ``test_api_v1_health.py``
-pattern) are *also* expected to assert no leak on that buffer; the sweep
+the stdlib ``caplog``. Under ``pytest-xdist`` the fd scan is off; there
+the lines a structlog ``PrintLogger`` writes are recorded per test (see
+:func:`_record_structlog_prints`) and scanned too. Tests that drive their
+own structlog capture into a private buffer (the ``test_observability.py`` /
+``test_api_v1_health.py`` pattern) are *also* expected to assert no leak on that buffer; the sweep
 here is the safety net under the targeted assertion, not its replacement.
 Documented in :data:`SECRET_LEAK_PATTERNS` so contributors can extend the
 denylist without re-deriving the test contract.
@@ -45,6 +47,7 @@ from typing import Any, Final
 import httpx
 import pytest
 import respx
+import structlog
 from cryptography.fernet import Fernet
 
 from meho_backplane.settings import get_settings
@@ -627,6 +630,36 @@ def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+_PRINT_LOGGER_METHODS: Final[tuple[str, ...]] = (
+    "msg", "log", "debug", "info", "warn", "warning",
+    "fatal", "failure", "err", "error", "critical", "exception",
+)  # fmt: skip
+
+
+def _record_structlog_prints(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Collect every line a structlog ``PrintLogger`` writes, for this test.
+
+    The fd scan cannot run under xdist, and a structured log line goes to
+    stdout only, so no other scan would see it (#6608). Each ``PrintLogger``
+    method is wrapped: the line is still printed, and a copy is added to the
+    returned list. ``monkeypatch`` puts the methods back after the test.
+    """
+    lines: list[str] = []
+
+    def _wrap(original: Any) -> Any:
+        def _method(self: Any, message: Any) -> None:
+            lines.append(str(message))
+            original(self, message)
+
+        return _method
+
+    for name in _PRINT_LOGGER_METHODS:
+        monkeypatch.setattr(
+            structlog.PrintLogger, name, _wrap(getattr(structlog.PrintLogger, name))
+        )
+    return lines
+
+
 @pytest.fixture(autouse=True)
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
@@ -654,17 +687,18 @@ def _no_secret_leak_sweep(
     ``tests/test_secret_leak_checks.py``; this fixture is the safety
     net for everything else.
 
-    **Capture surface depends on the runner (#585/#604).** The
+    **Capture surface depends on the runner (#585/#604, #6608).** The
     ``caplog`` (stdlib :mod:`logging`) scan is **always** active — it is
-    reliably per-test isolated even under ``pytest-xdist``. The
-    ``capfd`` (OS-fd-level) scan is active **only single-process**: fd
+    reliably per-test isolated even under ``pytest-xdist``. Under xdist
+    a second scan covers every line a structlog ``PrintLogger`` writes.
+    The ``capfd`` (OS-fd-level) scan is active **only single-process**: fd
     capture is not cleanly per-test under xdist, so a real ``Bearer``
     emitted by some test's late/async/500-path on a worker would be
     mis-attributed to whichever test's teardown sweep runs next — a
     non-deterministic false positive (not a real leak: production
     redacts ``SENSITIVE_HEADERS`` and the full serial suite is clean).
-    Under xdist the fd scan is skipped; coverage is preserved by the
-    always-on ``caplog`` scan, the explicit
+    Under xdist the fd scan is skipped; coverage is kept by the
+    always-on ``caplog`` scan, the structlog line scan, the explicit
     ``tests/test_secret_leak_checks.py`` assertions, and production-side
     redaction (defense in depth). The body details the gate.
 
@@ -681,22 +715,19 @@ def _no_secret_leak_sweep(
     # pytest-xdist it is NOT cleanly per-test isolated — a real
     # ``Bearer`` emitted by *some* test's late / async / 500-path on a
     # worker lands in whichever test's teardown sweep happens to run
-    # next, a non-deterministic FALSE POSITIVE. Proven not a production
-    # leak: ``RequestContextMiddleware`` redacts ``SENSITIVE_HEADERS``,
-    # this sweep is autouse serially too, and the full serial suite is
-    # clean (2007/0/0) while parallel runs flag different innocent
-    # tests run-to-run. So the fd-level scan runs ONLY single-process
-    # (local dev + any serial security context); under xdist we rely on
-    # the ``caplog`` scan below (stdlib ``logging`` IS reliably
-    # per-test under xdist) PLUS the explicit
-    # ``tests/test_secret_leak_checks.py`` assertions PLUS the
-    # production-side header redaction — defense in depth, no real
-    # coverage lost. A capfd-under-xdist redesign is tracked separately
-    # if an fd-only leak surface ever emerges.
+    # next, a non-deterministic FALSE POSITIVE. So the fd-level scan runs
+    # ONLY single-process. Under xdist the structlog lines that a
+    # ``PrintLogger`` writes to stdout (the production log path) are recorded
+    # as they are written (#6608) and scanned like the ``caplog`` records.
+    # What is still not seen under xdist: output that does not go through a
+    # ``PrintLogger`` or stdlib logging (a bare ``print``, a write to
+    # ``sys.stderr``, a subprocess).
     under_xdist = os.environ.get("PYTEST_XDIST_WORKER") is not None
 
     captured_chunks: list[tuple[str, str]] = []
     real_readouterr = capfd.readouterr
+
+    structlog_lines = _record_structlog_prints(monkeypatch) if under_xdist else []
 
     if not under_xdist:
         # Discard pre-test fd residue so the sweep inspects only what
@@ -720,7 +751,9 @@ def _no_secret_leak_sweep(
     out_parts = [out for out, _err in captured_chunks if out]
     err_parts = [err for _out, err in captured_chunks if err]
     log_records = "\n".join(record.getMessage() for record in caplog.records)
-    haystack = "\n".join(("\n".join(out_parts), "\n".join(err_parts), log_records))
+    haystack = "\n".join(
+        ("\n".join(out_parts), "\n".join(err_parts), log_records, "\n".join(structlog_lines))
+    )
 
     if not haystack.strip():
         return

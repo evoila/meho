@@ -54,7 +54,9 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "operation_contract_guidance",
         "policy_classification",
         "preview_typed_writes",
+        "result_query_small_form",
         "search_clear_lead",
+        "search_hit_call_hints",
         "search_plain_sentences",
         "team_knowledge_recall",
     }

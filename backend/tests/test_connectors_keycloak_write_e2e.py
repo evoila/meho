@@ -543,14 +543,20 @@ async def test_write_ops_visible_to_search_operations(
     keycloak_write_e2e: KeycloakConnector,
 ) -> None:
     """All nine write ops are discoverable via search_operations."""
-    result = await search_operations(
-        _OPERATOR,
-        {
-            "connector_id": _CONNECTOR_ID,
-            "query": "keycloak create update realm client user role group member attributes",
-            "limit": 50,
-        },
-    )
-    surfaced = {hit["op_id"] for hit in result["hits"]}
+    # search_operations caps a page at 50 hits and Keycloak has more ops than
+    # that, so one query cannot show them all. Search the whole connector, then
+    # search the account write group, which holds the ops the first page misses.
+    surfaced: set[str] = set()
+    for group in (None, "account_write"):
+        result = await search_operations(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "query": "keycloak create update realm client user role group member attributes",
+                "group": group,
+                "limit": 50,
+            },
+        )
+        surfaced |= {hit["op_id"] for hit in result["hits"]}
     missing = set(EXPECTED_WRITE_OP_IDS) - surfaced
     assert not missing, f"search_operations did not surface: {missing}"

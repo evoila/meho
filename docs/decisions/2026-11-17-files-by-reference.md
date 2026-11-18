@@ -11,11 +11,11 @@ Nothing in this record is built yet.
 - **Approval is for the exact bytes.** A person approves one file with one checksum. The run checks the checksum again before it uses the file.
 - **Build in steps.** Proofs in a test setup come first. The build follows, in steps.
 - **A store ships with MEHO.** A small S3-type store (a store that speaks the common object-store interface) is a chart option (a setting of the install), off by default, with one key per tenant. The store is part of the first build phase. A customer without a file store can use large files from the start. A laptop uploads straight to the store with short-lived signed addresses.
-- **Files that come back from a target hold secrets.** Only the owner of the file and a tenant admin may fetch it. It lives 7 days by default and 30 days at most.
-- **A file approval is not a standing permission.** It never covers many targets. Each run on a target is approved, by a person or by one run approval that names the exact operation, target and checksum.
+- **Files that come back from a target hold secrets.** Only the owner of the file and a tenant admin may fetch it. It has a short life (proposed: 7 days by default, 30 days at most).
+- **A file approval is not a standing permission.** A file approval is never a standing permission for many targets. Each run on a target is approved, by a person or by one run approval that names the exact operation, target and checksum.
 - **Signed addresses are made at run time.** MEHO never stores them and never writes them to a log.
 - **A store on a private network is a per-tenant choice.** It is never switched on for the whole install.
-- **The approval card shows small text files.** It shows the content of a text file of 64 KiB or less.
+- **The approval card shows small text files.** It shows the content of small text files (proposed: up to 64 KiB).
 - **MEHO does not scan files.** The approval card, the docs and the help of the `files` command will say so.
 - **A dangerous file write on a site behind a satellite runner stays impossible.** There, only a target that pulls the file itself can work. See [satellite-write-path.md](satellite-write-path.md).
 
@@ -47,15 +47,15 @@ Nothing in this record is built yet.
 ## Limits we accept
 
 - MEHO does not scan files. A file can still hold something harmful or a secret. The person who approves must judge the file.
-- The approval card shows only text files up to 64 KiB.
+- The approval card shows the content only of small text files (proposed: up to 64 KiB).
 - Each target needs its own approval, or a run approval that names each target. This costs time for jobs on many targets.
 - A signed address works for anyone who holds it until it expires. So it is short-lived, made at run time, and never stored or logged.
 - Sites behind a satellite runner cannot take a dangerous file write.
 
 ## What stays open
 
-- **Which store ships.** This is decided after a test on a private network. No product is chosen yet.
-- **How targets and laptops reach the shipped store.** This is decided together with the test setup.
+- **Which store ships.** It is chosen after an upload test. No product is chosen yet.
+- **How targets and laptops reach the shipped store.** This is decided after a test on a private network.
 
 ## Where it is described
 

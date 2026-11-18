@@ -67,7 +67,7 @@ More: [Watch your estate with sensors](../guides/sensors-quickstart.md)
 
 ## Grant
 
-A permission that a person gives in advance. For example, a standing grant lets the changes of a service principal run without a wait.
+A permission that a person gives in advance. For example, a standing grant lets a service principal run its `caution` and `dangerous` changes without a wait. A delete still waits for a person.
 
 More: [Approvals](../can-do/approvals.md)
 

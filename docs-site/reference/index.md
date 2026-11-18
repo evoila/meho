@@ -11,6 +11,8 @@ written by hand, at each release.
 
 - [What's new](whats-new.md) — a plain-language summary of what landed
   in recent releases, since v0.28.0.
+- [Words we use](words.md) — what MEHO's own words mean, in plain
+  English and A to Z order. Written by hand, not generated.
 - [Connectors](connectors.md) — the per-connector inventory: connector
   id, product, supported version range, and kind, from the connector
   registry.

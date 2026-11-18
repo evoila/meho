@@ -148,6 +148,9 @@ func TestSecondAdminCheck(t *testing.T) {
 		if !strings.Contains(c.Hint, rightsChangeGuide) {
 			t.Errorf("hint %q does not link %s", c.Hint, rightsChangeGuide)
 		}
+		if !strings.Contains(c.Hint, "MEHO-Admins or MEHO-Platform-Admins") {
+			t.Errorf("hint %q does not name the admin groups", c.Hint)
+		}
 		if doctorExitCode(r) != 0 {
 			t.Errorf("exit code = %d, want 0: the line is a warning", doctorExitCode(r))
 		}
@@ -156,7 +159,7 @@ func TestSecondAdminCheck(t *testing.T) {
 		r := &doctorReport{}
 		addSecondAdminCheck(r, count(2))
 		c := findCheck(t, r, secondAdminCheckName)
-		if c.Status != doctorOK || !strings.Contains(c.Detail, "2 admins") {
+		if c.Status != doctorOK || c.Detail != "2 admins in this tenant" {
 			t.Errorf("status/detail = %s/%q, want ok with 2 admins", c.Status, c.Detail)
 		}
 	})

@@ -52,7 +52,7 @@ The machine also needs:
 You also need a computer on the management network with a browser:
 Chrome 111, Safari 16.4 or Firefox 128, or newer.
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-a-second-person).
+**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 MEHO runs on your management network only, never on the internet. Users
 reach it on ports 80 and 443 from the management network. MEHO holds the
@@ -115,7 +115,7 @@ Use your own DNS name and your own admin range.
 | `--public-address <ipv4>` | Only when address translation inside your network is in front of the machine, for example a load balancer: the address that the DNS name points to. Never an address on the internet. | None. |
 | `--first-tenant-id <uuid>` | The id of the first tenant. Give the old id when you move MEHO to another machine. | A new random id. |
 | `--admin-user <name>` | The user name of the first admin. | `admin` |
-| `--approver-user <name>` | The user name of the second person, who approves the admin's changes. | `approver` |
+| `--approver-user <name>` | The user name of the approver (in `MEHO-SA-Operators`), who approves the admin's risky changes but not a change of rights. | `approver` |
 | `--cluster-cidr <cidr>` | The address range of the pods. | `10.42.0.0/16` |
 | `--service-cidr <cidr>` | The address range of the services. | `10.43.0.0/16` |
 
@@ -207,8 +207,11 @@ says `First-start list: not in this version yet`.
 
 ## Step 4: First login
 
-The install made two users with temporary passwords: the first admin,
-and a second person who approves the admin's changes.
+The install made two users with temporary passwords: the first admin
+(in `MEHO-Admins`) and an approver (in `MEHO-SA-Operators`). The approver
+is not an admin. The approver can approve the admin's risky changes, but
+not a change of rights: a change of rights needs a second admin. See
+[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 1. On the server, read the file with the passwords:
 

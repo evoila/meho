@@ -46,7 +46,7 @@ systems.
 |---|---|
 | **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class (the built-in parts keep their data on disks the cluster makes). [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. The chart is tested with Helm 3.16.4. Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
 | **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. With the built-in parts, the chart can also make a self-signed certificate for you. |
-| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-a-second-person). |
+| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
 
 Everything else — the activity-feed store (Valkey), database
 migrations, the operations catalog — ships inside the Helm release.
@@ -325,8 +325,10 @@ This runs the OAuth device-code flow: the CLI prints a verification
 URL and code, you approve it in a browser, and the CLI stores the
 resulting token in your OS keyring.
 
-**Who logs in.** The install made two users with temporary passwords: the first admin (`admin`) and a second person
-who can approve the admin's changes (`approver`). Both are in the
+**Who logs in.** The install made two users with temporary passwords: the first admin (`admin`, in `MEHO-Admins`)
+and an approver (`approver`, in `MEHO-SA-Operators`). The approver is not an admin. The approver can approve the
+admin's risky changes, but not a change of rights: a change of rights needs a second admin. See
+[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). Both logins are in the
 Secret `meho-core-first-login`. Keycloak asks for a new password, a
 name and an email at the first login. Then it asks you to set up an
 authenticator app, and shows twelve recovery codes once. Save them: each

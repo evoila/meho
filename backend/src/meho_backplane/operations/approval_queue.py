@@ -1843,10 +1843,17 @@ async def rights_change_note(request: ApprovalRequest) -> str | None:
     approve it. ``None`` for any other request, when another admin could
     approve, and when MEHO cannot count the admins
     (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+
+    The note is extra help only. When reading it fails, the answer is
+    ``None`` and the request still waits for approval as stored.
     """
     if not is_rights_change(request):
         return None
-    return await only_admin_note(request.tenant_id, request.principal_sub)
+    try:
+        return await only_admin_note(request.tenant_id, request.principal_sub)
+    except Exception:
+        _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
+        return None
 
 
 async def _audit_routing_refusal(

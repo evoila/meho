@@ -106,7 +106,7 @@ func addApprovalSignInCheck(r *doctorReport, h *api.HealthResponse) {
 const secondAdminCheckName = "second admin"
 
 // rightsChangeGuide is the guide part that explains who approves a change of rights.
-const rightsChangeGuide = "https://evoila.github.io/meho/guides/approvals-and-break-glass/#changes-of-rights-need-a-second-person"
+const rightsChangeGuide = "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
 
 // addSecondAdminCheck adds one line that says whether a change of rights
 // can be approved in the tenant: another admin must approve it, never the
@@ -121,11 +121,11 @@ func addSecondAdminCheck(r *doctorReport, h *api.HealthResponse) {
 	if n == 1 {
 		r.add(authed(secondAdminCheckName, doctorWarn, "",
 			"This change needs a second admin to approve it. This tenant has only one admin.",
-			"add a second admin in Keycloak (the tenant's Admins group); see "+rightsChangeGuide))
+			"add a second admin in Keycloak (in MEHO-Admins or MEHO-Platform-Admins); see "+rightsChangeGuide))
 		return
 	}
 	if n > 1 {
 		r.add(authed(secondAdminCheckName, doctorOK, "",
-			fmt.Sprintf("%d admins can approve a change of rights", n), ""))
+			fmt.Sprintf("%d admins in this tenant", n), ""))
 	}
 }

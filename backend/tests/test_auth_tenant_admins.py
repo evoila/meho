@@ -35,6 +35,7 @@ from meho_backplane.auth.tenant_admins import (
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatcher, grant_approval
 from meho_backplane.operations._errors import result_awaiting_approval
+from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.templating import get_templates
 from tests.test_api_v1_approvals_fresh_sign_in import _settings_env  # noqa: F401 -- autouse
@@ -407,6 +408,56 @@ async def test_a_request_that_is_no_change_of_rights_gets_no_note(
     result = await _ask(monkeypatch, op_id="demo.vm.restart")
     assert result.status == "awaiting_approval"
     assert "approval_note" not in result.extras
+
+
+async def test_a_failed_note_read_still_waits_for_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def read(*_args: object) -> frozenset[str] | None:
+        calls.append("note")
+        raise RuntimeError("made-up failure")
+
+    async def step_event(**_kwargs: object) -> None:
+        calls.append("step event")
+
+    monkeypatch.setattr(tenant_admins, "_read", read)
+    monkeypatch.setattr(
+        "meho_backplane.operations.approval_queue.record_approval_step_event", step_event
+    )
+    result = await _ask(monkeypatch)
+    assert result.status == "awaiting_approval"
+    assert result.extras["approval_request_id"]
+    assert "approval_note" not in result.extras
+    assert calls == ["step event", "note"]
+
+
+async def test_a_step_of_a_multi_step_operation_gets_the_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
+    _known(monkeypatch, {_ADMIN_A})
+    operator = Operator(
+        sub=_ADMIN_A,
+        raw_jwt="<jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+    )
+    result = await enforce_subop_policy(
+        operator=operator,
+        connector_id="demo-rest-1.0",
+        op_id=_RIGHTS_OP,
+        safety_level="dangerous",
+        requires_approval=True,
+        target=None,
+        params={"user": "someone"},
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert result.extras["approval_note"] == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    assert ONLY_ONE_ADMIN in (result.error or "")
 
 
 # --- /api/v1/health -------------------------------------------------------------------

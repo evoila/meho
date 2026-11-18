@@ -1292,8 +1292,10 @@ admin's change of rights. MEHO says so; it builds no exception.
   (`JWT_PLATFORM_ADMIN_ROLE_NAME`), or no enabled admin is found. "Not
   known" never gives a warning.
 - At request time, `rights_change_note` in `operations/approval_queue.py`
-  runs after the request is stored (the dispatcher and the composite
-  step). When the requester is the only admin, the answer gets
+  runs after the request and its approval step event are saved (the
+  dispatcher and the composite step), outside the `try` that answers
+  "denied". A failed read of the note gives no note; the call still waits
+  for approval. When the requester is the only admin, the answer gets
   `extras.approval_note`: "This change needs a second admin to approve it.
   This tenant has only one admin." and a link to the approvals guide. The
   note is added to `error` too. The request is still stored, so an admin

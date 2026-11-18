@@ -71,8 +71,8 @@ ONLY_ONE_ADMIN: Final[str] = (
 
 #: The guide part that explains who approves a change of rights.
 RIGHTS_CHANGE_GUIDE_URL: Final[str] = (
-    "https://evoila.github.io/meho/guides/approvals-and-break-glass/"
-    "#changes-of-rights-need-a-second-person"
+    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
+    "#changes-of-rights-need-another-admin"
 )
 
 #: The whole read gives up after this many seconds.

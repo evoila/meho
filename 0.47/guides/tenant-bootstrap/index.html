@@ -2342,23 +2342,6 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Step 8: Check the first login and the secret access">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#set-up-the-agent-requester" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Set up the agent requester
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
 </li>
       
         <li class="md-nav__item">
@@ -3363,23 +3346,6 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Step 8: Check the first login and the secret access">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#set-up-the-agent-requester" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Set up the agent requester
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
 </li>
       
         <li class="md-nav__item">
@@ -3425,9 +3391,7 @@ first people log in.</p>
 <div class="admonition warning">
 <p class="admonition-title">Each step waits for approval</p>
 <p>Every step that changes a Keycloak group or user runs at the
-<strong>dangerous</strong> risk level, so each one waits for approval. The
-self-approval switch (<code>APPROVAL_ALLOW_SELF_APPROVAL</code>) does <strong>not</strong>
-cover the dangerous risk level.</p>
+<strong>dangerous</strong> risk level, so each one waits for approval.</p>
 <p>Two kinds of step get different approvers:</p>
 <ul>
 <li><strong>Create a group</strong> (Step 2): a MEHO-SA-Operator or a MEHO-Admin
@@ -3445,20 +3409,11 @@ admin adds a second admin first (see
 <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">An install with only one admin</a>).</p>
 <p>For the group step, pick one of these before you start:</p>
 <ul>
-<li><strong>A second person</strong> in your current tenant (a MEHO-SA-Operator or
-  an admin) approves it.</li>
 <li><strong>You are a MEHO-SA-Operator or a MEHO-Admin</strong> in your current
   tenant, and you approve it yourself, on purpose, in the web
   interface.</li>
-<li><strong>An agent makes the request</strong> and you approve it. This is the
-  agent-requester pattern in
-  <a href="../approvals-and-break-glass/#option-2-the-agent-requester-pattern">Approvals and break-glass</a>.
-  The agent needs a grant only when the switch
-  <code>AGENT_GRANT_REQUIRED</code> is <code>on</code>. With <code>off</code> (the default) or
-  <code>observe</code>, an agent's <code>dangerous</code> request waits for a person's
-  approval also with no grant. With <code>on</code>, a request with no grant
-  is refused. A grant never lets it run alone: it still waits for a
-  person's approval.</li>
+<li><strong>A second person</strong> in your current tenant (a MEHO-SA-Operator or
+  an admin) approves it.</li>
 </ul>
 <p>The group operations stay at the dangerous risk level (decision
 record:
@@ -3498,11 +3453,11 @@ each change is approved and stored in the audit log.</p>
 <li>A Vault target registered in MEHO (here called <code>vault-main</code>), and the
   right to write Vault identities and groups.</li>
 <li>An <code>operator</code> or <code>tenant_admin</code> login in your current tenant.</li>
-<li>For the group step: a second person who can approve, or one of the
-  setups from the box above. For the user and group member steps: an
-  admin who is not the person who asked. Step 8 needs a <code>tenant_admin</code> approver in the new tenant too,
-  because an approval belongs to one tenant. Step 8 explains the
-  choices.</li>
+<li>For the group step: a second person who can approve, unless you
+  approve it yourself as in the box above. For the user and group
+  member steps: an admin who is not the person who asked. Step 8 needs
+  a <code>tenant_admin</code> approver in the new tenant too, because an approval
+  belongs to one tenant. Step 8 explains the choices.</li>
 <li>This guide gives each person one tenant. For a person who works in
   two or more tenants with one login, follow
   <a href="../several-tenants/">One person in several tenants</a>.</li>
@@ -3710,99 +3665,20 @@ section 2.3 of the
 A policy written before that grant was added fails the cleanup.</p>
 <p>Pick one of these two ways to get an approver:</p>
 <ul>
+<li><strong>The new <code>tenant_admin</code> approves their own requests.</strong> A person with
+  the <code>tenant_admin</code> role is in MEHO-Admins, and MEHO-Admins may approve
+  their own changes, also <code>dangerous</code> ones. The new <code>tenant_admin</code>
+  approves the test write and the cleanup in the web interface.</li>
 <li><strong>A second person in the new tenant.</strong> Run Steps 4 to 6 again for a
   second person with the <code>tenant_admin</code> role. You make these requests
   in your current tenant, so your current approver approves them as
   before: an admin who is not you approves Steps 4 and 5.</li>
-<li><strong>An agent requester in the new tenant.</strong> The new <code>tenant_admin</code> sets
-  up the agent-requester pattern from
-  <a href="../approvals-and-break-glass/#option-2-the-agent-requester-pattern">Approvals and break-glass</a>
-  in the new tenant. A scheduled run of the agent makes the test write
-  and, later, the delete instead of the person. The <code>tenant_admin</code>
-  approves both. The agent needs the setup below first. MEHO checks the
-  <strong>requester's</strong> own Vault access when it stores an approval request.
-  Without this setup the agent's request is refused with
-  <code>write_capability_denied</code>, and there is nothing to approve.</li>
 </ul>
-<p>The self-approval switch is not enough here. It covers the test write
-(risk level <code>caution</code>), but never the cleanup delete (risk level
-<code>dangerous</code>).</p>
 <p>Both sides need Vault access. The approver needs the Vault identity
 from Step 6, with the <code>tenant_admin</code> Vault group. The approved write
 and the cleanup run under the approver's Vault policy. The requester
 needs a Vault identity too, because MEHO checks the requester's access
 before it stores the request. The read checks the reader's.</p>
-<h3 id="set-up-the-agent-requester">Set up the agent requester<a class="headerlink" href="#set-up-the-agent-requester" title="Permanent link">&para;</a></h3>
-<p>Skip this part if you chose a second person. The agent is registered in
-the new tenant, but its Vault identity is written through your current
-tenant's Vault target, like every identity in Step 6. So the Vault
-writes below wait for your current approver, as before.</p>
-<ol>
-<li>
-<p><strong>Register the agent.</strong> The new <code>tenant_admin</code>, logged in to the new
-   tenant, registers the agent principal. The test write
-   (<code>vault.kv.put</code>, risk level <code>caution</code>) and the cleanup
-   (<code>vault.kv.delete</code>, risk level <code>dangerous</code>) must wait for a
-   person's approval. What the agent needs for that depends on the
-   switch <code>AGENT_GRANT_REQUIRED</code>:</p>
-</li>
-<li>
-<p><code>off</code> (the default) or <code>observe</code>: both wait for approval, also
-     with no grant.</p>
-</li>
-<li><code>on</code>: with no grant, both are refused (<code>agent_no_grant</code>). With a
-     grant, both wait for approval.</li>
-</ol>
-<p>So register the agent with no starting grant (<code>--grants none</code>). The
-   new tenant has no target yet. After you add the Vault target below,
-   you give the agent two grants with <code>needs-approval</code>: one for
-   <code>vault.kv.put</code> and one for <code>vault.kv.delete</code>, both on that target
-   only. Then the write and the cleanup wait for a person in every
-   state of the switch. What else the agent may run also depends on
-   the switch:</p>
-<ul>
-<li><code>on</code>: nothing else. Every other call is refused
-     (<code>agent_no_grant</code>).</li>
-<li><code>off</code> or <code>observe</code>: the two grants do not limit the agent. A call
-     that no grant covers gets the default for its risk level: a
-     <code>safe</code> read runs at once, on any target of the tenant. A call
-     above <code>safe</code> waits for a person's approval.</li>
-</ul>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>tenant-check<span class="w"> </span>--grants<span class="w"> </span>none
-</code></pre></div>
-<ol>
-<li><strong>Find the agent's login id.</strong> The agent logs in to Vault with its own
-   Keycloak token. Its <code>sub</code> claim is the id of the Keycloak
-   service-account user, named <code>service-account-agent:&lt;name&gt;</code> in lower
-   case. The <code>jq</code> filter keeps only the exact username:</li>
-</ol>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>user<span class="w"> </span>list<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--username<span class="w"> </span>service-account-agent:tenant-check<span class="w"> </span>--json<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'[.result.rows[] | select(.username == "service-account-agent:tenant-check")]</span>
-<span class="s1">           | if length == 1 then .[0].id else error("expected one user, found \(length)") end'</span>
-</code></pre></div>
-<ol>
-<li>
-<p><strong>Give the agent a Vault identity with the tenant_admin group.</strong> Run
-   Step 6, parts 2 to 4, with that id in place of the person's user id:
-   the identity with the <code>tenant_id=&lt;tenant-uuid&gt;</code> metadata, the alias
-   on the JWT mount, and membership in
-   <code>meho-tenant-&lt;tenant-uuid&gt;-tenant_admin</code>. The agent's token carries
-   <code>tenant_role=tenant_admin</code>, and only the <code>meho-tenant-admin</code> policy
-   covers both the write under <code>tenants/&lt;tenant-uuid&gt;/*</code> and the
-   <code>secret/delete/...</code> grant for the cleanup. Remember that the group's
-   member list replaces the old one: list the approver's entity id and
-   the agent's entity id together.</p>
-</li>
-<li>
-<p><strong>Create the agent definition and schedule the run.</strong> Do this after
-   you added the Vault target and the agent's grants below. Follow
-   steps 2 to 4 of the agent-requester pattern (step 1 is the
-   registration above). The agent then has a grant, so
-   <code>meho agent create</code> needs no <code>--grants</code>. The run must be a
-   scheduled one. An agent you start by hand acts for you, and the
-   request then carries your <code>sub</code>, so you could not approve it.</p>
-</li>
-</ol>
 <p>The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
 with the person's own token. <code>meho targets add</code> waits for approval and
@@ -3810,18 +3686,8 @@ prints an approval id, so approve it before you use the target:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>vault-main<span class="w"> </span>--product<span class="w"> </span>vault<span class="w"> </span>--host<span class="w"> </span>vault.example.com<span class="w"> </span>--no-secret-ref
 meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id-from-targets-add&gt;
 </code></pre></div>
-<p><strong>With the agent requester:</strong> give the agent its two grants now. A grant
-names its target by UUID: it is the <code>id:</code> line of <code>meho targets describe</code>.
-Then do step 4 above.</p>
-<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>describe<span class="w"> </span>vault-main
-meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:tenant-check<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--op<span class="w"> </span>vault.kv.put<span class="w"> </span>--target<span class="w"> </span>&lt;vault-main-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
-meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:tenant-check<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--op<span class="w"> </span>vault.kv.delete<span class="w"> </span>--target<span class="w"> </span>&lt;vault-main-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
-</code></pre></div>
 <p>Then write one test secret, let the approver approve it, and read it
-back. With the agent requester, the scheduled run makes the write and
-the cleanup:</p>
+back:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test<span class="w"> </span>--data<span class="w"> </span><span class="s1">'{"ok": "yes"}'</span>
 <span class="c1"># The approver, logged in to the new tenant:</span>
 meho<span class="w"> </span>approvals<span class="w"> </span>list
@@ -3835,8 +3701,7 @@ missing for the approver, or the approver is not a <code>tenant_admin</code>. Th
 same error on the read means the identity or group is missing for the
 reader.</p>
 <p>Delete the test secret afterwards. The delete runs at the <code>dangerous</code>
-risk level, so the same <code>tenant_admin</code> approver (or the agent setup) is
-needed again:</p>
+risk level, so the same <code>tenant_admin</code> approver is needed again:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>delete<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test<span class="w"> </span>--versions<span class="w"> </span><span class="m">1</span>
 <span class="c1"># The approver, logged in to the new tenant:</span>
 meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;
@@ -3884,12 +3749,12 @@ meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class=
 <tr>
 <td>The test write or the cleanup answers <code>write_capability_denied</code>, and no approval request appears</td>
 <td>The requester's Vault identity has no <code>tenant_id</code> metadata, or is not in the tenant's <code>tenant_admin</code> Vault group. MEHO checks the requester's access before it stores the request.</td>
-<td>Step 6 for the requester. For an agent requester, the agent setup in Step 8.</td>
+<td>Step 6 for the requester.</td>
 </tr>
 <tr>
 <td><code>approve</code> answers <code>self_approval_forbidden</code></td>
 <td>You asked for the group step and tried to approve it yourself, and you are not a MEHO-SA-Operator or a MEHO-Admin.</td>
-<td>A MEHO-SA-Operator or an admin approves, or use the agent-requester pattern (see the box at the top).</td>
+<td>Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface.</td>
 </tr>
 <tr>
 <td><code>approve</code> answers <code>rights_change_required</code> ("This is a change of rights. Another admin must approve it.")</td>

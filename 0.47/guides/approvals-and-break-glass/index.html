@@ -2291,21 +2291,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#option-2-the-agent-requester-pattern" class="md-nav__link">
+  <a href="#option-2-the-audited-break-glass-flag-deployment-admins-emergencies" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Option 2 — the agent-requester pattern
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#option-3-the-audited-break-glass-flag-emergencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Option 3 — the audited break-glass flag (emergencies)
+        Option 2 — the audited break-glass flag (deployment admins, emergencies)
       
     </span>
   </a>
@@ -3390,21 +3379,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#option-2-the-agent-requester-pattern" class="md-nav__link">
+  <a href="#option-2-the-audited-break-glass-flag-deployment-admins-emergencies" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Option 2 — the agent-requester pattern
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#option-3-the-audited-break-glass-flag-emergencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Option 3 — the audited break-glass flag (emergencies)
+        Option 2 — the audited break-glass flag (deployment admins, emergencies)
       
     </span>
   </a>
@@ -3554,7 +3532,7 @@ AI tools and agents never approve. Approve and reject have no MCP tool.</p>
 off, only the self-approval rules of the groups apply, and
 <code>GET /ready</code> reports <code>approval_queue.effective_posture:
 "four_eyes_enforced"</code>. Leave it off. Setting it <code>"true"</code> is an
-audited emergency switch for the whole deploy (Option 3 below). It
+audited emergency switch for the whole deploy (Option 2 below). It
 covers only <code>safe</code> and <code>caution</code> changes and never reaches a
 <code>dangerous</code> or <code>destructive</code> operation. The endorsed way for one
 person to approve their own changes is the <strong>MEHO-SA-Operators</strong> or
@@ -3729,13 +3707,16 @@ text:</p>
 <div class="highlight"><pre><span></span><code>self_approval_forbidden: operator '&lt;your-sub&gt;' may not approve approval_request
 &lt;id&gt;: You cannot approve your own change. Only members of the
 MEHO-SA-Operators and MEHO-Admins groups may approve their own changes. Ask
-another operator, an admin or an approver to approve it.
-(set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)
+another person in MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or
+MEHO-Approvers to approve it. They find it on the Approvals page of the web
+interface.
 </code></pre></div>
 <p>That is a REST <code>403</code> (the command line prints it), and a disabled
-<strong>Approve</strong> button in the console. For a <code>dangerous</code> or <code>destructive</code>
-change the text asks for a MEHO-SA-Operator or a MEHO-Admin and does not
-name the switch, because the switch never reaches these levels. For your
+<strong>Approve</strong> button in the console. The text says only who may approve
+the change and where to ask. The groups come from the rules in the table
+above: for a <code>dangerous</code> or <code>destructive</code> change the text names
+MEHO-SA-Operators and MEHO-Admins. With approver routing on, it names
+the groups the policy routes the change to. For your
 own <code>caution</code> change that waits only because you sent it with a token,
 the text says instead that you may approve it yourself with a click in
 the web interface. Another
@@ -3818,7 +3799,8 @@ says whether it is the approver.</p>
 <h2 id="when-you-are-the-only-operator">When you are the only operator<a class="headerlink" href="#when-you-are-the-only-operator" title="Permanent link">&para;</a></h2>
 <p>On a team, a colleague approves your change. On a <strong>one-operator</strong>
 deploy you are both the requester and the only person who could
-approve. Pick one of the paths below.</p>
+approve. Use Option 1. Option 2 is for deployment admins in an
+emergency.</p>
 <h3 id="option-1-a-meho-sa-operator-or-a-meho-admin-approves-their-own-change-recommended">Option 1 — a MEHO-SA-Operator or a MEHO-Admin approves their own change (recommended)<a class="headerlink" href="#option-1-a-meho-sa-operator-or-a-meho-admin-approves-their-own-change-recommended" title="Permanent link">&para;</a></h3>
 <p>Put yourself in the <strong><code>MEHO-SA-Operators</code></strong> or the <strong><code>MEHO-Admins</code></strong>
 group (see
@@ -3847,102 +3829,11 @@ well. A deploy with a single admin needs no MEHO-SA-Operator. If you want
 a second person to check every risky change of an admin, keep the admins
 out of risky work: give the people who run changes the <code>MEHO-Operators</code>
 group.</p>
-<h3 id="option-2-the-agent-requester-pattern">Option 2 — the agent-requester pattern<a class="headerlink" href="#option-2-the-agent-requester-pattern" title="Permanent link">&para;</a></h3>
-<p>The second way is to make sure the write is <strong>not requested under
-your own subject</strong> in the first place. Park it under an <strong>agent
-principal</strong> instead — a first-class non-human identity with its own
-stable <code>sub</code>. Then, when you approve as yourself, requester and approver
-are already different subjects, and you never touch the break-glass
-flag. The full audit lineage stays intact: the request row records the
-agent as requester, the decision row records you as approver. This fits
-well for writes that run on a schedule.</p>
-<p>An agent principal is a Keycloak <code>client_credentials</code> client that
-carries <code>principal_kind=agent</code>. You create one, attach it to an agent
-definition, and drive the write through a <strong>scheduled</strong> run of
-that definition. Four steps:</p>
-<div class="highlight"><pre><span></span><code><span class="c1"># 1. Register the agent principal (mints its client_credentials client;</span>
-<span class="c1">#    the output includes the client id you pass to --identity-ref below).</span>
-<span class="c1">#    --grants none: no starting grant. Then give it one grant for the</span>
-<span class="c1">#    write it makes, on the one target, with needs-approval. The target</span>
-<span class="c1">#    UUID is the id: line of `meho targets describe &lt;target-name&gt;`.</span>
-<span class="c1">#    With AGENT_GRANT_REQUIRED=on, an agent with no grant is refused, so</span>
-<span class="c1">#    the write would never wait for you. The grant never lets the write</span>
-<span class="c1">#    run alone: it still waits for a person's approval.</span>
-meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>nightly-writer<span class="w"> </span>--grants<span class="w"> </span>none
-meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:nightly-writer<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--op<span class="w"> </span>&lt;write-op-id&gt;<span class="w"> </span>--target<span class="w"> </span>&lt;target-uuid&gt;<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
-
-<span class="c1"># 2. Author an agent definition bound to that principal. Its toolset and</span>
-<span class="c1">#    prompt are what perform the write when the definition runs.</span>
-<span class="c1">#    All four flags are required. It needs no --grants: the agent</span>
-<span class="c1">#    already has its grant from step 1.</span>
-meho<span class="w"> </span>agent<span class="w"> </span>create<span class="w"> </span>nightly-writer<span class="w"> </span>--identity-ref<span class="w"> </span>agent:nightly-writer<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--model-tier<span class="w"> </span>standard<span class="w"> </span>--turn-budget<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--system-prompt<span class="w"> </span><span class="s2">"&lt;what the agent does&gt;"</span>
-
-<span class="c1"># 3. Schedule the definition. --agent-definition takes its UUID: copy</span>
-<span class="c1">#    the id: line of `meho agent show nightly-writer`. --inputs is the</span>
-<span class="c1">#    task of each run. The autonomous run parks the write under the</span>
-<span class="c1">#    agent's sub (principal_sub=&lt;agent-sub&gt;). Use --kind one_off with</span>
-<span class="c1">#    --fire-at &lt;ISO8601&gt; instead for a single run rather than a cron.</span>
-meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>cron<span class="w"> </span>--agent-definition<span class="w"> </span>&lt;definition-uuid&gt;<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--cron-expr<span class="w"> </span><span class="s2">"0 2 * * *"</span><span class="w"> </span>--inputs<span class="w"> </span><span class="s1">'{"prompt": "&lt;the nightly task&gt;"}'</span>
-
-<span class="c1"># 4. The write now waits under the agent. Approve as yourself — your</span>
-<span class="c1">#    sub differs from the agent's, so it runs.</span>
-meho<span class="w"> </span>approvals<span class="w"> </span>list
-meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;id&gt;
-</code></pre></div>
-<p>An agent request above <code>safe</code> waits for a person when a grant of the
-agent covers it (a <code>deny</code> grant refuses it). With no grant, it
-depends on the switch <code>AGENT_GRANT_REQUIRED</code>: with <code>off</code> (the default)
-or <code>observe</code> it waits for a person too, and with <code>on</code> it is refused
-(<code>agent_no_grant</code>). For a <code>dangerous</code> or <code>destructive</code> write, the
-person who approves must be a MEHO-SA-Operator or a MEHO-Admin.
-For a change of rights, the person who approves must be an admin who
-is not the person who asked for it (see
-<a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</p>
-<div class="admonition warning">
-<p class="admonition-title">It must be an <em>autonomous</em> run, not a <em>delegated</em> one</p>
-<p>Only an <strong>autonomous / scheduled</strong> agent run parks the request under
-the agent's own subject. A run you launch <em>interactively</em> binds the
-agent as your delegate (RFC 8693 token exchange): you stay the
-<em>subject</em>, the agent is only the <em>actor</em>, and the waiting request
-still carries <strong>your</strong> <code>sub</code>. Then the rules for your own change
-apply. The scheduled trigger is what makes the agent the requester.</p>
-</div>
-<p>Which identity ends up on the request — and therefore whether you can
-approve it — comes down to how the write was dispatched:</p>
-<table>
-<thead>
-<tr>
-<th>How the write was dispatched</th>
-<th>Requester <code>sub</code></th>
-<th>You can approve it?</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>You call it directly</td>
-<td>your <code>sub</code></td>
-<td>Only as a MEHO-SA-Operator or a MEHO-Admin (or under the rules for your own change in <a href="#who-may-approve">Who may approve</a>)</td>
-</tr>
-<tr>
-<td>You launch an agent interactively; it makes the write</td>
-<td>your <code>sub</code> (agent is only the actor)</td>
-<td>The same as a direct call — you are still the subject</td>
-</tr>
-<tr>
-<td>A <strong>scheduled / autonomous</strong> agent run makes the write</td>
-<td>the <strong>agent's</strong> <code>sub</code></td>
-<td><strong>Yes</strong>, under the rules for another person's change</td>
-</tr>
-</tbody>
-</table>
-<h3 id="option-3-the-audited-break-glass-flag-emergencies">Option 3 — the audited break-glass flag (emergencies)<a class="headerlink" href="#option-3-the-audited-break-glass-flag-emergencies" title="Permanent link">&para;</a></h3>
-<p>When neither option above is possible — an incident, a first bring-up,
-a write you must make in the next five minutes — a deployment admin can
-enable <strong>self-approval</strong> for the whole deploy:</p>
+<h3 id="option-2-the-audited-break-glass-flag-deployment-admins-emergencies">Option 2 — the audited break-glass flag (deployment admins, emergencies)<a class="headerlink" href="#option-2-the-audited-break-glass-flag-deployment-admins-emergencies" title="Permanent link">&para;</a></h3>
+<p>This part is for deployment admins. When Option 1 is not possible — an
+incident, a first bring-up, a write you must make in the next five
+minutes — a deployment admin can enable <strong>self-approval</strong> for the whole
+deploy:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># Helm values overlay</span>
 <span class="nt">config</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">approvalAllowSelfApproval</span><span class="p">:</span><span class="w"> </span><span class="s">"true"</span><span class="w">   </span><span class="c1"># renders APPROVAL_ALLOW_SELF_APPROVAL=true</span>
@@ -4189,16 +4080,12 @@ pending. Add the missing line and try again. A reason can be at most
 <td><strong>MEHO-SA-Operator or MEHO-Admin</strong> (Option 1) — you approve your own change on purpose, in the web interface</td>
 </tr>
 <tr>
-<td>Solo deploy, writes that run on a schedule</td>
-<td><strong>Agent-requester</strong> (Option 2)</td>
-</tr>
-<tr>
 <td>Solo deploy, a change of rights you asked for</td>
 <td><strong>Add a second admin</strong> first. No option on this page lets you approve your own change of rights. See <a href="#changes-of-rights-need-another-admin">An install with only one admin</a></td>
 </tr>
 <tr>
 <td>Genuine emergency, <code>safe</code> or <code>caution</code> change, and nobody in MEHO-SA-Operators or MEHO-Admins</td>
-<td><strong>Break-glass</strong> (Option 3), then turn it back off</td>
+<td><strong>Break-glass</strong> (Option 2, a deployment admin turns it on), then turn it back off</td>
 </tr>
 <tr>
 <td>More than one operator</td>
@@ -4207,15 +4094,11 @@ pending. Add the missing line and try again. A reason can be at most
 </tbody>
 </table>
 <h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
-<p><strong><code>approve</code> returns <code>self_approval_forbidden</code> and I am the only
-operator.</strong> The write waits under <em>your</em> subject — a direct call, or an
-<em>interactive</em> agent run (where you stay the subject) — and you are not
-in <code>MEHO-SA-Operators</code> or <code>MEHO-Admins</code>. Ask your Keycloak admin to move
-you to <code>MEHO-SA-Operators</code> (Option 1), sign in again, and approve in the web
-interface. Or re-park the write under an agent-requester (Option 2).
-Reserve <code>APPROVAL_ALLOW_SELF_APPROVAL</code> for genuine emergencies — it
-re-opens the single-account hole for every <code>safe</code> and <code>caution</code>
-operation.</p>
+<p><strong><code>approve</code> returns <code>self_approval_forbidden</code>.</strong> It is your own change,
+and you are not in <code>MEHO-SA-Operators</code> or <code>MEHO-Admins</code>. Ask a person in
+one of the groups the text names to approve it on the Approvals page of
+the web interface. If you are the only operator, see
+<a href="#when-you-are-the-only-operator">When you are the only operator</a>.</p>
 <p><strong><code>approve</code> returns <code>approval_group_required</code>.</strong> The change is another
 person's <code>dangerous</code> or <code>destructive</code> change, and you are not a
 MEHO-SA-Operator or a MEHO-Admin. Ask one of them to approve it.</p>
@@ -4227,8 +4110,8 @@ break-glass flag changes this (see
 <a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</p>
 <p><strong>The Approve button is greyed out in the console.</strong> The request window
 says why: for example, it is your own change and the group rules do not
-let you approve it. For your own change, the window also names ways
-forward and links back here. Deny stays enabled. To take back your own
+let you approve it. For your own change, the window also says who may
+approve it and where to ask. Deny stays enabled. To take back your own
 request, use <code>meho approvals withdraw &lt;id&gt;</code> instead.</p>
 <p><strong><code>approve</code> fails with <code>fresh_sign_in_required</code> or
 <code>fresh_sign_in_already_used</code>.</strong> The command line or REST call did not show

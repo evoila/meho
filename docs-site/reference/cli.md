@@ -612,6 +612,7 @@ meho approvals show <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON instead of the human-readable view
+- `--script-page` — print this page (from 1) of the script of a linux.script.run request
 
 ### `meho approvals withdraw`
 

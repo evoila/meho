@@ -9,6 +9,9 @@
 * The same holds when MEHO infers the kind from the token: a
   client-credentials token without a ``principal_kind`` claim.
 * A person with ``tenant_admin`` still creates a grant.
+* ``meho_agents_grant_revoke``: a machine login removes an
+  ``auto-execute`` grant, but gets ``human_principal_required`` for a
+  ``deny`` or ``needs-approval`` grant, which stays. A person removes it.
 """
 
 from __future__ import annotations
@@ -188,3 +191,68 @@ async def test_a_person_with_tenant_admin_still_creates_a_grant() -> None:
     assert "result" in body, body
     assert body["result"]["isError"] is False
     assert await _count(AgentPermission) == 1
+
+
+async def _seed_grant(verdict: str) -> uuid.UUID:
+    grant_id = uuid.uuid4()
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            AgentPermission(
+                id=grant_id,
+                tenant_id=OPERATOR_TENANT_ID,
+                principal_sub=_AGENT_CLIENT_ID,
+                op_pattern="vault.kv.*",
+                verdict=verdict,
+                created_by_sub="person-1",
+            )
+        )
+    return grant_id
+
+
+def _revoke(client: TestClient, grant_id: uuid.UUID) -> dict[str, Any]:
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "meho_agents_grant_revoke", "arguments": {"grant_id": str(grant_id)}},
+    }
+    response = post_mcp(client, body)
+    assert response.status_code == 200, response.text
+    result: dict[str, Any] = response.json()
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [PrincipalKind.SERVICE, PrincipalKind.RUNNER])
+@pytest.mark.parametrize("verdict", ["deny", "needs-approval"])
+async def test_a_machine_login_cannot_revoke_a_limiting_grant(
+    kind: PrincipalKind, verdict: str
+) -> None:
+    grant_id = await _seed_grant(verdict)
+    for client in _client_for(_operator(kind)):
+        body = _revoke(client, grant_id)
+
+    _assert_refused(body, "meho_agents_grant_revoke")
+    assert "`meho agent grant revoke <grant-id>`" in body["error"]["message"]
+    assert await _count(AgentPermission) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_machine_login_revokes_an_auto_execute_grant() -> None:
+    grant_id = await _seed_grant("auto-execute")
+    for client in _client_for(_operator(PrincipalKind.SERVICE)):
+        body = _revoke(client, grant_id)
+
+    assert body["result"]["isError"] is False, body
+    assert await _count(AgentPermission) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["deny", "needs-approval"])
+async def test_a_person_revokes_a_limiting_grant(verdict: str) -> None:
+    grant_id = await _seed_grant(verdict)
+    for client in _client_for(_operator(PrincipalKind.USER)):
+        body = _revoke(client, grant_id)
+
+    assert body["result"]["isError"] is False, body
+    assert await _count(AgentPermission) == 0

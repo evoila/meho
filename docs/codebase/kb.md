@@ -926,7 +926,13 @@ Each run:
    body are one entry. Case and spaces count, because `MODE=prod` and
    `MODE=PROD` say different things. The job keeps a `confirmed` copy
    first, else the oldest, and gives each other copy `status: replaced`
-   and `replaced_by: <slug of the kept entry>`. Before the change it
+   and `replaced_by: <slug of the kept entry>`. It does so only when the
+   kept entry is `confirmed` or both entries have the same creator
+   (`created_by_sub`; two entries with no creator count as the same).
+   The job writes as the system login, so it follows the rule that a
+   writer changes only its own entries. Any other pair goes to the
+   report for a reviewer (`merge_for_review`: `slug` and `same_as`), and
+   neither entry changes. Before the change it
    locks both entries and reads them again. When either was edited or
    deleted after the scan, it leaves both as they are.
 2. **Retires expired entries.** An entry whose `expires_at` has passed
@@ -959,7 +965,8 @@ retrievals older than 180 days.
 `operator_sub = system:knowledge-upkeep` and `path = knowledge.upkeep`.
 The payload lists what was merged (`merged`: slug and `into`), retired
 (`retired`), refreshed (`refreshed`) and what waits for a reviewer
-(`for_review`), each list at most 100 items with full counts
+(`for_review` for used candidates, `merge_for_review` for equal entries
+the job did not merge), each list at most 100 items with full counts
 (`merged_count` and so on), plus the four numbers (`numbers`). The
 report models are in `lessons/upkeep_report.py`. Read it
 with `meho audit query` and the principal `system:knowledge-upkeep`. A

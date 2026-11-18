@@ -730,6 +730,7 @@
   "tests/test_keycloak_realm_name_check.py": 6.12,
   "tests/test_keycloak_rights_change_cards.py": 0.86,
   "tests/test_keycloak_rights_change_cards_mcp.py": 0.83,
+  "tests/test_keycloak_rights_change_current_state.py": 20.0,
   "tests/test_keycloak_rights_change_writes.py": 45.09,
   "tests/test_keycloak_role_effective_check.py": 2.08,
   "tests/test_lesson_header.py": 1.06,

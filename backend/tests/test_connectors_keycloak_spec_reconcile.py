@@ -139,6 +139,8 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_GROUP_PATH": ("GET", "PUT", "DELETE"),
     "_GROUP_CHILDREN_PATH": ("GET", "POST"),
     "_GROUP_MEMBERS_PATH": ("GET",),
+    # The roles a group gives directly (the group member add approval card).
+    "_GROUP_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_GROUPS_PATH": ("GET",),
     "_USER_GROUP_PATH": ("PUT", "DELETE"),
     # Realm delete approval card (#3886): user and group counts.
@@ -248,6 +250,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/groups/{group-id}",
         "GET:/admin/realms/{realm}/groups/{group-id}/children",
         "GET:/admin/realms/{realm}/groups/{group-id}/members",
+        "GET:/admin/realms/{realm}/groups/{group-id}/role-mappings",
         "GET:/admin/realms/{realm}/identity-provider/instances",
         "GET:/admin/realms/{realm}/roles",
         "GET:/admin/realms/{realm}/roles-by-id/{role-id}/composites",

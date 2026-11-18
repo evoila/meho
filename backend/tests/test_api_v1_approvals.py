@@ -329,8 +329,7 @@ async def test_resume_dispatches_when_no_target_was_pinned(
 
 
 # ---------------------------------------------------------------------------
-# T6 (#1483) — self_approval_forbidden REST detail must carry the
-# APPROVAL_ALLOW_SELF_APPROVAL break-glass hint the exception constructs.
+# The self_approval_forbidden REST detail says who may approve and where.
 # ---------------------------------------------------------------------------
 
 
@@ -341,20 +340,19 @@ async def test_resume_dispatches_when_no_target_was_pinned(
         ("decide", {"decision": "approved"}),
     ],
 )
-def test_self_approval_forbidden_detail_carries_break_glass_hint(
+def test_self_approval_forbidden_detail_names_who_may_approve(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     path_suffix: str,
     body: dict[str, Any],
 ) -> None:
-    """403 ``self_approval_forbidden`` detail names ``APPROVAL_ALLOW_SELF_APPROVAL``.
+    """403 ``self_approval_forbidden`` detail says who may approve and where to ask.
 
-    The service raises :class:`SelfApprovalForbiddenError` whose message
-    already names the break-glass flag; both the ``/approve`` and the
-    operator-decision ``/decide`` route map it to 403. The wire ``detail``
-    must keep the machine-readable ``self_approval_forbidden`` token prefix
-    **and** carry the env-var hint so a solo operator sees the escape hatch
-    in the response body rather than a bare token (#1483).
+    Both the ``/approve`` and the operator-decision ``/decide`` route map
+    :class:`SelfApprovalForbiddenError` to 403. The wire ``detail`` keeps
+    the machine-readable ``self_approval_forbidden`` token prefix, names
+    the groups that may approve and the Approvals page, and names no
+    setting and no other way to approve the change.
     """
     from meho_backplane.api.v1 import approvals as approvals_module
     from meho_backplane.operations.approval_queue import SelfApprovalForbiddenError
@@ -362,7 +360,11 @@ def test_self_approval_forbidden_detail_carries_break_glass_hint(
     request_id = uuid.UUID("55555555-5555-5555-5555-555555555555")
 
     async def _raise_self_approval(*_a: object, **_kw: object) -> None:
-        raise SelfApprovalForbiddenError(request_id, principal_sub="op-test")
+        raise SelfApprovalForbiddenError(
+            request_id,
+            principal_sub="op-test",
+            approver_kinds=("Operators", "SA-Operators", "Admins", "Approvers"),
+        )
 
     # Both routes call the module-level ``approve_request``; patch it to
     # raise before any DB row is touched.
@@ -381,7 +383,13 @@ def test_self_approval_forbidden_detail_carries_break_glass_hint(
     assert response.status_code == 403, response.text
     detail = response.json()["detail"]
     assert detail.startswith("self_approval_forbidden"), detail
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in detail, detail
+    assert (
+        "Ask another person in MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or "
+        "MEHO-Approvers to approve it." in detail
+    ), detail
+    assert "Approvals page" in detail, detail
+    for word in ("APPROVAL_ALLOW_SELF_APPROVAL", "agent-requester", "break-glass", "re-park"):
+        assert word.lower() not in detail.lower(), detail
 
 
 # ---------------------------------------------------------------------------

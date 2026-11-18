@@ -727,6 +727,7 @@
   "tests/test_mcp_auth.py": 1.47,
   "tests/test_mcp_automation_activation.py": 1.03,
   "tests/test_mcp_broadcast_overrides_tools.py": 19.72,
+  "tests/test_mcp_call_flow_guide.py": 8.0,
   "tests/test_mcp_call_operation_async.py": 21.43,
   "tests/test_mcp_call_operation_audit_status.py": 12.48,
   "tests/test_mcp_call_operation_broadcast_clamp.py": 10.93,

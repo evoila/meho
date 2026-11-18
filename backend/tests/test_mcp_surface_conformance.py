@@ -92,8 +92,8 @@ _DOCS_CAPABILITY = "meho-docs"
 def short_tool_texts(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
     """Run every test here with ``MCP_SHORT_TOOL_TEXTS`` off and on (#4172).
 
-    The short texts change only descriptions, so the surface must be the
-    same in both states.
+    The short texts change only descriptions and leave out output schemas
+    (#4714), so the surface must be the same in both states.
     """
     short = bool(request.param)
     monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if short else "false")
@@ -836,6 +836,12 @@ async def _listed_tools(operator: Operator) -> dict[str, dict[str, Any]]:
     return {tool["name"]: tool for tool in result["tools"]}
 
 
+def _output_fields(tool: dict[str, Any]) -> dict[str, Any]:
+    """Return the output schema properties of a listed tool; none with the short texts."""
+    properties: dict[str, Any] = tool.get("outputSchema", {}).get("properties", {})
+    return properties
+
+
 async def test_switches_off_listing_has_no_word_of_the_switched_features(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -850,23 +856,27 @@ async def test_switches_off_listing_has_no_word_of_the_switched_features(
     assert "create_anyway" not in knowledge["inputSchema"]["properties"]
     assert "dry_run" in knowledge["inputSchema"]["properties"]
     for name in ("call_operation", "preview_operation"):
-        assert "team_knowledge" not in tools[name]["outputSchema"]["properties"]
-    preview_fields = tools["preview_operation"]["outputSchema"]["properties"]
+        assert "team_knowledge" not in _output_fields(tools[name])
+    preview_fields = _output_fields(tools["preview_operation"])
     assert "policy_rule" not in preview_fields
     assert "approvers" not in preview_fields
 
 
 @pytest.mark.parametrize("shadow", [False, True])
 async def test_preview_policy_fields_follow_the_shadow_switch(
-    monkeypatch: pytest.MonkeyPatch, shadow: bool
+    monkeypatch: pytest.MonkeyPatch, shadow: bool, short_tool_texts: bool
 ) -> None:
-    """``policy_rule`` and ``approvers`` are in the preview's ``outputSchema`` only when on."""
+    """``policy_rule`` and ``approvers`` are in the preview's ``outputSchema`` only when on.
+
+    With the short texts there is no output schema at all (#4714).
+    """
     _set_switches(monkeypatch, similar=False, recall=False, shadow=shadow)
     tools = await _listed_tools(_operator())
-    preview_fields = tools["preview_operation"]["outputSchema"]["properties"]
-    assert ("policy_rule" in preview_fields) is shadow
-    assert ("approvers" in preview_fields) is shadow
-    assert "policy_rule" not in tools["call_operation"]["outputSchema"]["properties"]
+    assert ("outputSchema" in tools["preview_operation"]) is not short_tool_texts
+    preview_fields = _output_fields(tools["preview_operation"])
+    assert ("policy_rule" in preview_fields) is (shadow and not short_tool_texts)
+    assert ("approvers" in preview_fields) is (shadow and not short_tool_texts)
+    assert "policy_rule" not in _output_fields(tools["call_operation"])
 
 
 @pytest.mark.parametrize("switch", sorted(set(_SWITCHED_TOOLS.values())))
@@ -888,16 +898,19 @@ async def test_a_switch_on_lists_its_tools_as_registered(
         registered = mcp_registry._TOOLS[name][0]
         if short_tool_texts:
             registered = apply_short_text(registered, _SWITCHED_SHORT_TEXTS[name])
+            registered = registered.model_copy(update={"outputSchema": None})
         if tool_switch == switch:
             assert tools[name] == registered.to_wire()
-        else:
+        elif not (short_tool_texts and tool_switch == "TEAM_KNOWLEDGE_RECALL"):
+            # The short texts of the recall tools name recall only in the
+            # output schema, and the short texts leave that out (#4714).
             assert tools[name] != registered.to_wire()
     if switch == "KB_SIMILAR_CHECK":
         assert "create_anyway" in tools["add_to_knowledge"]["inputSchema"]["properties"]
         assert "similar entries first" in str(tools["add_to_knowledge"])
     else:
         for name in ("call_operation", "preview_operation"):
-            assert "team_knowledge" in tools[name]["outputSchema"]["properties"]
+            assert ("team_knowledge" in _output_fields(tools[name])) is not short_tool_texts
 
 
 def test_switches_off_over_mcp_route_and_create_anyway_is_refused_clearly(
@@ -941,6 +954,8 @@ async def test_include_raw_follows_the_typed_first_switch(
     Off: no word of it, so the listing is as before the switch existed. On:
     the input, the ``raw_operations`` output field and the description line,
     also when the short texts replace the description (#4712).
+    The short texts send no output schema, so there the output field is
+    not checked.
     """
     monkeypatch.setenv("SEARCH_TYPED_FIRST", "true" if on else "false")
     get_settings.cache_clear()
@@ -949,7 +964,11 @@ async def test_include_raw_follows_the_typed_first_switch(
         tool = tools[name]
         assert ("include_raw" in tool["inputSchema"]["properties"]) is on, name
         assert ("include_raw" in tool["description"]) is on, name
-        assert ("raw_operations" in str(tool["outputSchema"])) is on, name
+        if short_tool_texts:
+            # The short texts send no output schema at all.
+            assert "outputSchema" not in tool, name
+        else:
+            assert ("raw_operations" in str(tool["outputSchema"])) is on, name
         if on and not short_tool_texts:
             registered = mcp_registry._TOOLS[name][0].to_wire()
             assert tool["inputSchema"] == registered["inputSchema"]

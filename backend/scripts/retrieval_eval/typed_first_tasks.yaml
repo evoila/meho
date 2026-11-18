@@ -1,0 +1,206 @@
+# Typed-first discovery test: 40 ops requests with one known answer each.
+#
+# Each task is one ops request in plain words. Its answer is a typed or
+# multi-step operation that MEHO ships in this repo. The test measures
+# whether search finds that operation when raw operations (made from a
+# vendor API file) are visible, and when they are hidden.
+#
+# Schema: scripts.retrieval_eval.typed_first.TypedFirstTask.
+#
+# Pass rule (the same for every task):
+# * Search only (no model): the request is the search text. The task
+#   passes top-1 when an operation of expected_op_ids is the first hit,
+#   and top-3 when one is in the first three hits.
+# * Model run (benchmark lane): the task passes when the first
+#   call_operation of the session names an operation of expected_op_ids.
+#
+# Editing rules:
+# * expected_op_ids holds only typed or multi-step operations of
+#   connector_id that MEHO registers at start-up. The first entry is
+#   the main answer; more entries are other correct answers.
+#   test_retrieval_eval_typed_first.py checks this.
+# * Names in requests are made up. No host name, IP address, lab or
+#   customer name.
+# * Connectors with raw operations next to typed ones come first
+#   (gh-rest-3, harbor-rest-2.x). Tasks for connectors that are not in
+#   this repo live in a private file of the same format.
+# * Bump version when a request or an answer changes, so numbers from
+#   two versions are never compared.
+
+version: 1
+tasks:
+  # --- GitHub: hundreds of raw operations next to the multi-step ones ---
+  - id: gh-pr-ready
+    connector_id: gh-rest-3
+    request: Is pull request 42 ready to merge? Show its checks and reviews.
+    expected_op_ids: [gh.composite.pr_status_summary]
+  - id: gh-board-view
+    connector_id: gh-rest-3
+    request: Show the fields and the items of project board 3 of our organisation.
+    expected_op_ids: [gh.composite.project_view]
+  - id: gh-board-add-issue
+    connector_id: gh-rest-3
+    request: Put issue 17 on the project board.
+    expected_op_ids: [gh.composite.project_item_add]
+  - id: gh-board-set-status
+    connector_id: gh-rest-3
+    request: Set the Status of an item on the project board to In progress.
+    expected_op_ids: [gh.composite.project_item_set_field]
+  - id: gh-sub-issue
+    connector_id: gh-rest-3
+    request: Make issue 88 a sub-issue of issue 80.
+    expected_op_ids: [gh.composite.sub_issue_add]
+  - id: gh-issue-find
+    connector_id: gh-rest-3
+    request: Find the open issues with the label bug that talk about login.
+    expected_op_ids: [gh.composite.issue_search]
+  - id: gh-issue-read
+    connector_id: gh-rest-3
+    request: Show issue 120 with its sub-issues and the newest comments.
+    expected_op_ids: [gh.composite.issue_view]
+  - id: gh-issue-open
+    connector_id: gh-rest-3
+    request: Open a new issue called "Backup job fails" with the label ops.
+    expected_op_ids: [gh.composite.issue_create]
+  - id: gh-issue-reply
+    connector_id: gh-rest-3
+    request: Write a comment on issue 55 that the fix is deployed.
+    expected_op_ids: [gh.composite.issue_comment]
+  - id: gh-repo-facts
+    connector_id: gh-rest-3
+    request: What is the default branch of the repository, and is it private?
+    expected_op_ids: [gh.composite.repo_view]
+  - id: gh-files-on-branch
+    connector_id: gh-rest-3
+    request: List the files in the docs folder on the main branch.
+    expected_op_ids: [gh.composite.git_tree_view]
+  - id: gh-commit-file
+    connector_id: gh-rest-3
+    request: Commit a new version of README.md to the branch docs-update.
+    expected_op_ids: [gh.composite.branch_commit_files]
+
+  # --- Harbor: raw operations next to the typed ones ---
+  - id: harbor-version
+    connector_id: harbor-rest-2.x
+    request: Which Harbor version is running?
+    expected_op_ids: [harbor.about]
+  - id: harbor-health
+    connector_id: harbor-rest-2.x
+    request: Are all parts of Harbor healthy?
+    expected_op_ids: [harbor.health]
+  - id: harbor-repos
+    connector_id: harbor-rest-2.x
+    request: List the image repositories in the project platform.
+    expected_op_ids: [harbor.repository.list]
+  - id: harbor-tags
+    connector_id: harbor-rest-2.x
+    request: Which tags does the image web-app in the project platform have?
+    expected_op_ids: [harbor.artifact.list]
+  - id: harbor-cves
+    connector_id: harbor-rest-2.x
+    request: Show the known vulnerabilities of the image web-app:1.4.2.
+    expected_op_ids: [harbor.artifact.vulnerabilities]
+  - id: harbor-quota
+    connector_id: harbor-rest-2.x
+    request: Which projects use the most of their storage quota?
+    expected_op_ids: [harbor.quota.list]
+  - id: harbor-robot
+    connector_id: harbor-rest-2.x
+    request: Create a robot account for the build pipeline in the project platform.
+    expected_op_ids: [harbor.robot.create]
+  - id: harbor-copy-image
+    connector_id: harbor-rest-2.x
+    request: Copy the image web-app:1.4.2 into the project release.
+    expected_op_ids: [harbor.artifact.copy]
+
+  # --- Kubernetes ---
+  - id: k8s-pods-not-running
+    connector_id: k8s-1.x
+    request: Which pods in the namespace shop are not running?
+    expected_op_ids: [k8s.pod.list]
+  - id: k8s-restart
+    connector_id: k8s-1.x
+    request: Restart all pods of the deployment checkout.
+    expected_op_ids: [k8s.rollout.restart]
+  - id: k8s-scale
+    connector_id: k8s-1.x
+    request: Scale the deployment checkout to 5 replicas.
+    expected_op_ids: [k8s.scale]
+  - id: k8s-logs
+    connector_id: k8s-1.x
+    request: Show the last log lines of the pod checkout-7d9f.
+    expected_op_ids: [k8s.logs]
+  - id: k8s-warnings
+    connector_id: k8s-1.x
+    request: Show the recent warning events in the namespace shop.
+    expected_op_ids: [k8s.event.list]
+  - id: k8s-cordon
+    connector_id: k8s-1.x
+    request: Stop new pods from being placed on the node worker-2.
+    expected_op_ids: [k8s.cordon]
+
+  # --- Google Cloud ---
+  - id: gcloud-vms
+    connector_id: gcloud-rest-1.0
+    request: List the virtual machines in the Google Cloud project.
+    expected_op_ids: [gcloud.compute.instances.list]
+  - id: gcloud-apis
+    connector_id: gcloud-rest-1.0
+    request: Which APIs are turned on in the project?
+    expected_op_ids: [gcloud.services.list]
+  - id: gcloud-who-has-roles
+    connector_id: gcloud-rest-1.0
+    request: Show who has which role on the project.
+    expected_op_ids: [gcloud.iam.policy.read]
+  - id: gcloud-sa-keys
+    connector_id: gcloud-rest-1.0
+    request: List the keys of the service account deploy-bot and when they expire.
+    expected_op_ids: [gcloud.iam.service_account_keys.list]
+
+  # --- HashiCorp Vault ---
+  - id: vault-read-secret
+    connector_id: vault-1.x
+    request: Read the secret apps/web/db from Vault.
+    expected_op_ids: [vault.kv.read]
+  - id: vault-sealed
+    connector_id: vault-1.x
+    request: Is Vault sealed?
+    expected_op_ids: [vault.sys.seal_status, vault.sys.health]
+  - id: vault-secret-history
+    connector_id: vault-1.x
+    request: Show the old versions of the secret apps/web/db.
+    expected_op_ids: [vault.kv.versions]
+  - id: vault-policies
+    connector_id: vault-1.x
+    request: Which ACL policies exist in Vault?
+    expected_op_ids: [vault.sys.policy.list]
+
+  # --- Keycloak ---
+  - id: keycloak-disable-user
+    connector_id: keycloak-admin-26.x
+    request: Turn off the user jdoe in Keycloak without deleting it.
+    expected_op_ids: [keycloak.user.disable]
+  - id: keycloak-failed-logins
+    connector_id: keycloak-admin-26.x
+    request: Who failed to log in to the realm today?
+    expected_op_ids: [keycloak.events.list]
+  - id: keycloak-user-locked
+    connector_id: keycloak-admin-26.x
+    request: Is the user jdoe locked after too many wrong passwords?
+    expected_op_ids: [keycloak.user.lock_status]
+
+  # --- Argo CD ---
+  - id: argocd-out-of-sync
+    connector_id: argocd-api-3.x
+    request: Which Argo CD applications are out of sync?
+    expected_op_ids: [argocd.app.list]
+  - id: argocd-drift
+    connector_id: argocd-api-3.x
+    request: Show the difference between Git and the cluster for the application checkout.
+    expected_op_ids: [argocd.app.diff]
+
+  # --- Proxmox VE ---
+  - id: proxmox-migration-list
+    connector_id: proxmox-api-8.x
+    request: Collect all virtual machines of the Proxmox cluster for a migration plan.
+    expected_op_ids: [proxmox.migration.inventory]

@@ -20,6 +20,7 @@
   "tests/retrieval_eval/test_retrieval_eval_passage_bench.py": 1.01,
   "tests/retrieval_eval/test_retrieval_eval_principal.py": 0.48,
   "tests/retrieval_eval/test_retrieval_eval_runner.py": 0.82,
+  "tests/retrieval_eval/test_retrieval_eval_typed_first.py": 1.9,
   "tests/test_addon_capability_service.py": 0.77,
   "tests/test_addon_orchestration_linkage.py": 0.93,
   "tests/test_addon_pairing_conformance.py": 0.25,

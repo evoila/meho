@@ -44,7 +44,7 @@ class OperationSearchResult:
 
 #: Type of the ``search_operations_fn`` the runner calls per operations
 #: question. Keyword arguments: ``tenant_id``, ``connector_id``, ``query``,
-#: ``limit``. Tests pass a stub; the default is
+#: ``limit`` and, from the typed-first test, ``typed_only``. Tests pass a stub; the default is
 #: :func:`search_corpus_operations`.
 SearchOperationsCallable = Callable[..., Awaitable[OperationSearchResult]]
 
@@ -55,12 +55,14 @@ async def search_corpus_operations(
     connector_id: str,
     query: str,
     limit: int,
+    typed_only: bool = False,
 ) -> OperationSearchResult:
     """Run the ranked operation search for one eval question.
 
     Returns the ``op_id`` of each hit in rank order, cut to *limit*. A
     connector that this tenant cannot search gives an empty list and a
-    ``not_run_reason`` instead.
+    ``not_run_reason`` instead. *typed_only* hides raw operations, as the
+    switch ``SEARCH_TYPED_FIRST`` does (#4712).
     """
     product, version, impl_id = parse_connector_id(connector_id)
     if not await connector_exists(
@@ -85,6 +87,7 @@ async def search_corpus_operations(
             group_key=None,
             query=query,
             limit=limit,
+            typed_only=typed_only,
         )
     if outcome == "package_not_installed":
         package = detail[0] if detail else "?"

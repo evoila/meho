@@ -196,6 +196,17 @@ What the import does:
 - A file that changes nothing gives an empty `diff` and no new history
   entry.
 - One audit row covers the whole import.
+- **Targets wait for a person.** MEHO does not write a target from the
+  file at once. For each target the file creates or changes, it makes
+  one approval request. The answer lists them in
+  `waiting_for_approval`, each with its `path`, `name`, `op_id` and
+  `approval_request_id`. A person approves each one with
+  `meho approvals` or in the console. Only then does MEHO write the
+  target. The rest of the file is written at once.
+- A target in a tenant that the same file creates gets no request yet,
+  because its tenant does not exist when MEHO asks. It is in `failed`.
+  Import the file a second time after the first import: then MEHO asks
+  for these targets too.
 
 ### What the checks refuse
 

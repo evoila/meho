@@ -582,10 +582,8 @@ _SH = shutil.which("sh")
 
 
 def _fixture_files() -> dict[str, str]:
-    return {
-        str(path.relative_to(_FIXTURE_DIR)): path.read_text()
-        for path in sorted(_FIXTURE_DIR.rglob("*.xml"))
-    }
+    names = ("config.xml", f"backup/config-{_FX_T2}.xml", f"backup/config-{_FX_T1}.xml")
+    return {name: (_FIXTURE_DIR / name).read_text() for name in names}
 
 
 def _run_list_cmd(conf_dir: Path) -> subprocess.CompletedProcess[str]:

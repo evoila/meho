@@ -12900,6 +12900,73 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}/script": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Get Approval Script Page",
+        "description": "Read one page of the script of a ``linux.script.run`` request that waits for approval.\n\nThe pages are 64 KiB each, cut after values that look like secrets are\nhidden over the whole script. Reading a page does not delete the stored\nscript. Same access as ``GET /{id}``. Only while the request waits for\napproval: after the decision MEHO no longer keeps the script (410).\nA request that has no script, and a page that does not exist, are 404.\nA stored script that MEHO cannot read back (it cannot be decrypted) is\n409 with a plain sentence.",
+        "operationId": "get_approval_script_page_api_v1_approvals__request_id__script_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, from 1.",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, from 1."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalScriptPageView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{request_id}/result": {
       "get": {
         "tags": [
@@ -23293,6 +23360,61 @@
         }
       }
     },
+    "/ui/approvals/{request_id}/script": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval Script Page",
+        "description": "Render one page of the script block of a waiting script run.",
+        "operationId": "approval_script_page_ui_approvals__request_id__script_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/approvals/{request_id}/approve": {
       "post": {
         "tags": [
@@ -28060,6 +28182,56 @@
         ],
         "title": "ApprovalRevealResult",
         "description": "The run result of an approved reveal, for the person who asked."
+      },
+      "ApprovalScriptPageView": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "pages": {
+            "type": "integer",
+            "title": "Pages"
+          },
+          "script": {
+            "type": "string",
+            "nullable": true,
+            "title": "Script"
+          },
+          "script_bytes": {
+            "type": "integer",
+            "title": "Script Bytes"
+          },
+          "script_sha256": {
+            "type": "string",
+            "nullable": true,
+            "title": "Script Sha256"
+          },
+          "script_values_hidden": {
+            "type": "boolean",
+            "title": "Script Values Hidden",
+            "default": false
+          },
+          "script_unavailable": {
+            "type": "string",
+            "nullable": true,
+            "title": "Script Unavailable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "page",
+          "pages",
+          "script_bytes"
+        ],
+        "title": "ApprovalScriptPageView",
+        "description": "One page of the script of a waiting ``linux.script.run`` request."
       },
       "ApprovalSignInStatus": {
         "properties": {

@@ -33,9 +33,7 @@ EXCLUDED_FILES = frozenset({"CHANGELOG.md"})
 HIT_MESSAGE = "this line holds a word of the private name list"
 
 _FILE_HEADER = re.compile(r"^\+\+\+ (?P<path>.*)$")
-_HUNK_HEADER = re.compile(
-    r"^@@ -\d+(?:,(?P<old>\d+))? \+(?P<start>\d+)(?:,(?P<new>\d+))? @@"
-)
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(?P<old>\d+))? \+(?P<start>\d+)(?:,(?P<new>\d+))? @@")
 _ESCAPES = {
     "n": 10,
     "t": 9,
@@ -99,18 +97,20 @@ def _header_path(text: str) -> str | None:
     return text[2:] if text.startswith("b/") else text
 
 
-def added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
+def added_lines(diff: bytes) -> Iterator[tuple[str, int, str]]:
     """Yield (path, line number, text) for each added line of a zero-context diff.
 
     The lines of a hunk are counted from its ``@@`` header. Only a line
     outside a hunk can be a file header, so the text of an added line is
-    never taken for one.
+    never taken for one. The diff is split at newline bytes only, because a
+    form feed or a lone carriage return in a line is not a line end for git.
     """
     path: str | None = None
     number = 0
     old_left = 0
     new_left = 0
-    for line in diff.splitlines():
+    for raw_line in diff.split(b"\n"):
+        line = raw_line.decode("utf-8", errors="replace")
         if old_left > 0 or new_left > 0:
             if line.startswith("+"):
                 if path is not None:
@@ -138,7 +138,7 @@ def added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
             new_left = 1 if new is None else int(new)
 
 
-def find_hits(diff: str, pattern: re.Pattern[str]) -> list[tuple[str, int]]:
+def find_hits(diff: bytes, pattern: re.Pattern[str]) -> list[tuple[str, int]]:
     return [
         (path, number)
         for path, number, text in added_lines(diff)
@@ -152,7 +152,7 @@ def report(hits: Iterable[tuple[str, int]]) -> None:
         print(f"{path}:{number}: {HIT_MESSAGE}")
 
 
-def read_diff(base: str) -> str:
+def read_diff(base: str) -> bytes:
     result = subprocess.run(
         [
             "git",
@@ -162,17 +162,17 @@ def read_diff(base: str) -> str:
             "--unified=0",
             "--no-color",
             "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--diff-filter=ACMR",
             f"{base}..HEAD",
         ],
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"git diff failed: {result.stderr.strip()}")
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git diff failed: {message}")
     return result.stdout
 
 
@@ -213,9 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     if hits:
         report(hits)
         print(f"{len(hits)} added line(s) hold a word of the private name list.")
-        print(
-            "Ask a maintainer which word it is, then write the line again without it."
-        )
+        print("Ask a maintainer which word it is, then write the line again without it.")
         return 1
     print("No added line holds a word of the private name list.")
     return 0

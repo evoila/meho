@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "ci" / "check_private_names.py"
 _WORD_A = "forbiddenword-a"
@@ -168,3 +170,49 @@ def test_unknown_base_is_an_error(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 2
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["\x0c", "\x1c", "\x1d", "\x1e", "\x85", chr(0x2028), chr(0x2029), "\x0b", "\r"],
+)
+def test_line_separator_characters_do_not_hide_a_later_added_line(
+    tmp_path: Path, separator: str
+) -> None:
+    root = _repo(tmp_path)
+    text = f"ok{separator}more\nclean line\nnext line {_WORD_A}\n"
+    _commit(root, {"sep.txt": text})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "sep.txt:3:" in done.stdout
+
+
+def test_separator_in_a_later_hunk_keeps_line_numbers_right(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"two.txt": "a\nb\nc\nd\ne\nf\n"})
+    _commit(root, {"two.txt": f"a\nx\x0cy\nc\nd\ne\nf {_WORD_A}\n"})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "two.txt:6:" in done.stdout
+
+
+def test_no_newline_at_end_of_file_and_invalid_bytes_are_handled(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "bin.txt").write_bytes(b"\xff\xfe bad\nlast " + _WORD_A.encode())
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "change")
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "bin.txt:2:" in done.stdout
+
+
+def test_rename_with_edit_and_noprefix_config_are_checked(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _git(root, "config", "diff.noprefix", "true")
+    _git(root, "mv", "old.txt", "moved.txt")
+    (root / "moved.txt").write_text("keep\nnew forbidden-b7\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "change")
+    done = _run(root, f"{_WORD_B}\n")
+    assert done.returncode == 1
+    assert "moved.txt:2:" in done.stdout

@@ -1232,7 +1232,11 @@ Every other result has an `outcome` field:
     `op_id`) and says how many are left out in `operations_more`. An
     answer whose groups do not fit ends early, with `next_cursor` set to
     the last group shown, like a full page. Every group of every
-    built-in connector fits whole.
+    built-in connector fits whole. The text of a group (`name` and
+    `when_to_use`) stays under 3 KB, so a group always has room for
+    operation lines: a longer text is cut and ends with `…`. Every ASCII
+    text within the limits of a group fits whole; only a long text with
+    many non-ASCII characters is cut.
   - `group` (REST `group=`, CLI `--group`) lists one group. A `group`
     that matches no group gives an empty list and a `note`. The CLI also
     has `--cursor`.

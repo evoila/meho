@@ -24,6 +24,11 @@ finds them.
 
 Size limits, measured as compact JSON:
 
+* the text of one group (its ``name`` and ``when_to_use``) stays under
+  :data:`GROUP_TEXT_MAX_BYTES`. A longer text is cut and ends with ``…``.
+  Every ASCII text within the limits of a group (a name of 128 characters,
+  a ``when_to_use`` of 2,048) fits whole; only a long text with many
+  non-ASCII characters is cut;
 * one group stays under :data:`GROUP_MAX_BYTES`. When a group has more
   operations than fit, the rest are left out and ``operations_more`` says
   how many. ``search_operations`` with ``group`` finds them;
@@ -63,10 +68,12 @@ __all__ = [
     "ANSWER_MAX_BYTES",
     "GROUP_MAX_BYTES",
     "GROUP_OPERATIONS_LINE",
+    "GROUP_TEXT_MAX_BYTES",
     "SUMMARY_MAX_CHARS",
     "add_group_operations",
     "compact_size",
     "fit_group",
+    "fit_text",
     "group_listing_operations",
     "load_group_operations",
     "page_groups",
@@ -75,6 +82,14 @@ __all__ = [
 
 #: One group, as compact JSON, stays under this many bytes.
 GROUP_MAX_BYTES: Final[int] = 4 * 1024
+
+#: The text of one group, as compact JSON without its operations, stays
+#: under this many bytes. The rest of :data:`GROUP_MAX_BYTES` is for the
+#: operation lines.
+GROUP_TEXT_MAX_BYTES: Final[int] = 3 * 1024
+
+#: The group fields that are cut when the text of a group is too long, in order.
+_CUT_FIELDS: Final[tuple[str, ...]] = ("when_to_use", "name")
 
 #: One answer, as compact JSON, stays under this many bytes.
 ANSWER_MAX_BYTES: Final[int] = 12 * 1024
@@ -181,14 +196,45 @@ async def load_group_operations(
     return lines
 
 
+def _cut_text(text: str, keep: int) -> str:
+    """Return the first *keep* characters of *text*, with the cut mark when cut."""
+    if keep >= len(text):
+        return text
+    return text[:keep].rstrip() + _CUT_MARK
+
+
+def fit_text(group: dict[str, Any]) -> dict[str, Any]:
+    """Return *group* with its text cut to fit under :data:`GROUP_TEXT_MAX_BYTES`.
+
+    ``when_to_use`` is cut first, then ``name``, each to the longest start
+    that fits. ``group_key`` is never cut: a call names the group by it. A
+    group that fits is returned unchanged.
+    """
+    fitted = dict(group)
+    for field in _CUT_FIELDS:
+        text = fitted.get(field)
+        if compact_size(fitted) < GROUP_TEXT_MAX_BYTES or not isinstance(text, str):
+            continue
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if compact_size({**fitted, field: _cut_text(text, middle)}) < GROUP_TEXT_MAX_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        fitted[field] = _cut_text(text, low)
+    return fitted
+
+
 def fit_group(group: dict[str, Any], lines: list[dict[str, Any]]) -> dict[str, Any]:
     """Return *group* with as many of *lines* as fit under :data:`GROUP_MAX_BYTES`.
 
-    When some do not fit, ``operations_more`` says how many were left out.
-    The size is counted with that field in place, so the result never goes
-    over the limit because of it. A group whose own text is already over the
-    limit keeps its text and lists no operation.
+    The text of the group is cut first (:func:`fit_text`). When some lines
+    do not fit, ``operations_more`` says how many were left out. The size is
+    counted with that field in place, so the result never goes over the
+    limit because of it.
     """
+    group = fit_text(group)
     size = compact_size({**group, "operations": [], "operations_more": len(lines)})
     kept: list[dict[str, Any]] = []
     for line in lines:

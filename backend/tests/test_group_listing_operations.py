@@ -48,9 +48,12 @@ from meho_backplane.operations._group_listing_operations import (
     ANSWER_MAX_BYTES,
     GROUP_MAX_BYTES,
     GROUP_OPERATIONS_LINE,
+    GROUP_TEXT_MAX_BYTES,
     SUMMARY_MAX_CHARS,
+    add_group_operations,
     compact_size,
     fit_group,
+    fit_text,
     group_listing_operations,
     page_groups,
     summary_line,
@@ -284,10 +287,69 @@ def test_fit_group_cuts_at_the_limit_and_counts_the_rest() -> None:
     assert compact_size(one_more) >= GROUP_MAX_BYTES
 
 
-def test_fit_group_with_a_text_over_the_limit_lists_nothing() -> None:
-    fitted = fit_group(_group_entry("long", "x" * GROUP_MAX_BYTES), [_line(1)])
-    assert fitted["operations"] == []
-    assert fitted["operations_more"] == 1
+#: The longest group text an operator or the grouping may write: a name of
+#: 128 characters and a ``when_to_use`` of 2,048.
+_NAME_MAX_CHARS = 128
+_WHEN_TO_USE_MAX_CHARS = 2048
+
+
+def _long_group(key: str, char: str) -> dict[str, Any]:
+    return {
+        **_group_entry(key, char * _WHEN_TO_USE_MAX_CHARS),
+        "group_key": key[:64],
+        "name": char * _NAME_MAX_CHARS,
+    }
+
+
+def test_fit_text_keeps_the_longest_ascii_text_whole() -> None:
+    group = _long_group("g" * 64, "x")
+    assert fit_text(group) == group
+
+
+@pytest.mark.parametrize("char", ["漢", "é", '"', "\\", "😀"])
+def test_fit_text_cuts_a_long_multibyte_text(char: str) -> None:
+    group = _long_group("multibyte", char)
+    fitted = fit_text(group)
+    assert compact_size(fitted) < GROUP_TEXT_MAX_BYTES
+    assert fitted["group_key"] == "multibyte"
+    assert fitted["when_to_use"].endswith("…")
+    assert fitted["when_to_use"].startswith(char)
+
+
+def test_fit_text_cuts_the_name_when_the_text_alone_is_not_enough() -> None:
+    group = {**_group_entry("g", "漢" * 4000), "name": "漢" * 4000}
+    fitted = fit_text(group)
+    assert compact_size(fitted) < GROUP_TEXT_MAX_BYTES
+    assert fitted["name"].endswith("…")
+
+
+@pytest.mark.parametrize("char", ["x", "漢", "😀"])
+def test_fit_group_with_the_longest_text_stays_under_the_limit(char: str) -> None:
+    lines = [_line(n) for n in range(60)]
+    fitted = fit_group(_long_group("long", char), lines)
+    assert compact_size(fitted) < GROUP_MAX_BYTES
+    assert fitted["operations"], "the text leaves room for operation lines"
+    assert fitted["operations_more"] == 60 - len(fitted["operations"])
+    assert compact_size(fit_group(_long_group("long", char), [])) < GROUP_MAX_BYTES
+
+
+@pytest.mark.parametrize("char", ["x", "漢", "😀"])
+def test_an_answer_of_long_groups_stays_under_both_limits(char: str) -> None:
+    groups = [_long_group(f"g{n:02d}", char) for n in range(20)]
+    answer: dict[str, Any] = {
+        "connector_id": _CONNECTOR,
+        "groups": groups,
+        "next_cursor": None,
+    }
+    lines = {g["group_key"]: [_line(n) for n in range(40)] for g in groups}
+    add_group_operations(answer, lines, group_filter=None)
+    assert 0 < len(answer["groups"]) < len(groups)
+    assert compact_size(answer) < ANSWER_MAX_BYTES
+    for group in answer["groups"]:
+        assert compact_size(group) < GROUP_MAX_BYTES
+    one = {"connector_id": _CONNECTOR, "groups": groups[:1], "next_cursor": None}
+    add_group_operations(one, lines, group_filter="g00")
+    assert compact_size(one) < ANSWER_MAX_BYTES
 
 
 def test_page_groups_stops_under_the_limit_and_always_moves_on() -> None:

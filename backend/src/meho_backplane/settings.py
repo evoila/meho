@@ -2641,6 +2641,13 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Typed and multi-step operations first in ``search_operations`` and
+    #: ``list_operation_groups`` (#4712), behind a switch that is off by
+    #: default. When on, both show only ``source_kind`` ``typed`` and
+    #: ``composite`` operations, unless the caller sets ``include_raw`` or
+    #: the connector has no such operation. Off: both are as before. Set via
+    #: ``SEARCH_TYPED_FIRST``.
+    search_typed_first: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
     #: switch that is off by default. When on, each node row also has
     #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
@@ -3767,6 +3774,9 @@ def get_settings() -> Settings:
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
+        ),
+        search_typed_first=parse_bool_env(
+            os.environ.get("SEARCH_TYPED_FIRST"),
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),

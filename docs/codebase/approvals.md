@@ -1246,8 +1246,10 @@ decides: not the requester, a person in a chosen tenant, and an admin
 **Who sets the mark.**
 
 - The park step (`create_pending_request`) sets it for a group or role
-  change in MEHO's own login realm (`grant_facts`, see above). A request
-  outside the login realm keeps the usual rules.
+  change in MEHO's own login realm (`grant_facts`, see above). Outside
+  the login realm, such a change carries the mark when its operation is
+  also registered with `register_rights_change_op` (every Keycloak one
+  is, see the next point).
 - An operation registered with `register_rights_change_op` is a rights
   change on every request. `policy.classify` (a change of a category,
   labels or the "always wait" mark, see
@@ -1275,6 +1277,37 @@ through the same `is_rights_change` check, so an upgrade weakens nothing.
 `meho approvals show` prints `Rights change: another admin must approve`,
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
+
+**A tenant with one admin (#6641).** There, nobody can approve that
+admin's change of rights. MEHO says so; it builds no exception.
+
+- `auth/tenant_admins.py` counts the admins of a tenant with MEHO's own
+  Keycloak admin client: the enabled members of every group (at any level)
+  whose attributes give `tenant_admin` in the tenant (`tenant_role` with
+  `tenant_id`, or `meho_tenant` `<tenant>:<name>:Admins`) or
+  `platform_admin`. A child group takes a missing attribute from its
+  parent, as the token does. A service account (a username that starts
+  with `JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`) is not counted: only a
+  person may approve. The answer is kept 60 seconds per tenant.
+- The count is "not known" (`None`) when the admin client is not set up,
+  a read fails or is refused, platform admins come from a realm role
+  (`JWT_PLATFORM_ADMIN_ROLE_NAME`), or no enabled admin is found. "Not
+  known" never gives a warning.
+- At request time, `rights_change_note` in `operations/approval_queue.py`
+  runs after the request and its approval step event are saved (the
+  dispatcher and the composite step), outside the `try` that answers
+  "denied". A failed read of the note gives no note; the call still waits
+  for approval. When the requester is the only admin, the answer gets
+  `extras.approval_note`: "This change needs a second admin to approve it.
+  This tenant has only one admin." and a link to the approvals guide. The
+  note is added to `error` too. The request is still stored, so an admin
+  added later can approve it. `meho operation call` prints the note under
+  the parked hint. The web console shows it in the waiting answer of the
+  Keycloak pages, the operation run window, and the classify page.
+- `/api/v1/health` and `meho_status` report the count in
+  `approvals.rights_change_admins`. `meho doctor` shows the line "second
+  admin": a warning with the same sentence for one admin, ok for two or
+  more, and no line when the count is not known or the backplane is older.
 
 ## The "may I approve this?" answer (#3329)
 
@@ -1411,6 +1444,10 @@ category is the one the classification gave the looked-up operation
 `apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
 install's category is `EndpointDescriptor.policy_install_category`: the
 category from the install's classification entries and overrides alone.
+A step of a multi-step operation reads the override rows of its operation
+too (`apply_step_classification` passes them to `classify_step`), so a
+step and a direct call of the same operation get the same categories and
+the same approvers.
 When those entries give the operation two categories, it is the empty
 text: MEHO does not know it (an operation registered after the install's
 import can match two such entries). Then no group may approve the change
@@ -1423,9 +1460,18 @@ without a category fits only entries without `category`.
 in their order: a person only, the read-only check, still pending, the
 deadline, the rights-change and group rules (also the rules on own
 changes), the role floor. Then `_check_install_floor`
-(`install_floor_refusal` in `policy/routing_floor.py`): MEHO routes the
+(`InstallFloor.refusal` in `policy/routing_floor.py`): MEHO routes the
 request again with the install's file as it is now, the stored risk level
-and the stored `approver_install_category`. A request without stored
+and the stored `approver_install_category`. A request with stored kinds
+can have no stored install category (NULL) in two cases: it started to
+wait while `POLICY_CLASSIFICATION` was off (no change has a category
+then), or a build of main between 15 November 2026 and pull request #6542
+wrote it (those builds did not store the install category). In both
+cases the category counts as "not known" while `POLICY_CLASSIFICATION` is
+on, like the empty text, so the click is refused when an install entry
+that matches on a `category` could fit. With that switch off, a
+`category` entry fits nothing, as when the request started to wait. A
+request without stored
 kinds (it started to wait while the switch was off) is not checked here:
 it keeps today's rule until it is decided or expires. When an install
 entry fits and the
@@ -1456,10 +1502,13 @@ params check and the destructive preview binding still run after it.
 Routing also narrows an own click: a MEHO-SA-Operator whose own network
 change is routed to Admins only cannot approve it.
 
-`approve_right` gives the same answer with the reason `not_routed`. So the
-console sign, the REST fields `may_approve` / `may_approve_reason`, the
-"waiting for you" order and the push recipients
-(`approve_right_any_status`) all follow the routing. The shadow mode of
+`approve_right` gives the same answer with the reason `not_routed`. Its
+callers load the install's routing as it is now once
+(`load_install_floor` or `current_install_floor`) and pass it as
+`floor=`, so `approve_right` checks it first, as the click does. So the
+console sign and the approval card, the REST fields `may_approve` /
+`may_approve_reason`, the "waiting for you" order, the bell count and the
+push recipients (`approve_right_any_status`) all follow the routing. The shadow mode of
 "may approve" compares the evaluator with today's answer before routing.
 
 **When the routing changes.** A waiting request keeps the group kinds it
@@ -1467,14 +1516,19 @@ stored when it started to wait. A tenant file that is imported later
 applies only to new requests, not to the ones already waiting. The
 install's file is different: the click always checks the install's
 current routing too, so a narrower install file counts at once for the
-requests that already wait. `approve_right` (the console sign, the push
-recipients) uses only the stored kinds, so in that case the sign can say
-"may approve" and the click still refuses. Run approvals are different: they store no kinds, so they use the policy that
+requests that already wait. `approve_right` (the console sign, the
+approval card, the push recipients) reads the install's current routing
+too, so the sign says what the click decides. The "Who can approve" text
+still names the stored kinds. Run approvals are different: they store no kinds, so they use the policy that
 is stored at the moment of the click.
 
 **Audit rows.** When a request has stored kinds, its audit rows carry
 `approver_rule` and `approver_roles`: the `approval.request` row and the
-`approval.decision` row of the approve. The approve audit row of a run
+`approval.decision` row of the approve. When an install entry counted at
+the click, the `approval.decision` row of the approve also carries
+`approver_floor`: the place of that install entry (for example
+`install:routing[0]`), from the install's file as it was at the click. The
+approve audit row of a run
 approval carries `approver_routing`: the rule and the kinds of each routed
 entry, also when the list is refused. When the stored routing in the
 policy file is not valid, the request does not wait. One
@@ -1517,7 +1571,7 @@ the policy that is stored at the moment a person approves it
 Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`,
 `tests/test_run_approvals_routing.py`, `tests/test_ui_approvals_routing.py`,
 `tests/test_web_push_send.py`,
-`tests/test_policy_routing_floor.py`,
+`tests/test_policy_routing_floor.py`, `tests/test_policy_routing_step_floor.py`,
 `tests/migrations/test_migration_0167_add_approval_request_approver_roles.py`,
 `tests/migrations/test_migration_0173_add_approval_request_approver_category.py`.
 
@@ -2671,7 +2725,7 @@ The per-op preview is opt-in via a builder registry in
   `register_preview_builder_switch(op_id, enabled)` (core only, not in
   the connector kit) puts the builder behind a switch for the caller's
   side only: with `enabled()` false, the preview the caller gets back
-  (`preview_operation`, `PreviewContext.for_agent` true) is the one of an
+  (`preview_operation`, `PreviewContext.agent_preview` true) is the one of an
   op with no builder. The approval request a person reads always uses the
   builder. A new card for an op that agents already see goes behind a
   switch this way.

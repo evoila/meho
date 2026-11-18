@@ -104,6 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     classify_op,
     holds_hidden_param_values,
@@ -184,7 +185,7 @@ from meho_backplane.policy.routing import (
     routing_refusal,
     stamp_approver_set,
 )
-from meho_backplane.policy.routing_floor import install_floor_refusal
+from meho_backplane.policy.routing_floor import load_install_floor
 from meho_backplane.version import running_release_id
 from meho_backplane.work_ref import work_ref_filter_values
 
@@ -247,6 +248,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "rights_change_note",
     "take_approval_lock",
     "withdraw_request",
 ]
@@ -1834,6 +1836,26 @@ async def create_pending_request(
     return request
 
 
+async def rights_change_note(request: ApprovalRequest) -> str | None:
+    """The note for a change of rights that no other admin could approve (#6641).
+
+    The request is stored all the same, so an admin added later can still
+    approve it. ``None`` for any other request, when another admin could
+    approve, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+
+    The note is extra help only. When reading it fails, the answer is
+    ``None`` and the request still waits for approval as stored.
+    """
+    if not is_rights_change(request):
+        return None
+    try:
+        return await only_admin_note(request.tenant_id, request.principal_sub)
+    except Exception:
+        _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
+        return None
+
+
 async def _audit_routing_refusal(
     operator: Operator, request: ApprovalRequest, audit_id: uuid.UUID, routing_error: str
 ) -> None:
@@ -2150,6 +2172,10 @@ async def approve_request(
     }
     if reason:
         extra["reason"] = reason
+    # The install's routing entry that counted at this click (the floor).
+    floor = getattr(request, "_approver_floor", None)
+    if floor is not None:
+        extra["approver_floor"] = floor
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     extra.update(_approver_client_fields(operator, user_agent))
@@ -3935,9 +3961,14 @@ async def _check_install_floor(
     install's file as it is now, then the stored group kinds
     (:func:`_check_routed_approver`). Does nothing while the
     ``POLICY_APPROVER_ROUTING`` switch is off
-    (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+    (:class:`~meho_backplane.policy.routing_floor.InstallFloor`). When an
+    install entry counted, its place is kept on *request* for the approve
+    audit row (``approver_floor``).
     """
-    refusal = await install_floor_refusal(session, operator, request)
+    floor = await load_install_floor(session)
+    if floor is None:
+        return
+    refusal = floor.refusal(operator, request)
     if refusal is not None:
         raise ApprovalRoutingError(
             request.id,
@@ -3945,6 +3976,9 @@ async def _check_install_floor(
             role=operator.tenant_role.value,
             reason=refusal,
         )
+    found = floor.check(request)
+    if found is not None and found.floor is not None:
+        request._approver_floor = found.floor  # type: ignore[attr-defined]
 
 
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:

@@ -930,3 +930,27 @@ def test_switches_off_over_mcp_route_and_create_anyway_is_refused_clearly(
     error = called.json()["error"]
     assert error["code"] == -32602
     assert "create_anyway" in error["message"]
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["typed-first-off", "typed-first-on"])
+async def test_include_raw_follows_the_typed_first_switch(
+    monkeypatch: pytest.MonkeyPatch, on: bool, short_tool_texts: bool
+) -> None:
+    """``include_raw`` is listed on the two discovery tools only with ``SEARCH_TYPED_FIRST`` on.
+
+    Off: no word of it, so the listing is as before the switch existed. On:
+    the input, the ``raw_operations`` output field and the description line,
+    also when the short texts replace the description (#4712).
+    """
+    monkeypatch.setenv("SEARCH_TYPED_FIRST", "true" if on else "false")
+    get_settings.cache_clear()
+    tools = await _listed_tools(_operator())
+    for name in ("search_operations", "list_operation_groups"):
+        tool = tools[name]
+        assert ("include_raw" in tool["inputSchema"]["properties"]) is on, name
+        assert ("include_raw" in tool["description"]) is on, name
+        assert ("raw_operations" in str(tool["outputSchema"])) is on, name
+        if on and not short_tool_texts:
+            registered = mcp_registry._TOOLS[name][0].to_wire()
+            assert tool["inputSchema"] == registered["inputSchema"]
+            assert tool["description"] == registered["description"]

@@ -589,9 +589,10 @@ class VaultCredentialBackend:
                 "KV-v2 reads, so a prefixed value double-resolves to a 404."
             )
 
-        if operator.check_runner_dispatch:
+        if operator.check_runner_dispatch or _tenant_has_own_vault_role(operator):
             # The check runner reads for every tenant with one Vault login,
-            # so each of its reads must stay inside the sensor's tenant.
+            # so each of its reads must stay inside the sensor's tenant. A
+            # tenant with its own Vault login role gets the same check.
             _enforce_vault_tenant_scope(operator, mount=mount, path=secret_ref)
 
         async with vault_client_for_operator(operator) as client:
@@ -858,6 +859,13 @@ async def missing_secret_field_map_sources(
         return []
     _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
     return sorted({src for src in field_map.values() if src not in secret_data})
+
+
+def _tenant_has_own_vault_role(operator: Operator) -> bool:
+    """Whether *operator*'s tenant has its own Vault login role (lazy import, see below)."""
+    from meho_backplane.connectors.vault.tenant_scope import tenant_has_own_vault_role
+
+    return tenant_has_own_vault_role(operator)
 
 
 def _enforce_vault_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:

@@ -14,7 +14,8 @@ line number and one fixed sentence. It never prints the word, the pattern or
 the line, and it never says which entry of the list matched.
 
 Exit codes: 0 = no hit (or no list set, with a note), 1 = at least one hit,
-2 = the script could not run (bad list, git failure, no base).
+2 = the script could not run (bad list, no list with ``--require-list``,
+git failure, no base).
 
 Usage: check_private_names.py --base <git rev> [--require-list]
 """
@@ -146,10 +147,24 @@ def find_hits(diff: bytes, pattern: re.Pattern[str]) -> list[tuple[str, int]]:
     ]
 
 
+def _command_property(value: str) -> str:
+    """Escape a value for a property of a GitHub workflow command."""
+    return (
+        value.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+        .replace(":", "%3A")
+        .replace(",", "%2C")
+    )
+
+
 def report(hits: Iterable[tuple[str, int]]) -> None:
     for path, number in hits:
-        print(f"::error file={path},line={number}::{HIT_MESSAGE}")
-        print(f"{path}:{number}: {HIT_MESSAGE}")
+        # A line break in a file name must not start a new output line,
+        # because GitHub reads any line that starts with "::" as a command.
+        plain = path.replace("\r", "\\r").replace("\n", "\\n")
+        print(f"::error file={_command_property(path)},line={number}::{HIT_MESSAGE}")
+        print(f"{plain}:{number}: {HIT_MESSAGE}")
 
 
 def read_diff(base: str) -> bytes:
@@ -165,7 +180,7 @@ def read_diff(base: str) -> bytes:
             "--text",
             "--src-prefix=a/",
             "--dst-prefix=b/",
-            "--diff-filter=ACMR",
+            "--diff-filter=ACMRT",
             f"{base}..HEAD",
         ],
         capture_output=True,
@@ -198,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"error: the secret {LIST_ENV} is not set, so the check cannot run",
                 file=sys.stderr,
             )
-            return 1
+            return 2
         print(
             f"::warning::The secret {LIST_ENV} is not set, so the private name check did not run."
         )

@@ -147,7 +147,7 @@ def test_missing_list_fails_when_it_is_required(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     _commit(root, {"src/app.txt": "clean\n"})
     result = _run(root, None, "--require-list")
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "PRIVATE_NAME_LIST" in result.stderr
 
 
@@ -229,3 +229,33 @@ def test_file_git_treats_as_binary_is_still_checked(tmp_path: Path) -> None:
     assert done.returncode == 1
     assert "data.bin:2:" in done.stdout
     assert "marked.txt:2:" in done.stdout
+
+
+def test_file_whose_type_changes_is_checked(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "link.txt").symlink_to("old.txt")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "add a link")
+    (root / "link.txt").unlink()
+    _commit(root, {"link.txt": f"now a file with {_WORD_A}\n"})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "link.txt:1:" in done.stdout
+
+
+def test_file_name_is_escaped_in_the_workflow_command(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    name = "a%b,c:d\n::warning::e\rf.txt"
+    _commit(root, {name: f"x {_WORD_A}\n"})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    lines = done.stdout.splitlines()
+    assert (
+        "::error file=a%25b%2Cc%3Ad%0A%3A%3Awarning%3A%3Ae%0Df.txt,line=1::"
+        + ("this line holds a word of the private name list")
+        in lines
+    )
+    assert "a%b,c:d\\n::warning::e\\rf.txt:1: this line holds a word of the private name list" in (
+        lines
+    )
+    assert not any(line.startswith("::warning::") for line in lines)

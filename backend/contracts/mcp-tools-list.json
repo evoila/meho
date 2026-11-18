@@ -611,6 +611,13 @@
               "null"
             ]
           },
+          "group": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "include_raw": {
             "default": false,
             "type": "boolean"
@@ -650,6 +657,45 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "operations": {
+                  "items": {
+                    "properties": {
+                      "op_id": {
+                        "type": "string"
+                      },
+                      "requires_approval": {
+                        "type": "boolean"
+                      },
+                      "safety_level": {
+                        "enum": [
+                          "safe",
+                          "caution",
+                          "dangerous",
+                          "destructive"
+                        ],
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op_id",
+                      "summary",
+                      "safety_level",
+                      "requires_approval"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "operations_more": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "partial": {
                   "type": "boolean"
                 },
@@ -674,6 +720,9 @@
               "string",
               "null"
             ]
+          },
+          "note": {
+            "type": "string"
           },
           "raw_operations": {
             "properties": {

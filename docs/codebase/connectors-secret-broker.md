@@ -219,6 +219,17 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   before any Vault login; nothing is read or written. An approval made
   before MEHO showed target ids is refused too; the requester sends a new
   request.
+- The approval binds every side that names a MEHO target. For a `linux:`
+  sink the card shows the name as typed (`target`), the Linux target it
+  points to (`target_id`, `target_name`), its `host` and its SSH `port`
+  (22 when the target names none). The approved run compares the id, the
+  host and the port with the target it finds (`check_target` of the
+  `linux:` store, in `connectors/linux/secret_sink_target.py`). Another
+  target, a new host or port on the same target, or a card without one of
+  them, refuses the run with `LinuxTargetChangedError`: "Nothing was read
+  or written. Send a new request". The check runs before the sudo password
+  lookup, before the source is read and before any SSH call. A `vault:`
+  side names no MEHO target.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.
@@ -477,7 +488,8 @@ owner is never `root`. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
 client id, the target names, and the paths. For a `linux:` move the approval
-card shows the path and the owner, never the content. The person who approves
+card shows the path, the owner, the target, its host and its port, never
+the content. The person who approves
 reads both: the path says where the secret goes, the owner says who can read
 it.
 

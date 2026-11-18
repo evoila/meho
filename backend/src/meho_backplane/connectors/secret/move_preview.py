@@ -34,6 +34,11 @@ What the card adds to the refs
   The approved run compares all three with the target it finds and
   refuses another target, role or mount
   (:class:`~meho_backplane.connectors.secret.vault_target_endpoint.VaultTargetChangedError`).
+* A ``linux`` side names the target as typed (``target``), the Linux target
+  it points to now (``target_id``, ``target_name``), its ``host`` and its
+  SSH ``port``. The approved run compares the id, host and port with the
+  target it finds and refuses another one
+  (:class:`~meho_backplane.connectors.linux.secret_sink_target.LinuxTargetChangedError`).
 * The sink says whether its secret exists (``secret_exists``) and, with
   ``merge``, whether the named field exists (``field_exists``): ``"yes"``,
   ``"no"`` or ``"not known"``. A Vault sink looks it up with the same
@@ -45,8 +50,8 @@ What the card adds to the refs
   (:meth:`~meho_backplane.connectors.secret.vault_endpoint.VaultKvSecretEndpoint.write_secret`).
 
 The agent's own ``preview_operation`` gets only the refs: ``{kind, ref}``
-and, for a ``vault-target`` side, the target name as typed. It makes no
-target lookup and no Vault login.
+and, for a ``vault-target`` or ``linux`` side, the target name as typed. It
+makes no target lookup and no Vault login.
 
 Why ``secret.move`` reaches a builder at all
 ============================================
@@ -86,7 +91,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
+from meho_backplane.connectors.linux.secret_endpoint import (
+    LinuxSecretRefError,
+    LinuxSecretSinkEndpoint,
+    parse_linux_secret_ref,
+)
+from meho_backplane.connectors.linux.secret_sink_target import sink_target_card
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
 from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
 from meho_backplane.connectors.secret.vault_target_endpoint import (
@@ -103,12 +113,15 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
+from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.secret.endpoints import SecretRef
 
 __all__ = ["build_secret_move_preview", "check_secret_move_sink"]
+
+_LINUX_KIND = "linux"
 
 
 def _ref_only(spec: SecretRef) -> dict[str, str]:
@@ -120,11 +133,25 @@ def _ref_only(spec: SecretRef) -> dict[str, str]:
     a value. No I/O.
     """
     summary = {"kind": spec.kind, "ref": spec.ref}
-    if spec.kind == VAULT_TARGET_KIND:
-        # The target whose role does this read or write, named on its own
-        # so a reviewer does not have to cut it out of the ref.
+    if spec.kind in (VAULT_TARGET_KIND, _LINUX_KIND):
+        # The target this side names, on its own so a reviewer does not
+        # have to cut it out of the ref.
         summary["target"] = spec.ref.partition("/")[0]
     return summary
+
+
+async def _linux_target_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
+    """The Linux target a ``linux:`` side points to now: id, name, host and port.
+
+    Empty when the name finds no Linux target (or more than one). The
+    approved run then finds no target id on the card and refuses.
+    """
+    try:
+        endpoint = LinuxSecretSinkEndpoint(spec.ref)
+        row = await endpoint.check_target(operator)
+    except (LinuxSecretRefError, TargetNotFoundError, AmbiguousTargetError):
+        return {}
+    return sink_target_card(row)
 
 
 async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
@@ -136,6 +163,11 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
     approved run compares them with the target it finds. A name that does
     not resolve to a usable Vault target gets no ``target_id``; the
     permission check then refuses the call.
+
+    A ``linux:`` side also names the Linux target it points to now
+    (``target_id``, ``target_name``), its ``host`` and its SSH ``port``.
+    The approved run compares the id, host and port with the target it
+    finds.
     """
     summary = _ref_only(spec)
     if spec.kind == VAULT_TARGET_KIND:
@@ -147,6 +179,8 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
         summary["target_id"] = str(row.id)
         summary["target_name"] = row.name
         summary["vault_role"], summary["vault_mount"] = login_of(row)
+    elif spec.kind == _LINUX_KIND:
+        summary.update(await _linux_target_summary(spec, operator))
     return summary
 
 
@@ -184,7 +218,7 @@ def _linux_sink_refusal(raw_to: str) -> str | None:
         sink = parse_secret_ref(raw_to)
     except ValueError:
         return None  # the run reports a malformed ref itself
-    if sink.kind != "linux":
+    if sink.kind != _LINUX_KIND:
         return None
     try:
         parse_linux_secret_ref(sink.ref)

@@ -1002,6 +1002,43 @@ async def test_check_runner_operator_of_unlisted_tenant_keeps_runner_role(
     ]
 
 
+async def test_check_runner_of_unlisted_tenant_without_runner_role_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VAULT_OIDC_ROLE_TENANTS", _TENANT_A)
+    monkeypatch.delenv("VAULT_CHECK_RUNNER_ROLE", raising=False)
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="runner-jwt", tenant_id=_TENANT_B, check_runner_dispatch=True)
+
+    with pytest.raises(VaultRoleDeniedError) as exc_info:
+        async with vault_client_for_operator(operator):
+            pass
+
+    assert _TENANT_B in str(exc_info.value)
+    assert fake.auth.jwt.login_calls == []
+
+
+@pytest.mark.parametrize(
+    ("tenant", "by_tenant"),
+    [(_TENANT_A, ""), (_TENANT_C, f"{_TENANT_C}=meho-mcp-c")],
+)
+async def test_check_runner_of_allowed_tenant_without_runner_role_gets_shared_role(
+    monkeypatch: pytest.MonkeyPatch, tenant: str, by_tenant: str
+) -> None:
+    monkeypatch.setenv("VAULT_OIDC_ROLE_TENANTS", _TENANT_A)
+    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", by_tenant)
+    monkeypatch.delenv("VAULT_CHECK_RUNNER_ROLE", raising=False)
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="runner-jwt", tenant_id=tenant, check_runner_dispatch=True)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [{"role": "meho-mcp", "jwt": "runner-jwt", "path": "jwt"}]
+
+
 async def test_empty_tenant_list_gives_shared_role_to_unmapped_tenant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

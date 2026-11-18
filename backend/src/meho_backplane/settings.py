@@ -3059,9 +3059,13 @@ class Settings(BaseModel):
     @classmethod
     def _vault_oidc_role_tenants_must_be_uuid_csv(cls, value: str) -> str:
         """Stop the start when ``VAULT_OIDC_ROLE_TENANTS`` has an entry that is not a UUID."""
-        for chunk in (part.strip() for part in value.split(",")):
-            if not chunk:
-                continue
+        chunks = [part.strip() for part in value.split(",") if part.strip()]
+        if value.strip() and not chunks:
+            raise ValueError(
+                f"VAULT_OIDC_ROLE_TENANTS has no tenant UUID; got {value!r}. "
+                "Leave it empty, or list tenant UUIDs."
+            )
+        for chunk in chunks:
             try:
                 UUID(chunk)
             except ValueError as exc:

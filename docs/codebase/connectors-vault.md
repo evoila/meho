@@ -98,8 +98,12 @@ default). Empty means every tenant with no map entry gets `vault_oidc_role`.
 When set, only a tenant in the list gets `vault_oidc_role`. A tenant in
 neither the list nor `VAULT_OIDC_ROLE_BY_TENANT` gets a `VaultRoleDeniedError`
 that names the tenant and tells the admin to add it to
-`VAULT_OIDC_ROLE_BY_TENANT`; no Vault call is made. The per-target role, the
-check-runner role and the map entries are not affected. A tenant id that is
+`VAULT_OIDC_ROLE_BY_TENANT`; no Vault call is made. The list also covers the
+check-runner login (Sensors and event intake) when `VAULT_CHECK_RUNNER_ROLE` is
+empty: that login uses `vault_oidc_role`, so a runner of a tenant in neither
+the list nor the map gets the same refusal. The per-target role, a set
+check-runner role and the map entries are not affected. A value of only commas
+fails the pod start. A tenant id that is
 not a UUID fails the pod start. Leave it empty on the chart's built-in Vault,
 where one role serves every tenant.
 

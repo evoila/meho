@@ -659,7 +659,7 @@ def test_vault_oidc_role_tenants_accepts_uuid_csv(raw: str) -> None:
     assert settings.vault_oidc_role_tenants == raw
 
 
-@pytest.mark.parametrize("raw", ["not-a-uuid", f"{_UUID_A},bad"])
+@pytest.mark.parametrize("raw", ["not-a-uuid", f"{_UUID_A},bad", ",", " , ,"])
 def test_vault_oidc_role_tenants_rejects_malformed(raw: str) -> None:
     with pytest.raises(ValidationError) as exc_info:
         Settings(

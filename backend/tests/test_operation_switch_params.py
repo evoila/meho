@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from jsonschema import Draft202012Validator
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -238,11 +239,17 @@ def test_visible_schema_off_strips_examples_inside_maps_and_lists() -> None:
             "entries": {"type": "object", "additionalProperties": entry},
             "named": {"type": "object", "patternProperties": {"^n_": entry}},
             "pair": {"type": "array", "prefixItems": [entry], "items": {"type": "string"}},
+            "both": {
+                "type": "object",
+                "properties": {"first": {"type": "object"}},
+                "patternProperties": {"^f": entry},
+            },
         },
         "example": {
             "entries": {"first": {"mode": "m", _HIDDEN: "x"}},
             "named": {"n_one": {"mode": "m", _HIDDEN: "x"}},
             "pair": [{"mode": "m", _HIDDEN: "x"}, "tail"],
+            "both": {"first": {"mode": "m", _HIDDEN: "x"}},
         },
     }
     shown = visible_parameter_schema(stored)
@@ -251,7 +258,11 @@ def test_visible_schema_off_strips_examples_inside_maps_and_lists() -> None:
         "entries": {"first": {"mode": "m"}},
         "named": {"n_one": {"mode": "m"}},
         "pair": [{"mode": "m"}, "tail"],
+        "both": {"first": {"mode": "m"}},
     }
+    checked = Draft202012Validator(checked_parameter_schema(stored))
+    assert not checked.is_valid({"both": {"first": {"mode": "m", _HIDDEN: "x"}}})
+    assert checked.is_valid(shown["example"])
 
 
 def test_checked_schema_off_refuses_the_parameter_in_every_branch() -> None:
@@ -445,6 +456,19 @@ def _open_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
         ],
         "$defs": {"Needs": {"required": ["name", _HIDDEN]}},
     }
+    base = {"Base": {"type": "object", "properties": {"name": {"type": "string"}}}}
+    ref_sibling = {"$ref": "#/$defs/Base", "properties": {_HIDDEN: marked}, "$defs": base}
+    ref_closed = {
+        "type": "object",
+        "allOf": [
+            {
+                "$ref": "#/$defs/Base",
+                "properties": {_HIDDEN: marked},
+                "unevaluatedProperties": False,
+            }
+        ],
+        "$defs": base,
+    }
     return [
         ("no-rule", no_rule, {"name": "a", "other": 1}),
         ("open", open_true, {"name": "a", "other": 1}),
@@ -455,6 +479,8 @@ def _open_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
         ("dependent-required", dependent, {"name": "a"}),
         ("all-of-required", sibling_required, {"name": "a"}),
         ("linked-required", linked_required, {"name": "a"}),
+        ("ref-sibling", ref_sibling, {"name": "a"}),
+        ("ref-unevaluated", ref_closed, {"name": "a"}),
     ]
 
 

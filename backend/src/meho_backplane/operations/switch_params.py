@@ -118,21 +118,6 @@ def _pointer(root: object, ref: str) -> object | None:
     return target
 
 
-def _resolve(root: object, node: object) -> object:
-    """Follow local ``$ref`` links from *node*; return the schema they end at."""
-    seen: set[str] = set()
-    while isinstance(node, dict):
-        ref = node.get("$ref")
-        if not isinstance(ref, str) or ref in seen:
-            return node
-        seen.add(ref)
-        target = _pointer(root, ref)
-        if target is None:
-            return node
-        node = target
-    return node
-
-
 def _hidden(root: object, property_schema: object) -> bool:
     """Return whether *property_schema*, or a schema it links to, is marked and off."""
     seen: set[str] = set()
@@ -171,17 +156,24 @@ def _branches(node: dict[str, Any]) -> list[object]:
 
 
 def _property_schemas(root: object, schema: object) -> list[dict[str, Any]]:
-    """Return *schema* and the branches that describe the same object value."""
+    """Return *schema* and the branches that describe the same object value.
+
+    A schema with a local ``$ref`` counts with the schema it links to: both
+    its own keywords and the linked ones describe the value.
+    """
     found: list[dict[str, Any]] = []
     pending = [schema]
     seen: set[int] = set()
     while pending:
-        node = _resolve(root, pending.pop())
+        node = pending.pop()
         if not isinstance(node, dict) or id(node) in seen:
             continue
         seen.add(id(node))
         found.append(node)
         pending.extend(_branches(node))
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            pending.append(_pointer(root, ref))
     return found
 
 
@@ -202,9 +194,9 @@ def _value_schemas(nodes: list[dict[str, Any]], key: str) -> list[object]:
     found: list[object] = []
     for node in nodes:
         properties = node.get("properties")
-        if isinstance(properties, dict) and key in properties:
+        named = isinstance(properties, dict) and key in properties
+        if isinstance(properties, dict) and named:
             found.append(properties[key])
-            continue
         patterns = node.get("patternProperties")
         matched = [
             schema
@@ -212,7 +204,7 @@ def _value_schemas(nodes: list[dict[str, Any]], key: str) -> list[object]:
             if _pattern_matches(pattern, key)
         ]
         found.extend(matched)
-        if not matched and isinstance(node.get("additionalProperties"), dict):
+        if not named and not matched and isinstance(node.get("additionalProperties"), dict):
             found.append(node["additionalProperties"])
     return found
 
@@ -308,12 +300,23 @@ class _Walk:
         inherited: frozenset[str],
         refs: frozenset[str],
     ) -> object:
-        """Walk the schema that *ref* links to in place, so the hidden names apply to it."""
-        linked = self.node(target, inherited, refs | {ref})
+        """Walk the schema that *ref* links to in place, so the hidden names apply to it.
+
+        The linked schema goes into the ``allOf`` of the same object, so
+        keywords beside the link (such as ``unevaluatedProperties``) still
+        see the properties it declares.
+        """
+        hidden = frozenset(inherited | _all_hidden_names(self.root, node))
+        linked = self.node(target, hidden, refs | {ref})
         rest = {key: value for key, value in node.items() if key != "$ref"}
         if not rest:
             return linked
-        return {"allOf": [linked, self.node(rest, inherited, refs)]}
+        walked = self.node(rest, hidden, refs)
+        if not isinstance(walked, dict):
+            return walked
+        branches = walked.get("allOf")
+        walked["allOf"] = [linked, *(branches if isinstance(branches, list) else [])]
+        return walked
 
     def _keyword(
         self,

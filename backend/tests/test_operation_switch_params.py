@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -978,6 +979,108 @@ def test_a_keyword_not_on_a_property_stops_an_ingested_operation_from_registerin
     )
     with pytest.raises(ValueError, match="belongs on a property"):
         apply_safety_floor(product="widget", version="1.x", impl_id="widget", proto=proto)
+
+
+def _refused_schemas() -> list[tuple[str, dict[str, Any], str]]:
+    marker = {SWITCH_MARKER: FILE_REF_PARAMS_SWITCH}
+    marked_prop = {"properties": {_HIDDEN: marker}, "required": [_HIDDEN]}
+    links = "may link only with plain"
+    conditions = "cannot be under 'if', 'then', 'else' or 'not'"
+    return [
+        (
+            "anchor",
+            {
+                "properties": {_HIDDEN: {"$ref": "#Marked"}},
+                "$defs": {"M": {"$anchor": "Marked", **marker}},
+            },
+            links,
+        ),
+        (
+            "dynamic-ref",
+            {
+                "properties": {_HIDDEN: {"$dynamicRef": "#Marked"}},
+                "$defs": {"M": {"$dynamicAnchor": "Marked", **marker}},
+            },
+            links,
+        ),
+        (
+            "nested-id",
+            {
+                "properties": {_HIDDEN: {"$ref": "marked.json"}},
+                "$defs": {"M": {"$id": "marked.json", **marker}},
+            },
+            links,
+        ),
+        (
+            "percent-encoded-pointer",
+            {"properties": {_HIDDEN: {"$ref": "#/$defs/M%61rked"}}, "$defs": {"Marked": marker}},
+            links,
+        ),
+        ("if", {"properties": {_HIDDEN: marker}, "if": marked_prop, "then": {}}, conditions),
+        ("then", {"properties": {_HIDDEN: marker}, "if": {}, "then": marked_prop}, conditions),
+        ("else", {"properties": {_HIDDEN: marker}, "if": {}, "else": marked_prop}, conditions),
+        ("not", {"properties": {_HIDDEN: marker}, "not": marked_prop}, conditions),
+        (
+            "not-through-link",
+            {
+                "properties": {_HIDDEN: {"$ref": "#/$defs/Marked"}},
+                "not": {"properties": {_HIDDEN: {"$ref": "#/$defs/Marked"}}, "required": [_HIDDEN]},
+                "$defs": {"Marked": marker},
+            },
+            conditions,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [(schema, message) for _, schema, message in _refused_schemas()],
+    ids=[name for name, _, _ in _refused_schemas()],
+)
+async def test_a_keyword_with_an_unsupported_link_or_condition_stops_a_typed_operation(
+    stub_embedding_service: AsyncMock, schema: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        await _register(stub_embedding_service, schema)
+    async with get_sessionmaker()() as session:
+        rows = (
+            await session.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == _OP))
+        ).all()
+    assert rows == []
+
+
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [(schema, message) for _, schema, message in _refused_schemas()],
+    ids=[name for name, _, _ in _refused_schemas()],
+)
+def test_a_keyword_with_an_unsupported_link_or_condition_stops_an_ingested_operation(
+    schema: dict[str, Any], message: str
+) -> None:
+    proto = EndpointDescriptorProto(
+        op_id="GET:/v1/widget",
+        method="GET",
+        path="/v1/widget",
+        summary="Read a widget.",
+        description="Read a widget.",
+        parameter_schema=schema,
+        safety_level="safe",
+        requires_approval=False,
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        apply_safety_floor(product="widget", version="1.x", impl_id="widget", proto=proto)
+
+
+def test_a_schema_without_the_keyword_may_use_any_link_or_condition() -> None:
+    check_switch_names(
+        {
+            "properties": {"x": {"$ref": "#Named"}},
+            "not": {"required": ["y"]},
+            "$defs": {"N": {"$anchor": "Named", "$id": "n.json"}},
+        },
+        op_id="widget.x",
+    )
 
 
 @pytest.mark.parametrize(

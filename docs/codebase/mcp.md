@@ -2111,6 +2111,11 @@ knows one switch name today: `file_ref_params`, the setting
   `patternProperties` schema), stops the operation from registering, for
   typed, multi-step and ingested operations
   (`operations/switch_registration.py`).
+* The keyword under `if`, `then`, `else` or `not` also stops the
+  operation from registering. So does a schema with the keyword that
+  links in a way MEHO does not follow: `$anchor`, `$dynamicRef`, an
+  `$id` below the root, or a `$ref` that is not a plain `#/` pointer
+  (for example one with `%` escapes).
 * With the switch on, the parameter shows and is accepted as usual.
 * No new MCP tool and no new field.
 

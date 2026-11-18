@@ -5,9 +5,11 @@
 
 An operation registers only when MEHO can apply every keyword of its
 parameter schema (:mod:`~meho_backplane.operations.switch_params`): the
-keyword names a known switch, and it sits on a property. A typo or a
-keyword in another place stops the operation from registering, so it
-never shows a parameter that should stay hidden.
+keyword names a known switch, it sits on a property, it is not under
+``if``, ``then``, ``else`` or ``not``, and the schema links only with
+plain ``#/`` pointers. A typo or a keyword in another place stops the
+operation from registering, so it never shows a parameter that should
+stay hidden.
 """
 
 from __future__ import annotations
@@ -29,8 +31,10 @@ __all__ = ["check_switch_names"]
 def check_switch_names(schema: object, *, op_id: str) -> None:
     """Raise :class:`ValueError` when *schema* has a keyword MEHO cannot apply.
 
-    That is a switch name MEHO does not know, or a keyword that is not on a
-    property (:func:`_misplaced_markers`).
+    That is a switch name MEHO does not know, a keyword that is not on a
+    property (:func:`_misplaced_markers`), a keyword under a condition
+    (:func:`_conditional_markers`), or a keyword in a schema that links
+    in a way MEHO does not follow (:func:`_unsupported_links`).
     """
     unknown = sorted(switch_names(schema) - KNOWN_SWITCHES.keys())
     if unknown:
@@ -45,6 +49,19 @@ def check_switch_names(schema: object, *, op_id: str) -> None:
             f"belongs on a property schema (or on a shared schema that only "
             f"properties link to)"
         )
+    conditional = _conditional_markers(schema)
+    if conditional:
+        raise ValueError(
+            f"op {op_id!r} has {SWITCH_MARKER!r} under {conditional[0]!r}; the keyword "
+            f"cannot be under 'if', 'then', 'else' or 'not'"
+        )
+    if switch_names(schema):
+        links = _unsupported_links(schema)
+        if links:
+            raise ValueError(
+                f"op {op_id!r} uses {SWITCH_MARKER!r} with the link {links[0]!r}; a "
+                f"schema with this keyword may link only with plain '#/' pointers"
+            )
 
 
 #: The places at the root that hold shared schemas.
@@ -118,4 +135,73 @@ def _misplaced_markers(schema: object) -> list[str]:
             if not allowed and _marked(schema, node):
                 found.append(path or "/")
             pending.extend(_children(node, path, root=node is schema))
+    return sorted(found)
+
+
+#: Keywords whose schema is a condition, or is chosen by one.
+_CONDITIONS: Final[frozenset[str]] = frozenset({"if", "then", "else", "not"})
+#: Link keywords that MEHO does not follow.
+_LINK_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"$anchor", "$dynamicAnchor", "$dynamicRef", "$recursiveAnchor", "$recursiveRef"}
+)
+
+
+def _schemas(schema: object) -> list[tuple[dict[str, Any], str]]:
+    """Return every schema in *schema*, with its path, the shared ones too."""
+    found: list[tuple[dict[str, Any], str]] = []
+    pending: list[tuple[object, str]] = [(schema, "")]
+    while pending:
+        node, path = pending.pop()
+        if isinstance(node, list):
+            pending.extend((item, f"{path}/{index}") for index, item in enumerate(node))
+        elif isinstance(node, dict):
+            found.append((node, path or "/"))
+            pending.extend((child, at) for child, at, _ in _children(node, path, root=False))
+    return found
+
+
+def _reaches_marker(root: object, node: object) -> bool:
+    """Return whether *node*, or a schema in it or linked from it, carries the keyword."""
+    seen: set[str] = set()
+    pending: list[object] = [node]
+    while pending:
+        for item, _ in _schemas(pending.pop()):
+            if SWITCH_MARKER in item:
+                return True
+            ref = item.get("$ref")
+            if isinstance(ref, str) and ref not in seen:
+                seen.add(ref)
+                pending.append(_pointer(root, ref))
+    return False
+
+
+def _conditional_markers(schema: object) -> list[str]:
+    """Return the sorted paths of the conditions that hold or link to the keyword."""
+    return sorted(
+        f"{path.rstrip('/')}/{key}"
+        for node, path in _schemas(schema)
+        for key in _CONDITIONS & node.keys()
+        if _reaches_marker(schema, node[key])
+    )
+
+
+def _unsupported_links(schema: object) -> list[str]:
+    """Return the sorted paths of the links in *schema* that MEHO does not follow.
+
+    MEHO follows a ``$ref`` that is a plain ``#/`` pointer to a part of the
+    same schema. Anchors, dynamic links, an ``$id`` below the root, and a
+    ``$ref`` in any other form (another document, ``#name``, or a pointer
+    with ``%`` escapes) are not followed.
+    """
+    found: list[str] = []
+    for node, path in _schemas(schema):
+        at = path.rstrip("/")
+        found.extend(f"{at}/{key}" for key in sorted(_LINK_KEYWORDS & node.keys()))
+        if "$id" in node and node is not schema:
+            found.append(f"{at}/$id")
+        ref = node.get("$ref")
+        if ref is not None and not (
+            isinstance(ref, str) and ref.startswith("#/") and "%" not in ref
+        ):
+            found.append(f"{at}/$ref")
     return sorted(found)

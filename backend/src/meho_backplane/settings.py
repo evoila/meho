@@ -2662,6 +2662,14 @@ class Settings(BaseModel):
     #: exist when nothing matched. Off: the same answer as before. Set via
     #: ``CONNECTOR_LIST_PRODUCT_ALIASES``.
     connector_list_product_aliases: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Call hints on each ``search_operations`` hit (#4331), behind a switch
+    #: that is off by default. When on, each ranked hit also has
+    #: ``required_params`` (the names in the top-level ``required`` list of
+    #: the op's ``parameter_schema``) and ``target_required`` (the
+    #: dispatcher's own target rule), and the tool's output schema names
+    #: them. Off: the same answers and tool texts as before. Set via
+    #: ``SEARCH_HIT_CALL_HINTS``.
+    search_hit_call_hints: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3739,6 +3747,9 @@ def get_settings() -> Settings:
         ),
         connector_list_product_aliases=parse_bool_env(
             os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),
+        ),
+        search_hit_call_hints=parse_bool_env(
+            os.environ.get("SEARCH_HIT_CALL_HINTS"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

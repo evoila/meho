@@ -154,12 +154,12 @@ def _stored_password(found: tuple[dict[str, Any], int] | None, plan: PasswordPla
 
 def _write_kv(
     client: Any, plan: PasswordPlan, found: tuple[dict[str, Any], int] | None, value: str
-) -> None:
-    """Store the password. Keep the other fields; refuse a lost race (``cas``)."""
+) -> int:
+    """Store the password; return its KV version. Keep other fields; refuse a lost race."""
     data = dict(found[0]) if found else {}
     data[plan.field] = value
     try:
-        client.secrets.kv.v2.create_or_update_secret(
+        payload = client.secrets.kv.v2.create_or_update_secret(
             path=plan.path,
             secret=data,
             cas=found[1] if found else 0,
@@ -171,6 +171,7 @@ def _write_kv(
             "check that the KV-v2 mount exists and that the secret is not "
             "soft-deleted (undelete or destroy it, then run again)"
         ) from exc
+    return int(payload["data"]["version"])
 
 
 def _user_policies(client: Any, username: str, mount: str) -> list[str] | None:

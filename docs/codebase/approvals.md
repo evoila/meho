@@ -1246,8 +1246,10 @@ decides: not the requester, a person in a chosen tenant, and an admin
 **Who sets the mark.**
 
 - The park step (`create_pending_request`) sets it for a group or role
-  change in MEHO's own login realm (`grant_facts`, see above). A request
-  outside the login realm keeps the usual rules.
+  change in MEHO's own login realm (`grant_facts`, see above). Outside
+  the login realm, such a change carries the mark when its operation is
+  also registered with `register_rights_change_op` (every Keycloak one
+  is, see the next point).
 - An operation registered with `register_rights_change_op` is a rights
   change on every request. `policy.classify` (a change of a category,
   labels or the "always wait" mark, see
@@ -2702,7 +2704,7 @@ The per-op preview is opt-in via a builder registry in
   `register_preview_builder_switch(op_id, enabled)` (core only, not in
   the connector kit) puts the builder behind a switch for the caller's
   side only: with `enabled()` false, the preview the caller gets back
-  (`preview_operation`, `PreviewContext.for_agent` true) is the one of an
+  (`preview_operation`, `PreviewContext.agent_preview` true) is the one of an
   op with no builder. The approval request a person reads always uses the
   builder. A new card for an op that agents already see goes behind a
   switch this way.

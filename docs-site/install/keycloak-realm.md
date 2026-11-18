@@ -39,10 +39,9 @@ the end, then return to the trail.
 | 4 default client scopes | On the login clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
 | `offline_access` | Built-in client scope, optional on `meho-cli` and `meho-mcp` | The long login that renews itself |
-| `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
+| `MEHO-Readers`, `MEHO-Operators`, `MEHO-Admins` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
-| A user in `MEHO-SA-Operators` | Realm user | A second person for daily work: runs changes, approves their own risky changes and other people's |
 | A user of realm `master` with every role of the client `meho-realm` except `impersonation` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
 
 !!! tip "There is an automation for this"
@@ -50,7 +49,7 @@ the end, then return to the trail.
     The CLI ships an idempotent helper — `meho admin keycloak
     bootstrap-clients` — that creates the three public clients, the eight
     mappers, the four default scopes, the three `mcp:*` scopes, the
-    five groups and `MEHO-Platform-Admins`, and puts the first admin
+    three groups and `MEHO-Platform-Admins`, and puts the first admin
     user in `MEHO-Admins` and `MEHO-Platform-Admins`, in one
     invocation. This page is the
     manual reference path (and what the helper encodes); use the helper
@@ -341,9 +340,7 @@ sign-in levels, and makes the flow the browser flow of `meho-cli-approve`. It wa
 for approval
 ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
 It is a change of rights: another admin (a tenant admin or a platform
-admin) approves it, never the person who asked. So an install needs two
-admins before it runs this call. Add the second admin in Keycloak itself
-(Step 6, and put them in `MEHO-Admins` or `MEHO-Platform-Admins`).
+admin) approves it, never the person who asked.
 With the built-in Keycloak, `helm upgrade` adds the flow without this call.
 
 ```bash
@@ -517,10 +514,7 @@ The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 `keycloak.authflow.ensure_approval_touch` instead. It waits for
 approval. It is a change of rights: another admin (a tenant admin or a
-platform admin) approves it, never the person who asked. So an install
-needs two admins before it runs this call. Add the second admin in
-Keycloak itself (Step 6, and put them in `MEHO-Admins` or
-`MEHO-Platform-Admins`).
+platform admin) approves it, never the person who asked.
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch \
@@ -604,7 +598,7 @@ but turn **Multivalued** and **Aggregate attribute values** on: then
 Keycloak collects the `meho_tenant` value of every group of the person.
 
 These mappers hold **no fixed value**. They read the attributes of the
-person's group ([Step 5](#step-5-create-the-five-groups)): when a person
+person's group ([Step 5](#step-5-create-the-three-groups)): when a person
 has no value of their own, the stock User Attribute mapper takes it
 from the person's group. Never put a fixed `tenant_id` or `tenant_role`
 (a Hardcoded claim mapper) on these clients: everyone who logs in
@@ -637,21 +631,19 @@ Explicitly assign these as **default** client scopes on the client:
     complete but has no `sub`, and a wall of `invalid_token` /
     `missing_sub` responses.
 
-## Step 5 — Create the five groups
+## Step 5 — Create the three groups
 
 A person gets their tenant and their role from their group. Create
-these five groups at the **top level** (not inside another group), and
+these three groups at the **top level** (not inside another group), and
 give each one these **attributes** (open the group → **Attributes**):
 
-| Group | `tenant_id` | `tenant_role` | `approver` | `meho_tenant` |
-|---|---|---|---|---|
-| `MEHO-Readers` | your tenant UUID | `read_only` | – | `<uuid>:<name>:Readers` |
-| `MEHO-Operators` | your tenant UUID | `operator` | – | `<uuid>:<name>:Operators` |
-| `MEHO-SA-Operators` | your tenant UUID | `operator` | – | `<uuid>:<name>:SA-Operators` |
-| `MEHO-Admins` | your tenant UUID | `tenant_admin` | – | `<uuid>:<name>:Admins` |
-| `MEHO-Approvers` | your tenant UUID | `read_only` | `true` | `<uuid>:<name>:Approvers` |
+| Group | `tenant_id` | `tenant_role` | `meho_tenant` |
+|---|---|---|---|
+| `MEHO-Readers` | your tenant UUID | `read_only` | `<uuid>:<name>:Readers` |
+| `MEHO-Operators` | your tenant UUID | `operator` | `<uuid>:<name>:Operators` |
+| `MEHO-Admins` | your tenant UUID | `tenant_admin` | `<uuid>:<name>:Admins` |
 
-All five groups carry the same tenant UUID (mint one with `uuidgen`).
+All three groups carry the same tenant UUID (mint one with `uuidgen`).
 `tenant_role` uses an underscore (`read_only`), never a hyphen. In
 `meho_tenant`, `<uuid>` is the same tenant UUID and `<name>` is the
 tenant's short name (lowercase letters, digits and dashes, for example
@@ -660,9 +652,9 @@ tenant's short name (lowercase letters, digits and dashes, for example
 Also create the group **`MEHO-Platform-Admins`** with one attribute,
 `platform_admin` = `true`. Its members get rights across all tenants.
 It is not a role group: it holds no tenant and no role, so a person in
-it is also in one of the five groups.
+it is also in one of the three groups.
 
-Then put each person in **exactly one** of the five groups:
+Then put each person in **exactly one** of the three groups:
 
 - A person in **no** group gets no tenant. MEHO refuses the login with
   `401 missing_tenant_claim`.
@@ -683,52 +675,42 @@ Then put each person in **exactly one** of the five groups:
 To add another tenant later, follow [Add a tenant](../guides/tenant-bootstrap.md).
 
 `meho admin keycloak bootstrap-clients --tenant-id <uuid>` creates the
-five groups for you. On a later run, pass the same `--tenant-id`:
-without it, the command writes the all-zero UUID to the five groups.
+three groups for you. On a later run, pass the same `--tenant-id`:
+without it, the command writes the all-zero UUID to the three groups.
 `--tenant-name` sets the short name in `meho_tenant` (default `main`).
 
 ### Who may approve their own changes
 
-A person in **`MEHO-SA-Operators`** or in **`MEHO-Admins`** may approve
-their own changes, on purpose: with a click in the web interface, or on
-the command line after a fresh sign-in. They may also approve other
-people's `dangerous` and `destructive` changes. Agents and other machine
-logins never approve. The rules for every group are in
+A person in **`MEHO-Admins`** may approve their own changes, on
+purpose: with a click in the web interface, or on the command line after
+a fresh sign-in. They may also approve other people's `dangerous` and
+`destructive` changes. Agents and other machine logins never approve. The
+rules for every group are in
 [Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
 
-To make a person a MEHO-SA-Operator:
-
-1. In the Keycloak admin console, open the person: **Users** → the
-   person → **Groups**.
-2. Leave their current role group (a person is in exactly one of the
-   five groups) and join **`MEHO-SA-Operators`**. With `bootstrap-clients`
-   the group already exists.
-3. The person signs in again. MEHO reads the group from the new login
-   token; an older token still has the old group.
+To change a person's role, open the person in the Keycloak admin
+console (**Users** → the person → **Groups**), leave their current role
+group and join the new one. The person signs in again. MEHO reads the
+group from the new login token; an older token still has the old group.
 
 With a company login, put the person in the company group that your
-setup maps to `MEHO-SA-Operators` instead
-([Company login](login/index.md)). The design of the five groups is in
-the [login groups decision record](https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md)
-([#3959](https://github.com/evoila/meho/issues/3959)).
-
-A person is in exactly one role group per tenant, so an admin is not a
-MEHO-SA-Operator. Both groups may approve their own changes. The rules
-are in the
+setup maps to the role group ([Company login](login/index.md)). The
+design of the role groups is in the
+[login groups decision record](https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md).
+The rules are in the
 [decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md).
 
 ### More than one tenant
 
 A person can be in role groups of several tenants, one group per
-tenant. Each extra tenant gets its own five groups,
-`MEHO-<name>-Readers`, `MEHO-<name>-Operators`,
-`MEHO-<name>-SA-Operators`, `MEHO-<name>-Admins` and
-`MEHO-<name>-Approvers`. These groups carry **only** `meho_tenant`
+tenant. Each extra tenant gets its own three groups,
+`MEHO-<name>-Readers`, `MEHO-<name>-Operators` and
+`MEHO-<name>-Admins`. These groups carry **only** `meho_tenant`
 (for example `<uuid>:lab-b:Operators`), with the extra tenant's own
 UUID. They carry no `tenant_id` and no `tenant_role`.
 
 `meho admin keycloak bootstrap-clients --add-tenant lab-b` creates the
-five groups of the tenant `lab-b`. Give its UUID with
+three groups of the tenant `lab-b`. Give its UUID with
 `--add-tenant-id <uuid>`. Without it, the command reuses the UUID the
 groups already carry, or makes a new one and prints it. Keep it.
 
@@ -742,7 +724,7 @@ tenants, are in [One person in several tenants](../guides/several-tenants.md).
 Also create the group **`MEHO-Platform-Admins`** at the top level, with
 one attribute: `platform_admin` = `true`. It gives no tenant and no
 role. Only the platform admin (usually the first admin) is in it, on
-top of one of the five groups.
+top of one of the three groups.
 
 To fill the groups from your company directory instead of by hand, see
 [Company login](login/index.md).
@@ -782,19 +764,13 @@ one. Create at least one user with:
   `tenant_admin` role, and in **`MEHO-Platform-Admins`**.
 
 A `dangerous` or `destructive` change waits until a person approves it
-with a click. A member of **`MEHO-SA-Operators`** or **`MEHO-Admins`**
-may approve their own risky change, on purpose, in the web interface. So
-the first admin can approve their own changes. A person in
-`MEHO-Operators` needs a MEHO-SA-Operator or an admin to approve their
-risky changes. A login holds exactly one role group, so an admin is not
-also a MEHO-SA-Operator; both groups may approve their own changes (see
+with a click. A member of **`MEHO-Admins`** may approve their own risky
+change, on purpose, in the web interface. So the first admin can approve
+their own changes. A person in `MEHO-Operators` needs an admin to
+approve their risky changes (see
 [Who may approve their own changes](#who-may-approve-their-own-changes)
 and the
 [decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md)).
-
-Also create a second person in **`MEHO-SA-Operators`**, for daily work
-without admin rights. This person runs changes, approves their own risky
-changes, and may approve the admin's changes too.
 
 The user's email does not need to be verified for device-code login to
 complete.
@@ -859,8 +835,8 @@ they make nothing and only say in the log whether the Secret exists.
 Two names are refused:
 
 - A name that starts with `service-account-`. Keycloak uses that prefix
-  for its service accounts. This holds for all three users: the first
-  admin, the approver and the console admin.
+  for its service accounts. This holds for both users: the first
+  admin and the console admin.
 - A name a `master` user already has, when the Secret does not exist
   yet. That user was not made by this install. The Job fails and asks
   you to set `coreKeycloak.firstLogin.consoleAdminUsername` to another
@@ -911,7 +887,7 @@ Lost the login of every Keycloak admin? Follow
 
 ### Recovery codes on an older install
 
-On a new install, the first admin and the second person set up an
+On a new install, the first admin sets up an
 authenticator app at their first login, and Keycloak shows them twelve
 recovery codes once. Each recovery code works one time, instead of the code
 from the app. Two realm settings turn the recovery codes on, and the
@@ -1195,9 +1171,9 @@ role. A principal provisioned as `read_only` role **plus**
 [Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver).)
 
 The claim is fail-closed — absent or malformed means *not* an approver.
-To make a person an approver, put them in the **`MEHO-Approvers`**
-group ([Step 5](#step-5-create-the-five-groups)), and in no other of the
-five groups. That group carries `tenant_role` = `read_only` and
+To make a person an approver, create a group **`MEHO-Approvers`** like
+the groups in [Step 5](#step-5-create-the-three-groups), put the person
+in it, and in no other role group. That group carries `tenant_role` = `read_only` and
 `approver` = `true`, and the `approver` mapper from
 [Step 3](#step-3-add-the-protocol-mappers) copies it into the
 token. Its **Token Claim Name** must match the backplane's
@@ -1479,7 +1455,7 @@ usually appear:
 |---|---|---|
 | `unauthorized_client` at login start | The client is confidential, or the device grant is off | Step 2 — public client, device grant **On**. |
 | `meho login` fails at once with `invalid_request` and "Missing parameter: code_challenge_method" | The login client (`meho-cli`) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0, 0.42.0 or 0.43.0 (the built-in Keycloak, or `meho admin keycloak bootstrap-clients`) set `S256` on it. | Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation `keycloak.client.update` and the representation `{"attributes": {"pkce.code.challenge.method": ""}}` (an empty value removes the attribute). Step 2. |
-| Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
+| Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the role groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, and add the User Attribute mapper of Step 3 in the admin console. On an existing realm, do not run `meho admin keycloak bootstrap-clients` for this: it rewrites all the mappers and clients. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client), or the client does not use its own login flow | Step 4 — assign `basic` and `acr` to `meho-cli-approve`; check the client ID and its login flow in Step 2. Or approve in the web interface. |

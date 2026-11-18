@@ -1590,13 +1590,12 @@ coreKeycloak:
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
   # -- The first tenant's short name (lowercase letters, digits, dashes).
-  # The five role groups carry it in the `meho_tenant` attribute.
+  # The role groups carry it in the `meho_tenant` attribute.
   tenantName: main
   # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
-  # keep). The bootstrap Job makes five groups for each one:
-  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
-  # `-Approvers`. Empty by default: a site with one tenant needs nothing
-  # here. Putting people in these groups waits for a second person's
+  # keep). The bootstrap Job makes three groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators` and `-Admins`. Empty by default: a
+  # site with one tenant needs nothing here. Putting people in these groups waits for a second person's
   # approval when done through MEHO.
   tenants: []
   ingress:
@@ -1609,16 +1608,15 @@ coreKeycloak:
     # `client_id` and `client_secret`). Empty = the install makes
     # `<release>-core-keycloak-bootstrap`.
     bootstrap: ""
-  # The two people the install makes at the first start (the realm stage of
-  # the bootstrap Job, docs/codebase/core-bootstrap.md). Their temporary
-  # passwords are in `<release>-core-first-login`; Keycloak asks for a new
+  # The one person the install makes at the first start (the realm stage of
+  # the bootstrap Job, docs/codebase/core-bootstrap.md). Its temporary
+  # password is in `<release>-core-first-login`; Keycloak asks for a new
   # password at the first login. A change here after the first install has
-  # no effect: the Secret and the users already exist.
+  # no effect: the Secret and the user already exist.
   firstLogin:
-    # -- User name of the first admin (in MEHO-Admins, with platform_admin).
+    # -- User name of the one Admin login (in MEHO-Admins and
+    # MEHO-Platform-Admins, with platform_admin).
     adminUsername: admin
-    # -- User name of the second person, who can approve (MEHO-SA-Operators).
-    approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of
     # the master client `meho-realm` except `impersonation`), for example to connect a user

@@ -107,14 +107,17 @@ Next steps:
 {{- end }}
 {{- end }}
 {{- if .Values.coreKeycloak.enabled }}
+{{- if .Values.coreKeycloak.firstLogin.approverUsername }}
+
+Note: coreKeycloak.firstLogin.approverUsername is not used. The install makes one Admin login, so the value is ignored.
+{{- end }}
 
 First login (built-in Keycloak):
-  The install made two people with temporary passwords: the first admin
-  (groups MEHO-Admins and MEHO-Platform-Admins, with platform_admin) and a
-  second person who can approve (group MEHO-SA-Operators). The Secret
-  {{ printf "%s-core-first-login" .Release.Name }} holds their user names and passwords; it keeps the names
+  The install made one Admin login with a temporary password (groups
+  MEHO-Admins and MEHO-Platform-Admins, with platform_admin). The Secret
+  {{ printf "%s-core-first-login" .Release.Name }} holds its user name and password; it keeps the name
   from the first install even when coreKeycloak.firstLogin changes later.
-  (keys: admin_username, admin_password, approver_username, approver_password)
+  (keys: admin_username, admin_password)
   Read a user name with:
        kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_username}' | base64 -d
   Copy a password to the clipboard (use the line for your desktop):
@@ -122,7 +125,7 @@ First login (built-in Keycloak):
        Linux (X11):     kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d | xclip -selection clipboard
        Linux (Wayland): kubectl -n {{ .Release.Namespace }} get secret {{ printf "%s-core-first-login" .Release.Name }} -o jsonpath='{.data.admin_password}' | base64 -d | wl-copy
   Do not run a password command without the last pipe: the password would show on screen.
-  Clear the clipboard after the first login. For the second person, use the key approver_password.
+  Clear the clipboard after the first login.
   Then log in with `meho login https://{{ .Values.coreKeycloak.hostname }}` or open https://{{ .Values.coreKeycloak.hostname }}/ui/.
   Keycloak asks for a new password, a name and an email at the first login.
 {{- if .Values.coreKeycloak.companyLogin.enabled }}

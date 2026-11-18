@@ -5,8 +5,8 @@
 
 The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
-owner decided (``docs/decisions/login-role-groups.md``): five role groups that
-carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
+owner decided (``docs/decisions/login-role-groups.md``): three role groups that
+carry ``tenant_id`` and ``tenant_role``,
 the platform group that carries only ``platform_admin`` (#4043), the
 ``meho_tenant`` attribute and ``meho-tenants`` mapper for several tenants, the
 clients, the mappers ``meho admin keycloak bootstrap-clients`` puts on the
@@ -172,21 +172,10 @@ def test_role_groups_with_tenant_attributes_and_the_platform_group(realm: dict[s
             "tenant_role": ["operator"],
             "meho_tenant": _meho_tenant("Operators"),
         },
-        "MEHO-SA-Operators": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["operator"],
-            "meho_tenant": _meho_tenant("SA-Operators"),
-        },
         "MEHO-Admins": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["tenant_admin"],
             "meho_tenant": _meho_tenant("Admins"),
-        },
-        "MEHO-Approvers": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["read_only"],
-            "approver": ["true"],
-            "meho_tenant": _meho_tenant("Approvers"),
         },
         # Not a role group: it carries no tenant and no role, only the right
         # to act across tenants. The bootstrap Job puts the first admin here.

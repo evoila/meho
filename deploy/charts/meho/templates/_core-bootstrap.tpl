@@ -15,7 +15,6 @@ mounted into the Job.
   "realm_file" "/opt/meho/realm/meho-realm.json"
   "first_login_secret" (printf "%s-core-first-login" $rel)
   "admin_username" .Values.coreKeycloak.firstLogin.adminUsername
-  "approver_username" .Values.coreKeycloak.firstLogin.approverUsername
   "tenants" (default (list) .Values.coreKeycloak.tenants)
   "console_admin_secret" (printf "%s-core-console-admin" $rel)
   "console_admin_username" .Values.coreKeycloak.firstLogin.consoleAdminUsername

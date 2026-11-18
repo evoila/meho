@@ -36,8 +36,6 @@ Two people take part. They can be the same person.
 | **The cluster admin** | Admin of the whole OpenShift cluster | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one project only | Steps 2 to 8 |
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
-
 **Tools on your laptop:**
 
 - `oc`, the OpenShift command line, to log in. The web console has it
@@ -537,7 +535,7 @@ What happens, in order:
    activity) and MEHO start. A second Job sets up OpenBao.
 3. MEHO's database migrations end, and MEHO starts.
 4. Keycloak loads the realm `meho` and gets ready.
-5. A third Job makes the first two users in Keycloak.
+5. A third Job makes the first user in Keycloak.
 
 When Helm ends, you should see `STATUS: deployed` and `REVISION: 1`,
 then the install notes. The first start of MEHO can take up to 15
@@ -689,15 +687,11 @@ The `echo` prints a number well over 500. If it prints `4`, the token is
 `null`. Then you should see `7 passed, 0 failed`, with the line
 `GET /api/v1/health (authenticated) returns 200`.
 
-## Step 6: The first two users, `meho login`, `meho status`
+## Step 6: The first user, `meho login`, `meho status`
 
-The install made two users with temporary passwords: the first admin
-(`admin`, in `MEHO-Admins`) and an approver (`approver`, in
-`MEHO-SA-Operators`). The approver is not an admin. The approver can
-approve the admin's risky changes, but not a change of rights: a change
-of rights needs a second admin. See
-[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
-Write the two logins into a file that only you can read:
+The install made one Admin login with a temporary password (`admin`, in
+`MEHO-Admins` and `MEHO-Platform-Admins`).
+Write the login into a file that only you can read:
 
 ```bash
 umask 077
@@ -706,22 +700,9 @@ kubectl -n $NS get secret $REL-core-first-login \
 cat $W/first-login.txt
 ```
 
-You should see four lines: `admin_password`, `admin_username`,
-`approver_password` and `approver_username`.
+You should see two lines: `admin_password` and `admin_username`.
 
-You log in **twice**, once as each user, in **two separate browser
-windows**. Both logins go to the same Keycloak, which remembers who is
-logged in, so a normal window and a private (incognito) window keep them
-apart:
-
-| Who | Where | Browser window |
-|---|---|---|
-| `admin` | the `meho` command line (6.1) | your normal window |
-| `approver` | the web console (6.2) | a **private** window |
-
-The first login of each user asks for a new password, a name and an
-email. Remember both new passwords: the admin's changes wait for the
-approver's yes.
+The first login asks for a new password, a name and an email.
 
 ### 6.1 Log in as `admin` on the command line
 
@@ -757,18 +738,13 @@ Logged in as <your email> (sub: ...)
 a secret. A warning that the command line is newer or older than the
 install is harmless, but keep both at the same version when you can.
 
-### 6.2 Log in as `approver` in the web console
+### 6.2 Log in as `admin` in the web console
 
-Open a **private** browser window, so the `admin` login from 6.1 does
-not carry over, and go to:
+Go to this address and sign in as `admin` with the password you set in 6.1:
 
 ```bash
 echo https://$HOST/ui/
 ```
-
-Sign in as `approver` with its temporary password and set the new
-password. If the console shows you as `admin`, the window is not
-private: close it and open a new private one.
 
 The install notes also name a third login, the **console admin**: a
 user of Keycloak's own realm `master`, for Keycloak's admin page (for
@@ -778,7 +754,7 @@ login. Its user name and temporary password are in the Secret
 
 ### 6.3 Delete the login file
 
-Keep both new passwords in your key store, then delete the file:
+Keep the new password in your key store, then delete the file:
 
 ```bash
 rm -P $W/first-login.txt 2>/dev/null || shred -u $W/first-login.txt

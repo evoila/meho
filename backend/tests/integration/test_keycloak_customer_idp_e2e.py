@@ -83,9 +83,7 @@ _CUSTOMER_HOST = "customer-idp"
 _GROUP_MAP = {
     "meho-readers": "MEHO-Readers",
     "meho-operators": "MEHO-Operators",
-    "meho-sa-operators": "MEHO-SA-Operators",
     "meho-admins": "MEHO-Admins",
-    "meho-approvers": "MEHO-Approvers",
 }
 _CUSTOMER_GROUP = {meho: customer for customer, meho in _GROUP_MAP.items()}
 
@@ -527,8 +525,6 @@ def site(network: Network) -> Iterator[_OurSite]:
             headers=headers,
             admin_username=first_login["admin_username"],
             admin_password=first_login["admin_password"],
-            approver_username=first_login["approver_username"],
-            approver_password=first_login["approver_password"],
             master_admin_password=master_admin_password,
         )
     finally:

@@ -20,12 +20,12 @@ running realm up to date through the Admin REST API:
 * it adds the client attributes in ``ADDED_CLIENT_ATTRIBUTES`` (the idle
   limit of a long login) to a client that does not have them yet, and
   keeps a value that is there;
-* it makes the first admin and the second person with temporary passwords,
-  stored in ``<release>-core-first-login``; their first login also sets an
+* it makes the first admin with a temporary password,
+  stored in ``<release>-core-first-login``; its first login also sets an
   authenticator code and shows recovery codes;
 * it turns on recovery codes in the realm
   (:mod:`meho_backplane.core.keycloak_recovery`);
-* it makes the five role groups of every extra tenant in
+* it makes the three role groups of every extra tenant in
   ``coreKeycloak.tenants`` (``MEHO-<tenant>-<Role>``); these carry only the
   ``meho_tenant`` attribute;
 * it sets the attributes of the realm file's groups and of the extra
@@ -135,15 +135,14 @@ TENANT_NAME_ENV = "MEHO_REALM_TENANT_NAME"
 ADMIN_CLIENT_ID = "meho-admin"
 CI_CLIENT_ID = "meho-ci"
 CI_GROUP = "MEHO-CI-Admins"
-# Where the two first-login people go. The first admin is also in the
-# platform group, which carries only ``platform_admin``; it is not one of
-# the five role groups, so the one-role-group rule still holds.
+# Where the first admin goes. The first admin is also in the platform group,
+# which carries only ``platform_admin``; it is not one of the role groups, so
+# the one-role-group rule still holds.
 ADMIN_GROUPS = ("MEHO-Admins", "MEHO-Platform-Admins")
-APPROVER_GROUPS = ("MEHO-SA-Operators",)
-FIRST_LOGIN_KEYS = ("admin_username", "admin_password", "approver_username", "approver_password")
+FIRST_LOGIN_KEYS = ("admin_username", "admin_password")
 # The role part of a role group's name, and of its ``meho_tenant`` value
 # ``<tenant-uuid>:<tenant>:<Role>`` (docs/decisions/login-role-groups.md).
-TENANT_ROLES = ("Readers", "Operators", "SA-Operators", "Admins", "Approvers")
+TENANT_ROLES = ("Readers", "Operators", "Admins")
 # The attributes an older MEHO reads for access. An extra tenant's groups
 # must not carry them, so the stage removes them from such a group.
 OLD_ACCESS_ATTRIBUTES = ("tenant_id", "tenant_role", "approver")
@@ -169,7 +168,7 @@ CONSOLE_ADMIN_LEFT_OUT_ROLES = frozenset({"impersonation"})
 # The console admin sets a new password and an authenticator code at its first
 # login: realm ``master`` asks for no code by default.
 CONSOLE_ADMIN_ACTIONS = ("UPDATE_PASSWORD", "CONFIGURE_TOTP")
-# The two local accounts set a new password and an authenticator code at their
+# The first admin sets a new password and an authenticator code at its
 # first login. An account that exists already keeps its actions.
 FIRST_LOGIN_ACTIONS = ("UPDATE_PASSWORD", "CONFIGURE_TOTP")
 # Keycloak keeps this prefix for the users behind service clients
@@ -195,7 +194,7 @@ class CiPlan(BaseModel):
 
 
 class TenantPlan(BaseModel):
-    """One extra tenant: its five groups ``MEHO-<name>-<Role>``."""
+    """One extra tenant: its three groups ``MEHO-<name>-<Role>``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -220,7 +219,6 @@ class Plan(BaseModel):
     realm_file: str = Field(min_length=1)
     first_login_secret: str = Field(min_length=1)
     admin_username: str = Field(min_length=1)
-    approver_username: str = Field(min_length=1)
     tenants: tuple[TenantPlan, ...] = ()
     # The console admin (a user of realm ``master``) and the Secret with its login.
     console_admin_secret: str = Field(min_length=1)
@@ -638,15 +636,6 @@ def _same_user(one: str, other: str) -> bool:
     return one.strip().casefold() == other.strip().casefold()
 
 
-def _require_two_people(admin: str, approver: str, where: str) -> None:
-    if _same_user(admin, approver):
-        raise RealmStageError(
-            f"the first admin and the second person must be two different people, "
-            f"but {where} names {admin!r} and {approver!r}, which are the same "
-            "Keycloak user"
-        )
-
-
 def _require_plain_user(username: str, where: str) -> None:
     """Refuse the name of a service client's user: the stage must never adopt one."""
     if username.strip().casefold().startswith(SERVICE_ACCOUNT_PREFIX):
@@ -664,8 +653,7 @@ def _note_kept_name(secret: str, kept: str, wanted: str) -> None:
 
 def _check_chart_names(plan: Plan) -> None:
     """Check the user names from the chart before the stage changes anything."""
-    _require_two_people(plan.admin_username, plan.approver_username, "the chart")
-    for username in (plan.admin_username, plan.approver_username, plan.console_admin_username):
+    for username in (plan.admin_username, plan.console_admin_username):
         _require_plain_user(username, "the chart")
 
 
@@ -673,20 +661,13 @@ async def _ensure_first_login(realm: _Realm, plan: Plan, store: SecretStore) -> 
     fresh = {
         "admin_username": plan.admin_username,
         "admin_password": new_password(),
-        "approver_username": plan.approver_username,
-        "approver_password": new_password(),
     }
     data = await _read_or_make(store, plan.first_login_secret, fresh)
     where = f'Secret "{plan.first_login_secret}"'
-    _require_two_people(data["admin_username"], data["approver_username"], where)
-    for key in ("admin_username", "approver_username"):
-        _require_plain_user(data[key], where)
-        _note_kept_name(plan.first_login_secret, data[key], fresh[key])
+    _require_plain_user(data["admin_username"], where)
+    _note_kept_name(plan.first_login_secret, data["admin_username"], fresh["admin_username"])
     await realm.ensure_user(
         data["admin_username"], data["admin_password"], ADMIN_GROUPS, FIRST_LOGIN_ACTIONS
-    )
-    await realm.ensure_user(
-        data["approver_username"], data["approver_password"], APPROVER_GROUPS, FIRST_LOGIN_ACTIONS
     )
 
 
@@ -748,7 +729,7 @@ async def _ensure_console_admin(
 
 
 def tenant_groups(tenant: TenantPlan) -> list[dict[str, Any]]:
-    """The five groups of an extra tenant. They carry only ``meho_tenant``.
+    """The three groups of an extra tenant. They carry only ``meho_tenant``.
 
     No ``tenant_id`` or ``tenant_role``: an older MEHO, which reads only
     those, refuses a person who is only in these groups. ``finish_realm``

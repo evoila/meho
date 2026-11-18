@@ -157,8 +157,8 @@ existingSecrets:
   # `<release>-core-keycloak-bootstrap`. The secrets Job reads the same key.
   bootstrap: ""
 
-# -- User names of the users the install makes at the first start: the
-# first admin and a second person who can approve (temporary passwords in
+# -- User names of the users the install makes at the first start: the one
+# Admin login (temporary password in
 # `<release>-core-first-login`), and the console admin, a user of realm
 # `master` who administers realm `meho` (every role of the master client
 # `meho-realm` except `impersonation`; temporary password in `<release>-core-console-admin`). The parent chart's
@@ -166,7 +166,6 @@ existingSecrets:
 # these values; set them under the parent's `coreKeycloak:` block.
 firstLogin:
   adminUsername: admin
-  approverUsername: approver
   consoleAdminUsername: console-admin
 
 # -- A login for automated install proofs (a service client `meho-ci` and a

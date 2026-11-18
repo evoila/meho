@@ -19,7 +19,6 @@ from pathlib import Path
 
 from harness import (
     ADMIN_LOGIN_VALUE,
-    APPROVER_LOGIN_VALUE,
     INSTALL_DATE,
     LINUX_SERVER,
     SECRET_VALUES,
@@ -66,7 +65,6 @@ def place_values(
     hostname: str = "meho.example.com",
     tenant_id: str = TENANT_ID,
     admin: str = "admin",
-    approver: str = "approver",
     pod_range: str = "10.42.0.0/16",
 ) -> str:
     return textwrap.dedent(f"""\
@@ -79,7 +77,6 @@ def place_values(
           firstTenantId: "{tenant_id}"
           firstLogin:
             adminUsername: "{admin}"
-            approverUsername: "{approver}"
         """) + egress_values(pod_range=pod_range)
 
 
@@ -138,8 +135,6 @@ class CoreInstallTests(InstallTestCase):
             "--first-tenant-id",
             "9B4D2A7E-3F1C-4E2A-8C1F-5D6E7F8A9B0C",
             "--admin-user=First.Admin",
-            "--approver-user",
-            "Second@Example.org",
             "--cluster-cidr",
             "172.30.0.0/16",
         )
@@ -149,7 +144,6 @@ class CoreInstallTests(InstallTestCase):
             hostname="meho-01.example.org",
             tenant_id="9b4d2a7e-3f1c-4e2a-8c1f-5d6e7f8a9b0c",
             admin="first.admin",
-            approver="second@example.org",
             pod_range="172.30.0.0/16",
         )
         self.assertEqual(expected, self.machine.host_path(PLACE_VALUES).read_text())
@@ -170,9 +164,7 @@ class CoreInstallTests(InstallTestCase):
         cases = [
             ("--first-tenant-id must be a UUID", ["--first-tenant-id", "tenant-one"]),
             ("--admin-user must be a user name", ["--admin-user", "first admin"]),
-            ("--approver-user must be a user name", ["--approver-user", 'x"y']),
-            ("must be two different names", ["--admin-user", "same", "--approver-user", "same"]),
-            ("must be two different names", ["--admin-user", "Admin", "--approver-user", "admin"]),
+            ("unknown option: --approver-user", ["--approver-user", "approver"]),
         ]
         for message, args in cases:
             with self.subTest(args=args):
@@ -187,7 +179,7 @@ class CoreInstallTests(InstallTestCase):
         self.assertEqual(0o600, mode(first_login))
         self.assertEqual(0o600, mode(unseal_key))
         self.assertIn(f"admin_password={ADMIN_LOGIN_VALUE}\n", first_login.read_text())
-        self.assertIn(f"approver_password={APPROVER_LOGIN_VALUE}\n", first_login.read_text())
+        self.assertNotIn("approver", first_login.read_text())
         self.assertEqual(f"{UNSEAL_KEY}\n", unseal_key.read_text())
 
     def test_no_secret_in_the_output_or_the_records(self) -> None:
@@ -249,7 +241,6 @@ class CoreInstallTests(InstallTestCase):
                     "public_address": "10.0.0.5",
                     "first_tenant_id": TENANT_ID,
                     "admin_user": "admin",
-                    "approver_user": "approver",
                     "cluster_cidr": "10.42.0.0/16",
                     "service_cidr": "10.43.0.0/16",
                     "join_address": "",

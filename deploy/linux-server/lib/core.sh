@@ -72,14 +72,14 @@ tenant_id() {
     fi
 }
 
-# render_place_values <hostname> <tenant id> <admin user> <approver user>
+# render_place_values <hostname> <tenant id> <admin user>
 # <pod range> <service range> <addresses of this machine, one per line>:
 # print the answers of this place as Helm values (form-2 design, section 6).
 # The update writes this file again from the install record, so it also
 # drops the two network-policy ranges older installs wrote here: the chart
 # reaches its built-in parts by pod label since #4047.
 render_place_values() {
-    local hostname=$1 tenant_id=$2 admin_user=$3 approver_user=$4
+    local hostname=$1 tenant_id=$2 admin_user=$3
     cat <<EOF
 # Written by MEHO install.sh: the answers of this place. A later run of
 # install.sh passes this file to Helm again. It holds no secret.
@@ -90,9 +90,8 @@ coreKeycloak:
   firstTenantId: "${tenant_id}"
   firstLogin:
     adminUsername: "${admin_user}"
-    approverUsername: "${approver_user}"
 EOF
-    render_egress_values "$5" "$6" "$7"
+    render_egress_values "$4" "$5" "$6"
 }
 
 # render_egress_values <pod range> <service range> <addresses>: the
@@ -126,7 +125,7 @@ EOF
     done <<<"$addresses"
 }
 
-# write_place_values <hostname> <tenant id> <admin user> <approver user>
+# write_place_values <hostname> <tenant id> <admin user>
 # <pod range> <service range>: render_place_values with the addresses of
 # this machine, into the file for root only.
 write_place_values() {
@@ -273,7 +272,7 @@ print_first_start_list() {
 }
 
 # render_install_record <date> <hostname> <public address> <tenant id>
-# <admin user> <approver user> <pod range> <service range> <join address>
+# <admin user> <pod range> <service range> <join address>
 # <from disk 0|1>: print /etc/meho/install.json. A later run of install.sh
 # reads it to find the install and its answers (form-2 design, section 7),
 # with read_install_record in lib/update.sh, which reads one key per line.
@@ -281,7 +280,7 @@ print_first_start_list() {
 # letters, digits and a few signs in them.
 render_install_record() {
     local from_disk=false
-    if ((${10})); then
+    if ((${9})); then
         from_disk=true
     fi
     cat <<EOF
@@ -295,10 +294,9 @@ render_install_record() {
     "public_address": "$3",
     "first_tenant_id": "$4",
     "admin_user": "$5",
-    "approver_user": "$6",
-    "cluster_cidr": "$7",
-    "service_cidr": "$8",
-    "join_address": "$9",
+    "cluster_cidr": "$6",
+    "service_cidr": "$7",
+    "join_address": "$8",
     "from_disk": ${from_disk}
   }
 }

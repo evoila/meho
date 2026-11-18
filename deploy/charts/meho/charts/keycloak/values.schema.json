@@ -280,7 +280,7 @@
     "firstLogin": {
       "type": "object",
       "additionalProperties": false,
-      "description": "User names of the users the bootstrap Job makes at the first start: the first admin, the second person and the console admin (a user of realm master). The parent chart's Job reads them; the subchart only carries them.",
+      "description": "User names of the users the bootstrap Job makes at the first start: the one Admin login and the console admin (a user of realm master). The parent chart's Job reads them; the subchart only carries them.",
       "properties": {
         "adminUsername": {
           "type": "string",
@@ -290,6 +290,7 @@
         "approverUsername": {
           "type": "string",
           "minLength": 1,
+          "description": "Not used. The install makes one Admin login; the key is accepted and ignored.",
           "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }
         },
         "consoleAdminUsername": {

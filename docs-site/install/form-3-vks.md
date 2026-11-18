@@ -24,8 +24,6 @@ Two people take part. They can be the same person.
 | **The cluster admin** | Admin of the whole VKS cluster. `kubectl vsphere login` gives this. | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one namespace only | Steps 2 to 8 |
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
-
 The page uses these example values. Use your own in their place.
 
 | Example | What it is |
@@ -402,7 +400,7 @@ What happens, with the times of our test:
 | 43 s | MEHO's database migrations end, and MEHO starts. |
 | 108 s | Keycloak has loaded the realm `meho` and is ready. |
 | 113 s | MEHO is ready. |
-| 123 s | A third Job makes the first two users in Keycloak. |
+| 123 s | A third Job makes the first user in Keycloak. |
 | 137 s | Helm ends. |
 
 When Helm ends, you should see:
@@ -484,15 +482,11 @@ install-verify.sh: 6 passed, 0 failed, 0 warned
 [ok]   MEHO is up
 ```
 
-## Step 6: The first two users, `meho login`, `meho status`
+## Step 6: The first user, `meho login`, `meho status`
 
-The install made two users with temporary passwords: the first admin
-(`admin`, in `MEHO-Admins`) and an approver (`approver`, in
-`MEHO-SA-Operators`). The approver is not an admin. The approver can
-approve the admin's risky changes, but not a change of rights: a change
-of rights needs a second admin. See
-[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
-Write the two logins into a file that only you can read:
+The install made one Admin login with a temporary password (`admin`, in
+`MEHO-Admins` and `MEHO-Platform-Admins`).
+Write the login into a file that only you can read:
 
 ```bash
 umask 077
@@ -500,8 +494,7 @@ kubectl -n meho get secret meho-core-first-login \
   -o go-template='{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}' > first-login.txt
 ```
 
-`first-login.txt` has four lines: `admin_password`, `admin_username`,
-`approver_password` and `approver_username`.
+`first-login.txt` has two lines: `admin_password` and `admin_username`.
 
 Log in with the command line:
 
@@ -543,9 +536,7 @@ Logged in as <your email> (sub: ...)
   Connector packages: none
 ```
 
-Then open `https://meho.example.com/ui/` in a private browser window and
-log in once as `approver`. Keycloak asks for a new password there too.
-Keep both new passwords in your key store, and delete the file:
+Keep the new password in your key store, and delete the file:
 
 ```bash
 shred -u first-login.txt

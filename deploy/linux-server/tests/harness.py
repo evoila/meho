@@ -57,9 +57,8 @@ FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 TENANT_ID = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 INSTALL_DATE = "2026-10-23T12:00:00Z"
 ADMIN_LOGIN_VALUE = "fake-admin-login-7f3a"
-APPROVER_LOGIN_VALUE = "fake-approver-login-9c1d"
 UNSEAL_KEY = "fake-unseal-key-5e2b8a4c"
-SECRET_VALUES = (ADMIN_LOGIN_VALUE, APPROVER_LOGIN_VALUE, UNSEAL_KEY)
+SECRET_VALUES = (ADMIN_LOGIN_VALUE, UNSEAL_KEY)
 
 # RKE2's kernel settings file for the CIS profile, as RKE2 v1.37.1 ships it,
 # and the place where its tarball installer puts it.
@@ -302,8 +301,6 @@ DEFAULT_ANSWERS = {
     "kube_secret_first_login": (
         f"admin_password={ADMIN_LOGIN_VALUE}\n"
         "admin_username=admin\n"
-        f"approver_password={APPROVER_LOGIN_VALUE}\n"
-        "approver_username=approver\n"
     ),
     "kube_secret_first_login_rc": "0",
     "kube_secret_unseal": f"{UNSEAL_KEY}\n",

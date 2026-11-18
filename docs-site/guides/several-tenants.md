@@ -77,16 +77,14 @@ UUID once and keep it:
 uuidgen | tr 'A-Z' 'a-z'
 ```
 
-The tenant gets five role groups. They carry **only** `meho_tenant`, no
+The tenant gets three role groups. They carry **only** `meho_tenant`, no
 `tenant_id` and no `tenant_role`:
 
 | Group | `meho_tenant` | Role in MEHO |
 |---|---|---|
 | `MEHO-team-b-Readers` | `<tenant-uuid>:team-b:Readers` | `read_only` |
 | `MEHO-team-b-Operators` | `<tenant-uuid>:team-b:Operators` | `operator` |
-| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator`, may approve their own changes, but not a change of rights |
 | `MEHO-team-b-Admins` | `<tenant-uuid>:team-b:Admins` | `tenant_admin` |
-| `MEHO-team-b-Approvers` | `<tenant-uuid>:team-b:Approvers` | `read_only`, may approve |
 
 Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
@@ -151,7 +149,7 @@ are in [Keycloak realm setup, Step 3](../install/keycloak-realm.md#step-3-add-th
 Never set `meho_tenant` on a person. With **Aggregate attribute values**
 on, Keycloak adds a value on the person to their list. Keep people from
 editing their own attributes, as
-[Keycloak realm setup, Step 5](../install/keycloak-realm.md#step-5-create-the-five-groups)
+[Keycloak realm setup, Step 5](../install/keycloak-realm.md#step-5-create-the-three-groups)
 says.
 
 ## Step 2: Give the tenant its own Vault login role

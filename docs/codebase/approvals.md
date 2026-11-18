@@ -8,38 +8,6 @@ surfacing channel) + #1401 (G11.7-T1 — queue humans, self-approval
 guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
 — execute a parked direct operator op on approve via every surface)
 
-## Default roles
-
-MEHO has four default roles: Reader, Operator, Admin and Platform Admin.
-A person has one role per tenant. The full table, and what each role may
-do, is in the guide
-[Approvals and break-glass](../../docs-site/guides/approvals-and-break-glass.md#the-four-default-roles).
-
-| | Reader | Operator | Admin | Platform Admin |
-|---|---|---|---|---|
-| Read | yes | yes | yes | yes |
-| Run a `safe` change | no | yes. Runs at once, in the web console and with a token | as Operator | as Admin |
-| Run a `caution` change | no | yes. Web console: runs at once. Token: waits | as Operator | as Admin |
-| Run a high-risk change (`dangerous`, `destructive`) | no | asks; it waits for an Admin | asks; it waits; may approve it himself | as Admin |
-| Approve another person's low-risk change | no | yes | yes | yes |
-| Approve another person's high-risk change | no | no | yes | yes |
-| Approve my own change | no | only a `caution` change that waited because it came with a token, with a click in the web console | yes, every risk level, recorded as self-approved | as Admin |
-| Change rights | no | may ask; it waits for an Admin | alone. In the web console it runs at once. Asked with a token or by an AI tool, it waits for an Admin's click in the web console | as Admin; only a platform admin changes the Platform-Admins group |
-| Act in every tenant | no, only where in a role group | same | same | yes |
-
-An operation marked `requires_approval` always waits for an approval,
-at every risk level, in the web console and with a token.
-
-MEHO tells two people apart by their login (the login ID in the token).
-It does not know when two logins belong to one person, so a second person
-is a second login.
-
-The older groups `MEHO-SA-Operators` and `MEHO-Approvers` are read as
-Operators and Readers from the release that ships the four roles.
-The table describes that release. On an older release, the older
-groups keep their own rights (self-approval for SA-Operators, approval
-of another person's change for Approvers).
-
 ## Overview
 
 Which calls wait for approval depends on the op's safety level and on who
@@ -2399,17 +2367,21 @@ One rule for every view: `result_state_of_envelope` in
 console all read it. Every view gives the same advice: do not run it again,
 check the target first. No view says "failed" or "did not succeed" for it.
 
-Four cases end as `uncertain`:
+Five cases end as `uncertain`:
 
 | Case | Where | Stored result |
 |---|---|---|
 | The audit record could not be saved after the change ran. | `result_audit_commit_failed` | `error_code` `audit_commit_failed` |
 | A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
+| The product ended the login session after MEHO sent a change, and MEHO did not send it again. | `result_connector_auth_failed(..., changes_target=True)` | `error_code` `connector_auth_failed`, `retry: false`, advice `LOGIN_ENDED_ADVICE` |
 | MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
 | An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
 
-A connect timeout, a pool timeout and a refused connection stay plain errors,
-because nothing was sent. A timeout of a read operation (`safety_level`
+A connect timeout, a pool timeout, a refused connection and a refused login
+(`connector_auth_failed` at stage `establish`) stay plain errors, because
+nothing was sent. An approved change always starts with a fresh login
+(`drop_login_before_approved_change`, see `backend.md`), so a login that ended
+while the change waited does not end the run. A timeout of a read operation (`safety_level`
 `safe`) stays a plain error. Any other level counts as a change
 (`changes_target`).
 

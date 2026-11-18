@@ -934,7 +934,13 @@ Each run:
    report for a reviewer (`merge_for_review`: `slug` and `same_as`), and
    neither entry changes. Before the change it
    locks both entries and reads them again. When either was edited or
-   deleted after the scan, it leaves both as they are.
+   deleted after the scan, it leaves both as they are. The job compares
+   each copy with the kept entry only, not copies with each other. So in
+   a group of three equal entries, where the kept entry is not
+   `confirmed` and comes from person A, the two copies of person B both
+   go to the review list. The job does not merge B's two copies with
+   each other. A reviewer who confirms one entry lets the next run merge
+   the rest into it.
 2. **Retires expired entries.** An entry whose `expires_at` has passed
    gets `status: retired`.
 3. **Refreshes used confirmed entries.** A `confirmed` knowledge or

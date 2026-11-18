@@ -954,6 +954,8 @@ async def test_include_raw_follows_the_typed_first_switch(
     Off: no word of it, so the listing is as before the switch existed. On:
     the input, the ``raw_operations`` output field and the description line,
     also when the short texts replace the description (#4712).
+    The short texts send no output schema, so there the output field is
+    not checked.
     """
     monkeypatch.setenv("SEARCH_TYPED_FIRST", "true" if on else "false")
     get_settings.cache_clear()
@@ -962,7 +964,11 @@ async def test_include_raw_follows_the_typed_first_switch(
         tool = tools[name]
         assert ("include_raw" in tool["inputSchema"]["properties"]) is on, name
         assert ("include_raw" in tool["description"]) is on, name
-        assert ("raw_operations" in str(tool["outputSchema"])) is on, name
+        if short_tool_texts:
+            # The short texts send no output schema at all.
+            assert "outputSchema" not in tool, name
+        else:
+            assert ("raw_operations" in str(tool["outputSchema"])) is on, name
         if on and not short_tool_texts:
             registered = mcp_registry._TOOLS[name][0].to_wire()
             assert tool["inputSchema"] == registered["inputSchema"]

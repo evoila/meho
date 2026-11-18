@@ -305,13 +305,27 @@ async def _preview_operation_handler(
 # ---------------------------------------------------------------------------
 
 
+_list_operation_groups_short_text = with_short_text(LIST_OPERATION_GROUPS_SHORT)
+
+
+def _list_operation_groups_for_settings(
+    definition: ToolDefinition, operator: Operator
+) -> ToolDefinition:
+    """``list_operation_groups`` as shown under the current settings.
+
+    The ``include_raw`` step runs last, so the short text of
+    ``MCP_SHORT_TOOL_TEXTS`` does not drop its description line.
+    """
+    return include_raw_for_settings(_list_operation_groups_short_text(definition, operator))
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=lambda definition, _operator: include_raw_for_settings(definition),
+        for_settings=_list_operation_groups_for_settings,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
@@ -444,7 +458,6 @@ register_mcp_tool(
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",
-        for_settings=with_short_text(LIST_OPERATION_GROUPS_SHORT),
     ),
     handler=_list_operation_groups_handler,
 )

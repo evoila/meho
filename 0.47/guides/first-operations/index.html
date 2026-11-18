@@ -3494,6 +3494,13 @@ operations. Scope it to a group when you know one:</p>
 </ul>
 <p>Read those two flags on every hit <strong>before</strong> calling — see
 <a href="#safety-flags-at-first-contact">Safety flags at first contact</a>.</p>
+<p><strong>Raw operations (optional setting).</strong> An operator can turn on the
+backplane setting <code>SEARCH_TYPED_FIRST</code> (off by default). Then search and
+the group list show only typed and multi-step operations. Raw operations,
+made from the vendor API description, come back with <code>--include-raw</code>
+(<code>include_raw: true</code> on MCP and REST), or when the connector has no
+other operations. The answer's <code>raw_operations</code> part says what was left
+out. You can still call a raw operation by its <code>op_id</code>.</p>
 <h2 id="step-3-preview-when-you-want-the-wire-truth">Step 3 — preview (when you want the wire truth)<a class="headerlink" href="#step-3-preview-when-you-want-the-wire-truth" title="Permanent link">&para;</a></h2>
 <p><code>preview_operation</code> resolves the exact operation + target + params a
 call would use and returns the literal would-be HTTP request —

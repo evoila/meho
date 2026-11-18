@@ -965,6 +965,37 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     live run on a test install: set a `custom_description`, search
     with words that appear only in it, check the hit shows the new
     text, set it to `null`, check the original is back.
+- **How to call a hit, behind a switch (#4331).** The backplane switch
+  `SEARCH_HIT_CALL_HINTS` (an env var, off by default) adds two small
+  fields to each ranked hit, so an agent can make a right first call
+  without a second lookup:
+  - `required_params`: the names in the top-level `required` list of the
+    operation's stored `parameter_schema`, in that order. `call_operation`
+    checks `params` against that same schema. Names only, no schemas: the
+    full schema stays in exact-op mode. An operation with no `required`
+    list gives `[]`.
+  - `target_required`: `true` when a call needs a `target`. It uses the
+    dispatcher's own rule, `descriptor_requires_target` in
+    `operations/dispatcher.py`, which the exact-op contract's
+    `target.required` also uses. So the two always agree. Every generic
+    (ingested) operation needs a target; a typed or multi-step operation
+    needs one when its handler reaches the connector through the target.
+  - **Off (default):** both keys are left out, and the handler of a hit is
+    not even imported, so every answer is the same as before. The
+    registered `outputSchema` names both fields; while the switch is off,
+    `call_hints_schema_for_settings`
+    (`mcp/tools/_search_call_hints_schema.py`) takes them out of the
+    schema that `tools/list` sends. The REST `GET /api/v1/operations/search`
+    answer follows the same switch; the CLI `meho operation search --json`
+    prints the fields when the backplane sends them.
+  - **Before turning it on** (measurement plan of the pull request): on
+    the benchmark lane, compare the job score with the switch off and on,
+    for a small model and for Claude, and the size of a search answer
+    (it must grow by less than 10%). Turn it on only if the small model's
+    score goes up and Claude's does not go down. Then one live run on a
+    test install through the agent surface. Code:
+    `operations/_search_call_hints.py`. Tests:
+    `backend/tests/test_search_hit_call_hints.py`.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op

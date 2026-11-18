@@ -196,10 +196,9 @@ behind NAT, in a private control plane, on an isolated management
 network. The **satellite gateway** is a second deploy mode of the same
 backplane image that runs *inside* such a network and dials **out** to
 the central instance — never the reverse. It polls for authorised work,
-executes it locally against the same connector surface, and reports
-results back. By default a satellite runs only `safe` operations. A
-tenant admin can turn on a write tier per runner: then `caution` changes on
-an allowlist also run there, each after a person approves it.
+executes it locally against typed connector operations, and reports
+results back. A satellite runs only `safe` reads. Changes through a satellite are not
+built yet; see [what is not built yet](guides/satellite-gateway.md#what-is-not-built-yet).
 `dangerous` and `destructive` operations never run on a satellite.
 Authorisation, approval, and audit all stay central: a satellite cannot
 self-authorise anything.

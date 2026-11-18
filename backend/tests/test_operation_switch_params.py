@@ -1029,7 +1029,72 @@ def _refused_schemas() -> list[tuple[str, dict[str, Any], str]]:
             },
             conditions,
         ),
+        *_refused_keyword_named_schemas(marker, marked_prop, links, conditions),
     ]
+
+
+def _refused_keyword_named_schemas(
+    marker: dict[str, Any], marked_prop: dict[str, Any], links: str, conditions: str
+) -> list[tuple[str, dict[str, Any], str]]:
+    """Return refused schemas whose shared schema has the name of a keyword."""
+    misplaced = "belongs on a property schema"
+    cases: list[tuple[str, dict[str, Any], str]] = []
+    for name in ("default", "examples", "enum", "const"):
+        for container in ("$defs", "definitions"):
+            ref = f"#/{container}/{name}"
+            cases.append(
+                (
+                    f"not-in-{container}-{name}",
+                    {
+                        "properties": {_HIDDEN: marker, "other": {"$ref": ref}},
+                        container: {name: {"not": marked_prop}},
+                    },
+                    conditions,
+                )
+            )
+            cases.append(
+                (
+                    f"link-in-{container}-{name}",
+                    {
+                        "properties": {_HIDDEN: {"$ref": ref}},
+                        container: {name: {"$anchor": "Marked", **marker}},
+                    },
+                    links,
+                )
+            )
+        cases.append(
+            (
+                f"not-in-components-{name}",
+                {
+                    "properties": {
+                        _HIDDEN: marker,
+                        "other": {"$ref": f"#/components/schemas/{name}"},
+                    },
+                    "components": {"schemas": {name: {"not": marked_prop}}},
+                },
+                conditions,
+            )
+        )
+        cases.append(
+            (
+                f"not-in-nested-defs-{name}",
+                {
+                    "properties": {
+                        _HIDDEN: marker,
+                        "other": {"$defs": {name: {"not": marked_prop}}},
+                    }
+                },
+                conditions,
+            )
+        )
+        cases.append(
+            (
+                f"pattern-properties-{name}",
+                {"properties": {_HIDDEN: marker}, "patternProperties": {name: marker}},
+                misplaced,
+            )
+        )
+    return cases
 
 
 @pytest.mark.asyncio
@@ -1070,6 +1135,17 @@ def test_a_keyword_with_an_unsupported_link_or_condition_stops_an_ingested_opera
     )
     with pytest.raises(ValueError, match=re.escape(message)):
         apply_safety_floor(product="widget", version="1.x", impl_id="widget", proto=proto)
+
+
+@pytest.mark.parametrize("name", ["default", "examples", "enum", "const"])
+def test_a_property_may_link_to_a_marked_schema_with_the_name_of_a_keyword(name: str) -> None:
+    check_switch_names(
+        {
+            "properties": {_HIDDEN: {"$ref": f"#/$defs/{name}"}},
+            "$defs": {name: {SWITCH_MARKER: FILE_REF_PARAMS_SWITCH}},
+        },
+        op_id="widget.x",
+    )
 
 
 def test_a_schema_without_the_keyword_may_use_any_link_or_condition() -> None:

@@ -2116,6 +2116,10 @@ knows one switch name today: `file_ref_params`, the setting
   links in a way MEHO does not follow: `$anchor`, `$dynamicRef`, an
   `$id` below the root, or a `$ref` that is not a plain `#/` pointer
   (for example one with `%` escapes).
+* These checks read every shared schema (`$defs`, `definitions`,
+  `components.schemas`, also below the root) and every
+  `patternProperties` or `dependentSchemas` schema, also when its name
+  is a keyword such as `default`, `examples`, `enum` or `const`.
 * With the switch on, the parameter shows and is accepted as usual.
 * No new MCP tool and no new field.
 

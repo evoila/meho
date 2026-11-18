@@ -90,6 +90,11 @@ def _marked(root: object, node: object) -> bool:
 
 #: Keywords whose value is data or an example, not a schema.
 _NOT_SCHEMAS: Final[frozenset[str]] = _DATA_KEYWORDS | _EXAMPLE_KEYWORDS | {"examples"}
+#: Keywords whose value maps a name to a schema. The walk reads the names
+#: as names, never as keywords, so a schema named ``default`` is still read.
+_SCHEMA_MAPS: Final[frozenset[str]] = frozenset(
+    {"$defs", "definitions", "patternProperties", "dependentSchemas", "dependencies"}
+)
 
 
 def _shared_schemas(schema: object) -> list[tuple[object, str, bool]]:
@@ -110,6 +115,15 @@ def _children(node: dict[str, Any], path: str, *, root: bool) -> list[tuple[obje
             continue
         if key == "properties" and isinstance(value, dict):
             found.extend((prop, f"{path}/{key}/{name}", True) for name, prop in value.items())
+        elif key in _SCHEMA_MAPS and isinstance(value, dict):
+            found.extend((item, f"{path}/{key}/{name}", False) for name, item in value.items())
+        elif key == "components" and isinstance(value, dict):
+            found.extend(
+                (item, f"{path}/{key}/{part}/{name}", False)
+                for part, items in value.items()
+                if isinstance(items, dict)
+                for name, item in items.items()
+            )
         else:
             found.append((value, f"{path}/{key}", False))
     return found

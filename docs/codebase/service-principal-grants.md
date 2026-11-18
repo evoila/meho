@@ -133,6 +133,10 @@ and no run approval covers it.
   call when its floor applies (a read marked in code as one that returns
   no secret value runs at once; `vault.kv.read` waits only with
   `reveal_secret`). The agent verdict and the run approval notes use it.
+- An install or tenant override that turns approval off does not turn it
+  off for an op that writes or makes a credential, when its code turns
+  approval on (`op_policy._with_floors`). So a person's own call of such
+  an op waits too. A `credential_read` op has its own floor for this.
 - A service call of such an op waits also at level `safe`
   (`_service_safety_gate_reason` uses `credential_call_waits`), so the
   read exceptions above still run at once.
@@ -144,6 +148,12 @@ and no run approval covers it.
   call. `meho service-principals grants list` shows it as before.
 - The child operation check (`governed_subops.classify_subop_grantability`)
   marks such a step as not grantable, with the same reason.
+- A guard test (`tests/test_credential_class_guard.py`) goes over every
+  registered operation. An operation that stores or returns a secret value
+  must have one of the three classes. The test finds such an operation by
+  a secret tag (`secret-write`, `credential-mint`, ...), by a
+  secret-shaped parameter name on a write, or by a secret-shaped text
+  field in its answer that it did not declare plain.
 - The shadow evaluator marks such a call `credential` (no grant and no
   run approval clears it, `policy/floors.py::NO_GRANT_MARKS`) and, when it
   waits, `credential_waits` (the floor of the same name, for an agent

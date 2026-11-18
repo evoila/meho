@@ -147,6 +147,10 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # The handoff export returns a one-time handoff token: not the value,
         # but it can fetch the value once. Aggregate-only keeps it off the feed.
         "secret.handoff.export",
+        # ``vault.kv.generate`` makes a new password and stores it in KV. The
+        # answer holds only the place, but the call makes a credential, so it
+        # waits for a person on every call like the other ops of this list.
+        "vault.kv.generate",
     }
 )
 

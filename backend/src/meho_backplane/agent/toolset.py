@@ -250,10 +250,22 @@ def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
 #: tools built from the MCP tools run. Each schema has
 #: ``additionalProperties: false``, so a field it does not name goes back to
 #: the model as a retry and never reaches the handler.
+async def _list_groups_without_operations(
+    operator: Operator, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Run :func:`list_operation_groups` without the operation lines (#4713).
+
+    The hand-written copy has no ``cursor`` input. The operation lines can
+    end an answer early to keep it small, and this copy could not ask for
+    the rest, so it keeps the listing as it was.
+    """
+    return await list_operation_groups(operator, arguments, list_operations=False)
+
+
 _HAND_WRITTEN_OPERATION_TOOLS: tuple[MetaToolSpec, ...] = (
     MetaToolSpec(
         name="list_operation_groups",
-        handler=list_operation_groups,
+        handler=_list_groups_without_operations,
         description=(
             "List a connector's enabled operation groups so you can scope a "
             "later operation search. Call this FIRST when you don't yet know "

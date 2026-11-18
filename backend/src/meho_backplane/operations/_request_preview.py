@@ -80,6 +80,7 @@ from meho_backplane.operations._catalog_guard import (
     choose_catalog_for_target,
 )
 from meho_backplane.operations._errors import (
+    result_denied,
     result_license_read_off,
     result_target_required,
     result_unqualified_target_version,
@@ -311,6 +312,28 @@ def _refused_envelope(
     }
 
 
+async def _profile_target_envelope(
+    operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
+) -> dict[str, Any] | None:
+    """The ``denied`` envelope for a target outside the session's profile (#6099).
+
+    Such a target gets no preview, not even the request that would be sent.
+    The call is refused by the policy gate.
+    """
+    # Imported lazily: the ``mcp`` package imports the dispatcher.
+    from meho_backplane.mcp.profiles import profile_target_denial
+
+    denial = await profile_target_denial(operator.mcp_tool_profile, target)
+    if denial is None:
+        return None
+    return _refused_envelope(
+        result_denied(descriptor.op_id, denial, 0.0),
+        op_id=descriptor.op_id,
+        connector_id=connector_id,
+        source_kind=descriptor.source_kind,
+    )
+
+
 async def _resolve_descriptor(
     *,
     operator: Operator,
@@ -340,7 +363,8 @@ async def _resolve_descriptor(
     when the target's connector cannot run the op (#5948); like
     ``dispatch``, this comes right after the target check, so it is never
     hidden by the catalog choice or by the op's check before the wait for
-    approval.
+    approval. Returns the ``denied`` envelope when the target's connector
+    is outside the session's MCP profile (#6099).
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -403,6 +427,9 @@ async def _resolve_descriptor(
     )
     if outside is not None:
         return outside
+    refused = await _profile_target_envelope(operator, descriptor, connector_id, target)
+    if refused is not None:
+        return refused
 
     return await _catalog_choice(
         operator=operator, descriptor=descriptor, connector_id=connector_id, target=target

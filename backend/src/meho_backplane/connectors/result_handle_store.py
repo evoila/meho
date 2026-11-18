@@ -73,6 +73,17 @@ checked on every read so another operator in the same tenant gets a miss
 (``None``), not another operator's rows. This mirrors the #304 contract
 exactly.
 
+MCP tool profile (#6099): a record also keeps the profile of the MCP
+session that made it (``mcp_profile``, from :data:`result_profile_var`),
+when that profile has a connector list. A read names the profile of the
+reading session, and a record made under another profile, or under no
+profile, is a miss. So a result stored under one such profile cannot be
+read under another profile of the same person. A session without a
+profile, a built-in profile, or any session while the
+``MCP_PROFILE_CONNECTOR_LISTS`` switch is off keeps and reads ``None``
+(:func:`result_profile_scope`), so these sessions read the same results
+as before, also records written before the field existed.
+
 Bounded size
 ============
 
@@ -98,6 +109,7 @@ this store existed. The MCP read tool surfaces the miss as a typed
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -120,7 +132,30 @@ __all__ = [
     "dispose_result_handle_store",
     "get_result_handle_store",
     "reset_result_handle_store_for_testing",
+    "result_profile_scope",
+    "result_profile_var",
 ]
+
+#: The MCP tool profile of the session whose call is running (#6099), or
+#: ``None``. The MCP ``tools/call`` handler sets it; every record written
+#: while it is set keeps it, so only a read under the same profile finds it.
+result_profile_var: ContextVar[str | None] = ContextVar("result_profile", default=None)
+
+
+def result_profile_scope(profile: str | None) -> str | None:
+    """The profile a stored result keeps for a session of *profile* (#6099).
+
+    Only a profile with a connector list, while the switch is on, keeps
+    its results apart. Every other session gets ``None``, so it reads the
+    same results as before the switch existed.
+    """
+    if profile is None:
+        return None
+    settings = get_settings()
+    if not settings.mcp_profile_connector_lists or profile not in settings.mcp_connector_profiles:
+        return None
+    return profile
+
 
 _log = structlog.get_logger(__name__)
 
@@ -297,6 +332,7 @@ class _StoredPayload(msgspec.Struct):
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     record_kind: str = _ROWS_RECORD
     document: Any = None
+    mcp_profile: str | None = None
 
 
 def _without_document(
@@ -450,6 +486,7 @@ class ResultHandleStore:
         RESULT_CACHE_READS_TOTAL.labels(source="miss").inc()
         return None
 
+    # code-quality-allow: over the size limit before #6099, which adds one field.
     async def spill(
         self,
         *,
@@ -509,6 +546,7 @@ class ResultHandleStore:
                 storage_coverage="partial",
                 metadata=metadata,
                 document=document,
+                mcp_profile=result_profile_var.get(),
             )
             baseline, selected = _select_record(
                 baseline,
@@ -593,6 +631,7 @@ class ResultHandleStore:
             metadata=metadata or {},
             record_kind=_DOCUMENT_RECORD,
             document=document,
+            mcp_profile=result_profile_var.get(),
         )
         try:
             encoded = msgspec.json.encode(record)
@@ -666,14 +705,19 @@ class ResultHandleStore:
         return data
 
     @staticmethod
-    def _decode(raw: bytes, *, operator_sub: str, handle_id: UUID) -> _StoredPayload | None:
-        """Decode a raw record for *operator_sub*; ``None`` on a miss (sync)."""
+    def _decode(
+        raw: bytes, *, operator_sub: str, handle_id: UUID, mcp_profile: str | None
+    ) -> _StoredPayload | None:
+        """Decode a raw record for *operator_sub*; ``None`` on a miss (sync).
+
+        A record made under another MCP tool profile is a miss too (#6099).
+        """
         try:
             payload = msgspec.json.decode(raw, type=_StoredPayload)
         except (msgspec.DecodeError, msgspec.ValidationError) as exc:
             _log.warning("result_handle_decode_failed", handle_id=str(handle_id), error=str(exc))
             return None
-        if payload.operator_sub != operator_sub:
+        if payload.operator_sub != operator_sub or payload.mcp_profile != mcp_profile:
             return None
         return payload
 
@@ -685,6 +729,7 @@ class ResultHandleStore:
         handle_id: UUID,
         offset: int,
         limit: int,
+        mcp_profile: str | None = None,
     ) -> SpilledWindow | None:
         """The ``[offset : offset+limit]`` slice of a raw record (sync).
 
@@ -695,7 +740,9 @@ class ResultHandleStore:
         :class:`ResultRecordKindError` for a document record, which has no
         rows to page.
         """
-        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        payload = self._decode(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
         if payload is None:
             return None
         if payload.record_kind == _DOCUMENT_RECORD:
@@ -710,7 +757,7 @@ class ResultHandleStore:
         )
 
     def decode_rows(
-        self, raw: bytes, *, operator_sub: str, handle_id: UUID
+        self, raw: bytes, *, operator_sub: str, handle_id: UUID, mcp_profile: str | None = None
     ) -> SpilledRowSet | None:
         """The full authorized row set of a raw record (sync).
 
@@ -719,7 +766,9 @@ class ResultHandleStore:
         rule as :meth:`decode_window`. Raises :class:`ResultRecordKindError`
         for a document record: a relational query needs rows.
         """
-        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        payload = self._decode(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
         if payload is None:
             return None
         if payload.record_kind == _DOCUMENT_RECORD:
@@ -731,7 +780,7 @@ class ResultHandleStore:
         )
 
     def decode_document(
-        self, raw: bytes, *, operator_sub: str, handle_id: UUID
+        self, raw: bytes, *, operator_sub: str, handle_id: UUID, mcp_profile: str | None = None
     ) -> SpilledDocument | None:
         """The document a ``path`` read resolves against (sync).
 
@@ -741,7 +790,9 @@ class ResultHandleStore:
         rule as :meth:`decode_window`. Raises :class:`ResultRecordKindError`
         when the handle holds rows and nothing beside them.
         """
-        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        payload = self._decode(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
         if payload is None:
             return None
         if payload.record_kind != _DOCUMENT_RECORD and payload.document is None:
@@ -756,6 +807,7 @@ class ResultHandleStore:
         handle_id: UUID,
         offset: int,
         limit: int,
+        mcp_profile: str | None = None,
     ) -> SpilledWindow | None:
         """:meth:`fetch_record` then :meth:`decode_window`, both on the loop.
 
@@ -770,7 +822,12 @@ class ResultHandleStore:
         if raw is None:
             return None
         return self.decode_window(
-            raw, operator_sub=operator_sub, handle_id=handle_id, offset=offset, limit=limit
+            raw,
+            operator_sub=operator_sub,
+            handle_id=handle_id,
+            offset=offset,
+            limit=limit,
+            mcp_profile=mcp_profile,
         )
 
     async def fetch_rows(
@@ -779,6 +836,7 @@ class ResultHandleStore:
         tenant_id: UUID,
         operator_sub: str,
         handle_id: UUID,
+        mcp_profile: str | None = None,
     ) -> SpilledRowSet | None:
         """:meth:`fetch_record` then :meth:`decode_rows`, both on the loop.
 
@@ -788,7 +846,9 @@ class ResultHandleStore:
         raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
         if raw is None:
             return None
-        return self.decode_rows(raw, operator_sub=operator_sub, handle_id=handle_id)
+        return self.decode_rows(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
 
     async def fetch_document(
         self,
@@ -796,6 +856,7 @@ class ResultHandleStore:
         tenant_id: UUID,
         operator_sub: str,
         handle_id: UUID,
+        mcp_profile: str | None = None,
     ) -> SpilledDocument | None:
         """:meth:`fetch_record` then :meth:`decode_document`, both on the loop.
 
@@ -804,7 +865,9 @@ class ResultHandleStore:
         raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
         if raw is None:
             return None
-        return self.decode_document(raw, operator_sub=operator_sub, handle_id=handle_id)
+        return self.decode_document(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
 
 
 #: Process-wide singleton. Lazily built from the broadcast and result-cache

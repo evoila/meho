@@ -47,8 +47,9 @@ and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
 reset. Two more, `keycloak.user.lock_status` and
 `keycloak.realm.lock_settings`, show whether a user is locked after failed
-sign-ins. In total the connector registers 49
-operations: 19 `safe` reads and 30 writes that wait for
+sign-ins. Two more, `keycloak.events.list` and `keycloak.admin_events.list`,
+read the saved login events and admin events. In total the connector registers
+51 operations: 21 `safe` reads and 30 writes that wait for
 approval (8 `caution`, 18 `dangerous`, 4 `destructive`).
 `keycloak.user.required_actions.update` makes a user set up a one-time code
 (OTP) at the next login, and `keycloak.user.otp_status` shows who has one
@@ -236,12 +237,13 @@ rejects a whitespace-only secret rather than setting an empty password.
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
 - `register_operations()` — walks `READ_OPS`, `WRITE_OPS`,
-  `LOGIN_CHECK_OPS`, `APPROVAL_FLOW_OPS`, `PASSKEY_CODE_SKIP_OPS` and
-  `IDENTITY_PROVIDER_OPS`,
+  `LOGIN_CHECK_OPS`, `APPROVAL_FLOW_OPS`, `PASSKEY_CODE_SKIP_OPS`,
+  `IDENTITY_PROVIDER_OPS` and `EVENT_OPS`,
   resolves each `handler_attr` to a bound method, looks the group's
   `when_to_use` up in the merged `WHEN_TO_USE_BY_GROUP` ∪
   `WHEN_TO_USE_WRITE_BY_GROUP` ∪ `WHEN_TO_USE_LOGIN_CHECK_BY_GROUP` ∪
-  `WHEN_TO_USE_AUTHFLOW_BY_GROUP` ∪ `WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP`
+  `WHEN_TO_USE_AUTHFLOW_BY_GROUP` ∪ `WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP` ∪
+  `WHEN_TO_USE_EVENTS_BY_GROUP`
   (a missing entry is a hard error), and
   upserts via `register_typed_operation`. Idempotent across restarts.
 - `_write_admin(target, method, path, *, operator, json, idempotent_conflict=True)`
@@ -1015,11 +1017,14 @@ of them does not use this check.
 - The approval card shows the username stored in Keycloak for the user id
   (`username`, `user_available: true`). A name the caller sent is never
   shown as the user's name: when the user cannot be read, the card has no
-  `username`. It shows the sent value as `requested_username` and
-  `user_available: false`.
+  `username`. It shows the sent value as `requested_username`,
+  `user_available: false` and a `user_note` that says MEHO could not read
+  the user and that an approval is refused at the run. The required-actions
+  card does the same.
 - `user.delete` keeps its own card (the delete's `blast_radius` block). Its
   `username` is only the stored name. For a user that does not exist, the
-  card shows the sent name as `requested_username`.
+  card shows the sent name as `requested_username`. Its lookup uses the
+  shared `user_matches_username` for an id and a name that differ.
 - After approval, the op acts on the user id shown on the card. It does not
   look the username up again. A card without a user id is refused. A card
   without a stored username (no `username`, or `user_available` is not
@@ -1379,8 +1384,13 @@ request share one read, so a wrong password makes one failed sign-in.
   realm's level map, the client's `amr` mapper, the company login default,
   the client binding): the run stops half-way. The error names the refused
   step. `extras.remediation` also says what the run changed before: the
-  flow (alias, id, `flow_created`), the level map and the mapper. These
-  changes stay; a second run after the fix keeps them.
+  flow (alias, id, `flow_created`), the level map, the mapper and the
+  company login default. These changes stay; a second run after the fix
+  keeps them. When the realm has no company login default and the run
+  removed the flow's old one, a refused read back says "the flow has no
+  company login default". The short error message is cut to fit the
+  256-character limit (`_half_way_text`), so a long client id cannot push
+  its end past it.
 
 After a refusal (before the wait, or a 403 at the run), MEHO drops the
 admin token it keeps, so the next call signs in again. The next step also
@@ -1407,6 +1417,37 @@ A failed read, or a body of the wrong shape, is an error, never an empty list.
 
 The first op is named `.step.list` and not `.executions`, because the event
 feed treats a name that ends in `.list` as a read.
+
+### Login events and admin events (`ops_events.py`)
+
+Two `safe` reads, group `events`, for the first questions of a security
+review: who logged in and who failed, and who changed what. Each copies only
+a fixed list of fields (an allow-list).
+
+| op_id | Admin REST API | rows |
+|---|---|---|
+| `keycloak.events.list` | `GET .../events` | `time`, `type`, `clientId`, `userId`, `ipAddress`, `error`. Filters: `type` (list), `client`, `user`, `ipAddress`, `dateFrom`, `dateTo`. |
+| `keycloak.admin_events.list` | `GET .../admin-events` | `time`, `operationType`, `resourceType`, `resourcePath`, `authRealmId`, `authClientId`, `authUserId`, `authIpAddress`, `error`. Filters: `operationTypes`, `resourceTypes`, `resourcePath`, `authUser`, `authIpAddress`, `dateFrom`, `dateTo`. |
+
+- The admin event `representation` (the JSON text of the change, which can
+  hold a password), the `details` map and the session id are never returned.
+  The flight recorder trace masks `representation` too
+  (`_TRACE_ONLY_FIELDS` in `redaction.py`), because it stores the vendor
+  answer before the op filters it.
+- Each call first reads the realm (`GET /admin/realms/{realm}`). When
+  `eventsEnabled` (login events) or `adminEventsEnabled` (admin events) is
+  false, the answer is `enabled: false` with a `message` and no rows, and
+  Keycloak's event endpoint is not called. A realm answer without the flag
+  is an error. An empty `rows` with `enabled: true` means nothing was saved
+  for the filter.
+- Paging: `first` (default 0) and `max` (default 100, at most 1000). The op
+  asks Keycloak for `max + 1` rows and returns `max`; `has_more` is true when
+  the page is not the end of the list. Answer shape:
+  `{realm, enabled, first, max, has_more, rows, total}`. A long `rows` list
+  comes back behind a result handle like any other list.
+- `dateFrom` and `dateTo` are `YYYY-MM-DD`. Times come back as ISO 8601 in
+  UTC. A failed read, a body that is not a list, or a row that is not an
+  object is an error, never an empty list.
 
 ### Skip the one-time code after a passkey (#5663)
 
@@ -1572,7 +1613,7 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
-| `keycloak.user.required_actions.update` | `{resource, username, id, realm, add, remove, current_available, user_available[, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
+| `keycloak.user.required_actions.update` | `{resource, [username,] id, realm, add, remove, current_available, user_available[, user_note, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
 | `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
 | `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
@@ -1707,12 +1748,19 @@ admin realm (`master` by default), or the realm MEHO itself signs in with
   (`TargetWriteResult`); `meho targets add` / `update` print each line on
   stderr.
 - `targets.register` and `targets.update` add `warnings` to their answer,
-  only when there is one.
+  only when there is one. A call made with a token waits for approval, so
+  its card shows the lines first: each op registers a card-warnings builder
+  (`register_card_warnings`, `targets_register_card_warnings` and
+  `targets_update_card_warnings`), and the dispatcher stamps the lines as
+  `target_warnings`. They come from the target as it will be after the
+  write: the sent `product` and `extras`, else the stored ones. A call with
+  no warning has a card without the part.
 - The console create and edit forms show the lines after the save
   (`_saved_warning_modal.html`, from `forms_realm.saved_with_warnings`)
   instead of going straight back to the targets list.
 - The settings file import puts each line, with the path of the target
-  entry, in the `warnings` of the preview and of the apply.
+  entry, in the `warnings` of the preview and of the apply. The import
+  writes at once and has no approval card.
 - The dispatcher stamps the lines as `target_warnings` on the approval
   card of every write on such a target; the console shows them as a
   "Check the target" box.

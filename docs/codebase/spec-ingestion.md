@@ -1718,6 +1718,24 @@ rows. Three branches:
   signal. A genuinely novel `(product, version)` triple is
   unchanged by #1753.
 
+**Several versions under one name (#4728).** Only classes written by hand
+count in this check. A class made by an earlier ingest (the bare auto-shim,
+or the profiled class made when `--auth-scheme` is set; both are made in
+`connector_registration.py`) covers only the label it was made for, so
+`_find_class_covering_version()` skips it. So `networker-rest` 19.14 followed
+by `networker-rest` 19.12 works and makes `networker-rest-19.12`, the same
+way `vmware-rest-8.0` and `vmware-rest-9.0` coexist. A label outside the
+range of a hand-written class is still refused. The 422 `detail` is an
+object with `kind` (`uncovered_version_label`) and `message`; the CLI
+prints both.
+
+**Names that end in digits (#4728).** `IngestionPipelineService.ingest`
+refuses an `impl_id` that has a dash followed by a digit (for example
+`networker-rest-1912`) with `ImplIdEndsInDigitsError` (REST 422, MCP
+`-32602`, `kind` `impl_id_ends_in_digits`). The connector id
+`<impl_id>-<version>` is split at the first dash followed by a digit, so
+such a name would turn `1912-19.12` into the version.
+
 Called from `register_ingested_operations` (real path) and from
 `IngestionPipelineService._run_dry_run` (dry-run path) so an
 operator's `dry_run=True` validation sees the same 422 the real

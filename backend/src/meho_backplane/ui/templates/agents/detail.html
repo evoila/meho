@@ -40,8 +40,10 @@
   {% include "agents/_detail_body.html" %}
 
   {# Mount point for HTMX-loaded modals (edit, delete). A refused create or
-     edit answers 422; the hx-on handler swaps that answer in. #}
-  <div id="agents-modal-container" hx-on::before-swap="if (event.detail.requestConfig && ['post', 'patch'].includes(event.detail.requestConfig.verb) && event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
+     edit answers 422; the hx-on handler swaps that answer in, but only
+     MEHO's own form (an HTML answer). A JSON 422 from the field length
+     check is not swapped, so the open form and its text stay. #}
+  <div id="agents-modal-container" hx-on::before-swap="if (event.detail.requestConfig && ['post', 'patch'].includes(event.detail.requestConfig.verb) && event.detail.xhr.status === 422 && (event.detail.xhr.getResponseHeader('Content-Type') || '').startsWith('text/html')) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
 
   {# Disable-confirm modal -- native ``<dialog>``. Confirming POSTs the
      toggle with ``enabled=false`` and HX-Redirects back to the detail

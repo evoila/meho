@@ -235,6 +235,7 @@ async def create_run(
     target_name: str | None = None,
     params_hash: str | None = None,
     approval_request_id: uuid.UUID | None = None,
+    mcp_profile: str | None = None,
 ) -> OperationRun:
     """Insert a fresh ``operation_run`` row in the ``pending`` state.
 
@@ -256,6 +257,9 @@ async def create_run(
             correlation), or ``None`` for a param-less op.
         approval_request_id: The parked request id for an
             ``approval_resume`` run; ``None`` for a ``direct`` run.
+        mcp_profile: The MCP tool profile that keeps the run apart
+            (:func:`~meho_backplane.connectors.result_handle_store.result_profile_scope`),
+            or ``None``.
 
     Returns:
         The inserted :class:`OperationRun`, flushed.
@@ -271,6 +275,7 @@ async def create_run(
         target_name=target_name,
         params_hash=params_hash,
         approval_request_id=approval_request_id,
+        mcp_profile=mcp_profile,
         status=OperationRunStatus.PENDING.value,
         created_at=datetime.now(UTC),
     )

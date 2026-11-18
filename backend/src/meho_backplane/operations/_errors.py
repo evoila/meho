@@ -35,6 +35,7 @@ handling.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
@@ -61,6 +62,7 @@ from meho_backplane.operations.deny_reasons import (
     is_agent_no_grant,
 )
 from meho_backplane.operations.uncertain_outcome import (
+    LOGIN_ENDED_ADVICE,
     UNCERTAIN_ADVICE,
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
@@ -2516,6 +2518,30 @@ def _auth_scheme_remediation(target_name: str | None) -> str:
     )
 
 
+#: A clause that tells the reader to try the call again ("..., then retry.").
+_RETRY_CLAUSE_RE: Final = re.compile(
+    r",?\s+(?:and\s+)?then\s+(?:retry|try again|call again)\b[^.]*", re.IGNORECASE
+)
+#: A sentence that tells the reader to try the call again ("Try again.").
+_RETRY_SENTENCE_RE: Final = re.compile(
+    r"(?<!not )\b(?:retry|try again|call again)\b", re.IGNORECASE
+)
+_SENTENCE_SPLIT_RE: Final = re.compile(r"(?<=[.!?])\s+")
+
+
+def _without_retry_advice(text: str) -> str:
+    """Return *text* without any advice to send the call again.
+
+    Used for a change whose outcome is unknown: the change may already be
+    made, so the only advice is to check the target and make a new request.
+    A "then retry" clause is cut, and a sentence that still asks for a
+    retry is left out.
+    """
+    text = _RETRY_CLAUSE_RE.sub("", text)
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    return " ".join(s for s in sentences if not _RETRY_SENTENCE_RE.search(s))
+
+
 #: Shared doc-reference tail every ``connector_auth_failed`` summary ends with.
 _AUTH_FAILED_DOC_TAIL = (
     "See docs/architecture/connector-auth.md for the connector auth contract "
@@ -2616,8 +2642,15 @@ def result_connector_auth_failed(
     duration_ms: float,
     *,
     relogin: Literal["not_available", "attempted_failed", "reestablished"] = "not_available",
+    changes_target: bool = False,
 ) -> OperationResult:
     """Connector raised an upstream **auth/session failure** on dispatch.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the refusal came after the change was sent (any stage but
+    ``establish``), the result carries ``execution_outcome: uncertain`` and
+    ``retry: False`` with the advice that a person checks the target first.
+    A refused login (stage ``establish``) stays a plain failure.
 
     T5 (#1804) of the G0.26 v0.16.0 dogfood-hardening Initiative (#1800),
     the auth-class sibling of :func:`result_connector_http_403` (#1649)
@@ -2748,6 +2781,9 @@ def result_connector_auth_failed(
         remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
+    uncertain = changes_target and stage != "establish"
+    if uncertain:
+        remediation = _without_retry_advice(remediation)
     # #6154: a connector that does not use HTTP (a database login, for
     # example) still passes a status code; the text then names its own
     # cause instead of an HTTP status it never got.
@@ -2761,6 +2797,8 @@ def result_connector_auth_failed(
         over_http=over_http,
         session_ended=cause.startswith("session_ended_"),
     )
+    if uncertain:
+        summary = _without_retry_advice(summary)
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
@@ -2777,6 +2815,14 @@ def result_connector_auth_failed(
     if upstream_response is not None:
         _add_upstream_fault(extras, upstream_response)
     _add_attached_upstream_fault(extras, exc)
+    if uncertain:
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        if LOGIN_ENDED_ADVICE not in remediation:
+            remediation = f"{remediation} {LOGIN_ENDED_ADVICE}"
+            extras["remediation"] = remediation
+        if LOGIN_ENDED_ADVICE not in summary:
+            summary = f"{summary} {LOGIN_ENDED_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,

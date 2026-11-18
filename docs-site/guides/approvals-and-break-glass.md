@@ -389,6 +389,9 @@ depends on the switch `AGENT_GRANT_REQUIRED`: with `off` (the default)
 or `observe` it waits for a person too, and with `on` it is refused
 (`agent_no_grant`). For a `dangerous` or `destructive` write, the
 person who approves must be a MEHO-SA-Operator or a MEHO-Admin.
+For a change of rights, the person who approves must be an admin who
+is not the person who asked for it (see
+[Changes of rights need another admin](#changes-of-rights-need-another-admin)).
 
 !!! warning "It must be an *autonomous* run, not a *delegated* one"
 
@@ -696,6 +699,13 @@ operation.
 **`approve` returns `approval_group_required`.** The change is another
 person's `dangerous` or `destructive` change, and you are not a
 MEHO-SA-Operator or a MEHO-Admin. Ask one of them to approve it.
+
+**`approve` returns `rights_change_required`.** The answer says "This is
+a change of rights. Another admin must approve it." You asked for the
+change yourself, or you are not an admin in this tenant. An admin who is
+not the person who asked must approve it. No group, risk level or
+break-glass flag changes this (see
+[Changes of rights need another admin](#changes-of-rights-need-another-admin)).
 
 **The Approve button is greyed out in the console.** The request window
 says why: for example, it is your own change and the group rules do not

@@ -10,7 +10,9 @@
                        conflict it carries a button that asks for the change
                        with the same fields (``form``).
     * ``requested`` -- dict: {status, approval_request_id, error,
-                       matched_operations}: the answer to the request.
+                       matched_operations, approval_note}: the answer to
+                       the request. ``approval_note`` (#6641) is a sentence
+                       about the wait, or ``None``.
 
   The ask button's form has no ``hx-headers``, and it does not inherit the
   page form's: ``#classify-result`` sits next to that form, not inside it.
@@ -38,6 +40,9 @@
       another tenant admin approves it.
       <a class="link" href="/ui/approvals">Open the approvals page</a>
     </p>
+    {% if requested.approval_note %}
+      <p class="alert alert-warning text-sm [overflow-wrap:anywhere]" data-classify-approval-note>{{ requested.approval_note }}</p>
+    {% endif %}
   {% else %}
     <p class="alert alert-warning text-sm" data-classify-request-status="{{ requested.status }}">
       {{ requested.error or requested.status }}

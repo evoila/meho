@@ -324,6 +324,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
+from meho_backplane.connectors.resolver import stale_openbao_probe_hint
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -438,6 +439,7 @@ from meho_backplane.operations._secret_values import (
     split_reveal_secret,
 )
 from meho_backplane.operations._session_expired_hook import (
+    drop_login_before_approved_change,
     mark_session_relogin,
     may_resend_after_session_end,
     same_answer_after_signin_error,
@@ -2018,7 +2020,13 @@ async def _run_branch_with_error_handling(
         await _evict_connector_credentials(connector_instance, target)
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
-            result_connector_auth_failed(op_id, auth_exc, target, duration_ms),
+            result_connector_auth_failed(
+                op_id,
+                auth_exc,
+                target,
+                duration_ms,
+                changes_target=changes_target(descriptor.safety_level),
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -2335,6 +2343,7 @@ def _classify_http_status_error(
     target: Any,
     duration_ms: float,
     relogin: Literal["not_available", "reestablished"] = "not_available",
+    changes_target: bool = False,
 ) -> OperationResult:
     """Map an upstream ``HTTPStatusError`` to its structured ``OperationResult``.
 
@@ -2369,7 +2378,9 @@ def _classify_http_status_error(
     if status_code == 422:
         return result_connector_http_422(op_id, http_exc, duration_ms)
     if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
-        return result_connector_auth_failed(op_id, http_exc, target, duration_ms, relogin=relogin)
+        return result_connector_auth_failed(
+            op_id, http_exc, target, duration_ms, relogin=relogin, changes_target=changes_target
+        )
     return result_connector_error(op_id, http_exc, duration_ms)
 
 
@@ -2504,6 +2515,7 @@ async def _handle_http_status_error(
             connector_instance=connector_instance,
             target=target,
             duration_ms=duration_ms,
+            changes_target=changes_target(descriptor.safety_level),
         ),
         audit_id=audit_id,
         operator=operator,
@@ -2542,7 +2554,11 @@ async def _session_ended_not_resent(
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
         result_connector_auth_failed(
-            op_id, session_ended_not_resent_error(rejected_exc, target), target, duration_ms
+            op_id,
+            session_ended_not_resent_error(rejected_exc, target),
+            target,
+            duration_ms,
+            changes_target=changes_target(descriptor.safety_level),
         ),
         audit_id=audit_id,
         operator=operator,
@@ -2619,6 +2635,7 @@ async def _retry_after_expired_session_answer(
                 target=target,
                 duration_ms=duration_ms,
                 relogin="reestablished",
+                changes_target=changes_target(descriptor.safety_level),
             )
     except ConnectorAuthError as retry_exc:
         # The fresh sign-in was refused. Drop the kept credential too, so a
@@ -2718,6 +2735,7 @@ async def _retry_after_session_invalidation(
                 target=target,
                 duration_ms=duration_ms,
                 relogin="reestablished",
+                changes_target=changes_target(descriptor.safety_level),
             ),
             audit_id=audit_id,
             operator=operator,
@@ -4573,6 +4591,7 @@ async def _dispatch_now(
                 miss_version,
                 _elapsed_ms(started),
                 exception_message=exception_message,
+                hint=stale_openbao_probe_hint(target),
             )
         if resolution_error == "ambiguous_connector":
             # The exception's message is the single most diagnostic string
@@ -4594,6 +4613,13 @@ async def _dispatch_now(
         # old values. One dict lookup per dispatch; a drop only on a change.
         if target is not None:
             await forget_target_if_changed(target)
+
+        # An approved change waited for a person, so its kept login may have
+        # ended. It starts with a fresh login, for every connector kind. A
+        # child step of an approved multi-step operation is not dispatched
+        # with ``_approved``, so the login is dropped once for the whole run.
+        if _approved and target is not None:
+            await drop_login_before_approved_change(descriptor, connector_instance, target)
 
         # --- Steps 6/7/8/9: branch + reduce + audit + broadcast -----------
         return await _execute_and_audit(

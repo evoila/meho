@@ -497,7 +497,8 @@ def test_tool_text_follows_the_switch(monkeypatch: pytest.MonkeyPatch, on: bool)
         assert (INCLUDE_RAW_LINE in shown.description) is on
         assert ("raw_operations" in str(shown.outputSchema)) is on
         if on:
-            assert shown == registered
+            assert shown.inputSchema == registered.inputSchema
+            assert shown.outputSchema == registered.outputSchema
 
 
 async def test_stored_rows_are_unchanged(

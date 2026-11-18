@@ -36,11 +36,15 @@ The canonical KV layout is now per-tenant
   match the ``secret/tenants/<id>/...`` candidate, denying every legitimate
   per-tenant call.
 * **empty** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) → the tenant prefix check
-  is off and any plain path passes, as before the guard. A path with a ``.`` /
-  ``..`` segment, a ``%`` or a backslash is still refused
+  is off for a tenant without an entry in ``VAULT_OIDC_ROLE_BY_TENANT``, and
+  any plain path passes for it. A tenant with an entry (its own Vault login
+  role) always gets the check, with the folder ``secret/tenants/{tenant_id}/``
+  (:func:`effective_tenant_scope_template`). A path with a ``.`` / ``..``
+  segment, a ``%`` or a backslash is refused for every tenant
   (:func:`is_plain_kv_path`): that rule does not depend on a prefix. A
   deploy still mid-migration (secrets under the retired per-``sub`` layout)
-  opts out this way until its secrets are relocated.
+  opts out this way, for its tenants without a role entry, until its
+  secrets are relocated.
 
 The system/shim operator (Nil-UUID tenant, empty ``raw_jwt``) is exempt:
 its only callers exercise the unauthenticated ``vault.sys.health`` op and
@@ -166,8 +170,21 @@ def tenant_has_own_vault_role(operator: Operator) -> bool:
 
 
 def count_tenants_with_own_vault_role(overrides_csv: str) -> int:
-    """Count the entries of *overrides_csv* (the ``VAULT_OIDC_ROLE_BY_TENANT`` value)."""
-    return sum(1 for entry in overrides_csv.split(",") if "=" in entry)
+    """Count the tenants in *overrides_csv* (the ``VAULT_OIDC_ROLE_BY_TENANT`` value).
+
+    A tenant listed twice counts once. An entry the role lookup skips (no
+    ``=``, no role, no UUID) does not count.
+    """
+    tenants: set[UUID] = set()
+    for entry in overrides_csv.split(","):
+        key, sep, role = entry.partition("=")
+        if not sep or not role.strip():
+            continue
+        try:
+            tenants.add(UUID(key.strip()))
+        except ValueError:
+            continue
+    return len(tenants)
 
 
 def effective_tenant_scope_template(operator: Operator) -> str:

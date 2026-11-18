@@ -379,8 +379,11 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     layout. The consequence of running unenforced is silent otherwise: with
     the empty prefix
     :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`
-    is a no-op and cross-tenant ``vault.kv.*`` isolation is unenforced at the
-    app layer, with no other signal.
+    checks no folder for a tenant without an entry in
+    ``VAULT_OIDC_ROLE_BY_TENANT``, with no other signal. A tenant with an
+    entry (its own Vault login role) always gets the folder check; a second
+    line, ``vault_tenant_scope_tenants_with_own_role``, logs how many
+    tenants that is.
 
     This logs **one** structured advisory at startup naming the env var that
     re-enables the guard. It is purely observability — it does **not** change

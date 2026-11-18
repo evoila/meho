@@ -1199,17 +1199,15 @@ def _enforce_secret_ref_tenant_scope(
       relative to the mount, and the dispatch-time read addresses the
       default ``secret`` mount
       (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
-    * the operator's prefix is rendered from
-      :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-      (:func:`_tenant_prefix_or_empty`);
+    * the operator's prefix comes from :func:`_tenant_prefix_or_empty`;
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
     * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
       refused with any prefix setting, also an empty one
       (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
-    * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
-      mid-migration state) turns off only the prefix match: any plain
-      ref passes.
+    * an **empty** ``VAULT_KV_TENANT_SCOPE_PREFIX`` turns off only the
+      prefix match, and only for a tenant without its own Vault login role
+      (no entry in ``VAULT_OIDC_ROLE_BY_TENANT``): any plain ref passes.
 
     Only an *explicitly supplied* ``secret_ref`` is checked. The
     server-derived default

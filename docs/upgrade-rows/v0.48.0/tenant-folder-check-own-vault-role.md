@@ -1,5 +1,5 @@
 ## Note
-A tenant with an entry in `VAULT_OIDC_ROLE_BY_TENANT` now always gets the tenant folder check, also when `VAULT_KV_TENANT_SCOPE_PREFIX` is empty. MEHO then reads and writes only Vault paths under `secret/tenants/<tenant id>/` for that tenant. A tenant without an entry is unchanged.
+A tenant with an entry in `VAULT_OIDC_ROLE_BY_TENANT` now always gets the tenant folder check: every Vault path that a caller or a target names for it must be in the tenant's folder. With an empty `VAULT_KV_TENANT_SCOPE_PREFIX` that folder is `secret/tenants/<tenant id>/`; with a non-empty setting the folder of that setting applies. With either setting, MEHO now also checks a person's read of a target's secret when a call runs on a target of such a tenant. A tenant without an entry is unchanged.
 
 ## Action
-Keep the secrets of each tenant that has an entry in `VAULT_OIDC_ROLE_BY_TENANT` under `secret/tenants/<tenant id>/`. List the targets of that tenant with `meho targets list` and move each target whose `secret_ref` is outside that folder.
+For each tenant with an entry in `VAULT_OIDC_ROLE_BY_TENANT`: run `meho tenants use <tenant>`, then `meho targets list --json`, and look at the field `secret_ref` of each target. Move each secret whose `secret_ref` is outside the tenant's folder into the folder, and set the new `secret_ref` on the target. A call on a target that is not moved yet fails with `connector_error: VaultTenantScopeError` and the text `vault.kv request outside tenant namespace: requested '<path>' is not within tenant prefix '<folder>'`.

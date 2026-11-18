@@ -18,6 +18,7 @@ from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from structlog.testing import capture_logs
 
 from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -28,6 +29,7 @@ from meho_backplane.connectors.vault.tenant_scope import (
     effective_tenant_scope_template,
     enforce_tenant_scope,
 )
+from meho_backplane.main import _advise_vault_tenant_scope_unenforced
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -184,3 +186,16 @@ def test_plain_path_rule_still_runs() -> None:
 def test_count_of_tenants_with_own_role(monkeypatch: pytest.MonkeyPatch) -> None:
     assert count_tenants_with_own_vault_role(get_settings().vault_oidc_role_by_tenant) == 1
     assert count_tenants_with_own_vault_role("") == 0
+
+
+def test_tenant_listed_twice_counts_once() -> None:
+    twice = f"{_TENANT_T}=meho-tenant-t, {str(_TENANT_T).upper()}=meho-tenant-t2"
+    assert count_tenants_with_own_vault_role(twice) == 1
+    assert count_tenants_with_own_vault_role(f"{twice},{_TENANT_U}=meho-tenant-u") == 2
+
+
+def test_startup_logs_count_of_tenants_with_own_role() -> None:
+    with capture_logs() as captured:
+        _advise_vault_tenant_scope_unenforced()
+    lines = [e for e in captured if e.get("event") == "vault_tenant_scope_tenants_with_own_role"]
+    assert [e["count"] for e in lines] == [1]

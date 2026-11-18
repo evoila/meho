@@ -117,7 +117,10 @@ keep that inside each sensor's tenant:
   `enforce_tenant_scope` for an operator with `check_runner_dispatch`
   set. The runner's operator carries the sensor's `tenant_id`, so a read
   outside that tenant's subtree raises `VaultTenantScopeError` and the
-  sensor reads `unknown`.
+  sensor reads `unknown`. With an empty `VAULT_KV_TENANT_SCOPE_PREFIX`
+  this checks no folder for a tenant without an entry in
+  `VAULT_OIDC_ROLE_BY_TENANT`. For a tenant with an entry the check is
+  always on (see "A tenant with its own Vault role" below).
 - **The runner needs its own Vault role.** With a service principal
   (`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET`) on an install
   that uses Vault (`VAULT_ADDR` set), the runner does not start unless
@@ -411,22 +414,42 @@ invited widening the deploy-owned policy (the wrong fix). See
 ## A tenant with its own Vault role
 
 A tenant that has an entry in `VAULT_OIDC_ROLE_BY_TENANT` always gets the
-folder check. When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty, MEHO uses the
-built-in folder `secret/tenants/{tenant_id}/` for that tenant.
-`effective_tenant_scope_template` in `tenant_scope.py` picks the template:
-the setting when it is not empty, else the built-in folder when the tenant
-has a role entry, else none.
+folder check. Every path a caller or a target names for that tenant must
+be in its folder. `effective_tenant_scope_template` in `tenant_scope.py`
+picks the folder:
+
+- `VAULT_KV_TENANT_SCOPE_PREFIX` when it is not empty, for every tenant;
+- else the built-in folder `secret/tenants/{tenant_id}/` when the tenant
+  has a role entry;
+- else none (no folder check, only the plain-path rule).
+
+One more check depends on the role entry alone, with any setting: a
+person's run-time read of a target's secret
+(`VaultCredentialBackend.load_secret_data`). Without a role entry, only
+the check runner's reads are checked there.
 
 These paths use the helper:
 
 | Path | Check |
 |---|---|
-| `vault.kv.*` handlers | `enforce_tenant_scope` |
+| `vault.kv.*` handlers (also KV folder, KV generate, token store, KV compare) | `enforce_tenant_scope` |
 | Check runner and event intake reads of a target's secret | `enforce_tenant_scope`, in `VaultCredentialBackend.load_secret_data` |
 | A person's run-time read of a target's secret | the same check, when the tenant has a role entry |
 | Secret refs in operation parameters | `check_param_secret_ref`, through `enforce_tenant_scope` |
+| Secret broker endpoint (`secret.move` source and sink) and event-source secrets | `enforce_tenant_scope`, in `VaultKvSecretEndpoint.read_secret` / `check_write_allowed` (`connectors/secret/vault_endpoint.py`, used by `event_source/secrets.py`) |
+| Harbor robot secret written to Vault | `enforce_tenant_scope`, in `connectors/harbor/ops_robot_vault.py` |
+| pfSense VPN user password | `enforce_tenant_scope`, in `connectors/pfsense/ops_openvpn_user.py` |
+| Vault userpass password source (`password_secret_ref`, `generate_password`) | `enforce_tenant_scope`, in `connectors/vault/ops_auth_write.py` |
 | Target create and update (`secret_ref`) | `_tenant_prefix_or_empty` in `api/v1/targets.py` (422 `secret_ref_outside_tenant_scope`) |
 | Vault picker start path in the console | `_default_path` in `ui/routes/vault/routes.py` |
+
+Two Vault paths are built by MEHO itself, not named by a caller or a
+target, so they do not go through this check:
+
+- the scheduler's agent secret, from `SCHEDULER_AGENT_VAULT_PATH_PATTERN`,
+  read with `VAULT_SCHEDULER_TOKEN` (`scheduler/vault_credentials.py`);
+- the RKE2 server token, at `tenants/<tenant_id>/rke2/<node>/server-token`
+  (`connectors/rke2/ops_write.py`).
 
 A tenant without a role entry is unchanged. The system operator and the
 read-only platform path `secret/meho/test/federation` keep their

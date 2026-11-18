@@ -1236,6 +1236,7 @@
   "tests/test_vault_kv_list_jsonflux.py": 1.47,
   "tests/test_vault_new_credential_records.py": 3.8,
   "tests/test_vault_tenant_admin_policy_doc.py": 0.2,
+  "tests/test_vault_tenant_folder_own_role.py": 0.6,
   "tests/test_vault_tenant_scope_advisory.py": 1.23,
   "tests/test_vcf_api_contract_catalog_diff.py": 0.29,
   "tests/test_vcf_api_contract_manifest.py": 1.73,

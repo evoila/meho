@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // TestGetGroupsSendsGroupAndCursor — --group and --cursor reach the query.
@@ -78,5 +79,62 @@ func TestGroupsWithoutOperationsPrintAsBefore(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("want header, column line and one group row; got:\n%s", buf.String())
+	}
+}
+
+// TestGroupsJSONKeepsTheOperationsField — --json prints the operation
+// fields as the backplane sent them: with the switch on, a group without
+// typed operations keeps `"operations": []`; with the switch off there is
+// no operations field at all.
+func TestGroupsJSONKeepsTheOperationsField(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+		not  []string
+	}{
+		{
+			name: "switch on",
+			raw: `{"connector_id": "vault-1.x", "next_cursor": null, "groups": [
+				{"group_key": "raw", "name": "Raw", "when_to_use": "Raw.", "operation_count": 4, "operations": []},
+				{"group_key": "kv", "name": "KV", "when_to_use": "Secrets.", "operation_count": 3,
+				 "operations_more": 2, "operations": [
+				 {"op_id": "vault.kv.read", "summary": null, "safety_level": "safe", "requires_approval": false}]}]}`,
+			want: []string{`"operations": []`, `"op_id": "vault.kv.read"`, `"summary": null`, `"operations_more": 2`},
+		},
+		{
+			name: "switch off",
+			raw: `{"connector_id": "vault-1.x", "next_cursor": null, "groups": [
+				{"group_key": "kv", "name": "KV", "when_to_use": "Secrets.", "operation_count": 3}]}`,
+			not: []string{`"operations"`, `"operations_more"`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeOperationsClient{
+				groupsResponses: []*api.GetGroupsApiV1OperationsGroupsGetResponse{
+					{HTTPResponse: makeHTTPResp(200), Body: []byte(tc.raw)},
+				},
+			}
+			answer, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
+			if err != nil {
+				t.Fatalf("getGroups: %v", err)
+			}
+			var buf bytes.Buffer
+			if err := output.PrintJSON(&buf, answer); err != nil {
+				t.Fatalf("PrintJSON: %v", err)
+			}
+			out := buf.String()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("JSON misses %s:\n%s", want, out)
+				}
+			}
+			for _, not := range tc.not {
+				if strings.Contains(out, not) {
+					t.Fatalf("JSON should not have %s:\n%s", not, out)
+				}
+			}
+		})
 	}
 }

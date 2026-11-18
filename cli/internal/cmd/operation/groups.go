@@ -27,12 +27,15 @@ import (
 // backend Task explicitly out of scope for G0.12-T2 #1260 (the CLI
 // hygiene Initiative #1118 is consumer-side only).
 type GroupSummary struct {
-	GroupKey       string           `json:"group_key"`
-	Name           string           `json:"name"`
-	WhenToUse      string           `json:"when_to_use"`
-	OperationCount int              `json:"operation_count"`
-	Operations     []GroupOperation `json:"operations,omitempty"`
-	OperationsMore int              `json:"operations_more,omitempty"`
+	GroupKey       string `json:"group_key"`
+	Name           string `json:"name"`
+	WhenToUse      string `json:"when_to_use"`
+	OperationCount int    `json:"operation_count"`
+	// Operations is a pointer so --json keeps the backplane's answer: no
+	// field while the switch is off, and `[]` for a group without typed
+	// operations while it is on.
+	Operations     *[]GroupOperation `json:"operations,omitempty"`
+	OperationsMore int               `json:"operations_more,omitempty"`
 }
 
 // GroupOperation is one typed or multi-step operation of a group. The
@@ -228,7 +231,11 @@ func printGroupsTable(w io.Writer, r *GroupsResponse) {
 // printGroupOperations prints the operation lines of one group, one per
 // line, under the group's row.
 func printGroupOperations(w io.Writer, g GroupSummary) {
-	for _, op := range g.Operations {
+	var operations []GroupOperation
+	if g.Operations != nil {
+		operations = *g.Operations
+	}
+	for _, op := range operations {
 		approval := ""
 		if op.RequiresApproval {
 			approval = ", needs approval"

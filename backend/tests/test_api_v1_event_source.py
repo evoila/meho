@@ -70,6 +70,18 @@ def store_recorder(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     return calls
 
 
+@pytest.fixture
+def renew_recorder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Patch the secret-version bump; record the secret_ref per call."""
+    calls: list[str] = []
+
+    async def _rec(secret_ref: str) -> None:
+        calls.append(secret_ref)
+
+    monkeypatch.setattr("meho_backplane.api.v1.event_source.bump_secret_version", _rec)
+    return calls
+
+
 def _req(
     client: TestClient,
     method: str,
@@ -265,7 +277,7 @@ async def test_patch_pause_takes_effect_immediately(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_patch_rotates_secret(
-    client: TestClient, store_recorder: list[tuple[str, str]]
+    client: TestClient, store_recorder: list[tuple[str, str]], renew_recorder: list[str]
 ) -> None:
     """PATCH ``secret`` rotates the value at the derived ref and homes secret_ref."""
     await _insert_event_source(name="am", slug="am-prod", secret_ref=None)
@@ -281,7 +293,37 @@ async def test_patch_rotates_secret(
     assert resp.status_code == 200, resp.text
     assert resp.json()["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/event-sources/am-prod"
     assert store_recorder == [(f"tenants/{DEFAULT_TENANT_ID}/event-sources/am-prod", "rotated-key")]
+    # Every MEHO process reads the new secret on its next delivery.
+    assert renew_recorder == [f"tenants/{DEFAULT_TENANT_ID}/event-sources/am-prod"]
     assert "rotated-key" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_patch_secret_answers_503_when_processes_cannot_be_told(
+    client: TestClient, store_recorder: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the secret-version bump fails, the change answers 503 and the row
+    keeps its old secret_ref, so the operator sends the change again."""
+    await _insert_event_source(name="am", slug="am-prod", secret_ref=None)
+
+    async def _boom(secret_ref: str) -> None:
+        raise ConnectionError("valkey unreachable")
+
+    monkeypatch.setattr("meho_backplane.api.v1.event_source.bump_secret_version", _boom)
+    key = make_rsa_keypair("kid-A")
+    resp = _req(
+        client,
+        "PATCH",
+        "/api/v1/event-sources/am-prod",
+        _admin_token(key),
+        key,
+        json={"secret": "rotated-key"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"] == "secret_renew_failed"
+    assert "rotated-key" not in resp.text
+    shown = _req(client, "GET", "/api/v1/event-sources/am-prod", _admin_token(key), key)
+    assert shown.json()["secret_ref"] is None
 
 
 @pytest.mark.parametrize("blank", ["", "   "])

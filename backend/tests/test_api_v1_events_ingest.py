@@ -33,6 +33,7 @@ import json
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -49,11 +50,12 @@ from meho_backplane.auth.vault import _resolve_login_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EventOutbox, Tenant
 from meho_backplane.events.ingest.rate_limit import IngestRateLimitError
-from meho_backplane.events.ingest.service import (
-    IngestPayloadError,
-    _parse_json_or_fail,
-    _recent_secrets,
+from meho_backplane.events.ingest.secret_cache import (
+    _entries,
+    bump_secret_version,
+    clear_secret_cache,
 )
+from meho_backplane.events.ingest.service import IngestPayloadError, _parse_json_or_fail
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -119,6 +121,14 @@ class _FakeValkey:
     def pipeline(self, transaction: bool = True) -> _FakePipeline:
         return _FakePipeline(self.store)
 
+    async def get(self, name: str) -> bytes | None:
+        value = self.store.get(name)
+        return None if value is None else str(value).encode()
+
+    async def incr(self, name: str) -> int:
+        self.store[name] = self.store.get(name, 0) + 1
+        return self.store[name]
+
 
 @pytest.fixture(autouse=True)
 def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -139,9 +149,12 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         "meho_backplane.events.ingest.rate_limit.get_broadcast_client", lambda: fake
     )
-    _recent_secrets.clear()
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.secret_cache.get_broadcast_client", lambda: fake
+    )
+    clear_secret_cache()
     yield
-    _recent_secrets.clear()
+    clear_secret_cache()
 
 
 async def _seed_tenant() -> None:
@@ -358,7 +371,7 @@ async def test_bad_deliveries_over_their_limit_get_429_and_no_vault_read(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Past the failed-check limit, bad deliveries get 429 and read no secret;
-    the real sender is still checked against the secret read last."""
+    the real sender is still checked and accepted."""
     await _seed_source(extras={"rate_per_minute": 2})
     reads = _count_secret_reads(monkeypatch)
     body = b'{"alert":"firing"}'
@@ -368,40 +381,61 @@ async def test_bad_deliveries_over_their_limit_get_429_and_no_vault_read(
         client.post(url, content=body, headers=_bad_signature(body)).status_code for _ in range(5)
     ]
     assert codes == [401, 401, 429, 429, 429]
-    assert len(reads) == 2
+    assert len(reads) == 1
 
     over = client.post(url, content=body, headers=_bad_signature(body))
     assert over.headers["Retry-After"].isdigit()
     good = client.post(url, content=body, headers=_signed(body))
     assert good.status_code == 202
-    assert len(reads) == 2
+    assert len(reads) == 1
 
 
 @pytest.mark.asyncio
-async def test_failed_check_limit_without_a_recent_secret_answers_429(
+async def test_good_deliveries_over_the_limit_get_429_and_read_the_secret_once(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Past the failed-check limit, with no secret read by this process in the
-    current window, even a good delivery gets 429 and reads no secret."""
+    """Good deliveries past the delivery limit get 429 and read no more secrets."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _count_secret_reads(monkeypatch)
+    url = "/api/v1/events/ingest/prod-am"
+    codes = []
+    for i in range(10):
+        body = json.dumps({"n": i}).encode()
+        codes.append(client.post(url, content=body, headers=_signed(body)).status_code)
+    assert codes == [202, 202] + [429] * 8
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_changed_secret_works_at_once_while_the_failed_check_limit_is_reached(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a secret change, the new secret is accepted and the old one is
+    refused, also when the source is over its failed-check limit."""
     await _seed_source(extras={"rate_per_minute": 2})
     body = b'{"alert":"firing"}'
     url = "/api/v1/events/ingest/prod-am"
     for _ in range(2):
         assert client.post(url, content=body, headers=_bad_signature(body)).status_code == 401
-    _recent_secrets.clear()
-    reads = _count_secret_reads(monkeypatch)
+    reads = _count_secret_reads(monkeypatch, value="the-new-secret")
 
-    resp = client.post(url, content=body, headers=_signed(body))
-    assert resp.status_code == 429
-    assert reads == []
+    (secret_ref,) = {ref for _source_id, ref in _entries}
+    await bump_secret_version(secret_ref)
+
+    new = client.post(url, content=body, headers=_signed(body, secret="the-new-secret"))
+    old_body = b'{"alert":"resolved"}'
+    old = client.post(url, content=old_body, headers=_signed(old_body))
+    assert new.status_code == 202
+    assert old.status_code == 429
+    assert len(reads) == 1
 
 
 @pytest.mark.asyncio
-async def test_parallel_bad_deliveries_read_the_secret_at_most_limit_times(
+async def test_parallel_bad_deliveries_read_the_secret_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bad deliveries that arrive at the same time each take a failed-check
-    slot before the secret read, so at most ``limit`` of them read the secret."""
+    """Bad deliveries that arrive at the same time read the secret once; only
+    ``limit`` of them get 401, the rest get 429."""
     await _seed_source(extras={"rate_per_minute": 2})
     reads: list[str] = []
 
@@ -420,46 +454,33 @@ async def test_parallel_bad_deliveries_read_the_secret_at_most_limit_times(
         responses = await asyncio.gather(
             *(ac.post(url, content=body, headers=_bad_signature(body)) for _ in range(20))
         )
-        codes = sorted(r.status_code for r in responses)
-        assert len(reads) <= 2
-        assert codes.count(401) == len(reads)
-        assert codes.count(429) == 20 - len(reads)
+        codes = [r.status_code for r in responses]
+        assert len(reads) == 1
+        assert codes.count(401) == 2
+        assert codes.count(429) == 18
 
         good = await ac.post(url, content=body, headers=_signed(body))
     assert good.status_code == 202
-    assert len(reads) <= 2
+    assert len(reads) == 1
 
 
 @pytest.mark.asyncio
-async def test_kept_secret_from_an_older_window_is_not_used(
+async def test_kept_secret_from_an_older_window_is_read_again(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Past the failed-check limit, a secret read in an earlier window is
-    removed and not used: the good delivery gets 429 and reads no secret."""
+    """A secret kept from an earlier window is not used: the next delivery
+    reads the secret again."""
     await _seed_source(extras={"rate_per_minute": 2})
     body = b'{"alert":"firing"}'
     url = "/api/v1/events/ingest/prod-am"
-    for _ in range(2):
-        assert client.post(url, content=body, headers=_bad_signature(body)).status_code == 401
-    for key, (window, secret) in list(_recent_secrets.items()):
-        _recent_secrets[key] = (window - 1, secret)
+    assert client.post(url, content=body, headers=_bad_signature(body)).status_code == 401
+    for key, entry in list(_entries.items()):
+        _entries[key] = replace(entry, window=entry.window - 1)
     reads = _count_secret_reads(monkeypatch)
 
     resp = client.post(url, content=body, headers=_signed(body))
-    assert resp.status_code == 429
-    assert reads == []
-    assert _recent_secrets == {}
-
-
-@pytest.mark.asyncio
-async def test_good_deliveries_over_the_limit_get_429(client: TestClient) -> None:
-    await _seed_source(extras={"rate_per_minute": 2})
-    url = "/api/v1/events/ingest/prod-am"
-    codes = []
-    for i in range(3):
-        body = json.dumps({"n": i}).encode()
-        codes.append(client.post(url, content=body, headers=_signed(body)).status_code)
-    assert codes == [202, 202, 429]
+    assert resp.status_code == 202
+    assert len(reads) == 1
 
 
 @pytest.mark.asyncio

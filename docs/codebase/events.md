@@ -489,21 +489,29 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
    success the check returns the **signed message**: `"<ts>." + body`
    for a timestamped HMAC, else the raw body.
 
-   **Failed checks have their own limit.** Before the Vault read, each
+   **Failed checks have their own limit.** Before the check, each
    delivery takes a slot in
    `meho:ratelimit:ingest-failed:{tenant}:{source}` with one atomic
    `INCR` + `EXPIRE` (`take_check_slot`; same per-minute cap as the
    delivery limit, `events/ingest/rate_limit.py`). A check that passes
    gives the slot back (`release_check_slot`, `DECR`); a failed check or
-   a failed Vault read keeps it. When the slot is over the cap, the
-   delivery makes no Vault read: it is checked against the secret this
-   process read for the source in the current window (`_recent_secrets`;
-   an entry from an older window is removed), and a failed check, or no
-   such secret, answers `429` + `Retry-After`. Because the slot is taken
-   before the read, deliveries that arrive at the same time also make at
-   most *cap* Vault reads per source and window when they fail. A flood
-   of bad deliveries does not block the real sender. The kept secret is used only in this state, so
-   a rotated secret takes effect at once in normal use.
+   a failed Vault read keeps it. A failed check whose slot is over the
+   cap answers `429` + `Retry-After`. A flood of bad deliveries does not
+   block the real sender.
+
+   **A short copy of the secret.** Each process keeps the secret it read
+   for a source (`events/ingest/secret_cache.py`). The copy is used only
+   in the window it was read in (one minute), and only while the source's
+   secret version in Valkey (`meho:ingest:secret-version:{secret_ref}`)
+   is the same. Deliveries without a usable copy wait on one lock per
+   source, so one of them reads Vault. So good and bad deliveries
+   together read Vault about once per source, minute and process. A
+   secret change through `PATCH /api/v1/event-sources/{slug}` raises the
+   version after the Vault write, so every process reads the new secret
+   on its next delivery; if Valkey cannot be reached, the change answers
+   `503 secret_renew_failed`. With limits off (cap `0`) there is no copy
+   and every delivery reads Vault. The secret itself never goes to
+   Valkey.
 4. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
    `INCR`/`EXPIRE` pattern under the key namespace
    `meho:ratelimit:ingest:{tenant}:{source}`. It runs **after** the

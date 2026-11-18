@@ -12,17 +12,16 @@ this order:
    the webhook is JWT-less). An empty or blank stored secret refuses every
    sender.
 2. Verify the sender against the source's auth strategy (constant-time).
-   Before the Vault read, the delivery takes a slot in the source's
+   Before the check, the delivery takes a slot in the source's
    **failed-check** counter
    (:mod:`~meho_backplane.events.ingest.rate_limit`) with one atomic
    ``INCR``. A check that passes gives the slot back; a failed check or a
-   failed Vault read keeps it. When the slot is over the per-minute cap,
-   the delivery does not read Vault: it is checked against the secret this
-   process read in the current window, and answers ``429`` when the check
-   fails or no such secret is at hand. So at most *cap* Vault reads per
-   source and window come from deliveries that fail the check, also when
-   they arrive at the same time, and a flood of bad deliveries does not
-   block the real sender.
+   failed Vault read keeps it. A failed check whose slot is over the
+   per-minute cap answers ``429``, so a flood of bad deliveries does not
+   block the real sender. The secret comes from this process's short copy
+   (:mod:`~meho_backplane.events.ingest.secret_cache`): Vault is read about
+   once per source, minute and process, and again at once after the
+   secret is changed through the update route.
 3. Enforce the per-source delivery rate limit. Only deliveries that passed
    step 2 count against it.
 4. Compute the dedupe key: a SHA-256 of the signed message (the
@@ -94,12 +93,13 @@ from meho_backplane.event_source.secrets import read_event_source_secret
 from meho_backplane.events.ingest.auth import IngestAuthError, verify_ingest_auth
 from meho_backplane.events.ingest.config import IngestConfig
 from meho_backplane.events.ingest.rate_limit import (
-    current_window,
+    CheckSlot,
     enforce_ingest_rate_limit,
     failed_check_limit_error,
     release_check_slot,
     take_check_slot,
 )
+from meho_backplane.events.ingest.secret_cache import cached_secret
 from meho_backplane.events.normalizers import normalize_event
 from meho_backplane.events.outbox import publish
 from meho_backplane.settings import get_settings
@@ -126,13 +126,6 @@ INGEST_OPERATOR_SUB: str = "__ingest__"
 #: ``path``-is-op-id convention the internal-audit writer documents).
 INGEST_AUDIT_METHOD: str = "INGEST"
 INGEST_AUDIT_PATH: str = "events.ingest"
-
-
-#: ``(source id, secret_ref) -> (window of the read, secret)``: the last
-#: secret this process read from Vault for each source. A delivery over the
-#: failed-check limit uses it only when it was read in the current window
-#: (see the module docstring).
-_recent_secrets: dict[tuple[uuid.UUID, str], tuple[int, SecretStr]] = {}
 
 
 class IngestPayloadError(Exception):
@@ -192,7 +185,7 @@ async def _read_secret_or_fail(source: ResolvedSource) -> SecretStr:
     A source with no ``secret_ref`` cannot authenticate any sender, so it
     fails closed as an auth error (uniform 401). A Vault I/O / auth failure
     is transient and maps to :class:`IngestVaultError` (503); the sender
-    retries. A secret that was read is kept for :func:`_recent_secret`.
+    retries.
     """
     if source.secret_ref is None:
         raise IngestAuthError("no_secret_configured")
@@ -206,25 +199,19 @@ async def _read_secret_or_fail(source: ResolvedSource) -> SecretStr:
             error_class=type(exc).__name__,
         )
         raise IngestVaultError(str(type(exc).__name__)) from exc
-    _recent_secrets[(source.id, source.secret_ref)] = (current_window(), secret)
     return secret
 
 
-def _recent_secret(source: ResolvedSource, window: int) -> SecretStr | None:
-    """Return the secret this process read for *source* in *window*.
+async def _source_secret(source: ResolvedSource, slot: CheckSlot | None) -> SecretStr:
+    """Return the source's secret, from the per-process copy when limits are on.
 
-    An entry from an older window is removed and not used.
+    With no slot (limits off), every delivery reads Vault.
     """
-    if source.secret_ref is None:
-        return None
-    key = (source.id, source.secret_ref)
-    entry = _recent_secrets.get(key)
-    if entry is None:
-        return None
-    if entry[0] != window:
-        _recent_secrets.pop(key, None)
-        return None
-    return entry[1]
+    if slot is None or source.secret_ref is None:
+        return await _read_secret_or_fail(source)
+    return await cached_secret(
+        source.id, source.secret_ref, slot.window, lambda: _read_secret_or_fail(source)
+    )
 
 
 async def _check_sender(
@@ -238,21 +225,14 @@ async def _check_sender(
 ) -> bytes:
     """Check the sender against the source secret; return the signed message.
 
-    The delivery first takes a slot in the failed-check counter, before any
-    Vault read. A check that passes gives the slot back; a failed check or
-    a failed Vault read keeps it. When the slot is over *limit*, the check
-    uses the secret this process read in the current window instead of a
-    Vault read, and a failed check (or no such secret) answers ``429``.
+    The delivery first takes a slot in the failed-check counter. A check
+    that passes gives the slot back; a failed check or a failed Vault read
+    keeps it. A failed check whose slot is over *limit* answers ``429``.
     An empty or blank secret refuses every sender (``no_secret_configured``).
     """
     slot = await take_check_slot(source.tenant_id, source.slug, limit)
     try:
-        if slot is not None and slot.over_limit:
-            secret = _recent_secret(source, slot.window)
-        else:
-            secret = await _read_secret_or_fail(source)
-        if secret is None:
-            raise IngestAuthError("failed_check_limit")
+        secret = await _source_secret(source, slot)
         if not secret.get_secret_value().strip():
             raise IngestAuthError("no_secret_configured")
         signed_message = verify_ingest_auth(
@@ -401,7 +381,8 @@ async def accept_ingest_event(
     :class:`IngestOutcome` on accept or on a duplicate delivery (no second
     outbox/audit row). Only a delivery that passed the sender check counts
     against the source's delivery limit; failed checks have their own
-    counter, which also bounds the Vault reads (see the module docstring).
+    counter, and a short per-process copy of the secret keeps Vault reads
+    low (see the module docstring).
     The JSON body is parsed only after auth passes, so a parse failure (400)
     is never reachable unauthenticated.
     """

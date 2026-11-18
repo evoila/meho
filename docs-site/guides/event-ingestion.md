@@ -108,13 +108,12 @@ delivery, and the order is load-bearing:
 3. **Authenticate** (`401`) per the source's `auth_strategy`. A source
    whose stored secret is empty or only spaces accepts no sender. Failed
    checks have their own per-minute limit, the same number as the source's
-   rate limit. Each delivery takes a place in this limit before MEHO reads
-   the secret, and gives it back when it passes the check. Once a source
-   reaches the limit, MEHO stops reading the secret store for that source
-   for the rest of the minute, also for deliveries that arrive at the same
-   time: it checks each delivery against the secret it read in this
-   minute, and answers `429` with `Retry-After` to a delivery that fails.
-   So bad deliveries do not block the real sender.
+   rate limit. Once a source reaches it, MEHO answers `429` with
+   `Retry-After` to each delivery that fails the check. So bad deliveries
+   do not block the real sender. Each MEHO process keeps a copy of the
+   secret for up to one minute, so a burst of deliveries reads your
+   secret store about once per minute. A secret change through the
+   update applies to the next delivery in every MEHO process.
 4. **Rate-limit** (`429` with `Retry-After`) per tenant and source. Only
    deliveries that passed step 3 count.
 5. **De-duplicate** — a hash of the signed data (the timestamp and the
@@ -234,6 +233,6 @@ dispatch, on the audit ledger.
 | Ingest returns `202` (or `200` for a repeat of the same delivery) but no agent run fires | The event was accepted but no `event` trigger's filter matched it. A filter without `source` never matches a webhook event. | Add `"source": {"slug": "<source-slug>"}` to the trigger's `--event-filter`, then compare the rest against the lifted top-level fields. |
 | One alert fires many agent runs | A filter is too broad (in the limit, a filter with only the source matches every event of that source). | Tighten the filter to the fields you mean. |
 | A source registered but ingest still fails closed | It was registered without a secret. | Set the secret with an update before pointing the sender at it. An empty secret, or one of only spaces, is refused with `422`. |
-| A real sender gets `429` with few deliveries | The source reached its limit of failed checks this minute, and this MEHO process has not read the source's secret in this minute. With several MEHO processes, a process that has no copy of the secret from this minute answers `429`. The sender's retry reaches a process that has one, or the next minute. | Wait for the time in `Retry-After`. Find and stop the sender that fails the check; the server log names the reason of each failed check. |
+| A secret change answers `503 secret_renew_failed` | The new secret is stored in Vault, but MEHO could not reach Valkey to tell every MEHO process to use it. | Check Valkey, then send the change again. |
 
 **Next:** [Satellite gateway](satellite-gateway.md).

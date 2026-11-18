@@ -49,6 +49,7 @@ from meho_backplane.operations.approval_queue import (
     withdraw_request,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_service_a_known_person
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -104,6 +105,7 @@ async def _park(
     *, sub: str = _SENDER_SUB, tenant_id: uuid.UUID = _TENANT_ID, status: str | None = None
 ) -> uuid.UUID:
     """Park one request as *sub*; optionally force its status. Return its id."""
+    await give_service_a_known_person(tenant_id, sub)
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
             s,

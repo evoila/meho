@@ -323,6 +323,7 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
     from meho_backplane.db.models import ApprovalRequestStatus
     from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
     from meho_backplane.operations.grant_approval import check_grant_approval, is_rights_change
+    from meho_backplane.operations.people_behind import behind_subs, people_behind_unknown
 
     effect = request.proposed_effect or {}
     level = effect.get("safety_level")
@@ -341,6 +342,8 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
         rights_change=is_rights_change(request),
         grant_refusal=grant_refusal,
         break_glass=get_settings().approval_allow_self_approval,
+        people_behind=behind_subs(request.people_behind),
+        requester_unknown=people_behind_unknown(request.principal_kind, request.people_behind),
     )
 
 

@@ -4267,6 +4267,9 @@ class AgentDefinition(Base):
         default=True,
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last changed the definition. NULL until the first
+    # change after migration ``0175`` on a row the migration could not fill.
+    updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -7574,6 +7577,14 @@ class ApprovalRequest(Base):
     # entry that set them. See the class docstring. Added by migration ``0167``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The people behind a request of an agent, service or runner login:
+    # ``[{"sub", "name", "why"}]``, set at park time by
+    # :mod:`meho_backplane.operations.people_behind`. NULL for a person's
+    # request. An empty list: MEHO knows nobody behind the login. Added by
+    # migration ``0175``.
+    people_behind: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, nullable=True, default=None
+    )
     # The categories the tenant's and the install's routing used. Added by
     # migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -8908,6 +8919,9 @@ class RunbookRun(Base):
         default=None,
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last handed the run to a new assignee. NULL when the
+    # run was never handed over. Added by migration ``0175``.
+    reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -167,6 +167,7 @@ the claim; a malformed value is dropped with a warning in the log, and
 the token stays valid.
 """
 
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
@@ -473,18 +474,21 @@ class Operator(BaseModel):
         in_a_self_approval_group = self.self_approver or self.tenant_role == TenantRole.TENANT_ADMIN
         return in_a_self_approval_group and self.tenant_chosen and is_human_principal(self)
 
-    def may_approve_rights_change(self, requester_sub: str) -> bool:
+    def may_approve_rights_change(self, requester_sub: str, behind: Iterable[str] = ()) -> bool:
         """Return ``True`` when this person may approve a change of rights.
 
         The one place that decides it, for every kind of rights change
         and every approval path (the approve, the "may I approve?" sign and
         run approvals). True only for a person in a chosen current tenant who
         is an admin there (the ``tenant_admin`` role or a platform admin)
-        and who is not *requester_sub*: the requester never approves their
-        own change of rights. No group, no risk level and no break-glass
-        switch changes that.
+        and who is neither *requester_sub* nor one of *behind*, the people
+        behind the agent, service or runner login that asked
+        (:mod:`~meho_backplane.operations.people_behind`): the requester and
+        the people behind it never approve their own change of rights. No
+        group, no risk level and no break-glass switch changes that.
         """
-        if self.sub.casefold() == requester_sub.casefold():
+        mine = self.sub.casefold()
+        if mine == requester_sub.casefold() or mine in {sub.casefold() for sub in behind}:
             return False
         is_admin = self.tenant_role == TenantRole.TENANT_ADMIN or self.platform_admin
         return is_admin and self.tenant_chosen and is_human_principal(self)

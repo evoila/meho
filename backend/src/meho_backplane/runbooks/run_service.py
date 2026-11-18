@@ -856,6 +856,7 @@ class RunbookRunService:
             self._refuse_if_terminal(run)
             now = datetime.now(UTC)
             run.assigned_to = request.new_assignee
+            run.reassigned_by = operator_sub
             await session.commit()
 
         structlog.get_logger().info(

@@ -86,6 +86,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 
 # ---------------------------------------------------------------------------
 # Module-level handlers (closures are rejected by derive_handler_ref)
@@ -2309,6 +2310,7 @@ async def test_approve_allows_request_within_deadline(
     """
     requester = _make_operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
     reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    await give_agent_a_known_person(_TENANT_ID, "agent-requester")
     params = {"key": "value"}
 
     request = await create_pending_request(
@@ -3092,6 +3094,7 @@ async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
     # Park an agent-run request directly (run_id set) — the realistic shape
     # the agent runtime parks via the contextvar.
     requester = _make_operator(sub="agent-run-sub", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(_TENANT_ID, "agent-run-sub")
     params = {"path": "secret/agent"}
     async with get_sessionmaker()() as s:
         pending = await create_pending_request(

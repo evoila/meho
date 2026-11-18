@@ -55,6 +55,7 @@ from meho_backplane.operations.approval_queue import (
     create_pending_request,
     resume_dispatch_after_approval,
 )
+from tests._people_behind_helpers import give_known_person
 
 # ``pg_engine`` (imported for its side effect of being a discoverable
 # fixture) points the process sessionmaker at the testcontainer and seeds
@@ -91,6 +92,7 @@ def _make_operator(*, sub: str, kind: PrincipalKind = PrincipalKind.AGENT) -> Op
 async def _commit_run_bound_pending(*, requester_sub: str) -> ApprovalRequest:
     """Insert + commit a run-bound (``run_id`` set) parked request in Postgres."""
     requester = _make_operator(sub=requester_sub)
+    await give_known_person(requester)
     params = {"path": "secret/agent", "value": "tok"}
     async with get_sessionmaker()() as session:
         request = await create_pending_request(

@@ -404,6 +404,8 @@ class AgentDefinitionService:
                         outcome="Nothing was changed.",
                     )
             apply_changes(row, changes)
+            if updated_by_sub is not None:
+                row.updated_by_sub = updated_by_sub
             await session.flush()
             if grant_scopes and new_identity_ref is not None:
                 if updated_by_sub is None:

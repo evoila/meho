@@ -459,6 +459,23 @@
         <dt class="shrink-0 text-base-content/55">Requested by</dt>
         <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
+      {#- The people behind an agent, service or runner login: they count as
+          the requester, so the approver sees who is really asking. -#}
+      {% if request.people_behind is not none %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-people-behind>
+          <dt class="shrink-0 text-base-content/55">Behind it</dt>
+          <dd class="flex flex-col items-end gap-1 text-right">
+            {% for entry in request.people_behind %}
+              <span class="flex flex-wrap items-baseline justify-end gap-1">
+                <span class="text-base-content/55">{{ entry.why_text }}</span>
+                {{ subject(entry.person) }}
+              </span>
+            {% else %}
+              <span data-approval-people-behind-unknown>Set up by: not known. Only an Admin may approve.</span>
+            {% endfor %}
+          </dd>
+        </div>
+      {% endif %}
       {#- Run context (#3353): the external change-ticket ref the automation
           stamps and the originating run id, so the reviewer can trace the
           request to the work that issued it. -#}

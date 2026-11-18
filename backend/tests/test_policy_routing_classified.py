@@ -39,6 +39,7 @@ from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.store import ClassificationEdit, set_classification
 from meho_backplane.policy.who_approves import approvers_for
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-000000006437")
 _FIX = {"product": "clsroute", "version": "1.x", "impl_id": "clsroute"}
@@ -63,6 +64,12 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+async def _known_person_behind(_settings_env: None) -> None:
+    """The service login has a known person behind it, who approves nothing here."""
+    await give_known_person(_service())
 
 
 @pytest.fixture

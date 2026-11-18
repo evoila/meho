@@ -466,6 +466,15 @@ evaluator reads the matching grant through `matched_grant` (the same row
 match as `resolve_verdict`, before any ceiling) and applies the ceilings
 itself. See [policy-evaluator.md](policy-evaluator.md).
 
+## Who stands behind an agent's request
+
+A request an agent makes under its own login counts as a request of the
+people behind the agent: who registered or owns it, who gave its grants in
+force, who wrote or last changed its definition, and who made its schedules.
+They may approve it only where they may approve their own change. When MEHO
+knows nobody behind the agent, only an admin may approve. See
+[The people behind a request](approvals.md#the-people-behind-a-request).
+
 ## Dependencies
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`

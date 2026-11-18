@@ -54,6 +54,7 @@ from tests.test_policy_routing_classified import (
     _OP,
     _TENANT,
     _approve,
+    _known_person_behind,  # noqa: F401 -- autouse fixture: a known person behind the login
     _person,
     _register,
     _service,

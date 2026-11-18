@@ -1283,9 +1283,9 @@ async def test_no_connector_error_names_the_probe_again_fix_for_old_openbao_targ
     assert result.status == "error"
     assert result.error is not None
     assert result.error.startswith("no_connector:")
-    assert "meho targets probe bao-one" in result.error
+    assert "meho targets probe -- bao-one" in result.error
     assert result.extras["error_code"] == "no_connector"
-    assert "meho targets probe bao-one" in result.extras["hint"]
+    assert "meho targets probe -- bao-one" in result.extras["hint"]
 
 
 # ---------------------------------------------------------------------------

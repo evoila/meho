@@ -135,6 +135,7 @@ to make the binding visible in ``pyproject.toml``.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -657,10 +658,11 @@ def stale_openbao_probe_hint(target: Any) -> str | None:
             return None
     except InvalidVersion:
         return None
-    name = getattr(target, "name", None) or "<target-name>"
+    name = getattr(target, "name", None)
+    quoted = shlex.quote(name) if isinstance(name, str) and name else "<target-name>"
     return (
         "this may be an OpenBao server that was probed before 0.47; "
-        f"run `meho targets probe {name}` to detect it again"
+        f"run `meho targets probe -- {quoted}` to detect it again"
     )
 
 

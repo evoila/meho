@@ -11,6 +11,7 @@ until a CI run on it is green.
 
 from __future__ import annotations
 
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -113,7 +114,26 @@ def test_sensor_on_vault_connector_warns_for_hashicorp_2_x() -> None:
 def test_hint_for_an_old_openbao_target_names_the_probe() -> None:
     hint = stale_openbao_probe_hint(_target("2.7.1", probed_product="vault"))
     assert hint is not None
-    assert "meho targets probe t" in hint
+    assert "`meho targets probe -- t`" in hint
+
+
+@pytest.mark.parametrize(
+    ("name", "quoted"),
+    [
+        ("example;id", "'example;id'"),
+        ("-rf", "-rf"),
+        ("it's", "'it'\"'\"'s'"),
+        ("a b", "'a b'"),
+    ],
+)
+def test_hint_quotes_the_target_name(name: str, quoted: str) -> None:
+    target = _target("2.7.1", probed_product="vault")
+    target.name = name
+    hint = stale_openbao_probe_hint(target)
+    assert hint is not None
+    assert f"`meho targets probe -- {quoted}`" in hint
+    command = hint.split("`")[1]
+    assert shlex.split(command) == ["meho", "targets", "probe", "--", name]
 
 
 @pytest.mark.parametrize(

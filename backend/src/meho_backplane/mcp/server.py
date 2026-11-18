@@ -122,6 +122,10 @@ from meho_backplane.mcp.short_texts import (
     UnknownToolTextsError,
     parse_tool_texts,
 )
+from meho_backplane.mcp.structured_results import (
+    UnknownToolResultsError,
+    parse_tool_results,
+)
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.caller_gone import watch_caller
@@ -1414,7 +1418,8 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     """Return *operator* with the session's choices from the MCP URL, or a 400 error.
 
     Tool profile (#4172): ``?profile=<name>``. Short tool texts for this
-    session only (#6293): ``?texts=short``. An unknown value is a bad URL,
+    session only (#6293): ``?texts=short``. Each result once, in
+    ``structuredContent`` (#4716): ``?results=structured``. An unknown value is a bad URL,
     refused before the body is read, so a typo is never quietly ignored.
     The usage event of the request names the short texts choice, so it is
     on record also when no audit row is written.
@@ -1426,7 +1431,8 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     try:
         profile = parse_tool_profile(request.query_params.getlist("profile"))
         short_texts = parse_tool_texts(request.query_params.getlist("texts"))
-    except (UnknownToolProfileError, UnknownToolTextsError) as exc:
+        structured_results = parse_tool_results(request.query_params.getlist("results"))
+    except (UnknownToolProfileError, UnknownToolTextsError, UnknownToolResultsError) as exc:
         return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
     if operator.mcp_profile_claim is not None and profile != operator.mcp_profile_claim:
         _log.warning(
@@ -1448,6 +1454,8 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     if short_texts:
         update["mcp_short_tool_texts"] = True
         note_request_tool_texts(SHORT_TEXTS_VALUE)
+    if structured_results:
+        update["mcp_structured_results"] = True
     return operator.model_copy(update=update) if update else operator
 
 

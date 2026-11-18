@@ -48,6 +48,7 @@ from meho_backplane.operations.switch_params import (
     FILE_REF_PARAMS_SWITCH,
     SWITCH_MARKER,
     check_switch_names,
+    checked_parameter_schema,
     switch_names,
     visible_parameter_schema,
 )
@@ -198,13 +199,72 @@ def test_visible_schema_off_drops_the_parameter_at_every_depth() -> None:
     assert stored == snapshot, "the stored schema is never changed"
 
 
-def test_visible_schema_off_closes_an_open_schema() -> None:
+def test_visible_schema_off_keeps_the_other_rules() -> None:
     stored = _schema()
     del stored["additionalProperties"]
     shown = visible_parameter_schema(stored)
-    assert shown["additionalProperties"] is False
-    # A nested object that lost nothing stays as it was.
-    assert "additionalProperties" in shown["properties"]["options"]
+    assert "additionalProperties" not in shown
+    checked = checked_parameter_schema(stored)
+    assert "additionalProperties" not in checked
+    assert checked["properties"][_HIDDEN] is False
+    assert checked["properties"]["options"]["properties"][_NESTED_HIDDEN] is False
+    assert checked["required"] == ["name"]
+    assert checked_parameter_schema(stored) == checked, "the stored schema is never changed"
+
+
+def test_visible_schema_off_strips_examples_and_defaults_at_any_depth() -> None:
+    stored = _schema()
+    sample = {"name": "a", _HIDDEN: "x", "options": {"mode": "m", _NESTED_HIDDEN: "r"}}
+    stored["examples"] = [sample, "not an object"]
+    stored["example"] = sample
+    stored["default"] = sample
+    stored["properties"]["options"]["examples"] = [{"mode": "m", _NESTED_HIDDEN: "r"}]
+    stored["properties"]["options"]["default"] = {"mode": "m", _NESTED_HIDDEN: "r"}
+    stored["dependentRequired"] = {_HIDDEN: ["name"], "name": [_HIDDEN]}
+    shown = visible_parameter_schema(stored)
+    _no_trace(shown, _HIDDEN, _NESTED_HIDDEN, SWITCH_MARKER)
+    assert shown["examples"] == [{"name": "a", "options": {"mode": "m"}}, "not an object"]
+    assert shown["example"] == shown["default"] == {"name": "a", "options": {"mode": "m"}}
+    assert shown["properties"]["options"]["examples"] == [{"mode": "m"}]
+    assert shown["dependentRequired"] == {"name": []}
+
+
+def _ref_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            _HIDDEN: {"$ref": "#/$defs/Checksum"},
+            "options": {"$ref": "#/components/schemas/Options"},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+        "examples": [{"name": "a", _HIDDEN: "x", "options": {"mode": "m", _NESTED_HIDDEN: "r"}}],
+        "$defs": {"Checksum": {"type": "string", SWITCH_MARKER: FILE_REF_PARAMS_SWITCH}},
+        "components": {
+            "schemas": {
+                "Options": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {"type": "string"},
+                        _NESTED_HIDDEN: {"$ref": "#/components/schemas/FileRecord"},
+                    },
+                },
+                "FileRecord": {"type": "string", SWITCH_MARKER: FILE_REF_PARAMS_SWITCH},
+            }
+        },
+    }
+
+
+def test_visible_schema_follows_local_refs() -> None:
+    shown = visible_parameter_schema(_ref_schema())
+    _no_trace(shown, _HIDDEN, _NESTED_HIDDEN, SWITCH_MARKER, "Checksum", "FileRecord")
+    assert shown["examples"] == [{"name": "a", "options": {"mode": "m"}}]
+    assert set(shown["components"]["schemas"]) == {"Options"}
+    checked = checked_parameter_schema(_ref_schema())
+    assert checked["properties"][_HIDDEN] is False
+    options = checked["components"]["schemas"]["Options"]
+    assert options["properties"][_NESTED_HIDDEN] is False
 
 
 def test_visible_schema_on_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,7 +292,12 @@ def test_a_keyword_that_is_not_a_name_hides_nothing_and_does_not_register() -> N
 
 @pytest.mark.asyncio
 async def test_switch_off_shows_no_trace(stub_embedding_service: AsyncMock) -> None:
-    await _register(stub_embedding_service)
+    schema = _schema()
+    schema["examples"] = [
+        {"name": "a", _HIDDEN: "x", "options": {"mode": "m", _NESTED_HIDDEN: "r"}}
+    ]
+    schema["properties"]["options"]["example"] = {"mode": "m", _NESTED_HIDDEN: "r"}
+    await _register(stub_embedding_service, schema)
     operator = _operator()
 
     ranked = await search_operations(
@@ -298,12 +363,42 @@ async def test_switch_off_refuses_the_parameter_before_approval(
     assert await _approval_count() == 1
 
 
+def _open_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Schemas that accept more than their properties, each with one other valid input."""
+    no_rule = _schema()
+    del no_rule["additionalProperties"]
+    open_true = _schema()
+    open_true["additionalProperties"] = True
+    open_typed = _schema()
+    open_typed["additionalProperties"] = {"type": "string"}
+    pattern = _schema()
+    pattern["patternProperties"] = {"^exp": {"type": "string"}, "^x_": {"type": "string"}}
+    branches = {
+        "type": "object",
+        "allOf": [
+            {"properties": {"name": {"type": "string"}, _HIDDEN: _schema()["properties"][_HIDDEN]}},
+            {"properties": {"label": {"type": "string"}}},
+        ],
+        "required": ["name", _HIDDEN],
+    }
+    return [
+        ("no-rule", no_rule, {"name": "a", "other": 1}),
+        ("open", open_true, {"name": "a", "other": 1}),
+        ("typed", open_typed, {"name": "a", "other": "x"}),
+        ("pattern", pattern, {"name": "a", "x_other": "x"}),
+        ("all-of", branches, {"name": "a", "label": "x"}),
+    ]
+
+
 @pytest.mark.asyncio
-async def test_switch_off_refuses_the_parameter_of_an_open_schema(
-    stub_embedding_service: AsyncMock,
+@pytest.mark.parametrize(
+    ("schema", "other"),
+    [(schema, other) for _, schema, other in _open_schemas()],
+    ids=[name for name, _, _ in _open_schemas()],
+)
+async def test_switch_off_refuses_only_the_parameter_of_an_open_schema(
+    stub_embedding_service: AsyncMock, schema: dict[str, Any], other: dict[str, Any]
 ) -> None:
-    schema = _schema()
-    del schema["additionalProperties"]
     await _register(stub_embedding_service, schema)
     result = await dispatch(
         operator=_operator(),
@@ -315,6 +410,55 @@ async def test_switch_off_refuses_the_parameter_of_an_open_schema(
     assert result.error is not None
     assert result.error.startswith("invalid_params")
     assert await _approval_count() == 0
+    preview = await preview_operation(
+        _operator(),
+        {"connector_id": _CONNECTOR, "op_id": _OP, "params": {"name": "a", _HIDDEN: "abc"}},
+    )
+    assert preview["status"] == "error"
+    assert "invalid_params" in json.dumps(preview)
+
+    # Every other input is accepted as before: the call waits for approval.
+    ok = await dispatch(
+        operator=_operator(), connector_id=_CONNECTOR, op_id=_OP, target=None, params=other
+    )
+    assert ok.status == "awaiting_approval", ok.error
+    assert await _approval_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_switch_off_hides_and_refuses_a_parameter_behind_a_ref(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(stub_embedding_service, _ref_schema())
+    operator = _operator()
+    exact = await search_operations(operator, {"connector_id": _CONNECTOR, "op_id": _OP})
+    _no_trace(exact, _HIDDEN, _NESTED_HIDDEN, SWITCH_MARKER)
+    for params in (
+        {"name": "a", _HIDDEN: "abc"},
+        {"name": "a", "options": {"mode": "m", _NESTED_HIDDEN: "r"}},
+    ):
+        result = await dispatch(
+            operator=operator, connector_id=_CONNECTOR, op_id=_OP, target=None, params=params
+        )
+        assert result.error is not None
+        assert result.error.startswith("invalid_params")
+    assert await _approval_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_switch_on_shows_and_accepts_a_parameter_behind_a_ref(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch_on(monkeypatch)
+    await _register(stub_embedding_service, _ref_schema())
+    operator = _operator()
+    exact = await search_operations(operator, {"connector_id": _CONNECTOR, "op_id": _OP})
+    assert _HIDDEN in exact["operation"]["parameter_schema"]["properties"]
+    params = {"name": "a", _HIDDEN: "abc", "options": {"mode": "m", _NESTED_HIDDEN: "r"}}
+    result = await dispatch(
+        operator=operator, connector_id=_CONNECTOR, op_id=_OP, target=None, params=params
+    )
+    assert result.status == "awaiting_approval", result.error
 
 
 # ---------------------------------------------------------------------------

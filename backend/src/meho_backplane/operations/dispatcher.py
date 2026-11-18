@@ -504,6 +504,7 @@ from meho_backplane.operations.shutdown_drain import (
     shutting_down_result,
     track_operation,
 )
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.uncertain_outcome import changes_target
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
@@ -3901,9 +3902,9 @@ def _params_error(
     param is rejected as ``invalid_params`` here rather than defaulting
     onto the vendor query string in ``_split_ingested_params``.
     """
-    schema_to_validate = descriptor.parameter_schema
+    schema_to_validate = schema_for_checks(descriptor)
     if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+        schema_to_validate = ingested_schema_for_validation(schema_to_validate)
     try:
         validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:

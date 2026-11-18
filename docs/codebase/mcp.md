@@ -1921,17 +1921,20 @@ the off state.
 
 A parameter of an operation can wait behind a switch. Its schema carries
 `x-meho-switch: "<switch name>"` (`SWITCH_MARKER` in the connector kit;
-`operations/switch_params.py`). The keyword counts at any depth. MEHO
+`operations/switch_params.py`). The keyword counts at any depth, also
+on a shared schema that a property links to with a local `$ref`
+(`$defs`, `definitions`, `components.schemas`). MEHO
 knows one switch name today: `file_ref_params`, the setting
 `FILE_REF_PARAMS` (off by default, listed by `GET /version`).
 
 | Switch (off by default) | Where | With the switch off |
 | --- | --- | --- |
-| `FILE_REF_PARAMS` | `search_operations` (`required_params`), the exact-op contract, `preview_operation`, the operation read of REST, the console and the CLI | The marked parameter is left out of the shown schema and out of its `required` list. A call that gives it is refused like any unknown parameter (`invalid_params`), before it can wait for approval, so no approval request is stored. The hash of a call that does not give it is the same. |
+| `FILE_REF_PARAMS` | `search_operations` (`required_params`), the exact-op contract, `preview_operation`, the operation read of REST, the console and the CLI | The marked parameter is left out of the shown schema: out of its `required` list, out of `example`, `examples` and `default` values at any depth, and a shared schema only it used is dropped. A call that gives it is refused as `invalid_params`, before it can wait for approval, so no approval request is stored. MEHO checks the call against a schema where the parameter accepts no value; every other input is accepted or refused as before. The hash of a call that does not give it is the same. |
 
 * The stored schema is not changed. MEHO leaves the parameter out when it
   reads the operation row for the caller (`apply_effective_policy` and
-  the operation read by id).
+  the operation read by id). The row keeps the schema for the call check
+  in `parameter_check_schema` (not a column).
 * A keyword that names another switch stops the operation from
   registering, for typed, multi-step and ingested operations.
 * With the switch on, the parameter shows and is accepted as usual.

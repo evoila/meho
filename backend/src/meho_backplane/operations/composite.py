@@ -546,7 +546,12 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
 
 
 def _covered_by_approved_run(
-    *, safety_level: str, requires_approval: bool, always_wait: bool = False
+    *,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    always_wait: bool = False,
+    stored_op_class: str | None = None,
 ) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
@@ -554,11 +559,17 @@ def _covered_by_approved_run(
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
     internal step, except a ``destructive`` step, a step marked
-    ``requires_approval`` and a step a classification entry makes always
-    wait: those keep their own approval, or end with
+    ``requires_approval``, a step a classification entry makes always
+    wait and a step that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
+    those keep their own approval, or end with
     ``composite_resume_multi_gate_unsupported`` during a resume.
     """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
     if safety_level == "destructive" or requires_approval or always_wait:
+        return False
+    if credential_call_waits(op_id, stored_op_class):
         return False
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
 
@@ -816,6 +827,7 @@ async def enforce_subop_policy(
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
+        op_id=op_id,
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
         always_wait=descriptor.policy_always_wait,

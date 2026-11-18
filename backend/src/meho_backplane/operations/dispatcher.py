@@ -498,6 +498,7 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.service_grants import credential_call_waits
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
@@ -4318,13 +4319,17 @@ async def _dispatch_now(
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval.
+            # ``requires_approval`` step, or one that reads, writes or makes
+            # a credential, keeps its own approval.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
                 and approved_run_var.get()
                 and descriptor.safety_level != "destructive"
                 and not descriptor.requires_approval
+                and not credential_call_waits(
+                    descriptor.op_id, getattr(descriptor, "op_class", None)
+                )
             ):
                 _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                 verdict = PermissionVerdict.AUTO_EXECUTE

@@ -787,8 +787,11 @@ it. One rule says so: `service_grants.never_covered_reason`, with
 `credential_grant_reason` for these classes. Grant create, run approval
 create and agent grant create (an exact op id with `auto-execute`) refuse
 such an operation with the reason "A standing grant, an agent grant or a
-run approval never covers OP: it reads, writes or makes a credential, so a
-person approves each call. Leave it out." Details:
+run approval never covers 'OP': it reads, writes or makes a credential, so
+a person approves each call. Leave it out." The call of an agent or a
+service login waits also at level `safe`. The approval of a parent
+multi-step run does not cover such a step: it waits for its own approval
+(`_covered_by_approved_run`). Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),
 [run-approvals.md](run-approvals.md),
 [agent-permission-grants.md](agent-permission-grants.md).
@@ -4689,11 +4692,13 @@ the run, so its remaining internal steps go ahead under that approval
 while the dispatcher runs it with `_approved=True` (it binds
 `approved_run_var`) or while `composite_resume_scope_var` is set (the
 re-entry of an approved step). Then a step whose gate says
-`NEEDS_APPROVAL` goes ahead, unless the step is `destructive` or marked
-`requires_approval`. A `DENY` stays a deny. The same holds for a child
-operation the composite runs through `dispatch_child`: the child's own
-`dispatch()` reads `approved_run_var` right after its policy gate and goes
-ahead on `NEEDS_APPROVAL` under the same two exceptions. This holds whoever runs the
+`NEEDS_APPROVAL` goes ahead, unless the step is `destructive`, marked
+`requires_approval`, or reads, writes or makes a credential
+(`service_grants.credential_call_waits`). A `DENY` stays a deny. The same
+holds for a child operation the composite runs through `dispatch_child`:
+the child's own `dispatch()` reads `approved_run_var` right after its
+policy gate and goes ahead on `NEEDS_APPROVAL` under the same three
+exceptions. A credential step or child waits for its own approval. This holds whoever runs the
 resume and however the approval was given: a web click, or the command
 line with a fresh sign-in (#3979). It matters since #3980: a reviewer's
 token, and a `dangerous` step in the web interface, would otherwise wait

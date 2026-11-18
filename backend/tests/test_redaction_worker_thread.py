@@ -3,7 +3,7 @@
 
 """The secret-hiding pass of a script or a command line runs in a worker thread.
 
-* One very long line is hidden in time that grows in a straight line.
+* One very long line is hidden within a time bound.
 * While the pass runs, the app still answers other requests.
 * A caller the policy refuses never starts the pass.
 """
@@ -42,17 +42,26 @@ from tests.test_operations_preview_typed_writes import (  # noqa: F401 -- fixtur
 from tests.test_operations_request_preview import _FakeTarget, _make_operator
 
 _ONE_MIB = 1 << 20
+_HALF_MIB = 1 << 19
 _TIME_LIMIT_SECONDS = 2.0
 _FAKE = "made-up-value-not-real-4471"
 
 
 @pytest.mark.parametrize("unit", ["x", "-x"])
-def test_command_line_with_one_one_mib_item_is_hidden_in_linear_time(unit: str) -> None:
+def test_command_line_with_one_long_item_is_hidden_within_the_time_bound(unit: str) -> None:
     item = unit * (_ONE_MIB // len(unit))
     started = time.perf_counter()
     hidden = k8s_preview._hide_command_secrets(["sh", "-c", item, "--password", _FAKE])
     assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
     assert hidden == ["sh", "-c", item, "--password", HIDDEN]
+
+
+def test_job_args_item_with_many_words_is_hidden_within_the_time_bound() -> None:
+    item = "w " * (_HALF_MIB // 2) + f"PGPASSWORD={_FAKE} tail"
+    started = time.perf_counter()
+    hidden = k8s_preview._hide_command_secrets(["psql", item])
+    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert hidden == ["psql", "w " * (_HALF_MIB // 2) + f"PGPASSWORD={HIDDEN}"]
 
 
 @pytest.fixture

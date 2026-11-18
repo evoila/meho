@@ -531,8 +531,8 @@ a secret stay visible. An option group without `c` (`sh -e`) does not
 start a shell string: the next item is a direct argument.
 The command-line hider lives in `redaction/command_line.py`; the
 `linux.script.run` preview uses it too, for the script text.
-The pass is linear in the length of the text, and the Job previews run it in a
-worker thread so the backend keeps answering other requests.
+The Job previews run the pass in a worker thread, so the backend keeps
+answering other requests.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`

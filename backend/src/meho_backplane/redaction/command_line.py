@@ -96,9 +96,7 @@ _QUOTED_STRING = re.compile(r"'[^']*'|" r'"(?:[^"\\]|\\[\s\S])*"')
 _ASSIGNMENT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)=")
 
 #: The password in a URL that carries a user and password before the ``@``.
-#: The scheme is read only from the start of a run of scheme characters
-#: (the look-behind), so the pattern reads each run once and the time grows
-#: in a straight line with the length of the text.
+#: The scheme starts where a run of scheme characters starts (the look-behind).
 _URL_PASSWORD = re.compile(
     r"(?<![A-Za-z0-9+.-])(?P<head>[0-9+.-]*[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@"
 )
@@ -252,10 +250,10 @@ def hide_command_text(
             # and a new line is the flag ``-u``. A quoted string is read as it is.
             word = word.replace("\\\n", "")
         previous, prior = word, previous
-        value = word if shell else "".join(words[index:])
         hidden, pending = _hide_word(
             word,
-            value,
+            words,
+            index,
             prior=prior,
             pending=pending,
             shell=shell,
@@ -274,7 +272,8 @@ def hide_command_text(
 
 def _hide_word(
     word: str,
-    value: str,
+    words: list[str],
+    index: int,
     *,
     prior: str,
     pending: str | None,
@@ -284,14 +283,19 @@ def _hide_word(
 ) -> tuple[str | None, str | None]:
     """One word of a command line: its hidden form, or ``None`` when it is shown.
 
-    *value* is the span a secret in *word* hides: the word itself in a shell
-    string, the rest of the argument in a direct one. *prior* is the word
-    before it. *p_rule* says how ``-p`` is read in this command. Returned
+    *words* and *index* give the span a secret in *word* hides: the word
+    itself in a shell string, the rest of the argument (``words[index:]``) in
+    a direct one. That span is joined only when a value is hidden. *prior*
+    is the word before it. *p_rule* says how ``-p`` is read in this command. Returned
     with the hidden form is the secret flag that waits for the next word.
     The rules are those of :func:`hide_command_text`.
     """
+
+    def value() -> str:
+        return word if shell else "".join(words[index:])
+
     if pending is not None and not word.startswith("-"):
-        return hide_flag_value(pending, value), None
+        return hide_flag_value(pending, value()), None
     assignment = _secret_assignment(word)
     script = reads_shell_script(prior)
     quoted_assignment = assignment is not None and assignment.start() == 1 and not script
@@ -299,7 +303,7 @@ def _hide_word(
         inner, waiting = hide_command_text(word[1:-1], None, shell=script, p_programs=p_programs)
         return f"{word[0]}{inner}{word[0]}", waiting
     if assignment is not None:
-        return _hide_assignment(value, assignment), None
+        return _hide_assignment(value(), assignment), None
     glued = _hide_glued_value(word, p_rule=p_rule, script_mode=p_programs is not None)
     if glued is not None:
         return glued, None

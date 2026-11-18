@@ -187,6 +187,7 @@ from meho_backplane.operations.approval_rights import (
     self_approval_confirmation,
 )
 from meho_backplane.policy.routing import routing_enabled
+from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
@@ -489,11 +490,15 @@ async def _list_pending_waiting_first(
     batch before (not at a counted offset), so a request decided during the
     scan does not make the scan skip a row. Returns ``(rows, has_more, waiting ids)``.
     """
-    pager = WaitingFirstPager(
-        operator, offset=offset, size=_HISTORY_PAGE_SIZE, only_waiting=only_waiting
-    )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
+        pager = WaitingFirstPager(
+            operator,
+            offset=offset,
+            size=_HISTORY_PAGE_SIZE,
+            only_waiting=only_waiting,
+            floor=await load_install_floor(db_session),
+        )
         last: ApprovalRequest | None = None
         while True:
             batch = await list_pending(
@@ -523,6 +528,7 @@ async def _count_waiting_for(session: UISessionContext, operator: Operator) -> i
     count = 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
+        floor = await load_install_floor(db_session)
         last: ApprovalRequest | None = None
         while True:
             batch = await list_pending(
@@ -532,7 +538,9 @@ async def _count_waiting_for(session: UISessionContext, operator: Operator) -> i
                 limit=_WAITING_SCAN_BATCH,
                 after=last,
             )
-            count += sum(1 for row in batch if approve_right(operator, row).may_approve)
+            count += sum(
+                1 for row in batch if approve_right(operator, row, floor=floor).may_approve
+            )
             if count >= _BADGE_COUNT_CAP or len(batch) < _WAITING_SCAN_BATCH:
                 return min(count, _BADGE_COUNT_CAP)
             last = batch[-1]
@@ -1006,7 +1014,7 @@ async def _render_detail_modal(
 
     # The same service checks as the approve (#3329): the sign and the
     # button state match what the POST decides. The POST checks again.
-    right = approve_right(operator, approval)
+    right = approve_right(operator, approval, floor=await current_install_floor())
     self_approval_blocked = not right.may_approve and right.reason == ApproveRightReason.OWN_CHANGE
     approve_needs_sign_in = not has_fresh_web_approval_sign_in(operator, get_settings())
     csrf_token = mint_csrf_token(str(session.session_id))

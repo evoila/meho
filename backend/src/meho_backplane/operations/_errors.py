@@ -589,6 +589,7 @@ def result_no_connector(
     version: str | None,
     duration_ms: float,
     exception_message: str | None = None,
+    hint: str | None = None,
 ) -> OperationResult:
     """Resolver miss -- no registered impl for *(product, version)*.
 
@@ -613,6 +614,9 @@ def result_no_connector(
     The argument is optional for backward compatibility with call sites
     that pre-date the resolver-helper unification — they pass through
     the bare ``(product, version)`` form and ``extras`` omits the field.
+
+    ``hint`` is a fixed sentence that names the fix for a known cause. It
+    is added to the error text and to ``extras["hint"]``.
     """
     extras: dict[str, Any] = {
         "error_code": "no_connector",
@@ -621,10 +625,14 @@ def result_no_connector(
     }
     if exception_message is not None:
         extras["exception_message"] = _sanitize_free_text(exception_message)
+    error = f"no_connector: no implementation for product={product!r} version={version!r}"
+    if hint is not None:
+        extras["hint"] = hint
+        error = f"{error}; {hint}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"no_connector: no implementation for product={product!r} version={version!r}",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
     )

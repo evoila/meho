@@ -388,6 +388,15 @@ not claimed by the runner, so it makes no call to its target. The row, its
   becomes `active` again. A Dashboard file import that changes the Sensor
   follows the same rule.
 
+**Run once now** (`POST /api/v1/sensors/{id}/run`, `meho sensor run <id>`,
+`tenant_admin`, op id `sensor.run`; code in `checks/sensor_run.py`). The
+route does not run the operation. It calls `accelerate_sensor_next_fire`
+with `not_later_than=now`, so the runner claims the Sensor at its next tick
+and runs it as on its schedule. It answers 202 with the Sensor id and its
+`next_fire_at`. A paused Sensor is 409 `sensor_paused`; an unknown id or
+the id of another tenant is 404. A Sensor that is already due keeps its due
+time, so the call is safe to send twice. There is no MCP tool for it.
+
 **Pause after refused logins** (`checks/auth_park.py`). When the credential
 of a target is no longer valid, every run starts a new login that fails.
 So the runner counts

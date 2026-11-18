@@ -233,7 +233,7 @@ flowchart TB
   bp -->|"governed operations"| ta
   bp -->|"governed operations"| tb
   runner -->|"outbound-only poll and report"| bp
-  runner -->|"safe operations, approved caution changes"| tc
+  runner -->|"safe reads only"| tc
 ```
 
 **Pick this shape when:**

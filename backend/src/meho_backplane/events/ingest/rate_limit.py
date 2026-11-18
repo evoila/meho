@@ -7,8 +7,10 @@ Two counters per source and window:
 
 * the **delivery** counter (:func:`enforce_ingest_rate_limit`) counts only
   deliveries that passed the sender check;
-* the **failed-check** counter (:func:`count_failed_check`,
-  :func:`failed_check_limit_reached`) counts deliveries that failed it.
+* the **failed-check** counter (:func:`take_check_slot`,
+  :func:`release_check_slot`) counts deliveries that failed it. Each
+  delivery takes a slot before its check; a delivery that passes gives the
+  slot back.
 
 So a flood of wrongly signed deliveries fills its own counter and leaves the
 real sender's delivery limit alone. Both use the same per-minute cap.
@@ -41,6 +43,7 @@ broadcast limiter's fail-loud contract.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Final
 from uuid import UUID
 
@@ -48,11 +51,13 @@ from meho_backplane.broadcast.client import get_broadcast_client
 
 __all__ = [
     "INGEST_RATE_LIMIT_WINDOW_SECONDS",
+    "CheckSlot",
     "IngestRateLimitError",
-    "count_failed_check",
+    "current_window",
     "enforce_ingest_rate_limit",
     "failed_check_limit_error",
-    "failed_check_limit_reached",
+    "release_check_slot",
+    "take_check_slot",
 ]
 
 #: Fixed window width. One minute, matching the ``*_per_minute`` cap unit.
@@ -113,29 +118,58 @@ async def _count_in_window(key: str) -> int:
     return int(count)
 
 
-async def failed_check_limit_reached(tenant_id: UUID, source_slug: str, limit: int) -> bool:
-    """Return ``True`` when the source had *limit* failed sender checks this window.
+def current_window() -> int:
+    """Return the number of the current fixed window."""
+    return int(time.time()) // INGEST_RATE_LIMIT_WINDOW_SECONDS
 
-    A read only; it counts nothing. A *limit* of ``0`` (or negative) disables
-    the limit with no Valkey round-trip.
+
+@dataclass(frozen=True)
+class CheckSlot:
+    """One slot taken in a source's failed-check counter.
+
+    ``window`` is the window the slot counts in. ``over_limit`` is ``True``
+    when the count, with this slot, is above the cap.
+    """
+
+    key: str
+    window: int
+    over_limit: bool
+
+
+async def take_check_slot(tenant_id: UUID, source_slug: str, limit: int) -> CheckSlot | None:
+    """Count one sender check for the source in the current window.
+
+    Runs **before** the check and its secret read. ``INCR`` and ``EXPIRE``
+    run in one transaction, so parallel deliveries each get their own
+    count, and at most *limit* of them get a slot that is not over the
+    limit. A check that passes gives its slot back
+    (:func:`release_check_slot`), so the counter keeps only failed checks
+    and checks still running.
+
+    A *limit* of ``0`` (or negative) disables the limit: returns ``None``
+    with no Valkey round-trip.
     """
     if limit <= 0:
-        return False
-    bucket = int(time.time()) // INGEST_RATE_LIMIT_WINDOW_SECONDS
-    count = await get_broadcast_client().get(_failed_check_key(tenant_id, source_slug, bucket))
-    return count is not None and int(count) >= limit
+        return None
+    window = current_window()
+    key = _failed_check_key(tenant_id, source_slug, window)
+    count = await _count_in_window(key)
+    return CheckSlot(key=key, window=window, over_limit=count > limit)
 
 
-async def count_failed_check(tenant_id: UUID, source_slug: str, limit: int) -> None:
-    """Count one failed sender check for the source in the current window.
+async def release_check_slot(slot: CheckSlot | None) -> None:
+    """Give back the slot of a check that passed. ``None`` is a no-op.
 
-    A *limit* of ``0`` (or negative) disables the limit with no Valkey
-    round-trip.
+    ``EXPIRE`` runs with the ``DECR`` in one transaction, so the key still
+    expires if its window ended while the check ran.
     """
-    if limit <= 0:
+    if slot is None:
         return
-    bucket = int(time.time()) // INGEST_RATE_LIMIT_WINDOW_SECONDS
-    await _count_in_window(_failed_check_key(tenant_id, source_slug, bucket))
+    client = get_broadcast_client()
+    async with client.pipeline(transaction=True) as pipe:
+        pipe.decr(slot.key)
+        pipe.expire(slot.key, INGEST_RATE_LIMIT_WINDOW_SECONDS)
+        await pipe.execute()
 
 
 def failed_check_limit_error(limit: int) -> IngestRateLimitError:

@@ -12,13 +12,17 @@ this order:
    the webhook is JWT-less). An empty or blank stored secret refuses every
    sender.
 2. Verify the sender against the source's auth strategy (constant-time).
-   A failed check counts in the source's **failed-check** counter
-   (:mod:`~meho_backplane.events.ingest.rate_limit`). Once that counter is
-   at the per-minute cap, the delivery does not read Vault: it is checked
-   against the secret this process read last (kept for two windows), and
-   answers ``429`` when the check fails or no such secret is at hand. So
-   the Vault reads per source and window stay bounded, and a flood of bad
-   deliveries does not block the real sender.
+   Before the Vault read, the delivery takes a slot in the source's
+   **failed-check** counter
+   (:mod:`~meho_backplane.events.ingest.rate_limit`) with one atomic
+   ``INCR``. A check that passes gives the slot back; a failed check or a
+   failed Vault read keeps it. When the slot is over the per-minute cap,
+   the delivery does not read Vault: it is checked against the secret this
+   process read in the current window, and answers ``429`` when the check
+   fails or no such secret is at hand. So at most *cap* Vault reads per
+   source and window come from deliveries that fail the check, also when
+   they arrive at the same time, and a flood of bad deliveries does not
+   block the real sender.
 3. Enforce the per-source delivery rate limit. Only deliveries that passed
    step 2 count against it.
 4. Compute the dedupe key: a SHA-256 of the signed message (the
@@ -90,11 +94,11 @@ from meho_backplane.event_source.secrets import read_event_source_secret
 from meho_backplane.events.ingest.auth import IngestAuthError, verify_ingest_auth
 from meho_backplane.events.ingest.config import IngestConfig
 from meho_backplane.events.ingest.rate_limit import (
-    INGEST_RATE_LIMIT_WINDOW_SECONDS,
-    count_failed_check,
+    current_window,
     enforce_ingest_rate_limit,
     failed_check_limit_error,
-    failed_check_limit_reached,
+    release_check_slot,
+    take_check_slot,
 )
 from meho_backplane.events.normalizers import normalize_event
 from meho_backplane.events.outbox import publish
@@ -124,13 +128,11 @@ INGEST_AUDIT_METHOD: str = "INGEST"
 INGEST_AUDIT_PATH: str = "events.ingest"
 
 
-#: How long a secret read from Vault may be used for a delivery that arrives
-#: while the source is at its failed-check limit (see the module docstring).
-_RECENT_SECRET_SECONDS: float = 2.0 * INGEST_RATE_LIMIT_WINDOW_SECONDS
-
-#: ``(source id, secret_ref) -> (monotonic read time, secret)``: the last
-#: secret this process read from Vault for each source.
-_recent_secrets: dict[tuple[uuid.UUID, str], tuple[float, SecretStr]] = {}
+#: ``(source id, secret_ref) -> (window of the read, secret)``: the last
+#: secret this process read from Vault for each source. A delivery over the
+#: failed-check limit uses it only when it was read in the current window
+#: (see the module docstring).
+_recent_secrets: dict[tuple[uuid.UUID, str], tuple[int, SecretStr]] = {}
 
 
 class IngestPayloadError(Exception):
@@ -204,16 +206,23 @@ async def _read_secret_or_fail(source: ResolvedSource) -> SecretStr:
             error_class=type(exc).__name__,
         )
         raise IngestVaultError(str(type(exc).__name__)) from exc
-    _recent_secrets[(source.id, source.secret_ref)] = (time.monotonic(), secret)
+    _recent_secrets[(source.id, source.secret_ref)] = (current_window(), secret)
     return secret
 
 
-def _recent_secret(source: ResolvedSource) -> SecretStr | None:
-    """Return the secret this process read for *source* in the last two windows."""
+def _recent_secret(source: ResolvedSource, window: int) -> SecretStr | None:
+    """Return the secret this process read for *source* in *window*.
+
+    An entry from an older window is removed and not used.
+    """
     if source.secret_ref is None:
         return None
-    entry = _recent_secrets.get((source.id, source.secret_ref))
-    if entry is None or time.monotonic() - entry[0] > _RECENT_SECRET_SECONDS:
+    key = (source.id, source.secret_ref)
+    entry = _recent_secrets.get(key)
+    if entry is None:
+        return None
+    if entry[0] != window:
+        _recent_secrets.pop(key, None)
         return None
     return entry[1]
 
@@ -229,19 +238,24 @@ async def _check_sender(
 ) -> bytes:
     """Check the sender against the source secret; return the signed message.
 
-    A failed check counts in the failed-check counter. While that counter is
-    at *limit*, the check uses the secret this process read last instead of
-    a Vault read, and a failed check (or no such secret) answers ``429``.
+    The delivery first takes a slot in the failed-check counter, before any
+    Vault read. A check that passes gives the slot back; a failed check or
+    a failed Vault read keeps it. When the slot is over *limit*, the check
+    uses the secret this process read in the current window instead of a
+    Vault read, and a failed check (or no such secret) answers ``429``.
     An empty or blank secret refuses every sender (``no_secret_configured``).
     """
-    at_limit = await failed_check_limit_reached(source.tenant_id, source.slug, limit)
+    slot = await take_check_slot(source.tenant_id, source.slug, limit)
     try:
-        secret = _recent_secret(source) if at_limit else await _read_secret_or_fail(source)
+        if slot is not None and slot.over_limit:
+            secret = _recent_secret(source, slot.window)
+        else:
+            secret = await _read_secret_or_fail(source)
         if secret is None:
             raise IngestAuthError("failed_check_limit")
         if not secret.get_secret_value().strip():
             raise IngestAuthError("no_secret_configured")
-        return verify_ingest_auth(
+        signed_message = verify_ingest_auth(
             strategy=source.auth_strategy,
             secret=secret,
             headers=headers,
@@ -250,11 +264,12 @@ async def _check_sender(
             now=now.timestamp(),
         )
     except IngestAuthError as exc:
-        await count_failed_check(source.tenant_id, source.slug, limit)
-        if at_limit:
+        if slot is not None and slot.over_limit:
             _log.info("ingest_failed_check_limit", slug=source.slug, reason=exc.reason)
             raise failed_check_limit_error(limit) from exc
         raise
+    await release_check_slot(slot)
+    return signed_message
 
 
 def _dedupe_key(source: ResolvedSource, signed_message: bytes) -> str:

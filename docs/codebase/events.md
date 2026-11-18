@@ -489,15 +489,20 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
    success the check returns the **signed message**: `"<ts>." + body`
    for a timestamped HMAC, else the raw body.
 
-   **Failed checks have their own limit.** Each failed check counts in
-   `meho:ratelimit:ingest-failed:{tenant}:{source}` (same per-minute cap
-   as the delivery limit, `events/ingest/rate_limit.py`). While that
-   counter is at the cap, a delivery makes no Vault read: it is checked
-   against the secret this process read last for the source (kept in
-   memory for two windows, `_recent_secrets`), and a failed check, or no
-   such secret, answers `429` + `Retry-After`. So the Vault reads per
-   source and window stay bounded, and a flood of bad deliveries does not
-   block the real sender. The kept secret is used only in this state, so
+   **Failed checks have their own limit.** Before the Vault read, each
+   delivery takes a slot in
+   `meho:ratelimit:ingest-failed:{tenant}:{source}` with one atomic
+   `INCR` + `EXPIRE` (`take_check_slot`; same per-minute cap as the
+   delivery limit, `events/ingest/rate_limit.py`). A check that passes
+   gives the slot back (`release_check_slot`, `DECR`); a failed check or
+   a failed Vault read keeps it. When the slot is over the cap, the
+   delivery makes no Vault read: it is checked against the secret this
+   process read for the source in the current window (`_recent_secrets`;
+   an entry from an older window is removed), and a failed check, or no
+   such secret, answers `429` + `Retry-After`. Because the slot is taken
+   before the read, deliveries that arrive at the same time also make at
+   most *cap* Vault reads per source and window when they fail. A flood
+   of bad deliveries does not block the real sender. The kept secret is used only in this state, so
    a rotated secret takes effect at once in normal use.
 4. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
    `INCR`/`EXPIRE` pattern under the key namespace

@@ -56,14 +56,11 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
 
-    async def _not_reached(*_a: object, **_k: object) -> bool:
-        return False
+    async def _no_slot(*_a: object, **_k: object) -> None:
+        return None
 
     monkeypatch.setattr("meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _no_op)
-    monkeypatch.setattr("meho_backplane.events.ingest.service.count_failed_check", _no_op)
-    monkeypatch.setattr(
-        "meho_backplane.events.ingest.service.failed_check_limit_reached", _not_reached
-    )
+    monkeypatch.setattr("meho_backplane.events.ingest.service.take_check_slot", _no_slot)
     yield
 
 

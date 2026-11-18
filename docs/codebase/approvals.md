@@ -8,6 +8,31 @@ surfacing channel) + #1401 (G11.7-T1 — queue humans, self-approval
 guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
 — execute a parked direct operator op on approve via every surface)
 
+## Default roles
+
+MEHO has four default roles: Reader, Operator, Admin and Platform Admin.
+A person has one role per tenant. The full table, and what each role may
+do, is in the guide
+[Approvals and break-glass](../../docs-site/guides/approvals-and-break-glass.md#the-four-default-roles).
+
+| | Reader | Operator | Admin | Platform Admin |
+|---|---|---|---|---|
+| Read | yes | yes | yes | yes |
+| Run a low-risk change (`safe`, `caution`) | no | yes. Web console: runs at once. Token: waits | as Operator | as Admin |
+| Run a high-risk change (`dangerous`, `destructive`) | no | asks; it waits for an Admin | asks; it waits; may approve it himself | as Admin |
+| Approve another person's low-risk change | no | yes | yes | yes |
+| Approve another person's high-risk change | no | no | yes | yes |
+| Approve my own change | no | only a `caution` change that waited because it came with a token, with a click in the web console | yes, every risk level, recorded as self-approved | as Admin |
+| Change rights | no | may ask; it waits for an Admin | alone. In the web console it runs at once. Asked with a token or by an AI tool, it waits for an Admin's click in the web console | as Admin; only a platform admin changes the Platform-Admins group |
+| Act in every tenant | no, only where in a role group | same | same | yes |
+
+MEHO tells two people apart by their login (the login ID in the token).
+It does not know when two logins belong to one person, so a second person
+is a second login.
+
+The older groups `MEHO-SA-Operators` and `MEHO-Approvers` are read as
+Operators and Readers from the release that ships the four roles.
+
 ## Overview
 
 Which calls wait for approval depends on the op's safety level and on who

@@ -61,6 +61,9 @@
     the modal opens (bell, history row, or a deep link), so the extra confirm
     cannot be skipped by the link the approver used.
 
+  A second person is a second login
+    A pending row shows one line that says so (``data-testid="approval-second-login"``).
+
   Phone layout (#6000)
     Below the ``sm`` width the dialog opens as a sheet from the bottom of
     the screen (``modal-bottom``), full width; from ``sm`` up it is the
@@ -762,6 +765,14 @@
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="yes" data-approve-reason="{{ approve_right.reason }}">
         <p>{{ approve_right.message }}</p>
       </div>
+    {% endif %}
+
+    {% if request.status == "pending" %}
+      {#- A second person is a second login: MEHO tells people apart by the
+          login ID in the token, not by who sits behind it. -#}
+      <p class="mt-3 text-xs opacity-80" data-testid="approval-second-login">
+        A second person means a second login. MEHO cannot tell when two logins belong to one person.
+      </p>
     {% endif %}
 
     {% if request.status == "pending" and approve_needs_sign_in and not fresh_sign_in_error and not approve_blocked %}

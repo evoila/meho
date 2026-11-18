@@ -2699,6 +2699,20 @@ def test_modal_pending_shows_consequence_banner_naming_safety_level() -> None:
     assert "re-file" in banner
 
 
+def test_modal_pending_says_a_second_person_is_a_second_login() -> None:
+    """A pending card tells the reader that a second person means a second login."""
+    body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})
+    assert 'data-testid="approval-second-login"' in body
+    assert "A second person means a second login." in body
+
+
+def test_modal_decided_row_has_no_second_login_line() -> None:
+    """A decided card offers no decision, so it does not carry the line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    body = _render_modal_of(_seed_withdrawn())
+    assert "approval-second-login" not in body
+
+
 def test_modal_consequence_banner_is_generic_warning_when_safety_absent() -> None:
     """AC1 (absent case): with no ``safety_level`` the banner is generic warning."""
     body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})

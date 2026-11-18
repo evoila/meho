@@ -55,6 +55,7 @@ from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vault import (
     kv_write_preview,  # noqa: F401
     ops_kv_folder,  # noqa: F401
+    ops_kv_generate,  # noqa: F401
     userpass_write_preview,  # noqa: F401
 )
 from meho_backplane.connectors.vault.connector import OpenBaoConnector, VaultConnector

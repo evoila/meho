@@ -69,6 +69,7 @@ from uuid import UUID
 import hvac.exceptions
 import pytest
 import requests.exceptions
+import structlog.testing
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
@@ -1342,8 +1343,13 @@ def test_write_target_path_renders_authorization_path(
 
 
 def test_write_capabilities_cover_every_write_op() -> None:
-    """Every ``requires_approval`` KV write op has a capability requirement."""
+    """Every ``requires_approval`` KV write op has a capability requirement.
+
+    ``vault.kv.generate`` is registered from its own module, not from
+    ``_KV_OP_SPECS``, and it needs approval too, so it is added by name.
+    """
     write_ops = {spec["op_id"] for spec in _KV_OP_SPECS if spec.get("requires_approval") is True}
+    write_ops.add("vault.kv.generate")
     assert write_ops == set(VAULT_KV_WRITE_CAPABILITIES)
 
 
@@ -1496,9 +1502,13 @@ async def test_preflight_fail_soft_when_probe_raises(
     fake = install_fake_vault(monkeypatch)
     fake.sys.raise_on_get_capabilities = hvac.exceptions.VaultDown("sealed")
 
-    result = await vault_kv_write_capability_preflight(
-        _make_operator(), "vault.kv.put", {"path": "meho/x"}
-    )
+    # Capture the log lines instead of printing them. With no logging set up,
+    # structlog prints the failure with every local variable, and those hold
+    # made-up secret test data.
+    with structlog.testing.capture_logs():
+        result = await vault_kv_write_capability_preflight(
+            _make_operator(), "vault.kv.put", {"path": "meho/x"}
+        )
 
     assert result is None
 

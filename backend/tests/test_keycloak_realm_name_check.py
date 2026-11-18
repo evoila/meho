@@ -234,6 +234,7 @@ def _all_ops() -> list[Any]:
         PASSKEY_CODE_SKIP_OPS,
     )
     from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
+    from meho_backplane.connectors.keycloak.ops_events import EVENT_OPS
     from meho_backplane.connectors.keycloak.ops_flow_reads import FLOW_READ_OPS
     from meho_backplane.connectors.keycloak.ops_identity_provider import IDENTITY_PROVIDER_OPS
     from meho_backplane.connectors.keycloak.ops_lock_status import LOCK_STATUS_OPS
@@ -257,6 +258,7 @@ def _all_ops() -> list[Any]:
         *USER_STATE_OPS,
         *LOCK_STATUS_OPS,
         *FLOW_READ_OPS,
+        *EVENT_OPS,
     ]
 
 

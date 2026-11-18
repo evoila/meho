@@ -303,9 +303,9 @@ class SchedulerAdminService:
         method accepts the raw string so a future widening doesn't
         require lock-step changes.
 
-        Optional *work_ref* narrows to triggers carrying that exact
-        change-ticket reference (work_ref I3-T3 #1663) -- the
-        tenant-scoped exact-match driven by
+        Optional *work_ref* narrows to triggers carrying that
+        change-ticket reference, the whole id (work_ref I3-T3 #1663) -- the
+        tenant-scoped match driven by
         ``scheduled_trigger_tenant_work_ref_idx``. ``None`` (the
         default) applies no work_ref filter.
 

@@ -60,8 +60,13 @@ from meho_backplane.ui.routes.scheduler.views import (
     build_agent_name_map,
     project_trigger_to_view,
 )
-from meho_backplane.ui.routes.work_ref_form import filter_work_ref
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_list_router"]
 
@@ -97,27 +102,32 @@ async def _render(
     work_ref: str | None,
     session_ctx: UISessionContext,
     is_tenant_admin: bool,
+    work_ref_error: str | None = None,
 ) -> HTMLResponse:
     """Render the list page or the table-rows fragment.
 
     Both branches receive the same context shape so the fragment template
-    and the full-page template stay interchangeable.
+    and the full-page template stay interchangeable. With *work_ref_error*
+    (a refused ticket id search value) the list is empty, shows that text
+    and answers 422.
     """
-    scheduler = SchedulerAdminService()
-    triggers = await scheduler.list_(
-        session_ctx.tenant_id,
-        kind=kind.value if kind is not None else None,
-        status=status_filter.value if status_filter is not None else None,
-        work_ref=work_ref or None,
-        limit=_LIST_LIMIT,
-    )
-    # Resolve the agent-definition names once for the whole page (not per
-    # row) so the rendered table labels each trigger with its agent's name
-    # rather than a bare UUID.
-    agents = AgentDefinitionService()
-    definitions = await agents.list_(session_ctx.tenant_id, limit=_LIST_LIMIT)
-    agent_names = build_agent_name_map(definitions)
-    rows = [project_trigger_to_view(t, agent_names=agent_names) for t in triggers]
+    rows = []
+    if work_ref_error is None:
+        scheduler = SchedulerAdminService()
+        triggers = await scheduler.list_(
+            session_ctx.tenant_id,
+            kind=kind.value if kind is not None else None,
+            status=status_filter.value if status_filter is not None else None,
+            work_ref=work_ref or None,
+            limit=_LIST_LIMIT,
+        )
+        # Resolve the agent-definition names once for the whole page (not per
+        # row) so the rendered table labels each trigger with its agent's name
+        # rather than a bare UUID.
+        agents = AgentDefinitionService()
+        definitions = await agents.list_(session_ctx.tenant_id, limit=_LIST_LIMIT)
+        agent_names = build_agent_name_map(definitions)
+        rows = [project_trigger_to_view(t, agent_names=agent_names) for t in triggers]
 
     now = datetime.now(UTC)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
@@ -133,6 +143,7 @@ async def _render(
         "kind_filter": kind.value if kind is not None else "",
         "status_filter": status_filter.value if status_filter is not None else "",
         "work_ref_filter": work_ref or "",
+        "work_ref_error": work_ref_error,
         "csrf_token": csrf_token,
         # tenant_admin gate for the "Create trigger" button + per-row
         # "Cancel" affordance. The create / cancel routes re-check the role
@@ -145,6 +156,8 @@ async def _render(
         "scheduler/_table_rows.html" if _is_htmx_request(request) else "scheduler/list.html"
     )
     response = get_templates().TemplateResponse(request, template_name, context)
+    if work_ref_error is not None:
+        mark_work_ref_refused(response)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
@@ -176,11 +189,23 @@ def build_list_router() -> APIRouter:
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/scheduler``. See module docstring for the URL contract."""
+        try:
+            checked = filter_work_ref(work_ref)
+        except WorkRefError as exc:
+            return await _render(
+                request,
+                kind=kind,
+                status_filter=status,
+                work_ref=work_ref,
+                session_ctx=session_ctx,
+                is_tenant_admin=role_probe.is_tenant_admin,
+                work_ref_error=refused_filter_text(exc),
+            )
         return await _render(
             request,
             kind=kind,
             status_filter=status,
-            work_ref=filter_work_ref(work_ref),
+            work_ref=checked,
             session_ctx=session_ctx,
             is_tenant_admin=role_probe.is_tenant_admin,
         )

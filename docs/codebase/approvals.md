@@ -1249,13 +1249,29 @@ decides: not the requester, a person in a chosen tenant, and an admin
 **Who sets the mark.**
 
 - The park step (`create_pending_request`) sets it for a group or role
-  change in MEHO's own login realm (`grant_facts`, see above). A request
-  outside the login realm keeps the usual rules.
+  change in MEHO's own login realm (`grant_facts`, see above). Outside
+  the login realm, such a change carries the mark when its operation is
+  also registered with `register_rights_change_op` (every Keycloak one
+  is, see the next point).
 - An operation registered with `register_rights_change_op` is a rights
   change on every request. `policy.classify` (a change of a category,
   labels or the "always wait" mark, see
-  [policy-classification.md](policy-classification.md)) is one.
+  [policy-classification.md](policy-classification.md)) is one. The
+  Keycloak connector registers every write that is a change of rights this
+  way, also the group, role and login writes above (`GRANT_OPS` in
+  `connectors/keycloak/ops_write_grant.py`), so they carry the mark in
+  every realm. The login-realm checks above come on top.
 - Any other caller passes `rights_change=True` to `create_pending_request`.
+
+**No grant and no run approval covers a registered change of rights.**
+`register_grant_op` and `register_rights_change_op` also mark the
+operation with `declare_per_call_approval`. So making a standing grant for
+it is refused, a stored grant row does not clear a call, and a run approval
+list that names it is refused. This is one rule in the core: a connector
+that registers a change of rights needs no second mark. The Keycloak
+writes that are changes of rights are listed in
+[connectors-keycloak.md](connectors-keycloak.md), "Writes that are
+changes of rights".
 
 A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
@@ -2589,6 +2605,21 @@ The per-op preview is opt-in via a builder registry in
   `async (PreviewContext) -> dict | None` callable for an op-id.
   `PreviewContext` carries the resolved connector instance + descriptor +
   operator + target + params.
+  `register_preview_builder_switch(op_id, enabled)` (core only, not in
+  the connector kit) puts the builder behind a switch for the caller's
+  side only: with `enabled()` false, the preview the caller gets back
+  (`preview_operation`, `PreviewContext.agent_preview` true) is the one of an
+  op with no builder. The approval request a person reads always uses the
+  builder. A new card for an op that agents already see goes behind a
+  switch this way.
+  `register_person_only_preview_keys(op_id, enabled, keys)` (core only)
+  names the keys a builder adds for the person only. The MCP tools
+  `meho_approvals_get` and `meho_approvals_list` read the stored request
+  through `proposed_effect_for_agent`: with the switch off, an op behind
+  a builder switch shows the generic params echo of its stored params,
+  and an op with person-only keys shows its preview without them. So the
+  caller gets the same answer there as from `preview_operation`. The REST
+  approvals API and the console show the stored card.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as
@@ -3420,7 +3451,11 @@ that is allowed but risky, for example a Keycloak target that manages the
 realm MEHO itself signs in with
 (`targets/keycloak_realm_warnings.py`). The dispatcher stamps it onto the
 card when there is at least one line, and the console modal shows it as a
-"Check the target" box.
+"Check the target" box. For `targets.register` and `targets.update` the lines
+come from the target as it will be after the write: an op registers a
+builder with `register_card_warnings` (`operations/_preview.py`), and the
+dispatcher adds its lines (`build_card_warnings`, fail-soft). So the approver
+sees the warning before approving.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes

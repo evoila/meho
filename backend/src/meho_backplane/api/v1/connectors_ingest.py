@@ -233,6 +233,7 @@ from meho_backplane.operations.ingest import (
     EditOpBody,
     EditOpResponse,
     EnableReadsResponse,
+    ImplIdEndsInDigitsError,
     IngestionPipelineResult,
     IngestionPipelineService,
     IngestJob,
@@ -261,12 +262,12 @@ from meho_backplane.operations.ingest import (
     build_catalog_entry_typed_connector_detail,
     build_catalog_entry_upstream_not_spec_detail,
     build_connector_legacy_tenant_copy_detail,
+    build_connector_name_detail,
     build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
-    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -1229,7 +1230,7 @@ def _raise_ingest_http_error(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             build_version_mismatch_detail(exc),
         ) from exc
-    if isinstance(exc, ProductImplIdMismatch):
+    if isinstance(exc, ProductImplIdMismatch | ImplIdEndsInDigitsError):
         # G0.27 / T3 (#1817). The round-trip guard moved from this route
         # into IngestionPipelineService.ingest so every entry point fails
         # closed; here we map the service exception onto the same 422
@@ -1237,7 +1238,7 @@ def _raise_ingest_http_error(
         # Shared builder with the MCP -32602 path so the two can't drift.
         raise HTTPException(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            build_product_impl_id_mismatch_detail(exc),
+            build_connector_name_detail(exc),
         ) from exc
     if isinstance(exc, UncoveredVersionLabel):
         # G0.9-T9 (#741). Checked BEFORE the generic ValueError-family arm

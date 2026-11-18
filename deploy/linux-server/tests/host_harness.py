@@ -299,9 +299,15 @@ STUBS = {
     "free": 'cat "$MEHO_FAKE/free_out"',
     "uname": 'cat "$MEHO_FAKE/uname_a"',
     "ip": textwrap.dedent("""\
-        case "$1" in
+        case "$*" in
           addr) cat "$MEHO_FAKE/ip_addr" ;;
-          route) cat "$MEHO_FAKE/ip_route" ;;
+          route | "-4 route show")
+            cat "$MEHO_FAKE/ip_route"
+            exit "$(cat "$MEHO_FAKE/ip_route_rc")" ;;
+          "-4 route del "*)
+            rc=$(cat "$MEHO_FAKE/ip_route_del_rc")
+            [ "$rc" = 0 ] || echo "RTNETLINK answers: Operation not permitted" >&2
+            exit "$rc" ;;
           *) exit 1 ;;
         esac
         """),
@@ -466,6 +472,8 @@ DEFAULT_ANSWERS = {
     "uname_a": "Linux meho 6.8.0-45-generic #45-Ubuntu SMP x86_64 GNU/Linux\n",
     "ip_addr": "2: ens18 inet 10.0.0.5/24 scope global ens18\n",
     "ip_route": "default via 10.0.0.1 dev ens18\n",
+    "ip_route_rc": "0",
+    "ip_route_del_rc": "0",
     "timedatectl_out": "System clock synchronized: yes\n",
     "journal_out": "2026-10-23T11:00:00+0000 meho rke2[1234]: fake journal line\n",
     "nft_check_rc": "0",

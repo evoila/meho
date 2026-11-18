@@ -1397,12 +1397,30 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     refused before the body is read, so a typo is never quietly ignored.
     The usage event of the request names the short texts choice, so it is
     on record also when no audit row is written.
+
+    Profile token (#6099): a token with the ``mcp_profile`` claim works only
+    when ``?profile=`` names the same profile. Any other URL gets 403, not
+    401, so the client does not start a new login for it.
     """
     try:
         profile = parse_tool_profile(request.query_params.getlist("profile"))
         short_texts = parse_tool_texts(request.query_params.getlist("texts"))
     except (UnknownToolProfileError, UnknownToolTextsError) as exc:
         return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
+    if operator.mcp_profile_claim is not None and profile != operator.mcp_profile_claim:
+        _log.warning(
+            "mcp_profile_token_url_mismatch",
+            operator_sub=operator.sub,
+            token_profile=operator.mcp_profile_claim,
+            url_profile=profile,
+        )
+        return _error_response(
+            None,
+            INVALID_REQUEST,
+            f"forbidden: this login is only for the {operator.mcp_profile_claim!r} "
+            f"tool profile. Connect to /mcp?profile={operator.mcp_profile_claim}.",
+            status_code=403,
+        )
     update: dict[str, Any] = {}
     if profile is not None:
         update["mcp_tool_profile"] = profile

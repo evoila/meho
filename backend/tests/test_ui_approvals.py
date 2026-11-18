@@ -95,6 +95,7 @@ from meho_backplane.ui.csrf import (
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
@@ -1824,21 +1825,61 @@ def test_history_work_ref_filter_counts_length_after_cleaning(typed: str, stored
     [("CHG\u200b1", "control or invisible characters"), ("x" * 257, "at most 256 characters")],
     ids=["invisible", "too-long"],
 )
-def test_history_work_ref_filter_refuses_a_bad_ticket_id(typed: str, message: str) -> None:
-    """A value the rule refuses is a 422 that names the rule, not an empty list."""
+@pytest.mark.parametrize(
+    ("path", "headers"),
+    [("/ui/approvals/list", _HX_HEADERS), ("/ui/approvals", {})],
+    ids=["list", "page"],
+)
+def test_history_work_ref_filter_refuses_a_bad_ticket_id(
+    typed: str, message: str, path: str, headers: dict[str, str]
+) -> None:
+    """A refused value is a 422 page or list that shows the rule, not an empty list."""
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
-        response = client.get(
+        response = client.get(path, params={"tab": "all", "work_ref": typed}, headers=headers)
+
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "data-work-ref-refused" in response.text
+    assert message in response.text
+    assert "No  requests for" not in response.text
+
+
+def test_history_load_more_refusal_replaces_the_console() -> None:
+    """A refused value during "Load more" replaces the console, not the rows list.
+
+    The pager appends its answer into the rows list. The refused answer is the
+    whole console, so the htmx headers send it to the console instead.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        paged = client.get(
             "/ui/approvals/list",
-            params={"tab": "all", "work_ref": typed},
+            params={"tab": "all", "offset": "25", "partial": "rows", "work_ref": "CHG\u200b1"},
+            headers=_HX_HEADERS,
+        )
+        searched = client.get(
+            "/ui/approvals/list",
+            params={"tab": "all", "work_ref": "CHG\u200b1"},
             headers=_HX_HEADERS,
         )
 
-    assert response.status_code == 422, response.text
-    assert message in response.json()["detail"]
+    assert paged.status_code == 422, paged.text
+    assert paged.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert paged.headers["HX-Retarget"] == "#approvals-history"
+    assert paged.headers["HX-Reswap"] == "outerHTML"
+    assert paged.text.count('id="approvals-history"') == 1
+    assert "data-work-ref-refused" in paged.text
+    # The search box already swaps the console; its answer needs no new target.
+    assert searched.status_code == 422, searched.text
+    assert "HX-Retarget" not in searched.headers
+    assert "HX-Reswap" not in searched.headers
 
 
 def test_history_push_url_preserves_work_ref_filter() -> None:

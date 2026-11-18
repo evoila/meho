@@ -208,8 +208,13 @@ from meho_backplane.ui.routes.approvals.run_watch import (
     start_approved_run,
 )
 from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
-from meho_backplane.ui.routes.work_ref_form import filter_work_ref
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_approvals_router"]
 
@@ -757,7 +762,20 @@ async def _build_history_context(
     """
     tab = _resolve_history_tab(tab)
     order_choice = _resolve_history_order(order)
-    work_ref_filter = filter_work_ref(work_ref)
+    try:
+        work_ref_filter = filter_work_ref(work_ref)
+    except WorkRefError as exc:
+        return _history_view(
+            tab=tab,
+            order="newest",
+            order_choice=order_choice,
+            work_ref=work_ref,
+            requests=[],
+            offset=offset,
+            has_more=False,
+            in_order_work_ref=None,
+            work_ref_error=refused_filter_text(exc),
+        )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         positions = await pending_chain_positions(
@@ -807,8 +825,12 @@ async def _build_history_context(
             )
     # Where each approved run is now; a running row asks again (#5110).
     live = await live_runs_for(session.tenant_id, rows)
-    return {
-        "requests": [
+    return _history_view(
+        tab=tab,
+        order=resolved_order,
+        order_choice=order_choice,
+        work_ref=work_ref_filter or "",
+        requests=[
             {
                 **project_request_to_view(
                     row,
@@ -820,22 +842,55 @@ async def _build_history_context(
             }
             for row in rows
         ],
+        offset=offset,
+        has_more=has_more,
+        # "Approve group in order" (#3597): offered on the Pending tab when
+        # the filter names a change ticket with two or more pending requests.
+        in_order_work_ref=work_ref_filter if tab == "pending" and positions else None,
+    )
+
+
+def _history_view(
+    *,
+    tab: str,
+    order: str,
+    order_choice: str,
+    work_ref: str,
+    requests: list[dict[str, object]],
+    offset: int,
+    has_more: bool,
+    in_order_work_ref: str | None,
+    work_ref_error: str | None = None,
+) -> dict[str, object]:
+    """The template context of the history page and its list partial.
+
+    ``work_ref_error`` is the text for a refused ticket id search value;
+    the list is then empty and the caller answers 422.
+    """
+    return {
+        "requests": requests,
         "poll_seconds": POLL_SECONDS,
-        "order": resolved_order,
+        "order": order,
         "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
         "tabs": [t for t in _HISTORY_TABS if t != _FOR_YOU_TAB or routing_enabled()],
-        "work_ref": work_ref_filter or "",
+        "work_ref": work_ref,
+        "work_ref_error": work_ref_error,
         "offset": offset,
         "page_size": _HISTORY_PAGE_SIZE,
         "next_offset": offset + _HISTORY_PAGE_SIZE,
         "has_more": has_more,
-        # "Approve group in order" (#3597): offered on the Pending tab when
-        # the filter names a change ticket with two or more pending requests.
-        "in_order_work_ref": work_ref_filter if tab == "pending" and positions else None,
+        "in_order_work_ref": in_order_work_ref,
     }
+
+
+def _history_response(response: HTMLResponse, context: dict[str, object]) -> HTMLResponse:
+    """Answer 422 when the context shows a refused ticket id search value."""
+    if context["work_ref_error"] is not None:
+        mark_work_ref_refused(response)
+    return response
 
 
 async def _render_index(
@@ -857,7 +912,9 @@ async def _render_index(
     context = await _build_history_context(session, tab, work_ref, offset, order)
     context["active_surface"] = "approvals"
     context["page_title"] = "Approvals"
-    return get_templates().TemplateResponse(request, "approvals/index.html", context)
+    return _history_response(
+        get_templates().TemplateResponse(request, "approvals/index.html", context), context
+    )
 
 
 async def _render_history(
@@ -883,12 +940,18 @@ async def _render_history(
             detail=f"Unknown approvals list partial '{partial}'.",
         )
     context = await _build_history_context(session, tab, work_ref, offset, order)
-    template = (
-        "approvals/_history_rows_oob.html"
-        if partial == _HISTORY_PARTIAL_ROWS
-        else "approvals/_history.html"
-    )
-    return get_templates().TemplateResponse(request, template, context)
+    refused = context["work_ref_error"] is not None
+    if partial == _HISTORY_PARTIAL_ROWS and not refused:
+        return get_templates().TemplateResponse(
+            request, "approvals/_history_rows_oob.html", context
+        )
+    response = get_templates().TemplateResponse(request, "approvals/_history.html", context)
+    if refused and partial == _HISTORY_PARTIAL_ROWS:
+        # The "Load more" button appends into the rows list; the refused
+        # answer is the whole console, so it replaces the console instead.
+        mark_work_ref_refused(response, retarget="#approvals-history", reswap="outerHTML")
+        return response
+    return _history_response(response, context)
 
 
 async def _render_detail_modal(

@@ -14,9 +14,14 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from meho_backplane.redaction.command_line import (
     HIDDEN,
     hide_command_text,
+    hide_in_text,
     hide_shell_script,
 )
 
@@ -84,3 +89,41 @@ def test_a_flag_waits_for_its_value_across_a_line_continuation() -> None:
     assert hide_shell_script(script) == (
         f"mysql \\\n  -p \\\n  {HIDDEN} appdb\nmkdir -p \\\n  /tmp/x\n"
     )
+
+
+_ONE_MIB = 1 << 20
+_TIME_LIMIT_SECONDS = 2.0
+
+
+@pytest.mark.parametrize("unit", ["x", "-x", "a://", "1+"])
+def test_shell_script_with_one_very_long_line_is_hidden_in_linear_time(unit: str) -> None:
+    script = unit * (_ONE_MIB // len(unit))
+    started = time.perf_counter()
+    shown = hide_shell_script(script)
+    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert shown == script
+
+
+def test_url_password_is_still_hidden_inside_a_long_line() -> None:
+    script = "x" * _ONE_MIB + f" curl https://{_USER}:{_FAKE}@host.example.invalid/\n"
+    started = time.perf_counter()
+    shown = hide_shell_script(script)
+    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert _FAKE not in shown
+    assert f"https://{_USER}:{HIDDEN}@host.example.invalid/" in shown
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"https://{_USER}:{_FAKE}@h/", f"https://{_USER}:{HIDDEN}@h/"),
+        (f"1abc://{_USER}:{_FAKE}@h", f"1abc://{_USER}:{HIDDEN}@h"),
+        (f"+a.b-c://{_USER}:{_FAKE}@h", f"+a.b-c://{_USER}:{HIDDEN}@h"),
+        (f"x=postgres://{_USER}:{_FAKE}@h:5432/db", f"x=postgres://{_USER}:{HIDDEN}@h:5432/db"),
+        (f"1://{_USER}:{_FAKE}@h", f"1://{_USER}:{_FAKE}@h"),
+        (f"://{_USER}:{_FAKE}@h", f"://{_USER}:{_FAKE}@h"),
+        (f"https://{_USER}@h/:{_FAKE}@", f"https://{_USER}@h/:{_FAKE}@"),
+    ],
+)
+def test_url_password_cases_keep_their_hidden_text(text: str, expected: str) -> None:
+    assert hide_in_text(text) == expected

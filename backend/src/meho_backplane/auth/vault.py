@@ -261,6 +261,20 @@ def _resolve_role_for_tenant(overrides_csv: str, tenant_id: UUID) -> str | None:
     return None
 
 
+def _tenant_in_csv(tenants_csv: str, tenant_id: UUID) -> bool:
+    """Say whether *tenant_id* is in a comma-separated list of tenant UUIDs."""
+    for raw in tenants_csv.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        try:
+            if UUID(entry) == tenant_id:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _resolve_login_role(operator: Operator, settings: Settings, override: str | None) -> str:
     """Select the Vault JWT role for a login. Precedence (highest first):
 
@@ -270,13 +284,18 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
        dedicated narrow role instead of the shared ``meho-mcp`` identity;
     2. the check-runner's dedicated ``vault_check_runner_role`` (#2757),
        selected only for the synthetic operators that present the runner's
-       token (background Sensor dispatch and the inbound event intake);
+       token (background Sensor dispatch and the inbound event intake).
+       When it is empty, the runner logs in with ``vault_oidc_role``, and
+       the ``vault_oidc_role_tenants`` check of tier 4 applies to it too;
     3. a per-tenant role from ``vault_oidc_role_by_tenant`` (#3852), keyed on
        ``operator.tenant_id`` — so an operator of a sandbox tenant logs into
        a role whose ``bound_claims`` + policy it satisfies instead of the
        shared identity, and one fixed role stops spanning tenants on a shared
        instance. Empty map ⇒ this tier is inert;
-    4. the deployment-global ``vault_oidc_role`` — today's default.
+    4. the deployment-global ``vault_oidc_role``. When
+       ``vault_oidc_role_tenants`` is set, only a tenant in that list gets
+       it; any other tenant gets :class:`VaultRoleDeniedError` before a
+       Vault call. Empty list ⇒ every tenant gets it.
 
     The per-tenant tier sits *below* the check-runner tier deliberately: the
     synthetic check-runner operator carries a ``tenant_id`` too, but its
@@ -289,11 +308,27 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
     if override is not None:
         return override
     if operator.check_runner_dispatch:
-        return settings.vault_check_runner_role or settings.vault_oidc_role
+        if settings.vault_check_runner_role:
+            return settings.vault_check_runner_role
+        if _resolve_role_for_tenant(settings.vault_oidc_role_by_tenant, operator.tenant_id) is None:
+            _check_shared_role_list(settings, operator.tenant_id)
+        return settings.vault_oidc_role
     tenant_role = _resolve_role_for_tenant(settings.vault_oidc_role_by_tenant, operator.tenant_id)
     if tenant_role is not None:
         return tenant_role
+    _check_shared_role_list(settings, operator.tenant_id)
     return settings.vault_oidc_role
+
+
+def _check_shared_role_list(settings: Settings, tenant_id: UUID) -> None:
+    """Refuse a tenant that is not in a non-empty ``vault_oidc_role_tenants``."""
+    if settings.vault_oidc_role_tenants and not _tenant_in_csv(
+        settings.vault_oidc_role_tenants, tenant_id
+    ):
+        raise VaultRoleDeniedError(
+            f"This tenant has no Vault login role (tenant {tenant_id}). "
+            "Ask the admin to add it to VAULT_OIDC_ROLE_BY_TENANT."
+        )
 
 
 @asynccontextmanager

@@ -6,7 +6,9 @@
 The migration adds three nullable columns: ``approval_request.people_behind``,
 ``agent_definition.updated_by_sub`` and ``runbook_runs.reassigned_by``. It
 fills ``updated_by_sub`` from the newest successful ``agent.edit`` audit row
-of the definition, else from ``created_by_sub``. ``downgrade()`` removes the
+of the definition, else from ``created_by_sub``. An edit from before the
+definition was created (an edit of a deleted definition with the same name)
+does not count. ``downgrade()`` removes the
 columns again. Every step targets this migration's own revision (``0175``)
 and its ``down_revision`` (``0174``), never ``head``.
 
@@ -41,11 +43,14 @@ _TENANT = "00000000-0000-0000-0000-000000000175"
 _OTHER_TENANT = "00000000-0000-0000-0000-000000000176"
 _EDITED = "00000000-0000-0000-0000-0000000001e1"
 _NEVER_EDITED = "00000000-0000-0000-0000-0000000001e2"
+_RECREATED = "00000000-0000-0000-0000-0000000001e3"
 
-#: The definitions to seed: (id, tenant, name, created_by_sub).
+#: The definitions to seed: (id, tenant, name, created_by_sub, created_at).
+#: "helper" was deleted and made again on 2026-11-10; its only edit is older.
 DEFINITIONS = (
-    (_EDITED, _TENANT, "triage", "creator-a"),
-    (_NEVER_EDITED, _TENANT, "nightly", "creator-b"),
+    (_EDITED, _TENANT, "triage", "creator-a", "2026-10-01 00:00:00"),
+    (_NEVER_EDITED, _TENANT, "nightly", "creator-b", "2026-10-01 00:00:00"),
+    (_RECREATED, _TENANT, "helper", "creator-c", "2026-11-10 00:00:00"),
 )
 
 #: The audit rows to seed: (operator_sub, tenant, op_id, agent_name, status, occurred_at).
@@ -59,10 +64,15 @@ AUDIT_ROWS = (
     ("editor-elsewhere", _OTHER_TENANT, "agent.edit", "triage", 200, "2026-11-04 10:00:00"),
     ("editor-of-other", _TENANT, "agent.edit", "other", 200, "2026-11-05 10:00:00"),
     ("creator-a", _TENANT, "agent.create", "triage", 201, "2026-11-06 10:00:00"),
+    ("editor-of-deleted", _TENANT, "agent.edit", "helper", 200, "2026-11-07 10:00:00"),
 )
 
 #: What the fill gives each definition.
-EXPECTED = [(_EDITED, "editor-new"), (_NEVER_EDITED, "creator-b")]
+EXPECTED = [
+    (_EDITED, "editor-new"),
+    (_NEVER_EDITED, "creator-b"),
+    (_RECREATED, "creator-c"),
+]
 
 
 @pytest.fixture
@@ -106,8 +116,7 @@ def _run(sync_url: str, sql: str, **params: object) -> list[tuple[object, ...]]:
 DEFINITION_SQL = (
     "INSERT INTO agent_definition (id, tenant_id, name, identity_ref, model_tier, "
     "system_prompt, toolset, turn_budget, enabled, created_by_sub, created_at, updated_at) "
-    "VALUES (:id, :tenant, :name, 'agent:x', 'small', 'p', '{}', 5, true, :creator, "
-    "'2026-10-01 00:00:00', '2026-10-01 00:00:00')"
+    "VALUES (:id, :tenant, :name, 'agent:x', 'small', 'p', '{}', 5, true, :creator, :at, :at)"
 )
 AUDIT_SQL = (
     "INSERT INTO audit_log (id, occurred_at, operator_sub, method, path, status_code, payload, "
@@ -143,8 +152,16 @@ def test_updated_by_sub_comes_from_the_newest_edit_or_the_creator(
 ) -> None:
     cfg, sync_url = alembic_cfg
     copy_migrated_db(cfg, _DOWN_REVISION)
-    for definition_id, tenant, name, creator in DEFINITIONS:
-        _run(sync_url, DEFINITION_SQL, id=definition_id, tenant=tenant, name=name, creator=creator)
+    for definition_id, tenant, name, creator, created_at in DEFINITIONS:
+        _run(
+            sync_url,
+            DEFINITION_SQL,
+            id=definition_id,
+            tenant=tenant,
+            name=name,
+            creator=creator,
+            at=created_at,
+        )
     for index, (sub, tenant, op_id, agent_name, status, at) in enumerate(AUDIT_ROWS):
         _run(
             sync_url,

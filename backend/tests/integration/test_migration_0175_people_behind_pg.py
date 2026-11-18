@@ -10,7 +10,8 @@ the audit rows with ``->>``. The tests check:
 
 * the upgrade adds the three columns and the downgrade drops them;
 * ``agent_definition.updated_by_sub`` comes from the newest successful
-  ``agent.edit`` audit row of the definition, else from ``created_by_sub``.
+  ``agent.edit`` audit row of the definition, else from ``created_by_sub``;
+  an edit from before the definition was created does not count.
 
 Tests are sync because :func:`alembic.command.upgrade` runs its own
 :func:`asyncio.run`. Every test leaves the container at ``head``.
@@ -80,7 +81,7 @@ async def _seed(url: str) -> None:
                     ),
                     {"id": uuid.UUID(tenant), "slug": f"t-{tenant[-4:]}", "at": created},
                 )
-            for definition_id, tenant, name, creator in DEFINITIONS:
+            for definition_id, tenant, name, creator, created_at in DEFINITIONS:
                 await conn.execute(
                     text(
                         "INSERT INTO agent_definition (id, tenant_id, name, identity_ref, "
@@ -94,7 +95,7 @@ async def _seed(url: str) -> None:
                         "tenant": uuid.UUID(tenant),
                         "name": name,
                         "creator": creator,
-                        "at": created,
+                        "at": datetime.fromisoformat(created_at).replace(tzinfo=UTC),
                     },
                 )
             for sub, tenant, op_id, agent_name, status, at in AUDIT_ROWS:

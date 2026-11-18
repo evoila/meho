@@ -1834,7 +1834,9 @@ requests follow the agent row. A sensor never makes a request.
 - `agent_definition.updated_by_sub` — set by every edit
   (`AgentDefinitionService.update`). The migration fills it from the
   newest successful `agent.edit` audit row of the definition, else from
-  `created_by_sub`.
+  `created_by_sub`. It reads only audit rows from the time the definition
+  was created, so an edit of a deleted definition with the same name does
+  not count.
 - `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`.
 
 **The rule.** One shared check, `_check_approver_group`, used by every

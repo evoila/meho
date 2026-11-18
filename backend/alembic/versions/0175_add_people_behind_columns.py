@@ -21,7 +21,9 @@ MEHO needs three facts it does not keep yet:
 * ``agent_definition.updated_by_sub`` -- Text, nullable. The person who
   last changed the agent definition. The upgrade fills it from the
   newest successful ``agent.edit`` audit row of the definition, and from
-  ``created_by_sub`` when there is none.
+  ``created_by_sub`` when there is none. It reads only audit rows from the
+  time the definition was created, so an edit of a deleted definition with
+  the same name does not count.
 * ``runbook_runs.reassigned_by`` -- Text, nullable. The person who last
   handed the run to a new assignee.
 
@@ -58,7 +60,10 @@ __all__ = [
 ]
 
 #: The newest person who changed the definition, from the audit log. The
-#: audit row of an edit keeps ``op_id`` and ``agent_name`` in its payload.
+#: audit row of an edit keeps ``op_id`` and ``agent_name`` in its payload,
+#: not the definition id. So MEHO reads only rows from the time the
+#: definition was created: an edit of a deleted definition with the same
+#: name is older and does not count.
 _FILL_SQL = """
 UPDATE agent_definition SET updated_by_sub = COALESCE(
     (
@@ -67,6 +72,7 @@ UPDATE agent_definition SET updated_by_sub = COALESCE(
           AND audit_log.status_code >= 200 AND audit_log.status_code < 300
           AND {op_id} = 'agent.edit'
           AND {agent_name} = agent_definition.name
+          AND audit_log.occurred_at >= agent_definition.created_at
         ORDER BY audit_log.occurred_at DESC
         LIMIT 1
     ),

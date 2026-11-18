@@ -534,7 +534,7 @@ async def test_a_person_only_in_a_team_group_gets_the_claims_bindings_match(
             {"bindings": [{"match": match, "kind": "SA-Operators", "categories": ["network"]}]}
         )
         bound = bind(operator, claims, entries)
-        assert bound.bound_kind is RoleGroup.SA_OPERATORS, match
+        assert bound.bound_kind is RoleGroup.OPERATORS, match
         assert bound.bound_categories == frozenset({"network"})
     short = {"match": {"group": "/Network"}, "kind": "SA-Operators", "categories": ["*"]}
     assert bind(operator, claims, bindings_from_document({"bindings": [short]})).bound_kind is None

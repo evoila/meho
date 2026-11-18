@@ -2937,6 +2937,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0480-2026-11-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.48.0 — 2026-11-18
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0470-2026-11-17" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3657,6 +3668,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0480-2026-11-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.48.0 — 2026-11-18
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0470-2026-11-17" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4228,6 +4250,26 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v0480-2026-11-18"><a href="https://github.com/evoila/meho/releases/tag/v0.48.0">v0.48.0</a> — 2026-11-18<a class="headerlink" href="#v0480-2026-11-18" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>MEHO says when a change of rights needs a second admin.</strong> When the
+  only admin of a tenant asks for such a change, the answer says so.
+  <code>meho doctor</code> shows a new line "second admin".</li>
+<li><strong>An approved change starts with a fresh login.</strong> Before MEHO sends a
+  change that a person approved, it signs in to the target again. A change
+  whose login was refused after MEHO sent it is stored as "outcome
+  unknown": check the target first, then make a new request.</li>
+<li><strong>New help for agents, behind switches.</strong> Typed operations first in
+  search, required parameters in search hits, operations in the group
+  list, a short guide to the call flow, and clearer <code>result_query</code>
+  answers. All are off by default.</li>
+<li><strong>More operations.</strong> A Vault operation that makes a password that meets
+  given rules, and reads of Keycloak login and admin events.</li>
+<li><strong>Reset a lost second factor.</strong> A host command on the appliance and on
+  the Linux server install resets the code app of a local account.</li>
+<li><strong>No database migration.</strong> After the upgrade, probe every OpenBao
+  target again.</li>
+</ul>
 <h2 id="v0470-2026-11-17"><a href="https://github.com/evoila/meho/releases/tag/v0.47.0">v0.47.0</a> — 2026-11-17<a class="headerlink" href="#v0470-2026-11-17" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Keycloak writes that change rights need another admin.</strong> Giving a

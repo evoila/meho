@@ -17,7 +17,10 @@ says so (``service_grants.never_covered_reason``), for the classes
 * A step of a multi-step operation that makes a credential waits, also
   when a standing grant and a run approval name the step.
 * A credential call at level ``safe`` waits for an agent that holds an
-  ``auto-execute`` grant row.
+  ``auto-execute`` grant row, and for a service login, by op id and by
+  stored class. A credential read that returns no secret value still runs.
+* The approval of a parent multi-step run does not cover a step or a
+  child call that makes a credential: it waits for its own approval.
 * Standing grant create, run approval create and agent grant create refuse
   such an operation, with the plain reason.
 """
@@ -27,6 +30,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -38,6 +42,10 @@ from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.agents.grants import GrantValidationError as AgentGrantValidationError
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPermission,
@@ -47,10 +55,15 @@ from meho_backplane.db.models import (
     ServicePrincipalGrant,
 )
 from meho_backplane.op_classes import _DECLARED, declare_op_classes, declared_op_ids
+from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations._validate import CREDENTIAL_WAIT_NOTE, policy_gate
-from meho_backplane.operations.composite import enforce_subop_policy
+from meho_backplane.operations.composite import (
+    approved_run_var,
+    composite_depth_var,
+    enforce_subop_policy,
+)
 from meho_backplane.operations.governed_subops import classify_subop_grantability
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
 from meho_backplane.operations.run_approvals import (
@@ -77,7 +90,7 @@ _SERVICE = "svc-credential-calls"
 _AGENT = "agent:credential-calls"
 _RUN = "run-credential-calls"
 _MINT = "vault.token.create"
-_STORED_WRITE = "POST:/v1/example/users/{id}/password"
+_STORED_WRITE = "POST:/v1/example/users/{id}/passphrase"
 _DECLARED_WRITE = "PUT:/v1/example/service-keys/{id}"
 
 _FROM_TODAY = {
@@ -486,3 +499,198 @@ async def test_agent_grant_create_keeps_rows_that_run_no_credential_call_at_once
         _TENANT, "op-admin", _agent_grant(op_pattern, verdict)
     )
     assert created.op_pattern == op_pattern
+
+
+def _safe_row(op_id: str, *, op_class: str | None = None) -> EndpointDescriptor:
+    return EndpointDescriptor(
+        product="example",
+        version="1.0",
+        impl_id="example-rest",
+        op_id=op_id,
+        method="POST",
+        source_kind="ingested",
+        safety_level="safe",
+        requires_approval=False,
+        op_class=op_class,
+        parameter_schema={},
+        tenant_id=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "op_class"),
+    [(_MINT, None), ("vault.kv.put", None), (_STORED_WRITE, "credential_write")],
+    ids=["mint-by-op-id", "write-by-op-id", "write-by-stored-class"],
+)
+async def test_a_service_call_of_a_safe_credential_op_waits(
+    op_id: str, op_class: str | None
+) -> None:
+    descriptor = _safe_row(op_id, op_class=op_class)
+    verdict, reason = await policy_gate(
+        operator=_service(),
+        descriptor=descriptor,
+        target=None,
+        connector_id="example-rest-1.0",
+        decide_only=True,
+    )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL, reason
+    assert reason is not None and reason.count(CREDENTIAL_WAIT_NOTE) == 1, reason
+    shadow = await evaluate_call(
+        operator=_service(),
+        descriptor=descriptor,
+        target=None,
+        connector_id="example-rest-1.0",
+        decide_only=True,
+    )
+    assert shadow.verdict is Verdict.WAIT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["vault.kv.list", "vault.sys.mount.tune"])
+async def test_a_service_call_of_a_safe_op_with_no_secret_value_runs(op_id: str) -> None:
+    """A credential read marked as one that returns no secret value, and a plain write."""
+    descriptor = _safe_row(op_id)
+    verdict, reason = await policy_gate(
+        operator=_service(),
+        descriptor=descriptor,
+        target=None,
+        connector_id="example-rest-1.0",
+        decide_only=True,
+    )
+    assert verdict is PermissionVerdict.AUTO_EXECUTE, reason
+    shadow = await evaluate_call(
+        operator=_service(),
+        descriptor=descriptor,
+        target=None,
+        connector_id="example-rest-1.0",
+        decide_only=True,
+    )
+    assert shadow.verdict is Verdict.RUN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operator", [_service(), _agent()], ids=["service", "agent"])
+@pytest.mark.parametrize("safety_level", ["safe", "caution"])
+async def test_an_approved_run_does_not_cover_a_step_that_makes_a_credential(
+    operator: Operator, safety_level: str
+) -> None:
+    token = approved_run_var.set(True)
+    try:
+        result = await enforce_subop_policy(
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id=_MINT,
+            safety_level=safety_level,
+            requires_approval=False,
+            target=None,
+            params={"policies": ["<policy-name>"]},
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert result is not None
+    assert result.status == "awaiting_approval", result.error
+
+
+@pytest.mark.asyncio
+async def test_an_approved_run_still_covers_a_plain_caution_step() -> None:
+    token = approved_run_var.set(True)
+    try:
+        result = await enforce_subop_policy(
+            operator=_service(),
+            connector_id="vault-1.x",
+            op_id="vault.sys.mount.tune",
+            safety_level="caution",
+            requires_approval=False,
+            target=None,
+            params={},
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert result is None
+
+
+class _VaultStub(Connector):
+    """Lets the resolver pick a connector; the typed handlers never call it."""
+
+    product = "vault"
+    version = "1.x"
+    impl_id = "vault"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+class _Target:
+    def __init__(self) -> None:
+        self.product = "vault"
+        self.fingerprint = None
+        self.preferred_impl_id: str | None = None
+        self.id = uuid.uuid4()
+        self.name = "test-target"
+        self.host = "test.example.com"
+        self.port = 443
+        self.auth_model = "shared_service_account"
+
+
+async def _child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return {"ran": True}
+
+
+@pytest.fixture
+def vault_stub() -> Iterator[None]:
+    reset_dispatcher_caches()
+    clear_registry()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_VaultStub)
+    yield
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("vault_stub")
+@pytest.mark.parametrize(
+    ("op_id", "status"), [(_MINT, "awaiting_approval"), ("vault.sys.mount.tune", "ok")]
+)
+async def test_an_approved_run_does_not_cover_a_child_call_that_makes_a_credential(
+    op_id: str, status: str
+) -> None:
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=op_id,
+        handler=_child_handler,
+        summary="A child step.",
+        description="A child step.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        safety_level="caution",
+        embedding_service=embedding,
+    )
+    approved = approved_run_var.set(True)
+    depth = composite_depth_var.set(1)
+    try:
+        result = await dispatch(
+            operator=_service(),
+            connector_id="vault-1.x",
+            op_id=op_id,
+            target=_Target(),
+            params={},
+        )
+    finally:
+        composite_depth_var.reset(depth)
+        approved_run_var.reset(approved)
+    assert result.status == status, result.error

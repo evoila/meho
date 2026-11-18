@@ -188,7 +188,7 @@ connector's `declare_op_classes`, or the core lists of
 
 - At call time `_never_covered` in `run_approval_gate.py` refuses it, and
   logs `run_approval_refused_credential` with the reason "A standing
-  grant, an agent grant or a run approval never covers OP: it reads,
+  grant, an agent grant or a run approval never covers 'OP': it reads,
   writes or makes a credential, so a person approves each call." The call
   gets the same answer as with no run approval. The shadow evaluator
   (`policy/floors.py::run_approval_may_clear`) gives the same answer.

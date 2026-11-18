@@ -18,9 +18,9 @@ The floors come from the code, never from a file. They are:
 * **Token calls.** A call made with a token (a person's token, an agent,
   a runner) runs at once only when it is ``safe``. A ``caution``,
   ``dangerous`` or ``destructive`` call waits.
-* **Credentials.** An agent's call that reads, writes or makes a
-  credential waits for a person, also at level ``safe``, whatever its
-  agent grants say.
+* **Credentials.** A call of an agent or a service login that reads,
+  writes or makes a credential waits for a person, also at level
+  ``safe``, whatever its grants say.
 * **No grant.** Some calls wait for a person every time: no standing grant
   and no run approval clears them. These are an operation that reads,
   writes or makes a credential, one that connects to an address the caller gives, one marked
@@ -102,7 +102,7 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 sandbox_delete_grant_clears=asker.kind == "service",
             )
         )
-    if asker.kind == "agent" and "credential_waits" in asked.op_class:
+    if asker.kind in ("agent", "service") and "credential_waits" in asked.op_class:
         hits.append(
             FloorHit(
                 "wait",

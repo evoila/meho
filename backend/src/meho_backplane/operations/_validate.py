@@ -490,9 +490,15 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     :func:`~meho_backplane.op_classes.declare_root_shell` parks at every
     level, also ``safe``: a standing grant can still cover it, a run
     approval never does.
+    A call that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    parks at every level, also ``safe``: no standing grant and no run
+    approval covers it.
 
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
     if descriptor.safety_level == "destructive":
         if sandbox_mode_active():
             return (
@@ -522,6 +528,8 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
             "root on the host, so it waits for approval unless a standing grant "
             "covers it"
         )
+    if credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None)):
+        return f"safety_level={descriptor.safety_level}; {CREDENTIAL_WAIT_NOTE}"
     return None
 
 
@@ -689,7 +697,9 @@ async def _service_grant_verdict(
             "the operation connects to an address the caller gives, so no "
             "standing grant covers it; a person approves each call"
         )
-    if credential_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None)):
+    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and credential_grant_reason(
+        descriptor.op_id, getattr(descriptor, "op_class", None)
+    ):
         notes.append(CREDENTIAL_WAIT_NOTE)
     if notes:
         note = "; ".join(notes)

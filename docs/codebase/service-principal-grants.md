@@ -122,7 +122,7 @@ and no run approval covers it.
   lists in `broadcast/events.py`). A step of a multi-step operation has
   only its op id.
 - `credential_grant_reason` gives the reason: "A standing grant, an agent
-  grant or a run approval never covers OP: it reads, writes or makes a
+  grant or a run approval never covers 'OP': it reads, writes or makes a
   credential, so a person approves each call." `never_covered_reason`
   returns it with the kind `credential`.
 - Grant create refuses such an op by op id before the lookup, and by the
@@ -133,6 +133,9 @@ and no run approval covers it.
   call when its floor applies (a read marked in code as one that returns
   no secret value runs at once; `vault.kv.read` waits only with
   `reveal_secret`). The agent verdict and the run approval notes use it.
+- A service call of such an op waits also at level `safe`
+  (`_service_safety_gate_reason` uses `credential_call_waits`), so the
+  read exceptions above still run at once.
 - When a service call of such an op waits, its reason ends with "the
   operation reads, writes or makes a credential, so no standing grant, no
   agent grant and no run approval covers it; a person approves each
@@ -143,7 +146,8 @@ and no run approval covers it.
   marks such a step as not grantable, with the same reason.
 - The shadow evaluator marks such a call `credential` (no grant and no
   run approval clears it, `policy/floors.py::NO_GRANT_MARKS`) and, when it
-  waits, `credential_waits` (the agent floor of the same name).
+  waits, `credential_waits` (the floor of the same name, for an agent
+  and a service login).
 A call that sets a param a connector marks with `declare_wait_when_set`
 (`op_classes.py`; today `secret_field_map` and `flight_recorder_capture`
 of `targets.register`) waits for a person too: the dispatcher marks that

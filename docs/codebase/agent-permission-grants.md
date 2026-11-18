@@ -143,7 +143,7 @@ For an agent:
 - `AgentGrantService.grant` (create and elevate) refuses an
   `auto-execute` row whose `op_pattern` is exactly the op id of such a
   call, with the reason "A standing grant, an agent grant or a run
-  approval never covers OP: it reads, writes or makes a credential, so a
+  approval never covers 'OP': it reads, writes or makes a credential, so a
   person approves each call. Leave it out." A pattern with `*`, `?` or
   `[` is not refused: the gate keeps the credential calls it matches
   waiting. A `needs-approval` or `deny` row is not refused either, because

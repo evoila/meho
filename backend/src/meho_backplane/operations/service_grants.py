@@ -345,7 +345,7 @@ def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> s
     if resolve_op_class(op_id, stored_op_class) not in CREDENTIAL_CLASSES:
         return None
     return (
-        f"A standing grant, an agent grant or a run approval never covers {op_id}: "
+        f"A standing grant, an agent grant or a run approval never covers {op_id!r}: "
         "it reads, writes or makes a credential, so a person approves each call."
     )
 

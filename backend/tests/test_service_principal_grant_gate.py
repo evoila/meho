@@ -699,7 +699,7 @@ async def test_grant_create_refuses_a_credential_read_op() -> None:
             creator_role=TenantRole.TENANT_ADMIN,
         )
     assert str(exc.value) == (
-        f"A standing grant, an agent grant or a run approval never covers {_SECRET_OP}: "
+        f"A standing grant, an agent grant or a run approval never covers {_SECRET_OP!r}: "
         "it reads, writes or makes a credential, so a person approves each call. "
         "Leave it out."
     )

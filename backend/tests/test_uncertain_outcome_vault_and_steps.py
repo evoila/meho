@@ -26,7 +26,6 @@ import meho_backplane.connectors._shared.vault_creds as vault_creds_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultUnreachableError
-from meho_backplane.connectors._shared.vault_creds import TargetSecretReadFailedError
 from meho_backplane.connectors._shared.wrapped_creds import WrappedCredentialError
 from meho_backplane.connectors.adapters import ssh as ssh_module
 from meho_backplane.connectors.pfsense import ops_openvpn_user
@@ -69,13 +68,12 @@ __all__ = [
 def _wrapped(outer: type[Exception], cause: BaseException) -> Exception:
     """*outer* raised ``from`` *cause*, as a connector wraps a fault."""
     try:
-        raise cause
-    except BaseException as exc:
         try:
+            raise cause
+        except BaseException as exc:
             raise outer("the call failed") from exc
-        except outer as wrapped:
-            return wrapped
-    raise AssertionError("unreachable")
+    except outer as wrapped:
+        return wrapped
 
 
 #: The fault :func:`_raising_handler` raises; set by :func:`_register_raising`.
@@ -216,7 +214,9 @@ def test_requests_faults_after_sending(exc: BaseException) -> None:
     [
         requests.exceptions.ConnectTimeout(),
         _wrapped(VaultUnreachableError, requests.exceptions.ReadTimeout()),
-        TargetSecretReadFailedError(target_name="t", cause=requests.exceptions.ReadTimeout()),
+        vault_creds_module.TargetSecretReadFailedError(
+            target_name="t", cause=requests.exceptions.ReadTimeout()
+        ),
         _wrapped(WrappedCredentialError, requests.exceptions.ReadTimeout()),
     ],
     ids=["connect-timeout", "vault-login", "target-secret-read", "wrapped-credential"],

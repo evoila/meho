@@ -156,7 +156,7 @@ def test_announce_refuses_control_characters_in_text_fields(
     with (
         patch(
             "meho_backplane.api.v1.broadcast.resolve_agent_admission",
-            new=AsyncMock(side_effect=lambda op: fake_admission(op)),
+            new=AsyncMock(side_effect=fake_admission),
         ),
         patch(
             "meho_backplane.api.v1.broadcast.enforce_announce_rate_limit",

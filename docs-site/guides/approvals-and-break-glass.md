@@ -161,6 +161,16 @@ link and stops. Approve in the console instead.
 
 ## The four default roles
 
+!!! note "Which release this section describes"
+
+    This section describes the four default roles as they ship in one
+    release, together with the role changes that read the older groups
+    as Operators and Readers. On an older release, the older groups
+    `MEHO-SA-Operators` and `MEHO-Approvers` keep their own rights: an
+    SA-Operator may approve their own change, and an Approver may
+    approve another person's change. Check the release notes of your
+    version.
+
 MEHO has four default roles. A person has one role in a tenant. It comes
 from one login group in Keycloak. MEHO reads it only from your signed
 login token, never from a request field or a command-line flag.
@@ -182,7 +192,8 @@ web console.
 | | Reader | Operator | Admin | Platform Admin |
 |---|---|---|---|---|
 | Read | yes | yes | yes | yes |
-| Run a low-risk change (`safe`, `caution`) | no | yes. Web console: runs at once. Token: waits | as Operator | as Admin |
+| Run a `safe` change | no | yes. Runs at once, in the web console and with a token | as Operator | as Admin |
+| Run a `caution` change | no | yes. Web console: runs at once. Token: waits | as Operator | as Admin |
 | Run a high-risk change (`dangerous`, `destructive`) | no | asks; it waits for an Admin | asks; it waits; may approve it himself | as Admin |
 | Approve another person's low-risk change | no | yes | yes | yes |
 | Approve another person's high-risk change | no | no | yes | yes |
@@ -190,13 +201,16 @@ web console.
 | Change rights | no | may ask; it waits for an Admin | alone. In the web console it runs at once. Asked with a token or by an AI tool, it waits for an Admin's click in the web console | as Admin; only a platform admin changes the Platform-Admins group |
 | Act in every tenant | no, only where in a role group | same | same | yes |
 
+An operation marked `requires_approval` always waits for an approval,
+at every risk level, in the web console and with a token.
+
 The groups come from the
 [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-five-groups).
 A new install and a new tenant get the groups for Readers, Operators and
 Admins, and the Platform-Admins group. An install that already has the
-older groups `MEHO-SA-Operators` and `MEHO-Approvers` keeps them: MEHO
-reads the first as Operators and the second as Readers. Nothing changes in
-Keycloak.
+older groups `MEHO-SA-Operators` and `MEHO-Approvers` keeps them. From
+the release that ships the four roles, MEHO reads the first as Operators
+and the second as Readers. Nothing changes in Keycloak.
 
 ## A second person is a second login
 

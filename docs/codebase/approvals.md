@@ -18,7 +18,8 @@ do, is in the guide
 | | Reader | Operator | Admin | Platform Admin |
 |---|---|---|---|---|
 | Read | yes | yes | yes | yes |
-| Run a low-risk change (`safe`, `caution`) | no | yes. Web console: runs at once. Token: waits | as Operator | as Admin |
+| Run a `safe` change | no | yes. Runs at once, in the web console and with a token | as Operator | as Admin |
+| Run a `caution` change | no | yes. Web console: runs at once. Token: waits | as Operator | as Admin |
 | Run a high-risk change (`dangerous`, `destructive`) | no | asks; it waits for an Admin | asks; it waits; may approve it himself | as Admin |
 | Approve another person's low-risk change | no | yes | yes | yes |
 | Approve another person's high-risk change | no | no | yes | yes |
@@ -26,12 +27,18 @@ do, is in the guide
 | Change rights | no | may ask; it waits for an Admin | alone. In the web console it runs at once. Asked with a token or by an AI tool, it waits for an Admin's click in the web console | as Admin; only a platform admin changes the Platform-Admins group |
 | Act in every tenant | no, only where in a role group | same | same | yes |
 
+An operation marked `requires_approval` always waits for an approval,
+at every risk level, in the web console and with a token.
+
 MEHO tells two people apart by their login (the login ID in the token).
 It does not know when two logins belong to one person, so a second person
 is a second login.
 
 The older groups `MEHO-SA-Operators` and `MEHO-Approvers` are read as
 Operators and Readers from the release that ships the four roles.
+The table describes that release. On an older release, the older
+groups keep their own rights (self-approval for SA-Operators, approval
+of another person's change for Approvers).
 
 ## Overview
 

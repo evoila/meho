@@ -1225,6 +1225,69 @@ async def test_no_connector_error_names_target_product_not_connector_id(
     assert result.extras["version"] is None
 
 
+async def test_no_connector_error_names_the_probe_again_fix_for_old_openbao_target(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An OpenBao target probed before 0.47 is stored as ``vault`` 2.x.
+
+    No connector serves it, and the error names the fix. The resolver test
+    in ``test_connectors_vault_version_ranges.py`` covers the target after a
+    probe that finds ``openbao``.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="GET:/v1/openbao-hint",
+        source_kind="ingested",
+        method="GET",
+        path="/v1/openbao-hint",
+        handler_ref=None,
+        summary="vault op",
+        description="Ingested op under product vault.",
+        tags=[],
+        parameter_schema={},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    target = _FakeTarget(product="vault", version="2.7.1", name="bao-one")
+    target.fingerprint = SimpleNamespace(version="2.7.1", product="vault")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="GET:/v1/openbao-hint",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("no_connector:")
+    assert "meho targets probe -- bao-one" in result.error
+    assert result.extras["error_code"] == "no_connector"
+    assert "meho targets probe -- bao-one" in result.extras["hint"]
+
+
 # ---------------------------------------------------------------------------
 # #4139: an op that needs a target and got none says so in one clear line
 # ---------------------------------------------------------------------------

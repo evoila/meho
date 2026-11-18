@@ -797,7 +797,7 @@ tests, none skipped).
   priority; skip semantics).
 - Workflow wiring: `.github/workflows/ci.yml` — the two "Checkout vendor
   spec-shelf" steps (their folders come from the lists in
-  `ci/spec-shelf/`, read by `scripts/ci/spec_shelf.sh`) and the `SPEC_SHELF_TOKEN_PRESENT` /
+  `ci/spec-shelf/`, read by `scripts/ci/spec_shelf.sh`) and the `SPEC_SHELF_READY` /
   `MEHO_CONSUMER_DOCS_ROOT` job env rows; operator-facing summary in
   [`docs/codebase/devops.md`](../codebase/devops.md).
 - Precedent ADRs: [`shipped-spec-provenance.md`](shipped-spec-provenance.md)

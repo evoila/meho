@@ -94,6 +94,194 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-11-18
+
+**MEHO says when a change of rights needs a second admin.** A change of
+rights waits until another admin approves it. When the person who asks is
+the only admin of the tenant, the answer now says so, with a link to the
+guide. `meho doctor` shows a new line "second admin" (#6653). Run
+`meho doctor` after the upgrade.
+
+**An approved change starts with a fresh login.** Before MEHO sends a change
+that a person approved, it signs in to the target again (#6680). See
+"Security".
+
+**New help for agents, behind switches.** Search can show typed and
+multi-step operations first, a search hit can name its required parameters,
+the group list can name the operations of each group, a short guide to the
+call flow can start each session, and `result_query` can explain an empty
+answer. All are off by default. They are listed under "Switches, off by
+default".
+
+MEHO 0.48.0 also brings a Vault operation that makes a password that meets
+given rules (#6635), reads of Keycloak login and admin events (#6637), and a
+host command that resets a lost second factor of a local account (#6619).
+
+The upgrade runs no database migration. The head stays `0174`. Read "Steps
+after the upgrade" first.
+
+### Steps after the upgrade
+- The upgrade runs no database migration. The head stays `0174`.
+- The upgrade ends every approval request that still waits, as every
+  upgrade since 0.39.0 does (`release_changed`). Decide waiting requests
+  first, or ask the requesters to send them again.
+- Probe every OpenBao target again after the upgrade: `meho targets probe
+  <name>`. The probe finds `openbao` and stores it, and calls work again
+  (#6679).
+- Run `meho doctor`. When the line "second admin" warns, add a second admin
+  in Keycloak: a member of the tenant's admin group (`MEHO-Admins` for the
+  first tenant) or of `MEHO-Platform-Admins` (#6653).
+- With `POLICY_APPROVER_ROUTING` on: reject a waiting request that the
+  approve click now refuses because MEHO does not know its category, and
+  start the call again (#6633).
+- If `POLICY_CLASSIFICATION` is on, a step of a multi-step operation can now
+  wait for approval, also while `POLICY_APPROVER_ROUTING` is off. Check the
+  overrides of operations that are used as steps (#6633).
+
+### Switches, off by default
+- `SEARCH_TYPED_FIRST`: `search_operations` and `list_operation_groups`
+  (MCP, REST and CLI) show only typed and multi-step operations.
+  `include_raw: true` (REST `include_raw=true`, CLI `--include-raw`) shows
+  the raw operations again. A connector with only raw operations shows them
+  with a note. A search with no typed match says how many raw operations
+  would match (#6640).
+- `SEARCH_HIT_CALL_HINTS`: each hit of `search_operations` names its
+  required parameters (`required_params`) and says if a call needs a target
+  (`target_required`) (#6638).
+- `GROUP_LISTING_OPERATIONS`: `list_operation_groups` (MCP, REST
+  `GET /api/v1/operations/groups`, CLI `meho operation groups`) also lists
+  the typed and multi-step operations of each group. Each one has `op_id`, a
+  one-line `summary`, `safety_level` and `requires_approval`, as a call uses
+  them, with operator overrides. A long list ends with `next_cursor`, and a
+  full group says how many it left out (`operations_more`). The new argument
+  `group` (REST `group=`, CLI `--group`) lists one group. The CLI also gets
+  `--cursor`. Raw operations are not listed one by one; search finds them
+  (#6676).
+- `MCP_CALL_FLOW_GUIDE`: the text that a new MCP session gets starts with a
+  short guide: how to find, preview and call an operation, read a large
+  result, and what to do when a call waits for approval. It names only the
+  tools of that session (#6657).
+- `RESULT_QUERY_SMALL_FORM`: an error of the MCP `result_query` tool names
+  the wrong place in the query (for example `query.filter[0].field`). A
+  filter that matches no row lists up to 10 real values of each filter
+  field. The new operator `contains` matches text and ignores case. The
+  REST route does not change (#6655).
+- MCP URL option `?results=structured`: that session gets each result of a
+  tool with an output schema once, in `structuredContent`, and a short line
+  in `content`. Errors and tools without an output schema keep the full
+  text. Do not use it with a client that reads only the text (#6658).
+- `VAULT_OIDC_ROLE_TENANTS` (empty by default, set it through the chart's
+  `extraEnv`): a comma-separated list of the tenant ids that may use the
+  shared Vault login role `VAULT_OIDC_ROLE`. A tenant that is not in the
+  list and has no entry in `VAULT_OIDC_ROLE_BY_TENANT` gets a clear
+  refusal, and MEHO tries no Vault login. An entry that is not a tenant id
+  stops MEHO from starting. Leave it empty on the built-in Vault of the
+  chart (#6666).
+- With `POLICY_CLASSIFICATION` on, a step of a multi-step operation reads
+  the category and labels of an override of its operation, like a direct
+  call. So a step can now wait for approval where an override says so. With
+  `POLICY_APPROVER_ROUTING` on too, a step waits for the same approvers as a
+  direct call. The approval card, the "may approve" sign, the bell count and
+  the push messages use the install's routing as it is now. The audit row
+  of an approval names the install entry that counted (`approver_floor`). A
+  tenant import warns, and does not refuse, a wider routing entry in two
+  cases: an earlier entry of the same tenant fits first, or both connector
+  patterns have a wildcard and differ. `meho policy export` of a tenant
+  writes `# Has no effect where wider:` above such an entry (#6633).
+
+### Security
+- Before MEHO sends a change that a person approved, it signs in to the
+  target again. This holds for every way an approved change starts: the
+  console, the API, an agent that waits, a re-run and a background run
+  (#6680). No action needed.
+- A change whose login was refused after MEHO sent it is stored as
+  "outcome unknown". It cannot run again. When you see "outcome unknown",
+  check the target first, then make a new request (#6680).
+- The pass that hides secret values in a script or a command line runs in a
+  worker thread, so MEHO keeps answering other requests while it works
+  (#6681). No action needed.
+- When a person may not approve their own change, the answer says only
+  that, which groups may approve it, and where to ask: the Approvals page of
+  the web console. The REST answer still starts with
+  `self_approval_forbidden` (#6606). No action needed.
+- An admin can name the tenants that may use the shared Vault login role,
+  with `VAULT_OIDC_ROLE_TENANTS` (#6666). On a MEHO with several tenants and
+  your own Vault, list the tenants that use the shared role, and give every
+  other tenant its own role in `VAULT_OIDC_ROLE_BY_TENANT`.
+
+### Added
+- `vault.kv.generate` makes a random password that meets given rules
+  (length, smallest number of upper-case letters, lower-case letters, digits
+  and special characters, allowed special characters, longest run of one
+  character) and stores it in one field of a KV v2 secret. The result holds
+  only the mount, path, field and version. A field that already holds a
+  value stays, unless `rotate: true`. Each call waits for approval (#6635).
+- `keycloak.events.list` (logins and failed logins) and
+  `keycloak.admin_events.list` (who changed what) on the Keycloak connector.
+  Both are safe reads, page by page. The answer says when the realm does
+  not save these events (#6637).
+- `sudo meho-host reset-second-factor <user>` on the appliance and on the
+  Linux server install. It removes the one-time code and the recovery codes
+  of a local account, asks for a new password and a new code app at the
+  next login, and writes an audit row (#6619).
+- When the person who asks for a change of rights is the only admin of the
+  tenant, the answer says "This change needs a second admin to approve it.
+  This tenant has only one admin." with a link to the guide. `meho doctor`
+  shows the line "second admin". `/api/v1/health` and `meho_status` report
+  the number in `approvals.rights_change_admins` (#6653).
+
+### Changed
+- A change whose login was refused after MEHO sent it is stored as
+  "outcome unknown" (`execution_outcome: uncertain`, `retry: false`). It
+  cannot run again: the re-run answer refuses it. The answer says: the
+  change may or may not have been made, a person must check the target
+  first, then make a new request. MCP, CLI and the console show the same
+  text. A login that was refused before anything was sent stays "failed"
+  and can run again (#6680).
+- Before MEHO sends a change that a person approved, it signs in to the
+  target again. A multi-step operation signs in again once, at the start of
+  the approved run. A read, and a change that did not wait for a person,
+  keep the login that MEHO already has (#6680).
+- With the short tool texts on (`MCP_SHORT_TOOL_TEXTS`, chart
+  `config.mcpShortToolTexts`, off by default, or `?texts=short` for one
+  session), no tool sends an output schema, and a tool answer has no
+  `structuredContent`. The text of the answer still holds the whole JSON
+  result. `search_memory`, `list_operation_groups` and
+  `meho_connector_list` get short texts too. With a tool profile
+  (`?profile=investigate` or `?profile=operate`), the tool list fits in
+  under 6,000 tokens (#6642).
+- The approval card of `targets.register` and `targets.update` shows the
+  realm warning of a Keycloak target as it will be after the write (#6626).
+- The text copy of an MCP tool result is compact JSON (no space after `,`
+  and `:`), for every session. The data is the same (#6658).
+
+### Fixed
+- The approval cards of a Keycloak realm create and update show the
+  realm's password policy text again (for example `length(8) and
+  digits(1)`) (#6650).
+- A Vault call on an OpenBao target that was probed before 0.47 now says what to do. The `no_connector` error tells the operator to probe the target again (`meho targets probe -- <name>`). After the probe MEHO stores `openbao`, and the calls work again (#6679).
+
+### CI and tests
+- The check for secret-shaped text after each test also reads structured
+  log lines when tests run in parallel (#6611).
+- The unit test shards share the work more evenly, and each shard has more
+  time before CI stops it (#6663).
+- CI files read internal names from repository secrets. An empty secret
+  fails the job with a message that names it (#6476).
+
+### Documentation
+- The approvals guide says who may approve a Keycloak change of rights:
+  another admin, in every realm, never the person who asked (#6649).
+- A new decision record says MEHO handles files by reference. Its status is
+  "Proposed" (#6665).
+- The configurable policy record is accepted (#6659).
+- The login record names the Claude Code and Claude Desktop login clients
+  (#6660).
+- A new decision record names four default roles and who changes rights.
+  Most of it is not built yet; later releases bring the code (#6685).
+
+### Release files
+- `meho-linux-*.tar`: the install on a plain Linux server, available and in testing. Ask evoila before you use it in production. See [Ways to install MEHO](https://evoila.github.io/meho/latest/install/ways-to-install/).
 ## [0.47.0] - 2026-11-17
 
 **Keycloak writes that change rights need another admin.** Twenty Keycloak

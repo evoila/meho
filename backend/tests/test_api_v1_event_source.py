@@ -284,6 +284,36 @@ async def test_patch_rotates_secret(
     assert "rotated-key" not in resp.text
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_with_blank_secret_422(
+    client: TestClient, store_recorder: list[tuple[str, str]], blank: str
+) -> None:
+    key = make_rsa_keypair("kid-A")
+    payload = {**_MINIMAL, "secret": blank}
+    resp = _req(client, "POST", "/api/v1/event-sources", _admin_token(key), key, json=payload)
+    assert resp.status_code == 422, resp.text
+    assert store_recorder == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_patch_with_blank_secret_422(
+    client: TestClient, store_recorder: list[tuple[str, str]], blank: str
+) -> None:
+    await _insert_event_source(name="am", slug="am-prod", secret_ref=None)
+    key = make_rsa_keypair("kid-A")
+    resp = _req(
+        client,
+        "PATCH",
+        "/api/v1/event-sources/am-prod",
+        _admin_token(key),
+        key,
+        json={"secret": blank},
+    )
+    assert resp.status_code == 422, resp.text
+    assert store_recorder == []
+
+
 @pytest.mark.asyncio
 async def test_patch_as_operator_403(client: TestClient) -> None:
     await _insert_event_source(name="am", slug="am-prod")

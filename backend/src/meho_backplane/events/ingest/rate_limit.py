@@ -1,7 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Per-source fixed-window rate limit for the inbound ingest endpoint (#2881).
+"""Per-source fixed-window rate limits for the inbound ingest endpoint.
+
+Two counters per source and window:
+
+* the **delivery** counter (:func:`enforce_ingest_rate_limit`) counts only
+  deliveries that passed the sender check;
+* the **failed-check** counter (:func:`count_failed_check`,
+  :func:`failed_check_limit_reached`) counts deliveries that failed it.
+
+So a flood of wrongly signed deliveries fills its own counter and leaves the
+real sender's delivery limit alone. Both use the same per-minute cap.
 
 The broadcast-announce limiter (``broadcast/rate_limit.py``) proved out the
 fixed-window ``INCR`` + ``EXPIRE`` shape on the shared Valkey; this is the
@@ -39,7 +49,10 @@ from meho_backplane.broadcast.client import get_broadcast_client
 __all__ = [
     "INGEST_RATE_LIMIT_WINDOW_SECONDS",
     "IngestRateLimitError",
+    "count_failed_check",
     "enforce_ingest_rate_limit",
+    "failed_check_limit_error",
+    "failed_check_limit_reached",
 ]
 
 #: Fixed window width. One minute, matching the ``*_per_minute`` cap unit.
@@ -70,6 +83,66 @@ def _window_key(tenant_id: UUID, source_slug: str, bucket: int) -> str:
     return f"meho:ratelimit:ingest:{tenant_id}:{source_slug}:{bucket}"
 
 
+def _failed_check_key(tenant_id: UUID, source_slug: str, bucket: int) -> str:
+    """Build the per-``(tenant, source, window)`` key of failed sender checks."""
+    return f"meho:ratelimit:ingest-failed:{tenant_id}:{source_slug}:{bucket}"
+
+
+def _limit_error(limit: int, now: int) -> IngestRateLimitError:
+    window = INGEST_RATE_LIMIT_WINDOW_SECONDS
+    return IngestRateLimitError(
+        limit=limit,
+        window_seconds=window,
+        retry_after_seconds=window - (now % window),
+    )
+
+
+async def _count_in_window(key: str) -> int:
+    """``INCR`` + ``EXPIRE`` the window counter *key*; return the new count.
+
+    Both run in one transaction, so a counter can never outlive its window:
+    the ``EXPIRE`` re-arms on every call within the window, extending the
+    key's life to at most one window past its last write -- harmless, since
+    the next window uses a different key.
+    """
+    client = get_broadcast_client()
+    async with client.pipeline(transaction=True) as pipe:
+        pipe.incr(key)
+        pipe.expire(key, INGEST_RATE_LIMIT_WINDOW_SECONDS)
+        count, _ = await pipe.execute()
+    return int(count)
+
+
+async def failed_check_limit_reached(tenant_id: UUID, source_slug: str, limit: int) -> bool:
+    """Return ``True`` when the source had *limit* failed sender checks this window.
+
+    A read only; it counts nothing. A *limit* of ``0`` (or negative) disables
+    the limit with no Valkey round-trip.
+    """
+    if limit <= 0:
+        return False
+    bucket = int(time.time()) // INGEST_RATE_LIMIT_WINDOW_SECONDS
+    count = await get_broadcast_client().get(_failed_check_key(tenant_id, source_slug, bucket))
+    return count is not None and int(count) >= limit
+
+
+async def count_failed_check(tenant_id: UUID, source_slug: str, limit: int) -> None:
+    """Count one failed sender check for the source in the current window.
+
+    A *limit* of ``0`` (or negative) disables the limit with no Valkey
+    round-trip.
+    """
+    if limit <= 0:
+        return
+    bucket = int(time.time()) // INGEST_RATE_LIMIT_WINDOW_SECONDS
+    await _count_in_window(_failed_check_key(tenant_id, source_slug, bucket))
+
+
+def failed_check_limit_error(limit: int) -> IngestRateLimitError:
+    """The ``429`` error for a source over its failed-check limit."""
+    return _limit_error(limit, int(time.time()))
+
+
 async def enforce_ingest_rate_limit(
     tenant_id: UUID,
     source_slug: str,
@@ -77,9 +150,10 @@ async def enforce_ingest_rate_limit(
 ) -> None:
     """Reject the delivery if this source is over *limit* in the current window.
 
-    A *limit* of ``0`` (or negative) disables enforcement with no Valkey
-    round-trip. Otherwise increments the current window's per-source counter
-    and raises :class:`IngestRateLimitError` once the count exceeds *limit*.
+    Called only for a delivery that passed the sender check. A *limit* of
+    ``0`` (or negative) disables enforcement with no Valkey round-trip.
+    Otherwise increments the current window's per-source counter and raises
+    :class:`IngestRateLimitError` once the count exceeds *limit*.
 
     Raises:
         IngestRateLimitError: The source has already made *limit* deliveries
@@ -90,25 +164,8 @@ async def enforce_ingest_rate_limit(
     if limit <= 0:
         return
 
-    window = INGEST_RATE_LIMIT_WINDOW_SECONDS
     now = int(time.time())
-    bucket = now // window
-    key = _window_key(tenant_id, source_slug, bucket)
-
-    client = get_broadcast_client()
-    # INCR + EXPIRE atomically so a counter can never outlive its window: the
-    # EXPIRE re-arms on every call within the window, extending the key's life
-    # to at most one window past its last write -- harmless, since the next
-    # window uses a different key.
-    async with client.pipeline(transaction=True) as pipe:
-        pipe.incr(key)
-        pipe.expire(key, window)
-        count, _ = await pipe.execute()
-
+    bucket = now // INGEST_RATE_LIMIT_WINDOW_SECONDS
+    count = await _count_in_window(_window_key(tenant_id, source_slug, bucket))
     if count > limit:
-        retry_after = window - (now % window)
-        raise IngestRateLimitError(
-            limit=limit,
-            window_seconds=window,
-            retry_after_seconds=retry_after,
-        )
+        raise _limit_error(limit, now)

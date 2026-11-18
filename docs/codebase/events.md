@@ -300,8 +300,15 @@ key/value the trigger's **`event_filter`** names — the Postgres jsonb
   filter is not a match (unless they are equal). Inverting the
   operands would match nothing useful, so the direction is pinned by a
   test.
-- An **empty filter `{}` matches every event** of the tenant (it names
-  no constraints). `event_filter` is matched, `event_kind` is not — a
+- An **empty filter `{}` matches every internal event** of the tenant
+  (it names no constraints).
+- An **external event** (`event_kind` starts with `external.`, from the
+  webhook intake) fires a trigger only when its filter names an event
+  source by slug or id: `{"source": {"slug": "am-prod"}, ...}`. The
+  ingest envelope writes `source` itself, so a sender cannot set it, and
+  a filter written for an internal event (for example
+  `{"agent_definition_id": ..., "status": "succeeded"}`) never matches a
+  webhook body that carries the same fields (`_trigger_matches`). `event_filter` is matched, `event_kind` is not — a
   subscriber filters on payload fields (for `agent_run.completed`:
   `run_id` / `tenant_id` / `status` / `agent_definition_id` /
   `work_ref`).
@@ -441,7 +448,7 @@ distinct `event_id`, hence a distinct work_ref.
 
 ## Inbound external event ingest (#2881)
 
-The producer side above is MEHO-internal (an agent run completing).
+The producer side above is internal to MEHO (an agent run completing).
 `POST /api/v1/events/ingest/{source_slug}`
 (`api/v1/events_ingest.py` + `events/ingest/`) is the **external**
 producer: a JWT-less webhook a registered `event_source` (#2880)
@@ -465,14 +472,7 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
    cap defaults to 256 KiB; a source's `extras["max_body_bytes"]` can
    only *lower* it, never raise it above the ceiling. The default cap
    applies when there is no source.
-3. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
-   `INCR`/`EXPIRE` pattern under a new key namespace
-   `meho:ratelimit:ingest:{tenant}:{source}` (`events/ingest/rate_limit.py`).
-   It runs **before** the Vault read and the auth check, so every
-   delivery to a source counts, accepted or refused, and the limit also
-   caps how many Vault reads a source can cause per window. Fail-loud
-   on a Valkey outage (`503`; a webhook sender retries).
-4. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
+3. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
    (`events/ingest/auth.py`, every secret comparison through
    `hmac.compare_digest`): `hmac-sha256` over the raw body (with an
    optional timestamp bound into the signature and gated by a replay
@@ -483,9 +483,27 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
    vendor whose headers differ (Grafana's `X-Grafana-Alerting-Signature`)
    is config, not a code branch — richer per-vendor normalisation is
    #2882. The failure reason is logged server-side, never returned, so
-   every rejection is the same uniform `401`. On success the check
-   returns the **signed message**: `"<ts>." + body` for a timestamped
-   HMAC, else the raw body.
+   every rejection is the same uniform `401`. A stored secret that is
+   empty or only whitespace refuses every sender (`no_secret_configured`);
+   the create and update schemas refuse such a secret with `422`. On
+   success the check returns the **signed message**: `"<ts>." + body`
+   for a timestamped HMAC, else the raw body.
+
+   **Failed checks have their own limit.** Each failed check counts in
+   `meho:ratelimit:ingest-failed:{tenant}:{source}` (same per-minute cap
+   as the delivery limit, `events/ingest/rate_limit.py`). While that
+   counter is at the cap, a delivery makes no Vault read: it is checked
+   against the secret this process read last for the source (kept in
+   memory for two windows, `_recent_secrets`), and a failed check, or no
+   such secret, answers `429` + `Retry-After`. So the Vault reads per
+   source and window stay bounded, and a flood of bad deliveries does not
+   block the real sender. The kept secret is used only in this state, so
+   a rotated secret takes effect at once in normal use.
+4. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
+   `INCR`/`EXPIRE` pattern under the key namespace
+   `meho:ratelimit:ingest:{tenant}:{source}`. It runs **after** the
+   sender check, so only deliveries that passed it count. Fail-loud on a
+   Valkey outage (`503`; a webhook sender retries).
 5. **Dedupe** — a SHA-256 of the signed message, namespaced by source
    id, written as `event_outbox.dedupe_key` (#2879). Only data the
    credential covers goes into the key; no request header does. So a
@@ -544,8 +562,8 @@ or missing credential all answer `401` with the same body. The reason
 `source_paused`, `no_secret_configured`, `bad_signature`, ...) goes to
 the server log only. The body cap runs before that answer, so an
 oversize body gets `413` whether or not the slug exists. What still
-differs is work: an active source costs a rate-limit count and a Vault
-read before its answer, a missing one does not.
+differs is work: an active source costs a Vault read and a failed-check
+count before its answer, a missing one does not.
 
 ## First-wave payload normalisers (#2882)
 
@@ -612,15 +630,16 @@ Author `event_filter` against the lifted top-level fields:
 
 | Kind | Example `event_filter` | Matches |
 |---|---|---|
-| `alertmanager` | `{"status": "firing", "labels": {"severity": "critical"}}` | critical firing alerts |
-| `grafana` | `{"state": "alerting", "labels": {"severity": "warning"}}` | warning alerts still alerting |
-| `vcf-operations` | `{"status": "active", "criticality": "critical"}` | active critical VMware alerts |
-| `vcf-operations` | `{"resource_kind": "VirtualMachine"}` | any alert on a VM |
-| `harbor` | `{"type": "SCANNING_COMPLETED", "repository": {"namespace": "prod"}}` | scans finishing in the `prod` project |
-| `generic-json` | `{"severity": "high"}` | any body with a top-level `severity: high` |
+| `alertmanager` | `{"source": {"slug": "am-prod"}, "status": "firing", "labels": {"severity": "critical"}}` | critical firing alerts |
+| `grafana` | `{"source": {"slug": "grafana-prod"}, "state": "alerting", "labels": {"severity": "warning"}}` | warning alerts still alerting |
+| `vcf-operations` | `{"source": {"slug": "vcf-ops"}, "status": "active", "criticality": "critical"}` | active critical VMware alerts |
+| `vcf-operations` | `{"source": {"slug": "vcf-ops"}, "resource_kind": "VirtualMachine"}` | any alert on a VM |
+| `harbor` | `{"source": {"slug": "harbor"}, "type": "SCANNING_COMPLETED", "repository": {"namespace": "prod"}}` | scans finishing in the `prod` project |
+| `generic-json` | `{"source": {"slug": "hooks"}, "severity": "high"}` | any body with a top-level `severity: high` |
 
-`{}` (empty filter) matches every event of the tenant — scope with the source
-`kind` in mind, since a tenant's sources share the outbox.
+Every filter for an external event names its source (`slug` or `id`);
+without it the trigger never fires on an external event. `{}` (empty
+filter) matches every internal event of the tenant and no external one.
 
 ### VCF Operations: the recommended payload template
 
@@ -754,13 +773,15 @@ All three are set through env vars (defaults shown in parens):
     static-header, basic, and the `compare_digest`-for-every-secret guard
   - [backend/tests/test_events_ingest_rate_limit.py](../../backend/tests/test_events_ingest_rate_limit.py)
     — 429 + `Retry-After`, per-source isolation, `0` disables, Valkey
-    fail-loud
+    fail-loud, failed checks counted apart from deliveries
   - [backend/tests/test_events_ingest_config.py](../../backend/tests/test_events_ingest_config.py)
     — per-source `extras` config resolution + security clamps
   - [backend/tests/test_api_v1_events_ingest.py](../../backend/tests/test_api_v1_events_ingest.py)
     — endpoint: one uniform 401 for a missing, paused or wrongly signed
     source, 413-before-buffer, 202 + outbox `origin`/`dedupe_key` +
-    `__ingest__` audit row, idempotent 200, 429/400 mapping
+    `__ingest__` audit row, idempotent 200, 429/400 mapping, bad
+    deliveries that do not block the real sender, a blank stored secret
+    that refuses every sender
   - [backend/tests/test_events_ingest_e2e.py](../../backend/tests/test_events_ingest_e2e.py)
     — POSTed event → drain tick → matched `kind=event` trigger → agent run
 - First-wave normalisers (#2882):

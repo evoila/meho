@@ -25,7 +25,10 @@ import pytest
 from meho_backplane.events.ingest.rate_limit import (
     INGEST_RATE_LIMIT_WINDOW_SECONDS,
     IngestRateLimitError,
+    count_failed_check,
     enforce_ingest_rate_limit,
+    failed_check_limit_error,
+    failed_check_limit_reached,
 )
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
@@ -64,10 +67,16 @@ class _FakeValkey:
     def __init__(self) -> None:
         self.store: dict[str, int] = {}
         self.pipeline_calls = 0
+        self.get_calls = 0
 
     def pipeline(self, transaction: bool = True) -> _FakePipeline:
         self.pipeline_calls += 1
         return _FakePipeline(self.store)
+
+    async def get(self, name: str) -> bytes | None:
+        self.get_calls += 1
+        value = self.store.get(name)
+        return None if value is None else str(value).encode()
 
 
 @pytest.fixture
@@ -131,3 +140,40 @@ async def test_valkey_outage_propagates(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("meho_backplane.events.ingest.rate_limit.get_broadcast_client", _boom)
     with pytest.raises(ConnectionError):
         await enforce_ingest_rate_limit(_TENANT, "prod-am", limit=10)
+
+
+@pytest.mark.asyncio
+async def test_failed_checks_reach_their_limit(fake_valkey: _FakeValkey) -> None:
+    for _ in range(2):
+        assert not await failed_check_limit_reached(_TENANT, "prod-am", limit=3)
+        await count_failed_check(_TENANT, "prod-am", limit=3)
+    assert not await failed_check_limit_reached(_TENANT, "prod-am", limit=3)
+    await count_failed_check(_TENANT, "prod-am", limit=3)
+    assert await failed_check_limit_reached(_TENANT, "prod-am", limit=3)
+    # Another source in the tenant has its own counter.
+    assert not await failed_check_limit_reached(_TENANT, "other", limit=3)
+
+
+@pytest.mark.asyncio
+async def test_failed_checks_do_not_use_up_the_delivery_limit(fake_valkey: _FakeValkey) -> None:
+    for _ in range(10):
+        await count_failed_check(_TENANT, "prod-am", limit=3)
+    for _ in range(3):
+        await enforce_ingest_rate_limit(_TENANT, "prod-am", limit=3)  # no raise
+
+
+@pytest.mark.asyncio
+async def test_failed_check_zero_limit_disables_no_round_trip(fake_valkey: _FakeValkey) -> None:
+    for _ in range(100):
+        await count_failed_check(_TENANT, "prod-am", limit=0)
+        assert not await failed_check_limit_reached(_TENANT, "prod-am", limit=0)
+    assert fake_valkey.pipeline_calls == 0
+    assert fake_valkey.get_calls == 0
+
+
+def test_failed_check_limit_error_names_the_window(fake_valkey: _FakeValkey) -> None:
+    exc = failed_check_limit_error(5)
+    assert exc.limit == 5
+    assert exc.retry_after_seconds == INGEST_RATE_LIMIT_WINDOW_SECONDS - (
+        int(_FIXED_NOW) % INGEST_RATE_LIMIT_WINDOW_SECONDS
+    )

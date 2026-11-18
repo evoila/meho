@@ -298,9 +298,18 @@ when you leave it out.
   the start or the end, not only dots, and at most 255 characters. MEHO
   does not trim a value; it refuses it.
 - MEHO allows a managed realm that is the admin realm, or the realm MEHO
-  itself signs in with, but it warns you: at create, at update (REST,
-  CLI and the console forms), and on the approval card of each write on
-  that target.
+  itself signs in with, but it warns you. When the warning shows depends
+  on how you make the change:
+  - You make it in the console, or with `meho targets add` or `update`
+    after a person's login: the warning shows at once, after the save.
+  - A request made with a token waits for a person to approve it (an AI
+    agent's call, or a call with an API token). The warning is on the
+    approval card, so the approver sees it before approving. It is in the
+    result again after the approval.
+  - A settings file import writes at once. Its preview and its result
+    both list the warning, with the path of the target entry.
+  - Each later write on that target also shows the warning on its
+    approval card.
 - `meho doctor` lists the Keycloak targets MEHO refuses. A platform
   admin sees the targets of every tenant. You can fix one with
   `meho targets update`, or in the console edit form ("Managed realm").

@@ -44,6 +44,7 @@ from meho_backplane.connectors.targets.ops import (
     build_targets_register_preview,
     build_targets_remove_preview,
     register_targets_registry_operations,
+    targets_register_card_warnings,
 )
 from meho_backplane.connectors.targets.probe import (
     TARGETS_PROBE_OP_ID,
@@ -54,9 +55,11 @@ from meho_backplane.connectors.targets.update import (
     TARGETS_UPDATE_OP_ID,
     build_targets_update_preview,
     register_targets_update_operation,
+    targets_update_card_warnings,
 )
 from meho_backplane.op_classes import declare_wait_when_set
 from meho_backplane.operations._preview import (
+    register_card_warnings,
     register_permission_preflight,
     register_preview_builder,
     register_preview_builder_switch,
@@ -79,6 +82,9 @@ register_preview_builder(TARGETS_UPDATE_OP_ID, build_targets_update_preview)
 register_preview_builder(TARGETS_REGISTER_OP_ID, build_targets_register_preview)
 register_preview_builder_switch(TARGETS_REGISTER_OP_ID, lambda: get_settings().preview_typed_writes)
 register_permission_preflight(TARGETS_PROBE_OP_ID, targets_probe_preflight)
+# The card shows the realm warnings of the target as it will be after the write.
+register_card_warnings(TARGETS_REGISTER_OP_ID, targets_register_card_warnings)
+register_card_warnings(TARGETS_UPDATE_OP_ID, targets_update_card_warnings)
 # Every register call waits for a person (the address marker on host and fqdn).
 # This rule also makes a register that sets one of these two fields wait.
 declare_wait_when_set(TARGETS_REGISTER_OP_ID, ("secret_field_map", "flight_recorder_capture"))

@@ -52,6 +52,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
+from structlog.tracebacks import ExceptionDictTransformer
 
 import meho_backplane.audit as audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -185,7 +186,8 @@ def _configure_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

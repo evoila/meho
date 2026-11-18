@@ -96,7 +96,6 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
 from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.auth.tenant_admins import admin_count
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 from meho_backplane.connectors._shared.credential_backend import (
@@ -367,10 +366,6 @@ class ApprovalsStatus(BaseModel):
     level, and ``required`` when it is ``ok`` or its read failed).
     ``sign_in_level_warning`` is a short sentence whenever the level is not
     required in practice or the read failed, else ``None``.
-    ``rights_change_admins`` is how many admins of the caller's tenant could
-    approve a change of rights (#6641,
-    :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-    count them. With one admin, a change of rights cannot be approved.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -382,7 +377,6 @@ class ApprovalsStatus(BaseModel):
     sign_in_level: str | None = None
     sign_in_level_in_force: str | None = None
     sign_in_level_warning: str | None = None
-    rights_change_admins: int | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -1071,9 +1065,6 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
     approvals = _with_sign_in(approvals, await read_approval_sign_in())
-    approvals = approvals.model_copy(
-        update={"rights_change_admins": await admin_count(operator.tenant_id)}
-    )
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,

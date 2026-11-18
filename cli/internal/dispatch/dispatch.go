@@ -182,22 +182,6 @@ func ParkedApprovalID(extras json.RawMessage) string {
 	return e.ApprovalRequestID
 }
 
-// parkedNote returns extras.approval_note: a sentence the person must read
-// about the wait, for example that no other admin could approve a change
-// of rights (#6641). Empty when there is none.
-func parkedNote(extras json.RawMessage) string {
-	if len(extras) == 0 || string(extras) == "null" {
-		return ""
-	}
-	var e struct {
-		ApprovalNote string `json:"approval_note"`
-	}
-	if err := json.Unmarshal(extras, &e); err != nil {
-		return ""
-	}
-	return e.ApprovalNote
-}
-
 // WriteParkedHint writes the operator-facing parked guidance every human
 // render path shares: the ParkedHint one-liner, then — when the parked
 // envelope carried extras.approval_request_id — the approval id plus a
@@ -209,9 +193,6 @@ func parkedNote(extras json.RawMessage) string {
 // byte-identical.
 func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	fmt.Fprintf(w, "  %s\n", ParkedHint)
-	if note := parkedNote(extras); note != "" {
-		fmt.Fprintf(w, "  %s\n", note)
-	}
 	if id := ParkedApprovalID(extras); id != "" {
 		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
 		fmt.Fprintf(w, "  after approval, read the output with: meho approvals result %s\n", id)

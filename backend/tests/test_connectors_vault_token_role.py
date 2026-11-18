@@ -43,6 +43,7 @@ from unittest.mock import AsyncMock
 
 import hvac.exceptions
 import pytest
+import structlog.testing
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -427,9 +428,13 @@ async def test_write_preflight_probe_fault_is_fail_soft(
     fake = install_fake_client(monkeypatch)
     fake.sys.raise_on_get_capabilities = hvac.exceptions.VaultDown("sealed")
 
-    result = await vault_token_role_write_capability_preflight(
-        _make_operator(), {"role_name": _ROLE}, target=None
-    )
+    # Capture the log lines instead of printing them. With no logging set up,
+    # structlog prints the failure with every local variable, and those hold
+    # made-up secret test data.
+    with structlog.testing.capture_logs():
+        result = await vault_token_role_write_capability_preflight(
+            _make_operator(), {"role_name": _ROLE}, target=None
+        )
 
     assert result is None
 

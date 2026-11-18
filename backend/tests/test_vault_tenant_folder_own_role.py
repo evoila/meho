@@ -182,7 +182,5 @@ def test_plain_path_rule_still_runs() -> None:
 
 
 def test_count_of_tenants_with_own_role(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert count_tenants_with_own_vault_role() == 1
-    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", "")
-    get_settings.cache_clear()
-    assert count_tenants_with_own_vault_role() == 0
+    assert count_tenants_with_own_vault_role(get_settings().vault_oidc_role_by_tenant) == 1
+    assert count_tenants_with_own_vault_role("") == 0

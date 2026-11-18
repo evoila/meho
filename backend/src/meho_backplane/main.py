@@ -395,13 +395,14 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     lifespan uses (e.g. :func:`_preload_embedding_model`): a single
     ``structlog`` event, no f-strings, no raise.
     """
-    enforced = bool(get_settings().vault_kv_tenant_scope_prefix)
+    settings = get_settings()
+    enforced = bool(settings.vault_kv_tenant_scope_prefix)
     VAULT_TENANT_SCOPE_ENFORCED.set(1 if enforced else 0)
     from meho_backplane.connectors.vault.tenant_scope import count_tenants_with_own_vault_role
 
     structlog.get_logger().info(
         "vault_tenant_scope_tenants_with_own_role",
-        count=count_tenants_with_own_vault_role(),
+        count=count_tenants_with_own_vault_role(settings.vault_oidc_role_by_tenant),
     )
     if not enforced:
         structlog.get_logger().warning(

@@ -165,10 +165,9 @@ def tenant_has_own_vault_role(operator: Operator) -> bool:
     )
 
 
-def count_tenants_with_own_vault_role() -> int:
-    """Count the entries of ``VAULT_OIDC_ROLE_BY_TENANT`` (for the start-up log)."""
-    raw = get_settings().vault_oidc_role_by_tenant
-    return sum(1 for entry in raw.split(",") if "=" in entry)
+def count_tenants_with_own_vault_role(overrides_csv: str) -> int:
+    """Count the entries of *overrides_csv* (the ``VAULT_OIDC_ROLE_BY_TENANT`` value)."""
+    return sum(1 for entry in overrides_csv.split(",") if "=" in entry)
 
 
 def effective_tenant_scope_template(operator: Operator) -> str:

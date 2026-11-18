@@ -348,6 +348,11 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
+from meho_backplane.operations._composite_steps import (
+    mark_when_a_step_is_unknown,
+    recording_steps,
+    track_composite_steps,
+)
 from meho_backplane.operations._errors import (
     MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
@@ -859,12 +864,15 @@ async def _run_source_kind_branch(
         # raise :class:`CompositeRecursionLimitExceeded` *before* a
         # rogue recursive dispatch fires (handled by the surrounding
         # exception branch in :func:`_execute_and_audit`).
-        dispatch_child = get_dispatch_child(
-            dispatch=dispatch,
-            parent_operator=operator,
-            parent_target=target,
-            parent_audit_id=audit_id,
-            parent_op_id=descriptor.op_id,
+        dispatch_child = recording_steps(
+            get_dispatch_child(
+                dispatch=dispatch,
+                parent_operator=operator,
+                parent_target=target,
+                parent_audit_id=audit_id,
+                parent_op_id=descriptor.op_id,
+            ),
+            audit_id,
         )
         return await dispatch_composite(
             handler=handler,
@@ -975,19 +983,22 @@ async def _execute_and_audit(
         connector_id=connector_id,
     )
     try:
-        result = await _execute_and_audit_inner(
-            op_id=op_id,
-            connector_id=connector_id,
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            started=started,
-            secret_view=secret_view,
-        )
+        # A multi-step run keeps a log of its steps, so its error result is
+        # stored as uncertain when a step ended uncertain (_composite_steps).
+        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
+            result = await _execute_and_audit_inner(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                started=started,
+                secret_view=secret_view,
+            )
     finally:
         # Persists the trace via record_trace on the recorder's best-effort
         # path (owning root only); never raises (F7).
@@ -2294,6 +2305,7 @@ async def _audit_error_and_return(
     secret-named fields and Tier-1 shapes in every string of ``error``,
     ``extras`` and ``result``.
     """
+    result = mark_when_a_step_is_unknown(result, audit_id)
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)
     receipt = await audit_safe(

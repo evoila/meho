@@ -95,7 +95,10 @@ from meho_backplane.connectors.linux.ops_write import _resolve_sudo_password
 from meho_backplane.connectors.linux.secret_sink_target import check_approved_sink_target
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.targets.resolver import resolve_target
 
 if TYPE_CHECKING:
@@ -508,7 +511,10 @@ class LinuxSecretSinkEndpoint:
         """Write *material* to the file on the host as the owner, mode 0600.
 
         Checks the target first (:meth:`check_target`), before the sudo
-        password lookup and before any SSH call.
+        password lookup and before any SSH call. Then drops the SSH logins
+        this process keeps for the target when a person changed it since this
+        process last saw it (:func:`forget_target_if_changed`), so the script
+        goes to the host and port the row holds now.
         """
         connector = get_or_create_connector_instance(LinuxSshConnector)
         if not isinstance(connector, LinuxSshConnector):  # pragma: no cover -- registry invariant
@@ -517,6 +523,9 @@ class LinuxSecretSinkEndpoint:
                 "the connector instance cache is misconfigured"
             )
         target = cast("Target", await self.check_target(operator))
+        # secret.move carries no top-level target, so the dispatcher does not
+        # run this check for the sink.
+        await forget_target_if_changed(target)
 
         sudo_password = await _resolve_sudo_password(connector, target, operator)
         await self._check_home(connector, target, operator, sudo_password)

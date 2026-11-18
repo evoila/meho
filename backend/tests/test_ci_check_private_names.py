@@ -106,6 +106,32 @@ def test_changelog_is_not_checked(tmp_path: Path) -> None:
     assert _run(root, f"{_WORD_A}\n").returncode == 0
 
 
+def test_added_line_that_looks_like_a_file_header_does_not_hide_later_lines(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {"new.txt": f"++ b/CHANGELOG.md\nnext line {_WORD_A}\n"})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "new.txt:2:" in done.stdout
+
+
+def test_path_with_special_characters_is_reported_by_its_own_name(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {'odd "name".txt': f"line {_WORD_A}\n"})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert 'odd "name".txt:1:' in done.stdout
+
+
+def test_quoted_path_of_changelog_look_alike_is_still_checked(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit(root, {'a"b.txt': "clean\n", "other.txt": f"x {_WORD_A}\n"})
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "other.txt:1:" in done.stdout
+
+
 def test_missing_list_passes_with_a_note(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     _commit(root, {"src/app.txt": f"{_WORD_A}\n"})

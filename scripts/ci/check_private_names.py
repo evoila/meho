@@ -32,8 +32,21 @@ LIST_ENV = "PRIVATE_NAME_LIST"
 EXCLUDED_FILES = frozenset({"CHANGELOG.md"})
 HIT_MESSAGE = "this line holds a word of the private name list"
 
-_FILE_HEADER = re.compile(r"^\+\+\+ (?:b/(?P<path>.*)|/dev/null)$")
-_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,\d+)? @@")
+_FILE_HEADER = re.compile(r"^\+\+\+ (?P<path>.*)$")
+_HUNK_HEADER = re.compile(
+    r"^@@ -\d+(?:,(?P<old>\d+))? \+(?P<start>\d+)(?:,(?P<new>\d+))? @@"
+)
+_ESCAPES = {
+    "n": 10,
+    "t": 9,
+    "r": 13,
+    "a": 7,
+    "b": 8,
+    "f": 12,
+    "v": 11,
+    '"': 34,
+    "\\": 92,
+}
 
 
 class ListError(Exception):
@@ -55,23 +68,74 @@ def compile_list(raw: str) -> re.Pattern[str] | None:
         ) from None
 
 
+def _unquote(text: str) -> str:
+    """Undo the C-style quoting git uses for paths with special characters."""
+    raw = bytearray()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char != "\\" or index + 1 >= len(text):
+            raw += char.encode("utf-8")
+            index += 1
+            continue
+        nxt = text[index + 1]
+        if nxt in "01234567":
+            digits = text[index + 1 : index + 4]
+            raw.append(int(digits, 8) & 0xFF)
+            index += 1 + len(digits)
+        else:
+            raw.append(_ESCAPES.get(nxt, ord(nxt)))
+            index += 2
+    return raw.decode("utf-8", errors="replace")
+
+
+def _header_path(text: str) -> str | None:
+    """The path of a ``+++`` header, or None for /dev/null."""
+    text = text.rstrip("\t")
+    if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+        text = _unquote(text[1:-1])
+    if text == "/dev/null":
+        return None
+    return text[2:] if text.startswith("b/") else text
+
+
 def added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
-    """Yield (path, line number, text) for each added line of a zero-context diff."""
+    """Yield (path, line number, text) for each added line of a zero-context diff.
+
+    The lines of a hunk are counted from its ``@@`` header. Only a line
+    outside a hunk can be a file header, so the text of an added line is
+    never taken for one.
+    """
     path: str | None = None
     number = 0
+    old_left = 0
+    new_left = 0
     for line in diff.splitlines():
+        if old_left > 0 or new_left > 0:
+            if line.startswith("+"):
+                if path is not None:
+                    yield path, number, line[1:]
+                number += 1
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1
+            elif not line.startswith("\\"):
+                # A context line, which counts on both sides.
+                number += 1
+                old_left -= 1
+                new_left -= 1
+            continue
         header = _FILE_HEADER.match(line)
         if header is not None:
-            path = header.group("path")
+            path = _header_path(header.group("path"))
             continue
         hunk = _HUNK_HEADER.match(line)
         if hunk is not None:
             number = int(hunk.group("start"))
-            continue
-        if path is None or not line.startswith("+"):
-            continue
-        yield path, number, line[1:]
-        number += 1
+            old = hunk.group("old")
+            new = hunk.group("new")
+            old_left = 1 if old is None else int(old)
+            new_left = 1 if new is None else int(new)
 
 
 def find_hits(diff: str, pattern: re.Pattern[str]) -> list[tuple[str, int]]:
@@ -92,6 +156,8 @@ def read_diff(base: str) -> str:
     result = subprocess.run(
         [
             "git",
+            "-c",
+            "core.quotePath=false",
             "diff",
             "--unified=0",
             "--no-color",
@@ -147,7 +213,9 @@ def main(argv: list[str] | None = None) -> int:
     if hits:
         report(hits)
         print(f"{len(hits)} added line(s) hold a word of the private name list.")
-        print("Ask a maintainer which word it is, then write the line again without it.")
+        print(
+            "Ask a maintainer which word it is, then write the line again without it."
+        )
         return 1
     print("No added line holds a word of the private name list.")
     return 0

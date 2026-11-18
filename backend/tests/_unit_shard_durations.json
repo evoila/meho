@@ -1053,6 +1053,7 @@
   "tests/test_session_store_week_read.py": 4.04,
   "tests/test_session_store_worker.py": 39.06,
   "tests/test_settings.py": 3.05,
+  "tests/test_settings_import_target_writes.py": 18.94,
   "tests/test_shared_lists_only_shrink.py": 0.77,
   "tests/test_shutdown_drain.py": 1.29,
   "tests/test_soak_harness_driver.py": 8.0,

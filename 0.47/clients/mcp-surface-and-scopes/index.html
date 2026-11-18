@@ -3570,6 +3570,15 @@ with a profile: <code>https://&lt;meho-host&gt;/mcp?profile=investigate&amp;text
 The biggest tools then show a short description. They accept the same
 inputs as before. Other sessions keep the full texts. A value other than
 <code>short</code> is refused with HTTP 400.</p>
+<p>A client that reads <code>structuredContent</code> can get each result once. Add
+<code>results=structured</code> to the URL, for example
+<code>https://&lt;meho-host&gt;/mcp?results=structured</code>. A tool that declares an
+output schema then sends one short line as its text, and the full result
+only in <code>structuredContent</code>. Errors and tools without an output schema
+still send the full text. Use it only with a client that gives the model
+<code>structuredContent</code>: a client that reads only the text (for example
+Cursor) would see only the short line. A value other than <code>structured</code> is
+refused with HTTP 400.</p>
 <h2 id="the-operator-planes-behind-mcpadmin">The operator planes (behind <code>mcp:admin</code>)<a class="headerlink" href="#the-operator-planes-behind-mcpadmin" title="Permanent link">&para;</a></h2>
 <p>The governance and lifecycle tools — connector lifecycle and ingest,
 agents / principals / grants, scheduler, sensors, broadcast overrides,

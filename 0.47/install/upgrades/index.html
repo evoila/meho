@@ -3864,6 +3864,11 @@ Rows of the next release are in this table at once.</p>
 <td>An approved <code>secret.move</code> with a <code>vault-target:</code> side now checks that each Vault target is the one the approval showed. A request that waits for approval from before the upgrade does not show the target ids, so its approved run is refused and nothing is read or written.</td>
 <td>Before the upgrade, approve or reject each waiting <code>secret.move</code> with a <code>vault-target:</code> side. After the upgrade, send a new request for each one that was refused.</td>
 </tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
+<td>With <code>POLICY_CLASSIFICATION</code> on, a step of a multi-step operation now reads the category and labels of an override of its operation, like a direct call. This changes a step also while <code>POLICY_APPROVER_ROUTING</code> is off. With <code>POLICY_APPROVER_ROUTING</code> on too, a step waits for the same approvers as a direct call. The approval card, the "may approve" sign, the bell count and the push messages now use the install's current routing, as the approve click does. The audit row of an approval names the install entry that counted (<code>approver_floor</code>). A tenant policy import no longer refuses a wider routing entry in two cases, it warns instead: when an earlier entry of the same tenant fits each of its changes first, and when both connector patterns have a wildcard and differ. <code>meho policy export</code> of a tenant writes a <code># Has no effect where wider:</code> comment above a routing entry that is wider than the install's. A request with routed approvers but no stored install category (it started to wait while <code>POLICY_CLASSIFICATION</code> was off, or an older build of main wrote it) counts as "category not known" while <code>POLICY_CLASSIFICATION</code> is on. No schema migration.</td>
+<td><strong>Nothing to do</strong> while <code>POLICY_APPROVER_ROUTING</code> is off. Otherwise reject a waiting request that the click now refuses because MEHO does not know its category, and start the call again. See <a href="https://evoila.github.io/meho/latest/guides/policy-file/#the-installs-routing-is-a-floor">The install's routing is a floor</a>.</td>
+</tr>
 </tbody>
 </table>
 <p>New rows come from one small file per row in

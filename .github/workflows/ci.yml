@@ -1261,14 +1261,28 @@ jobs:
           # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
           # node), shards that pass every test can take 674-710 s, and 660 s
           # dropped good pull requests from the merge queue.
-          budget_s=900
+          # All six shards: 1200 s (#6662), so every measured shard stays
+          # under 80 percent of its budget (960 s). Measured pytest wall in
+          # merge-queue run 44201692298 (all tests passed): shard 1 765 s,
+          # shard 2 915 s, shard 3 873 s, shard 4 850 s, shard 5 805 s,
+          # shard 6 854 s. Against 900 s that is 85, 102, 97, 94, 89 and 95
+          # percent. Against 1200 s it is 64, 76, 73, 71, 67 and 71 percent.
+          # Pull request runs 44212040368 and 44214999634 took 683-795 s.
+          # Why not a seventh shard: it changes the required check names, and
+          # a balanced split alone leaves the average near 840 s on these
+          # runners. Why not only shard 2: shards 3, 4 and 6 sit at 850-873 s.
+          # Fixture timing of shard 2 (MEHO_FIXTURE_TIMING_FILE): the
+          # `azure` and `registered` fixtures take 4.3 s per test,
+          # `_audit_db_url` 28 s per test file. The gate stays on. The
+          # 30-minute job limit still sits above setup plus 1200 s.
+          budget_s=1200
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
           # in each xdist worker, so a test that stops making progress fails
           # on its own after 180 s with its name and a stack dump of every
           # thread, instead of sitting silent (one dot per test, no names)
           # until the 30-min job cap. The shard then still lands inside the
-          # 900 s budget below. Mirrors the python-coverage job's guard;
+          # 1200 s budget below. Mirrors the python-coverage job's guard;
           # --timeout-method=signal (NOT thread) is load-bearing under xdist:
           # thread calls os._exit(), which xdist reads as a worker crash and
           # whose stack dump it swallows. 180 s is ~3x the slowest honest

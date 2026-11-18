@@ -612,11 +612,14 @@ async def _build_results_context(
 
     product, version, impl_id = parse_connector_id(connector_id)
     try:
-        # The console shows every operation, raw ones too: the
-        # ``SEARCH_TYPED_FIRST`` switch is about what an agent sees (#4712).
+        # The console shows every operation, raw ones too, and every group
+        # on one page: the ``SEARCH_TYPED_FIRST`` and
+        # ``GROUP_LISTING_OPERATIONS`` switches are about what an agent sees
+        # (#4712, #4713).
         groups_result = await list_operation_groups(
             operator,
             {"connector_id": connector_id, "limit": _GROUPS_LIMIT, "include_raw": True},
+            list_operations=False,
         )
         context["groups"] = groups_result.get("groups", [])
         if query:

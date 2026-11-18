@@ -100,6 +100,11 @@ from meho_backplane.operations._errors import (
     result_target_required,
     unknown_connector_message,
 )
+from meho_backplane.operations._group_listing_operations import (
+    add_group_operations,
+    group_listing_operations,
+    load_group_operations,
+)
 from meho_backplane.operations._lookup import (
     close_connector_ids,
     connector_class_registered,
@@ -868,6 +873,7 @@ def _build_operation_groups_query(
     limit: int | None,
     cursor: str | None,
     typed_only: bool = False,
+    group_key: str | None = None,
 ) -> Any:
     """Build the keyset-paginated :class:`OperationGroup` SELECT.
 
@@ -897,7 +903,8 @@ def _build_operation_groups_query(
 
     *typed_only* (switch ``SEARCH_TYPED_FIRST``, #4712) also needs a typed
     or multi-step op in the group, so a group of raw ops only is left out.
-    ``limit=None`` reads every group, for a count.
+    ``limit=None`` reads every group, for a count. *group_key* keeps only
+    that group (#4713).
     """
     stmt = (
         select(OperationGroup)
@@ -921,6 +928,8 @@ def _build_operation_groups_query(
         stmt = stmt.where(OperationGroup.group_key > cursor)
     if typed_only:
         stmt = stmt.where(group_has_typed_operation_clause(tenant_id))
+    if group_key is not None:
+        stmt = stmt.where(OperationGroup.group_key == group_key)
     return stmt
 
 
@@ -987,14 +996,22 @@ async def _require_dispatchable_connector(
 async def list_operation_groups(
     operator: Operator,
     arguments: dict[str, Any],
+    *,
+    list_operations: bool | None = None,
 ) -> dict[str, Any]:
     """Return the operation groups for *connector_id* visible to the agent.
 
     ``arguments`` shape: ``{"connector_id": str, "limit"?: int,
-    "cursor"?: str, "include_raw"?: bool}``. ``include_raw`` matters only
-    while the ``SEARCH_TYPED_FIRST`` switch is on (:mod:`._search_typed_first`):
-    then the counts and the groups are of typed and multi-step ops unless it
-    is set, and the answer also carries ``raw_operations``.
+    "cursor"?: str, "include_raw"?: bool, "group"?: str}``. ``include_raw``
+    matters only while the ``SEARCH_TYPED_FIRST`` switch is on
+    (:mod:`._search_typed_first`): then the counts and the groups are of
+    typed and multi-step ops unless it is set, and the answer also carries
+    ``raw_operations``.
+
+    *list_operations* puts each group's typed and multi-step operations into
+    the answer, with a size limit (:mod:`._group_listing_operations`, #4713).
+    ``None`` (the default) follows the ``GROUP_LISTING_OPERATIONS`` switch.
+    ``group`` is used only then: it keeps one group.
 
     A group is returned when it is fully enabled
     (``review_status='enabled'``) **or** still ``staged``/``disabled`` at
@@ -1050,6 +1067,8 @@ async def list_operation_groups(
     """
     connector_id = arguments["connector_id"]
     limit, cursor = _coerce_list_operation_groups_pagination(arguments)
+    with_operations = group_listing_operations() if list_operations is None else list_operations
+    group_filter = (arguments.get("group") or None) if with_operations else None
     product, version, impl_id = parse_connector_id(connector_id)
     await _require_dispatchable_connector(
         operator=operator,
@@ -1079,12 +1098,28 @@ async def list_operation_groups(
         )
         typed_only = plan is not None and plan[0]
         group_stmt = _build_operation_groups_query(
-            **query_args, limit=limit, cursor=cursor, typed_only=typed_only
+            **query_args,
+            limit=limit,
+            cursor=cursor,
+            typed_only=typed_only,
+            group_key=group_filter,
         )
         # A connector whose code is not in this MEHO offers no group (#5585).
         groups = [] if code_missing else (await session.execute(group_stmt)).scalars().all()
         counts = await _count_ops_per_group(
             session, [g.id for g in groups], tenant_id=operator.tenant_id, typed_only=typed_only
+        )
+        op_lines = (
+            await load_group_operations(
+                session,
+                groups,
+                tenant_id=operator.tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            )
+            if with_operations
+            else None
         )
         raw_block = (
             None
@@ -1134,6 +1169,9 @@ async def list_operation_groups(
     }
     if raw_block is not None:
         answer["raw_operations"] = raw_block
+    if op_lines is not None:
+        # No note for a connector whose code is missing: no group is shown at all.
+        add_group_operations(answer, op_lines, group_filter=None if code_missing else group_filter)
     return answer
 
 

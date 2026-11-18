@@ -251,7 +251,9 @@ this text must stay short.
 
 `tests/test_mcp_tool_text_budget.py` sets two limits. It measures a tool
 as its name plus description plus input schema as compact JSON, taken
-from `ToolDefinition.to_wire()`. Output schemas are not counted.
+from `ToolDefinition.to_wire()`. Output schemas are not counted here.
+The size check of the lean tool profiles counts them (see "Lean tool
+profiles under 6,000 tokens" below).
 
 - One tool: at most 6,000 characters.
 - The whole default list (26 tools, docs add-on on): at most 70,000
@@ -448,8 +450,10 @@ in prod**:
 
 A client that reads `structuredContent` can ask for each result once. It
 adds `?results=structured` to the MCP URL, for example
-`https://<meho-host>/mcp?results=structured`. It works with the other URL
-options: `?profile=operate&texts=short&results=structured`.
+`https://<meho-host>/mcp?results=structured`. It works with a profile:
+`?profile=operate&results=structured`. With `texts=short` no tool has an
+`outputSchema` (#4714), so every result keeps the full text and this
+option changes nothing.
 
 What that session gets:
 
@@ -1209,6 +1213,55 @@ Every other result has an `outcome` field:
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #4712).
+- **Operations in the group listing, behind a switch (#4713).** A model
+  had to search to see any operation, and a search needs good words. The
+  backplane switch `GROUP_LISTING_OPERATIONS` (an env var, off by default)
+  lets a model walk down without a search query: connector, group,
+  operation, contract (`search_operations` with `op_id`), call. When on,
+  `list_operation_groups` changes like this (MCP, REST
+  `GET /api/v1/operations/groups` and CLI `meho operation groups` the
+  same):
+  - Each group has `operations`: its typed and multi-step operations
+    (`source_kind` `typed` and `composite`), by `op_id`. Each line has
+    `op_id`, `summary` (the first sentence of the summary, cut to 100
+    characters; `null` when there is none), `safety_level` and
+    `requires_approval`. The risk level and the approval flag are the
+    ones a call uses, operator overrides included. Only operations that
+    are on for the tenant, in its scope, with their package installed.
+  - Raw operations are never listed one by one (a big connector has
+    thousands). `operation_count` still counts them when the listing
+    shows them; search finds them.
+  - Size limits, as compact JSON: one group under 4 KB, one answer under
+    12 KB. A group with more operations than fit lists the first ones (by
+    `op_id`) and says how many are left out in `operations_more`. An
+    answer whose groups do not fit ends early, with `next_cursor` set to
+    the last group shown, like a full page. Every group of every
+    built-in connector fits whole. The text of a group (`name` and
+    `when_to_use`) stays under 3 KB, so a group always has room for
+    operation lines: a longer text is cut and ends with `…`. Every ASCII
+    text within the limits of a group fits whole; only a long text with
+    many non-ASCII characters is cut.
+  - `group` (REST `group=`, CLI `--group`) lists one group. A `group`
+    that matches no group gives an empty list and a `note`. The CLI also
+    has `--cursor`.
+  - Not changed: the operator console list and the hosted agent tools
+    that have no `cursor` input (the hand-written `list_operation_groups`
+    and the agent's default tool) keep the old listing
+    (`list_operations=False`). The hosted tool built from the MCP tool
+    (`agent_operation_tools_from_mcp` on) follows the switch.
+  - Off: no `group` input, no `operations`, `operations_more` or `note`
+    field and no description line in `tools/list`
+    (`mcp/tools/_group_operations.py`); the REST and CLI `group` change
+    nothing.
+  - Code: `operations/_group_listing_operations.py`, called from
+    `list_operation_groups` in `operations/meta_tools.py`. Tests:
+    `tests/test_group_listing_operations.py` (with the size check over
+    every connector MEHO registers at start-up), and
+    `test_group_operations_follow_their_switch` in
+    `tests/test_mcp_surface_conformance.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #4713).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.
@@ -2161,9 +2214,10 @@ not score worse.
 
 - **Off (default):** every tool shows its full text, byte for byte as
   before, unless the session asks for the short texts.
-- **On:** 14 tools show a short description and short input texts, in
-  every session. The whole default list goes from 67,865 to 46,067
-  characters (32% less). No other tool changes.
+- **On:** 17 tools show a short description and short input texts, in
+  every session. The whole default list goes from 68,280 to 43,176
+  characters (37% less). No tool sends an output schema (#4714, see
+  "Lean tool profiles under 6,000 tokens" below). Nothing else changes.
 
 ### One session asks for the short texts (#6293)
 
@@ -2205,7 +2259,11 @@ What stays the same in both states:
 - The inputs each tool accepts. Only `description` strings change. Every
   property, type, enum, default, limit and `required` list stays, so the
   `tools/call` input check accepts and refuses the same calls.
-- The output schema and annotations.
+- The annotations.
+- The result of each call. The text block holds the same JSON.
+
+What changes besides the texts: no tool sends an `outputSchema`, and so
+no `tools/call` result has `structuredContent` (#4714).
 
 What a short text keeps: what the tool is for, when to call it, its
 arguments, and the rules that stop wrong calls. What it leaves out:
@@ -2242,12 +2300,74 @@ How it works:
 | `list_targets` | 2,945 | 1,116 |
 | `search_docs` | 2,943 | 1,563 |
 | `meho_broadcast_watch` | 2,701 | 1,543 |
+| `search_memory` | 2,428 | 1,714 |
+| `list_operation_groups` | 2,300 | 840 |
+| `meho_connector_list` | 1,898 | 865 |
 
 Sizes are characters as `tests/test_mcp_tool_text_budget.py` counts them
 (name, description and input schema), with the similar-entry check off.
 The first ten are the ten biggest tools. The next four are needed to
-reach 30% less. `query_topology` and `result_query` stay larger because
-their input schemas are large.
+reach 30% less. The last three are in both tool profiles; they bring the
+profiles under 6,000 tokens. `query_topology` and `result_query` stay
+larger because their input schemas are large.
+
+### Lean tool profiles under 6,000 tokens (#4714)
+
+A session with a tool profile and the short texts
+(`?profile=investigate&texts=short`, or `?profile=operate&texts=short`)
+gets a lean tool list. Each lean profile is under 6,000 tokens, and
+`query_topology` is under 6,000 bytes.
+
+What the model sees depends on the client. A client turns each MCP tool
+into a tool for the model: name, description and input schema. The
+Claude API and the OpenAI-style tool format have no field for an output
+schema, so most clients do not show it to the model. A client may still
+put it in the context in another way. The size check therefore counts
+the whole `tools/list` entry, output schema included.
+
+So the short texts also leave out every `outputSchema`. The MCP spec
+makes the output schema optional. A tool that declares one must return
+`structuredContent`, or Claude Desktop fails the call (#2774). The
+`tools/call` handler uses the tool as the session lists it
+(`tool_for_settings` in `mcp/registry.py`), so a session without output
+schemas also gets no `structuredContent`. The text block still holds the
+whole JSON result. Claude Desktop and Claude Code read it as before.
+
+Sizes are UTF-8 bytes of the whole `tools/list` entry as compact JSON.
+"Before" is the full text, "after" the short text.
+
+| Tool | Before | After |
+| --- | ---: | ---: |
+| `query_topology` | 13,034 | 3,272 |
+| `search_operations` | 6,658 | 1,568 |
+| `preview_operation` | 5,933 | 1,425 |
+| `result_query` | 5,364 | 2,585 |
+| `call_operation` | 4,683 | 2,129 |
+| `list_targets` | 4,429 | 1,195 |
+| `search_memory` | 3,741 | 1,793 |
+| `list_operation_groups` | 3,560 | 919 |
+| `meho_broadcast_recent` | 3,255 | 1,886 |
+| `meho_broadcast_announce` | 3,216 | 1,955 |
+| `search_knowledge` | 3,092 | 2,221 |
+| `meho_broadcast_watch` | 2,722 | 1,637 |
+| `meho_connector_list` | 1,981 | 944 |
+| `meho_status` | 986 | 986 |
+
+| List | Bytes before | Bytes after | Tokens after (Qwen2.5 / o200k / cl100k) |
+| --- | ---: | ---: | ---: |
+| `investigate` (9 tools) | 34,494 | 14,340 | 3,503 / 3,511 / 3,449 |
+| `operate` (13 tools) | 49,620 | 21,243 | 5,199 / 5,177 / 5,093 |
+| Full default list (26 tools) | 92,106 | 45,132 | 10,961 / 10,916 / 10,753 |
+
+The tokens are counted on the list as one compact JSON text. The byte
+count divided by 4 is a little higher than every tokenizer count.
+`tests/test_mcp_tool_text_budget.py` fails when a lean profile is over
+6,000 tokens of the test model (Qwen2.5), over 24,000 bytes (6,000
+tokens at 4 bytes per token), or when `query_topology` is over 6,000
+bytes. The test downloads the Qwen2.5 tokenizer file from Hugging Face at
+a fixed revision and checks its SHA-256. In CI a failed download fails
+the test; without network on a local machine only the token test is
+skipped.
 
 Tests:
 
@@ -2255,7 +2375,11 @@ Tests:
   tool equals the tool as listed before; with it on, each changed tool is
   shorter and takes the same inputs, and no other tool changes.
 - `tests/test_mcp_tool_text_budget.py`: with the switch on, the whole
-  default list is at most 47,000 characters and at least 30% smaller.
+  default list is at most 47,000 characters and at least 30% smaller;
+  each tool profile is at most 6,000 tokens of the test model and at most
+  24,000 bytes; `query_topology` is at most 6,000 bytes.
+- `tests/test_mcp_structured_content.py`: with the switch on, `tools/list`
+  has no output schema and `tools/call` returns no `structuredContent`.
 - `tests/test_mcp_surface_conformance.py` runs every test in both states.
 - `tests/test_mcp_tool_profiles.py`: a profile shows the short texts only
   with the switch on.
@@ -2269,7 +2393,11 @@ Tests:
 How to measure it: run the same benchmark task set twice against one
 build, once with `MCP_SHORT_TOOL_TEXTS=false` and once with `true`, with a
 small model and with Claude. `/ready` tells which state a run used.
-Compare the task scores and the tokens used before the first answer.
+Compare the task scores and the tokens used before the first answer. Do
+it for the full list and for each tool profile (`?profile=investigate`,
+`?profile=operate`). Then one live run on the sandbox MEHO with
+`?profile=operate&texts=short` through Claude Desktop and Claude Code:
+call every tool of the profile once and check that no call fails.
 
 ## A guide to the call flow in the session-start text (`MCP_CALL_FLOW_GUIDE`, off by default, #4715)
 

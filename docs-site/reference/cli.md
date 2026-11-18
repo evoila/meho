@@ -3929,6 +3929,8 @@ meho operation groups <connector_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cursor` — the next_cursor of the previous page, to list the next page
+- `--group` — list only this group (matters only while the backplane switch GROUP_LISTING_OPERATIONS is on)
 - `--include-raw` — also count raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 

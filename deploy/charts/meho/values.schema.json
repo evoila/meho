@@ -529,7 +529,7 @@
         "mcpShortToolTexts": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+          "description": "Send a short text for the biggest tools on the default MCP tool list, and no output schemas. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
         },
         "mcpProfileConnectorLists": {
           "type": "string",

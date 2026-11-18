@@ -1569,9 +1569,10 @@ class Settings(BaseModel):
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
-        (:mod:`meho_backplane.mcp.short_texts`). The inputs a tool accepts
-        stay the same. A small model keeps more of its context window for
-        the job. It stays off until model tests show it helps. Env
+        (:mod:`meho_backplane.mcp.short_texts`), and no tool sends an
+        output schema. The inputs a tool accepts stay the same. A small
+        model keeps more of its context window for the job. It stays off
+        until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
     mcp_call_flow_guide:
         Off by default. When on, the MCP session-start text starts with a
@@ -2655,6 +2656,14 @@ class Settings(BaseModel):
     #: the connector has no such operation. Off: both are as before. Set via
     #: ``SEARCH_TYPED_FIRST``.
     search_typed_first: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Each group's typed and multi-step operations in
+    #: ``list_operation_groups`` (#4713), behind a switch that is off by
+    #: default. When on, each group lists them with ``op_id``, a one-line
+    #: summary, the risk level and the approval flag, and an answer is paged
+    #: so that it stays under a size limit
+    #: (:mod:`meho_backplane.operations._group_listing_operations`). Off: the
+    #: listing is as before. Set via ``GROUP_LISTING_OPERATIONS``.
+    group_listing_operations: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
     #: switch that is off by default. When on, each node row also has
     #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
@@ -3793,6 +3802,9 @@ def get_settings() -> Settings:
         ),
         search_typed_first=parse_bool_env(
             os.environ.get("SEARCH_TYPED_FIRST"),
+        ),
+        group_listing_operations=parse_bool_env(
+            os.environ.get("GROUP_LISTING_OPERATIONS"),
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),

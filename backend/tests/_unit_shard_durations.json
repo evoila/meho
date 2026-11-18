@@ -693,6 +693,7 @@
   "tests/test_github_board_composite_flow.py": 0.03,
   "tests/test_governed_subops.py": 0.21,
   "tests/test_grant_use_lineage.py": 0.32,
+  "tests/test_group_listing_operations.py": 15.0,
   "tests/test_health.py": 0.86,
   "tests/test_health_server_time.py": 3.13,
   "tests/test_hosted_run_events.py": 4.9,

@@ -261,6 +261,20 @@ def _resolve_role_for_tenant(overrides_csv: str, tenant_id: UUID) -> str | None:
     return None
 
 
+def _tenant_in_csv(tenants_csv: str, tenant_id: UUID) -> bool:
+    """Say whether *tenant_id* is in a comma-separated list of tenant UUIDs."""
+    for raw in tenants_csv.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        try:
+            if UUID(entry) == tenant_id:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _resolve_login_role(operator: Operator, settings: Settings, override: str | None) -> str:
     """Select the Vault JWT role for a login. Precedence (highest first):
 
@@ -276,7 +290,10 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
        a role whose ``bound_claims`` + policy it satisfies instead of the
        shared identity, and one fixed role stops spanning tenants on a shared
        instance. Empty map ⇒ this tier is inert;
-    4. the deployment-global ``vault_oidc_role`` — today's default.
+    4. the deployment-global ``vault_oidc_role``. When
+       ``vault_oidc_role_tenants`` is set, only a tenant in that list gets
+       it; any other tenant gets :class:`VaultRoleDeniedError` before a
+       Vault call. Empty list ⇒ every tenant gets it.
 
     The per-tenant tier sits *below* the check-runner tier deliberately: the
     synthetic check-runner operator carries a ``tenant_id`` too, but its
@@ -293,6 +310,13 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
     tenant_role = _resolve_role_for_tenant(settings.vault_oidc_role_by_tenant, operator.tenant_id)
     if tenant_role is not None:
         return tenant_role
+    if settings.vault_oidc_role_tenants and not _tenant_in_csv(
+        settings.vault_oidc_role_tenants, operator.tenant_id
+    ):
+        raise VaultRoleDeniedError(
+            f"This tenant has no Vault login role (tenant {operator.tenant_id}). "
+            "Ask the admin to add it to VAULT_OIDC_ROLE_BY_TENANT."
+        )
     return settings.vault_oidc_role
 
 

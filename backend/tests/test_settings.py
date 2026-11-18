@@ -650,6 +650,25 @@ def test_vault_oidc_role_by_tenant_rejects_malformed(raw: str) -> None:
     assert "VAULT_OIDC_ROLE_BY_TENANT" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("raw", ["", _UUID_A, f"{_UUID_A},{_UUID_B}", f" {_UUID_A} ,,"])
+def test_vault_oidc_role_tenants_accepts_uuid_csv(raw: str) -> None:
+    settings = Settings(
+        **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        vault_oidc_role_tenants=raw,
+    )
+    assert settings.vault_oidc_role_tenants == raw
+
+
+@pytest.mark.parametrize("raw", ["not-a-uuid", f"{_UUID_A},bad"])
+def test_vault_oidc_role_tenants_rejects_malformed(raw: str) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+            vault_oidc_role_tenants=raw,
+        )
+    assert "VAULT_OIDC_ROLE_TENANTS" in str(exc_info.value)
+
+
 # ---------------------------------------------------------------------------
 # #1725 M2 — vault_kv_tenant_scope_prefix template validation at construction
 # ---------------------------------------------------------------------------

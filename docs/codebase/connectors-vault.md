@@ -92,6 +92,17 @@ than silently misrouting a login. The setting only **selects** a role; the
 fail-closed isolation boundary is each role's policy + `bound_claims`,
 provisioned consumer-side.
 
+The **shared-role list** is `settings.vault_oidc_role_tenants` — a
+comma-separated list of tenant UUIDs (env `VAULT_OIDC_ROLE_TENANTS`, empty by
+default). Empty means every tenant with no map entry gets `vault_oidc_role`.
+When set, only a tenant in the list gets `vault_oidc_role`. A tenant in
+neither the list nor `VAULT_OIDC_ROLE_BY_TENANT` gets a `VaultRoleDeniedError`
+that names the tenant and tells the admin to add it to
+`VAULT_OIDC_ROLE_BY_TENANT`; no Vault call is made. The per-target role, the
+check-runner role and the map entries are not affected. A tenant id that is
+not a UUID fails the pod start. Leave it empty on the chart's built-in Vault,
+where one role serves every tenant.
+
 Guarantees:
 
 - **Backward-compatible.** A target naming no role (and every non-vault

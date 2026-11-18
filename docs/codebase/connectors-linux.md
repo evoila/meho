@@ -637,10 +637,11 @@ the approver reads it. `linux/script_preview.py` builds these preview fields:
 
 | Field | What it holds |
 |---|---|
-| `script` | The script text. Values that look like secrets are replaced by a marker, in two passes. First the shell-aware command-line hider that the `k8s.job.create` preview uses (`redaction/command_line.py`, `hide_shell_script`): the value of a `NAME=VALUE` whose name holds a secret word (`PGPASSWORD=...`, `export AWS_SECRET_ACCESS_KEY=...`), the value after a secret flag (`--password x`), the password in `curl -u user:password` and in a URL, tokens with a known vendor prefix. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also with the value glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are. This list is narrower than the `k8s.job.create` rule, where `-p` is a secret flag after any program. A password glued to `-u` (`curl -uuser:password`) is hidden in a script too. A new line ends a command, but a line continuation (a `\` at the end of a line) does not: the value of a flag may be on the next line. Then the packaged default redaction policy (`docs/codebase/redaction.md`): a bearer token, a JWT, a private key block, a quoted `"password": "..."` pair. Any change counts as hidden. Cut at 64 KiB. |
+| `script` | The script text. Values that look like secrets are replaced by a marker, in two passes. First the shell-aware command-line hider that the `k8s.job.create` preview uses (`redaction/command_line.py`, `hide_shell_script`): the value of a `NAME=VALUE` whose name holds a secret word (`PGPASSWORD=...`, `export AWS_SECRET_ACCESS_KEY=...`), the value after a secret flag (`--password x`), the password in `curl -u user:password` and in a URL, tokens with a known vendor prefix. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also with the value glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are. This list is narrower than the `k8s.job.create` rule, where `-p` is a secret flag after any program. A password glued to `-u` (`curl -uuser:password`) is hidden in a script too. A new line ends a command, but a line continuation (a `\` at the end of a line) does not: the value of a flag may be on the next line. Then the packaged default redaction policy (`docs/codebase/redaction.md`): a bearer token, a JWT, a private key block, a quoted `"password": "..."` pair. Any change counts as hidden. The hidden text is cut into pages of 64 KiB, so a secret that crosses a page border is still hidden; the preview holds page 1. |
+| `script_pages` | How many pages the shown text has. |
 | `script_bytes` | The size of the full script in UTF-8 bytes. |
 | `script_sha256` | The SHA-256 of the full script as it runs, to compare with a reviewed copy. Left out when values were hidden: with the rest of the text in view, the hash would let a reader test guesses of the hidden value. |
-| `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. |
+| `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. `script_truncated` means the text has more than one page. |
 | `script_unavailable` | Set, with no text and no hash, when the redaction pass fails. |
 | `script_ref` | The optional `script_ref` param: where the reviewed copy lives. |
 | `script_check` | `matches` or `does not match`, when the caller sent the optional `expected_sha256` param. |
@@ -660,6 +661,35 @@ block (`ui/templates/approvals/_script.html`), with the hash, the reviewed
 copy and the check. `meho approvals show` and the `meho approvals approve`
 prompt print the same block, one line per script line
 (`cli/internal/cmd/approvals/script.go`).
+
+**Longer than one page.** `linux.script.run` accepts a script of at most
+1,048,576 bytes (1 MiB, `SCRIPT_MAX_BYTES`): a larger one is refused when
+the request is made, before it waits for approval, by a params check
+(`_check_script_size`) with a plain text. The schema has `maxLength` too, so
+a client sees the limit. It counts characters and the check counts bytes.
+When both fail, the plain text replaces the schema error
+(`operations/_validate.py`, `params_errors`). While the request waits, the
+approver reads every page: `GET /api/v1/approvals/{id}/script?page=N`
+(same access as `GET /api/v1/approvals/{id}`), `meho approvals show <id>
+--script-page N`, and the "previous page" / "next page" links of the console
+block. All three use `operations/approval_script.py`, which decrypts the
+stored script without deleting it (`approval_handoff.read`; only the
+approved run uses `consume`), hides secret values over the whole script and
+then cuts pages (`shown_script`). The redaction pass runs once per request,
+in a worker thread and not in the event loop. Its result holds no secret
+values; the last 8 are kept in memory, so reading the other pages does not
+run it again. The checksum is of the whole script and is the same on every
+page; with hidden values no page shows one. After the decision MEHO no
+longer keeps the script: the REST read answers 410 with a plain sentence,
+the console block has no page links and says that only page 1 is shown, and
+a page link of a modal opened before the decision shows that sentence. A
+stored script that MEHO cannot decrypt gives 409 (REST) or a plain sentence
+(console), not a server error. A script that is not valid UTF-8 (a lone
+surrogate) is refused when the request is made, with a plain text. The
+console shows control and format characters of the script (an escape code,
+a right-to-left override, a zero-width space) as visible marks such as
+`\u202e`, the same set the CLI escapes (`ui/templating.py`,
+`visible_marks`). There is no MCP tool for it.
 
 ### Approval + secret hygiene
 

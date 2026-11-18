@@ -324,6 +324,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
+from meho_backplane.connectors.resolver import stale_openbao_probe_hint
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -4590,6 +4591,7 @@ async def _dispatch_now(
                 miss_version,
                 _elapsed_ms(started),
                 exception_message=exception_message,
+                hint=stale_openbao_probe_hint(target),
             )
         if resolution_error == "ambiguous_connector":
             # The exception's message is the single most diagnostic string

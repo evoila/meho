@@ -17,7 +17,9 @@ choice is kept on the request's :class:`Operator`, so ``tools/list`` and the
 ``tools/call`` input check of that session use the same texts, and other
 sessions keep the full texts. Only the ``description`` strings change. The input
 schema keeps every property, type, enum, default, limit and ``required``
-list, so a tool accepts exactly the same calls in both states.
+list, so a tool accepts exactly the same calls in both states. Such a
+session also gets no ``outputSchema`` and no ``structuredContent``
+(:func:`~meho_backplane.mcp.registry.tool_for_settings`, #4714).
 
 A tool opts in through :attr:`ToolDefinition.for_settings`:
 ``for_settings=with_short_text(SHORT)``. A tool that already has a

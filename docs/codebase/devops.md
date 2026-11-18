@@ -2778,6 +2778,8 @@ ends in `\`), move it to a line that can.
 The job `Private name check` keeps internal names out of public text. It
 reads only the lines a pull request adds, in every file except
 `CHANGELOG.md`, and compares them with a list of patterns.
+Files that Git treats as binary are read as text too (`git diff --text`),
+so a NUL byte or a `-diff` attribute cannot hide an added line.
 
 - The list is the repository secret `PRIVATE_NAME_LIST`: one pattern per
   line, case does not matter. It is not stored in this repository, and

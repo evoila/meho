@@ -216,3 +216,16 @@ def test_rename_with_edit_and_noprefix_config_are_checked(tmp_path: Path) -> Non
     done = _run(root, f"{_WORD_B}\n")
     assert done.returncode == 1
     assert "moved.txt:2:" in done.stdout
+
+
+def test_file_git_treats_as_binary_is_still_checked(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / "data.bin").write_bytes(b"head\x00\nnew " + _WORD_A.encode() + b"\n")
+    (root / ".gitattributes").write_text("marked.txt -diff\n")
+    (root / "marked.txt").write_text(f"one\ntwo {_WORD_A}\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "change")
+    done = _run(root, f"{_WORD_A}\n")
+    assert done.returncode == 1
+    assert "data.bin:2:" in done.stdout
+    assert "marked.txt:2:" in done.stdout

@@ -162,6 +162,7 @@ def read_diff(base: str) -> bytes:
             "--unified=0",
             "--no-color",
             "--no-ext-diff",
+            "--text",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             "--diff-filter=ACMR",

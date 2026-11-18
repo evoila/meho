@@ -1093,6 +1093,51 @@ Every other result has an `outcome` field:
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #6014).
+- **Typed and multi-step operations first, behind a switch (#4712).** A
+  big connector holds many more raw operations (made from a vendor API
+  description, `source_kind='ingested'`) than typed and multi-step ones,
+  in the same groups. So a search often finds a raw call first, even
+  when a safer typed or multi-step operation exists. The backplane
+  switch `SEARCH_TYPED_FIRST` (an env var, off by default) changes what
+  `search_operations` and `list_operation_groups` show (MCP, REST and
+  CLI the same):
+  - Ranked search returns only `source_kind` `typed` and `composite`
+    rows. The filter is in the candidate queries, so raw rows cannot
+    push typed ones out of the top hits.
+  - `include_raw: true` (REST `include_raw=true`, CLI `--include-raw`)
+    adds raw operations back.
+  - A connector with no typed or multi-step operation the caller can use
+    (same tenant, enabled and package rules as the search) shows its raw
+    operations without the flag.
+  - Each answer has `raw_operations`: `included`, a count, and a `note`.
+    When a typed-only search is `no_match` or `ambiguous`, the search runs
+    once more with raw operations, and `hidden_matches` says how many
+    raw hits were left out; the note names `include_raw`.
+  - `list_operation_groups` counts typed and multi-step operations
+    (`operation_count`, `enabled_op_count`) and leaves out groups of raw
+    operations only (`hidden_groups`). The filter is in the query, so
+    paging stays correct.
+  - Not changed: exact-op mode (`op_id`) finds any operation; calling,
+    policy and approval are the same. The operator console search still
+    shows every operation.
+  - Off: no `include_raw` input, no `raw_operations` field and no
+    description line in `tools/list`
+    (`mcp/tools/_include_raw.py`); the REST and CLI flag change nothing.
+    Hosted agent runs follow the switch the same way, with the setting
+    `agent_operation_tools_from_mcp` on or off. On: their tools are built
+    for each run (`agent/toolset_operations.py`). Off: the hand-written
+    tools get the `include_raw` input and the line while the switch is on
+    (`with_include_raw_input`), so a hosted run can follow the note.
+  - Code: `operations/_search_typed_first.py`, `typed_only` in
+    `operations/_search.py`, `search_operations` and
+    `list_operation_groups` in `operations/meta_tools.py`. Tests:
+    `tests/test_search_typed_first.py`, and
+    `test_include_raw_follows_the_typed_first_switch` in
+    `tests/test_mcp_surface_conformance.py` and
+    `tests/test_agent_toolset_operations.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #4712).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.

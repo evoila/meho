@@ -37,8 +37,11 @@ approval), and a person's call made with a token. No standing grant, run
 approval or agent grant covers it. Only a person in the web console (the
 target form and the console target import) makes a target at once. The
 approval card (`build_targets_register_preview`) shows every sent field
-under `target`: name, product, host, `fqdn`, port and each `extras` key
-and value, with values under a secret-like name hidden; `result_if_run`
+under `target`: name, product, host, `fqdn`, port, `secret_ref` and each
+`extras` key and value, with values under a secret-like name hidden. When
+the call leaves `secret_ref` out, the card shows the default path MEHO
+will store (`tenants/<tenant_id>/<name>`) and `secret_ref_derived` is
+true. `result_if_run`
 says `fails` when a live target of the tenant has the name already. The
 agent's own `preview_operation` gets this card only with
 `PREVIEW_TYPED_WRITES` on; off, its preview is `unavailable`, as for a

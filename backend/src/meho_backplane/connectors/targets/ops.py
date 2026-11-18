@@ -102,6 +102,7 @@ from meho_backplane.connectors.targets.schemas import (
     TARGETS_REMOVE_PARAMETER_SCHEMA,
     TARGETS_REMOVE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.db.models import Target as TargetORM
@@ -258,8 +259,10 @@ async def build_targets_register_preview(ctx: PreviewContext) -> dict[str, Any]:
     port, ``extras`` (each key and value) and the rest. Values under a
     secret-like name are hidden the same way the generic parameter echo
     hides them; ``secret_ref`` is a Vault path, not a secret, so it shows.
-    When a live target of the caller's tenant has the name already, the
-    preview says the call would fail. Reads only.
+    When the call leaves ``secret_ref`` out, the card shows the default path
+    MEHO stores for the name (``secret_ref_derived`` is true). When a live
+    target of the caller's tenant has the name already, the preview says the
+    call would fail. Reads only.
     """
     shown = _redact_echoed_params(
         dict(ctx.params),
@@ -267,13 +270,17 @@ async def build_targets_register_preview(ctx: PreviewContext) -> dict[str, Any]:
         tenant=str(ctx.operator.tenant_id),
         op_id=TARGETS_REGISTER_OP_ID,
     )
+    name = ctx.params.get("name")
+    derived = "secret_ref" not in ctx.params and isinstance(name, str)
+    if derived:
+        shown["secret_ref"] = tenant_secret_ref(ctx.operator.tenant_id, str(name))
     preview: dict[str, Any] = {
         "action": TARGETS_REGISTER_OP_ID,
         "target": shown,
         "fields": sorted(ctx.params),
         "result_if_run": "created",
+        "secret_ref_derived": derived,
     }
-    name = ctx.params.get("name")
     if isinstance(name, str) and await _name_taken(ctx.operator.tenant_id, name):
         preview["result_if_run"] = "fails"
         preview["note"] = "a live target with this name exists in your tenant"

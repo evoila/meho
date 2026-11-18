@@ -10,8 +10,9 @@
   After a person approves, the target exists with the values the approval
   card showed.
 * **The approval card** of ``targets.register`` shows the name, product,
-  host, ``fqdn``, port and every ``extras`` key and value; a value under a
-  secret-like name is hidden.
+  host, ``fqdn``, port, the login reference (``secret_ref``, the default one
+  when the call leaves it out) and every ``extras`` key and value; a value
+  under a secret-like name is hidden.
 * **``extras``** -- a ``targets.update`` call that changes only ``extras``
   waits too, also under a standing grant, and its card shows the old and the
   new ``extras`` with secret-like values hidden.
@@ -43,6 +44,7 @@ from meho_backplane.connectors.targets.update import (
     TARGETS_UPDATE_OP_ID,
     register_targets_update_operation,
 )
+from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPermission,
@@ -266,16 +268,31 @@ async def test_every_caller_waits_and_the_approved_target_has_the_card_values(
     assert await _target(name) is None
     assert request.proposed_effect is not None
     card = request.proposed_effect["preview"]["target"]
-    assert card == _new_target(name)
+    assert card == {**_new_target(name), "secret_ref": tenant_secret_ref(_TENANT_ID, name)}
+    assert request.proposed_effect["preview"]["secret_ref_derived"] is True
 
     ran = await _approve_and_run(request.id)
 
     assert ran.status == "ok", ran
     row = await _target(name)
     assert row is not None
-    stored = {key: getattr(row, key) for key in ("name", "product", "host", "fqdn", "port")}
+    stored = {
+        key: getattr(row, key) for key in ("name", "product", "host", "fqdn", "port", "secret_ref")
+    }
     assert stored == {key: card[key] for key in stored}
     assert row.extras == card["extras"]
+
+
+async def test_the_card_shows_a_given_secret_ref_as_sent() -> None:
+    ref = tenant_secret_ref(_TENANT_ID, "shared-login")
+
+    result = await _register(_operator("person-token"), _new_target("given-ref", secret_ref=ref))
+
+    assert result.status == "awaiting_approval", result
+    (request,) = await _requests()
+    assert request.proposed_effect is not None
+    assert request.proposed_effect["preview"]["target"]["secret_ref"] == ref
+    assert request.proposed_effect["preview"]["secret_ref_derived"] is False
 
 
 async def test_the_card_hides_a_secret_like_extras_value() -> None:

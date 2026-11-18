@@ -307,6 +307,33 @@ A request without a card object (no blast radius) is not checked. The
 re-run path reports the three checks as `target_changed`,
 `preview_changed` and `object_changed`.
 
+**State on the card.** Some approval cards show the object as it is now,
+next to what the call changes (for example the roles a user has now). A
+connector registers such an operation with `register_state_pin(op_id,
+card_key)` (`operations/approval_state_pin.py`). The card holds the state
+under `card_key` and says `<card_key>_available: true`. Right before every
+approved run, with or without a preview hash,
+`state_changed_since_request` builds the card again and compares the
+state:
+
+- the same state: the run goes ahead;
+- another state: the run is refused (`REASON_STATE_CHANGED`: "The object
+  changed since the approval; send the request again.");
+- the approved card did not show the state (MEHO could not read it when the
+  request waited, or the request is older than the card), or MEHO cannot
+  read it now: the run is refused (`REASON_STATE_UNREADABLE`).
+
+A connector can name the part of the state that the run compares with
+`register_state_pin(..., compared=<function>)`. Keycloak's
+`group.member.add` compares only the group id and its roles, not the
+member list. A re-run after a first run that failed part way is refused
+when the first run already changed the object.
+
+The refusal has the `object_changed_since_approval` error code, in the
+shared resume check and in the re-run (`object_changed`). The Keycloak
+writes that use it are listed in
+[connectors-keycloak.md](connectors-keycloak.md#writes-that-are-changes-of-rights).
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -1943,6 +1970,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
+| An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.

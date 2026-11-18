@@ -78,6 +78,7 @@ from meho_backplane.operations.approval_resume_checks import preview_changed_sin
 from meho_backplane.operations.approved_reveal import is_secret_reveal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
 from meho_backplane.operations.uncertain_outcome import (
+    LOGIN_ENDED_ADVICE,
     UNCERTAIN_OUTCOME,
     connection_lost_after_send,
     with_uncertain_outcome,
@@ -158,6 +159,7 @@ class RerunNotAllowedError(ApprovalError):
         super().__init__(
             f"approval request {request_id} cannot run again: its state is {state!r}. "
             "Only an approved request whose last run failed can run again"
+            + (f". {LOGIN_ENDED_ADVICE}" if state == "uncertain" else "")
         )
         self.request_id = request_id
         self.state = state

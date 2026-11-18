@@ -14,7 +14,11 @@ may have done the work, and MEHO lost the answer. Three cases:
 * MEHO stopped in the middle of an approved run (a restart), so no result
   was stored.
 
-In all three, every view shows ``uncertain`` with one piece of advice: do
+A fourth case is the product refusing the login session after MEHO sent
+the change (``connector_auth_failed``). A refused login before anything was
+sent is a plain failure.
+
+In every case, every view shows ``uncertain`` with one piece of advice: do
 not run it again, check the target first. MEHO itself never runs such a
 change again (``retry`` is ``False``, and an approved request can start only
 once).
@@ -36,6 +40,7 @@ import httpx
 from meho_backplane.connectors import OperationResult
 
 __all__ = [
+    "LOGIN_ENDED_ADVICE",
     "UNCERTAIN_ADVICE",
     "UNCERTAIN_OUTCOME",
     "changes_target",
@@ -52,6 +57,13 @@ UNCERTAIN_OUTCOME: Final[str] = "uncertain"
 #: The one piece of advice every view shows for an uncertain run.
 UNCERTAIN_ADVICE: Final[str] = (
     "MEHO does not know if the change happened. Do not run it again. Check the target first."
+)
+
+#: The advice when the product ended the login session after MEHO sent a
+#: change. It names the one safe next step and no other.
+LOGIN_ENDED_ADVICE: Final[str] = (
+    "The change may or may not have been made. A person must check the target "
+    "first. Then make a new request."
 )
 
 #: Transport faults after which the vendor may already have the request: the

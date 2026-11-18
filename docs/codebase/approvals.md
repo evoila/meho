@@ -2367,7 +2367,7 @@ One rule for every view: `result_state_of_envelope` in
 console all read it. Every view gives the same advice: do not run it again,
 check the target first. No view says "failed" or "did not succeed" for it.
 
-Six cases end as `uncertain`:
+Seven cases end as `uncertain`:
 
 | Case | Where | Stored result |
 |---|---|---|
@@ -2375,13 +2375,17 @@ Six cases end as `uncertain`:
 | A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
 | The same on a connection that is not HTTP: an SSH command that timed out or lost its connection, or the same fault of the Kubernetes client or a database driver. | the general error arm of the dispatcher (`connection_lost_after_send`) | `error_code` `connector_error`, `retry: false` |
 | An approved re-run stopped with such a timeout or lost connection. | `rerun_failed_request` (`connection_lost_after_send`) | `error` `rerun_failed: ...`, `retry: false` |
+| The product ended the login session after MEHO sent a change, and MEHO did not send it again. | `result_connector_auth_failed(..., changes_target=True)` | `error_code` `connector_auth_failed`, `retry: false`, advice `LOGIN_ENDED_ADVICE` |
 | MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
 | An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
 
 The rule holds for every kind of connection. On HTTP, a connect timeout, a
-pool timeout and a refused connection stay plain errors, because nothing was
-sent. On the other connections, the types are listed once, in
-`operations/uncertain_outcome.py`:
+pool timeout, a refused connection and a refused login
+(`connector_auth_failed` at stage `establish`) stay plain errors, because
+nothing was sent. An approved change always starts with a fresh login
+(`drop_login_before_approved_change`, see `backend.md`), so a login that ended
+while the change waited does not end the run. On the other connections, the
+types are listed once, in `operations/uncertain_outcome.py`:
 
 - uncertain: `TimeoutError` (what `asyncio.wait_for` raises around an SSH
   command), `ConnectionError` (reset, aborted, broken pipe),

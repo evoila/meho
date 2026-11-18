@@ -271,6 +271,13 @@ class Settings(BaseModel):
         via ``VAULT_OIDC_ROLE_BY_TENANT``. Lets one fixed role stop
         spanning tenants on a shared multi-tenant instance; the fail-closed boundary is each role's
         Vault policy + ``bound_claims``, provisioned consumer-side.
+    vault_oidc_role_tenants:
+        Optional list of the tenants that may use ``vault_oidc_role``.
+        Comma-separated tenant UUIDs. Empty (the default) keeps
+        ``vault_oidc_role`` for every tenant without an entry in
+        ``vault_oidc_role_by_tenant``. When set, a tenant in neither list
+        gets a clear refusal and no Vault login is tried. Set via
+        ``VAULT_OIDC_ROLE_TENANTS``.
     vault_oidc_mount_path:
         Mount path of Vault's JWT/OIDC auth method, **without** the
         ``auth/`` prefix. Vault's recommended convention is to mount
@@ -1562,10 +1569,17 @@ class Settings(BaseModel):
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
-        (:mod:`meho_backplane.mcp.short_texts`). The inputs a tool accepts
-        stay the same. A small model keeps more of its context window for
-        the job. It stays off until model tests show it helps. Env
+        (:mod:`meho_backplane.mcp.short_texts`), and no tool sends an
+        output schema. The inputs a tool accepts stay the same. A small
+        model keeps more of its context window for the job. It stays off
+        until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
+    mcp_call_flow_guide:
+        Off by default. When on, the MCP session-start text starts with a
+        short guide that explains, in order, how to find and call an
+        operation (:mod:`meho_backplane.mcp.call_flow_guide`). It names
+        only tools the session can see. It stays off until model tests
+        show it helps. Env ``MCP_CALL_FLOW_GUIDE``.
     mcp_profile_connector_lists:
         Off by default. When on, the profiles of ``mcp_connector_profiles``
         count: a session that names one at ``/mcp?profile=<name>`` may use
@@ -1710,6 +1724,11 @@ class Settings(BaseModel):
     # Enforcement stays Vault-side: the boundary is the policy + ``bound_claims``
     # on each selected role; this setting only decides which role a login uses.
     vault_oidc_role_by_tenant: str = Field(default="")
+    # Tenants that may use ``vault_oidc_role``. Comma-separated tenant UUIDs.
+    # Empty (the default) keeps ``vault_oidc_role`` for every tenant that has
+    # no entry in ``vault_oidc_role_by_tenant``. When set, a tenant that is
+    # in neither list is refused before any Vault call.
+    vault_oidc_role_tenants: str = Field(default="")
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
@@ -2540,6 +2559,7 @@ class Settings(BaseModel):
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -2629,6 +2649,13 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Typed and multi-step operations first in ``search_operations`` and
+    #: ``list_operation_groups`` (#4712), behind a switch that is off by
+    #: default. When on, both show only ``source_kind`` ``typed`` and
+    #: ``composite`` operations, unless the caller sets ``include_raw`` or
+    #: the connector has no such operation. Off: both are as before. Set via
+    #: ``SEARCH_TYPED_FIRST``.
+    search_typed_first: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
     #: switch that is off by default. When on, each node row also has
     #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
@@ -2662,6 +2689,14 @@ class Settings(BaseModel):
     #: exist when nothing matched. Off: the same answer as before. Set via
     #: ``CONNECTOR_LIST_PRODUCT_ALIASES``.
     connector_list_product_aliases: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Call hints on each ``search_operations`` hit (#4331), behind a switch
+    #: that is off by default. When on, each ranked hit also has
+    #: ``required_params`` (the names in the top-level ``required`` list of
+    #: the op's ``parameter_schema``) and ``target_required`` (the
+    #: dispatcher's own target rule), and the tool's output schema names
+    #: them. Off: the same answers and tool texts as before. Set via
+    #: ``SEARCH_HIT_CALL_HINTS``.
+    search_hit_call_hints: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3035,6 +3070,25 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("vault_oidc_role_tenants")
+    @classmethod
+    def _vault_oidc_role_tenants_must_be_uuid_csv(cls, value: str) -> str:
+        """Stop the start when ``VAULT_OIDC_ROLE_TENANTS`` has an entry that is not a UUID."""
+        chunks = [part.strip() for part in value.split(",") if part.strip()]
+        if value.strip() and not chunks:
+            raise ValueError(
+                f"VAULT_OIDC_ROLE_TENANTS has no tenant UUID; got {value!r}. "
+                "Leave it empty, or list tenant UUIDs."
+            )
+        for chunk in chunks:
+            try:
+                UUID(chunk)
+            except ValueError as exc:
+                raise ValueError(
+                    f"VAULT_OIDC_ROLE_TENANTS entries must be tenant UUIDs; got {chunk!r}"
+                ) from exc
+        return value
+
     @field_validator("audit_wrapper_rows_retired")
     @classmethod
     def _wrapper_cutover_needs_request_usage(cls, value: bool, info: ValidationInfo) -> bool:
@@ -3181,6 +3235,7 @@ def get_settings() -> Settings:
         # #3852 -- empty/blank keeps the single-role behaviour byte-for-byte
         # (the resolver falls back to ``vault_oidc_role`` for every tenant).
         vault_oidc_role_by_tenant=os.environ.get("VAULT_OIDC_ROLE_BY_TENANT", "").strip(),
+        vault_oidc_role_tenants=os.environ.get("VAULT_OIDC_ROLE_TENANTS", "").strip(),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
         # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no
         # header) from empty-string (operator misconfiguration); the
@@ -3682,6 +3737,9 @@ def get_settings() -> Settings:
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
         ),
+        mcp_call_flow_guide=parse_bool_env(
+            os.environ.get("MCP_CALL_FLOW_GUIDE"),
+        ),
         mcp_profile_connector_lists=parse_bool_env(
             os.environ.get("MCP_PROFILE_CONNECTOR_LISTS"),
         ),
@@ -3728,6 +3786,9 @@ def get_settings() -> Settings:
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
         ),
+        search_typed_first=parse_bool_env(
+            os.environ.get("SEARCH_TYPED_FIRST"),
+        ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
@@ -3739,6 +3800,9 @@ def get_settings() -> Settings:
         ),
         connector_list_product_aliases=parse_bool_env(
             os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),
+        ),
+        search_hit_call_hints=parse_bool_env(
+            os.environ.get("SEARCH_HIT_CALL_HINTS"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

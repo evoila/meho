@@ -736,6 +736,7 @@ async def enforce_subop_policy(
         create_pending_request,
         record_approval_step_event,
         resume_requester_var,
+        rights_change_note,
     )
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
@@ -1013,7 +1014,11 @@ async def enforce_subop_policy(
                 audit_id=request._audit_id,  # type: ignore[attr-defined]
             )
             return result_awaiting_approval(
-                op_id, request.id, duration_ms, audit_id=request.request_audit_id
+                op_id,
+                request.id,
+                duration_ms,
+                audit_id=request.request_audit_id,
+                note=await rights_change_note(request),
             )
 
         # DENY, or any unexpected verdict — fail closed: the sub-op never

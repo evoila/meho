@@ -612,14 +612,22 @@ async def _build_results_context(
 
     product, version, impl_id = parse_connector_id(connector_id)
     try:
+        # The console shows every operation, raw ones too: the
+        # ``SEARCH_TYPED_FIRST`` switch is about what an agent sees (#4712).
         groups_result = await list_operation_groups(
-            operator, {"connector_id": connector_id, "limit": _GROUPS_LIMIT}
+            operator,
+            {"connector_id": connector_id, "limit": _GROUPS_LIMIT, "include_raw": True},
         )
         context["groups"] = groups_result.get("groups", [])
         if query:
             search_result = await search_operations(
                 operator,
-                {"connector_id": connector_id, "query": query, "limit": _SEARCH_LIMIT},
+                {
+                    "connector_id": connector_id,
+                    "query": query,
+                    "limit": _SEARCH_LIMIT,
+                    "include_raw": True,
+                },
             )
             hits = search_result.get("hits", [])
             desc_ids = await _descriptor_ids_for_op_ids(

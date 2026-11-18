@@ -3697,6 +3697,7 @@ async def _handle_needs_approval(
         IdempotencyKeyConflictError,
         create_pending_request,
         record_approval_step_event,
+        rights_change_note,
     )
 
     run_id = current_agent_run_id_var.get()
@@ -3824,33 +3825,24 @@ async def _handle_needs_approval(
                 install_category=descriptor.policy_install_category,
             )
             await session.commit()
-        if getattr(request, "_reused", False):
-            return result_awaiting_approval(
-                op_id,
-                request.id,
-                duration_ms,
-                reused=True,
-                audit_id=request.request_audit_id,
-            )
-        # Record the add-on step events AFTER commit so a phantom event
-        # cannot outlive a failed transaction (the helper is fail-open).
-        expired_request = getattr(request, "_expired_request", None)
-        if expired_request is not None:
+        reused = bool(getattr(request, "_reused", False))
+        if not reused:
+            # Record the add-on step events AFTER commit so a phantom event
+            # cannot outlive a failed transaction (the helper is fail-open).
+            expired_request = getattr(request, "_expired_request", None)
+            if expired_request is not None:
+                await record_approval_step_event(
+                    tenant_id=operator.tenant_id,
+                    request=expired_request,
+                    decision="expired",
+                    audit_id=expired_request._audit_id,
+                )
             await record_approval_step_event(
                 tenant_id=operator.tenant_id,
-                request=expired_request,
-                decision="expired",
-                audit_id=expired_request._audit_id,
+                request=request,
+                decision="pending",
+                audit_id=request._audit_id,  # type: ignore[attr-defined]
             )
-        await record_approval_step_event(
-            tenant_id=operator.tenant_id,
-            request=request,
-            decision="pending",
-            audit_id=request._audit_id,  # type: ignore[attr-defined]
-        )
-        return result_awaiting_approval(
-            op_id, request.id, duration_ms, audit_id=request.request_audit_id
-        )
     except IdempotencyKeyConflictError as exc:
         return await _audit_denied_and_return(
             result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),
@@ -3884,6 +3876,16 @@ async def _handle_needs_approval(
             "requires_approval is True; approval queue unavailable",
             duration_ms,
         )
+    # The request is saved. The note is read last, outside the ``try`` above,
+    # so it can never turn a stored request into a "denied" answer.
+    return result_awaiting_approval(
+        op_id,
+        request.id,
+        duration_ms,
+        reused=reused,
+        audit_id=request.request_audit_id,
+        note=await rights_change_note(request),
+    )
 
 
 def _params_error(

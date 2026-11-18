@@ -445,6 +445,10 @@ class Operator(BaseModel):
     #: (#6293). Only the MCP route sets it, from the URL; see
     #: :mod:`meho_backplane.mcp.short_texts`. It changes only tool texts.
     mcp_short_tool_texts: bool = False
+    #: The MCP client asked for each result once, in ``structuredContent``,
+    #: with ``?results=structured`` (#4716). Only the MCP route sets it, from
+    #: the URL; see :mod:`meho_backplane.mcp.structured_results`.
+    mcp_structured_results: bool = False
 
     @property
     def may_self_approve(self) -> bool:

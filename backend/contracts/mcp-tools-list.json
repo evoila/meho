@@ -611,6 +611,10 @@
               "null"
             ]
           },
+          "include_raw": {
+            "default": false,
+            "type": "boolean"
+          },
           "limit": {
             "default": 100,
             "maximum": 500,
@@ -670,6 +674,29 @@
               "string",
               "null"
             ]
+          },
+          "raw_operations": {
+            "properties": {
+              "hidden_groups": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "included": {
+                "type": "boolean"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "included",
+              "hidden_groups",
+              "note"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -5466,6 +5493,10 @@
               "null"
             ]
           },
+          "include_raw": {
+            "default": false,
+            "type": "boolean"
+          },
           "include_scores": {
             "default": false,
             "type": "boolean"
@@ -5607,6 +5638,29 @@
               },
               "query_duration_ms": {
                 "type": "number"
+              },
+              "raw_operations": {
+                "properties": {
+                  "hidden_matches": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "included": {
+                    "type": "boolean"
+                  },
+                  "note": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "included",
+                  "hidden_matches",
+                  "note"
+                ],
+                "type": "object"
               }
             },
             "required": [

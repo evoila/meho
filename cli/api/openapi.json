@@ -4699,6 +4699,18 @@
             "description": "Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358)."
           },
           {
+            "name": "include_raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.",
+              "default": false,
+              "title": "Include Raw"
+            },
+            "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`."
+          },
+          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -4844,6 +4856,18 @@
               "title": "Include Scores"
             },
             "description": "Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else."
+          },
+          {
+            "name": "include_raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.",
+              "default": false,
+              "title": "Include Raw"
+            },
+            "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`."
           },
           {
             "name": "authorization",
@@ -28092,6 +28116,11 @@
             "type": "string",
             "nullable": true,
             "title": "Sign In Level Warning"
+          },
+          "rights_change_admins": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Rights Change Admins"
           }
         },
         "type": "object",
@@ -28101,7 +28130,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, a change of rights cannot be approved."
       },
       "ApproveRequestBody": {
         "properties": {

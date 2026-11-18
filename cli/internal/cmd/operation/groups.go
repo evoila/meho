@@ -37,8 +37,27 @@ type GroupSummary struct {
 // GET /api/v1/operations/groups. Hand-typed for the same reason as
 // GroupSummary above.
 type GroupsResponse struct {
-	ConnectorID string         `json:"connector_id"`
-	Groups      []GroupSummary `json:"groups"`
+	ConnectorID   string         `json:"connector_id"`
+	Groups        []GroupSummary `json:"groups"`
+	RawOperations *RawOperations `json:"raw_operations,omitempty"`
+}
+
+// RawOperations is the `raw_operations` part of a search or group
+// answer. The backplane sends it only while its SEARCH_TYPED_FIRST
+// switch is on: then raw operations (made from the vendor API
+// description) are hidden unless --include-raw is set.
+type RawOperations struct {
+	Included      bool    `json:"included"`
+	HiddenMatches int     `json:"hidden_matches,omitempty"`
+	HiddenGroups  int     `json:"hidden_groups,omitempty"`
+	Note          *string `json:"note"`
+}
+
+// printRawNote prints the note of raw_operations, when there is one.
+func printRawNote(w io.Writer, raw *RawOperations) {
+	if raw != nil && raw.Note != nil && *raw.Note != "" {
+		fmt.Fprintf(w, "note: %s\n", *raw.Note)
+	}
 }
 
 // newGroupsCmd returns the `meho operation groups <connector_id>` command.
@@ -46,6 +65,7 @@ type GroupsResponse struct {
 // CLI shape (matches issue #481 spec):
 //
 //	meho operation groups <connector_id> \
+//	  [--include-raw]                         # also count raw operations
 //	  [--json]                                # machine-readable output
 //	  [--backplane <url>]                     # override the backplane URL
 //
@@ -56,6 +76,7 @@ type GroupsResponse struct {
 //   - 4   unexpected response shape
 func newGroupsCmd() *cobra.Command {
 	var (
+		includeRaw        bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -72,9 +93,12 @@ func newGroupsCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runGroups(cmd, args[0], jsonOut, backplaneOverride)
+			return runGroups(cmd, args[0], includeRaw, jsonOut, backplaneOverride)
 		},
 	}
+	cmd.Flags().BoolVar(&includeRaw, "include-raw", false,
+		"also count raw operations made from the vendor API description "+
+			"(matters only while the backplane switch SEARCH_TYPED_FIRST is on)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -82,7 +106,7 @@ func newGroupsCmd() *cobra.Command {
 	return cmd
 }
 
-func runGroups(cmd *cobra.Command, connectorID string, jsonOut bool, backplaneOverride string) error {
+func runGroups(cmd *cobra.Command, connectorID string, includeRaw, jsonOut bool, backplaneOverride string) error {
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
@@ -91,7 +115,7 @@ func runGroups(cmd *cobra.Command, connectorID string, jsonOut bool, backplaneOv
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	result, err := getGroups(cmd.Context(), client, connectorID)
+	result, err := getGroups(cmd.Context(), client, connectorID, includeRaw)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
@@ -107,9 +131,12 @@ func runGroups(cmd *cobra.Command, connectorID string, jsonOut bool, backplaneOv
 // (mirroring api.AuthedClient.GetHealth), and unmarshals the 200
 // body into the hand-typed GroupsResponse. Non-2xx outcomes wrap as
 // *apiResponseError for renderRequestError to classify.
-func getGroups(ctx context.Context, client operationsAPI, connectorID string) (*GroupsResponse, error) {
+func getGroups(ctx context.Context, client operationsAPI, connectorID string, includeRaw bool) (*GroupsResponse, error) {
 	params := &api.GetGroupsApiV1OperationsGroupsGetParams{
 		ConnectorId: connectorID,
+	}
+	if includeRaw {
+		params.IncludeRaw = &includeRaw
 	}
 	resp, err := client.GetGroupsApiV1OperationsGroupsGetWithResponse(ctx, params)
 	if err != nil {
@@ -140,6 +167,7 @@ func getGroups(ctx context.Context, client operationsAPI, connectorID string) (*
 // when_to_use is truncated to 80 chars; full text comes back via
 // --json.
 func printGroupsTable(w io.Writer, r *GroupsResponse) {
+	defer printRawNote(w, r.RawOperations)
 	if len(r.Groups) == 0 {
 		fmt.Fprintf(w, "%s — 0 enabled groups\n", r.ConnectorID)
 		return

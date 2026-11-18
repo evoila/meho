@@ -702,11 +702,27 @@ def test_detail_modal_approve_enabled_for_other_operator() -> None:
     assert "disabled" not in approve_button
 
 
+#: Words an own-change refusal never holds: it names who may approve and
+#: where to ask, and no setting or other way to approve the change.
+_OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS = (
+    "APPROVAL_ALLOW_SELF_APPROVAL",
+    "agent-requester",
+    "break-glass",
+    "re-park",
+)
+
+
+def _assert_names_only_who_may_approve(text: str) -> None:
+    """Assert *text* holds none of :data:`_OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS`."""
+    for word in _OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS:
+        assert word.lower() not in text.lower(), word
+
+
 def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     """When the reviewer IS the requester, Approve is disabled (Deny stays enabled).
 
-    The disabled button's aria-label names the ``APPROVAL_ALLOW_SELF_APPROVAL``
-    break-glass flag (#1401).
+    The disabled button's aria-label says who may approve and where to ask.
+    The page names no setting and no other way to approve the change.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer.
@@ -724,13 +740,11 @@ def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     approve_button = body.split('data-action="approve"')[1].split("</button>")[0]
     deny_button = body.split('data-action="reject"')[1].split("</button>")[0]
     assert "disabled" in approve_button
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_button
+    assert "Ask another person in MEHO-Operators" in approve_button
+    assert "Approvals page" in approve_button
     assert "disabled" not in deny_button
-    # #2669: the disabled button carries actionable single-operator guidance,
-    # not just a greyed-out control -- both patterns named + a docs deep link
-    # so a solo operator reaches an informed choice without reading source.
-    assert "agent-requester" in body
-    assert "guides/approvals-and-break-glass" in body
+    assert "You requested this" in body
+    _assert_names_only_who_may_approve(body)
 
 
 def test_detail_modal_unknown_id_is_404() -> None:
@@ -1142,10 +1156,9 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     """A forged self-approve (bypassing the disabled button) 403s; the row stays pending.
 
     The disabled Approve button is UX only; the BFF re-checks the
-    requester != approver invariant (#1401) via ``approve_request``. Rather
-    than a bare 403, the re-render carries the actionable single-operator
-    guidance -- both patterns named + a docs deep link (#2669) -- so the
-    solo operator reaches an informed choice in place.
+    requester != approver invariant via ``approve_request``. The
+    re-render says who may approve and where to ask, and names no setting
+    and no other way to approve the change.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer, break-glass OFF (default).
@@ -1170,12 +1183,9 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "cannot approve your own request" in body.lower()
-    # #2669: the rejected self-approval renders the guidance, not the bare
-    # error -- both single-operator patterns + the docs link, and the
-    # break-glass flag named as the emergency lever.
-    assert "agent-requester" in body
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in body
-    assert "guides/approvals-and-break-glass" in body
+    assert "Ask another person in MEHO-Operators" in body
+    assert "Approvals page" in body
+    _assert_names_only_who_may_approve(body)
     # The row is NOT approved, and nothing was re-dispatched.
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
@@ -2761,7 +2771,8 @@ def test_modal_self_approval_blocks_approve_armer_and_confirm_state() -> None:
 
     approve_armer = _opening_tag(body, 'data-action="approve"')
     assert "disabled" in approve_armer
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_armer
+    assert "Approvals page" in approve_armer
+    _assert_names_only_who_may_approve(body)
     # A blocked Approve never arms: no click-to-arm handler on it, and the
     # approve confirm state is not rendered at all.
     assert "armed = 'approve'" not in body

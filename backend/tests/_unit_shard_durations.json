@@ -193,6 +193,7 @@
   "tests/test_auth_runner_guard.py": 0.93,
   "tests/test_auth_runner_identity.py": 0.39,
   "tests/test_auth_self_approver.py": 2.37,
+  "tests/test_auth_tenant_admins.py": 10.0,
   "tests/test_auth_tenants.py": 0.92,
   "tests/test_auth_vault.py": 1.08,
   "tests/test_azure_sensor_templates.py": 0.86,

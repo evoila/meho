@@ -45,7 +45,7 @@ func TestGetGroupsSendsIncludeRaw(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: body},
 		},
 	}
-	if _, err := getGroups(context.Background(), f, "vault-1.x", true); err != nil {
+	if _, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{includeRaw: true}); err != nil {
 		t.Fatalf("getGroups: %v", err)
 	}
 	p := f.lastGroupsParams.IncludeRaw

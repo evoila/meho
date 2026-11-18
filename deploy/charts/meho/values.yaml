@@ -735,7 +735,8 @@ config:
   kbSimilarCheck: "false"
   # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
   # `"true"`, the biggest tools on the default MCP tool list send a short
-  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  # text, and no tool sends an output schema. The inputs they accept stay
+  # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
   # -- `mcpProfileConnectorLists` is rendered into
   # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of

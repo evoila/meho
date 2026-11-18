@@ -62,6 +62,7 @@ write-root allow-list *before* any SSH command is constructed.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import shlex
 from dataclasses import dataclass
@@ -1146,7 +1147,7 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     preview: dict[str, Any] = {
         "target": _target_label(ctx.target),
         "interpreter": interpreter,
-        **script_preview_fields(ctx.params),
+        **await asyncio.to_thread(script_preview_fields, ctx.params),
         "use_sudo": bool(ctx.params.get("use_sudo", False)),
     }
     arguments = ctx.params.get("arguments")

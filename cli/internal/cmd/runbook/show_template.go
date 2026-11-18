@@ -182,7 +182,7 @@ func printTemplateBlock(w io.Writer, r *api.ShowTemplateResponse) error {
 	if r == nil {
 		return nil
 	}
-	fmt.Fprintf(w, "Template: %s@%d\n", r.Slug, r.Version)
+	fmt.Fprintf(w, "Template: %s@%d\n", output.SafeText(r.Slug), r.Version)
 	fmt.Fprintf(w, "Title:       %s\n", output.SafeText(r.Title))
 	fmt.Fprintf(w, "Status:      %s\n", string(r.Status))
 	targetKind := "-"
@@ -191,9 +191,9 @@ func printTemplateBlock(w io.Writer, r *api.ShowTemplateResponse) error {
 	}
 	fmt.Fprintf(w, "Target kind: %s\n", output.SafeText(targetKind))
 	fmt.Fprintf(w, "Created by:  %s (%s)\n",
-		r.CreatedBy, r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		output.SafeText(r.CreatedBy), r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "Edited by:   %s (%s)\n",
-		r.EditedBy, r.EditedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		output.SafeText(r.EditedBy), r.EditedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Description:")
 	for _, line := range strings.Split(strings.TrimRight(r.Description, "\n"), "\n") {
@@ -276,7 +276,7 @@ func printManualVerify(w io.Writer, v api.ManualStep_Verify) {
 		fmt.Fprintf(w, "      verify: confirm — %s\n", output.SafeText(truncate(c.Prompt, 80)))
 	case "operation_call":
 		c, _ := v.AsOperationCallVerify()
-		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", c.OpId)
+		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", output.SafeText(c.OpId))
 	default:
 		fmt.Fprintf(w, "      verify: (unknown type %q)\n", discriminator)
 	}
@@ -299,7 +299,7 @@ func printOpCallVerify(w io.Writer, v api.OperationCallStep_Verify) {
 		fmt.Fprintf(w, "      verify: confirm — %s\n", output.SafeText(truncate(c.Prompt, 80)))
 	case "operation_call":
 		c, _ := v.AsOperationCallVerify()
-		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", c.OpId)
+		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", output.SafeText(c.OpId))
 	default:
 		fmt.Fprintf(w, "      verify: (unknown type %q)\n", discriminator)
 	}

@@ -21,7 +21,9 @@ this order:
    block the real sender. The secret comes from this process's short copy
    (:mod:`~meho_backplane.events.ingest.secret_cache`): Vault is read about
    once per source, minute and process, and again at once after the
-   secret is changed through the update route.
+   secret is changed through the update route. A failed Vault read is
+   kept the same way, so a burst of deliveries during a Vault failure
+   does not read Vault again.
 3. Enforce the per-source delivery rate limit. Only deliveries that passed
    step 2 count against it.
 4. Compute the dedupe key: a SHA-256 of the signed message (the

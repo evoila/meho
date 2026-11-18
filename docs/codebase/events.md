@@ -506,6 +506,9 @@ the source's Vault-custodied secret, not by a Keycloak JWT.
    is the same. Deliveries without a usable copy wait on one lock per
    source, so one of them reads Vault. So good and bad deliveries
    together read Vault about once per source, minute and process. A
+   failed Vault read is kept the same way: until the window or the
+   secret version changes, later deliveries get the same `503` without a
+   new Vault read. A
    secret change through `PATCH /api/v1/event-sources/{slug}` raises the
    version after the Vault write, so every process reads the new secret
    on its next delivery; if Valkey cannot be reached, the change answers

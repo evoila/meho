@@ -46,7 +46,7 @@ from sqlalchemy import func, select
 from meho_backplane.api.v1.events_ingest import _read_capped_body, router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.vault import _resolve_login_role
+from meho_backplane.auth.vault import VaultClientError, _resolve_login_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EventOutbox, Tenant
 from meho_backplane.events.ingest.rate_limit import IngestRateLimitError
@@ -461,6 +461,85 @@ async def test_parallel_bad_deliveries_read_the_secret_once(
 
         good = await ac.post(url, content=body, headers=_signed(body))
     assert good.status_code == 202
+    assert len(reads) == 1
+
+
+def _failing_secret_reads(monkeypatch: pytest.MonkeyPatch, *, delay: float = 0.0) -> list[str]:
+    reads: list[str] = []
+
+    async def _read_secret(_operator: object, ref: str) -> SecretStr:
+        reads.append(ref)
+        await asyncio.sleep(delay)
+        raise VaultClientError("vault down")
+
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
+    )
+    return reads
+
+
+@pytest.mark.asyncio
+async def test_failed_secret_read_is_not_repeated_in_the_same_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Vault fails, ten deliveries in one window read Vault once; all get 503."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _failing_secret_reads(monkeypatch)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+
+    codes = [client.post(url, content=body, headers=_signed(body)).status_code for _ in range(10)]
+    assert codes == [503] * 10
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_deliveries_during_a_vault_failure_read_vault_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twenty deliveries at the same time during a Vault failure read Vault once."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _failing_secret_reads(monkeypatch, delay=0.05)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_build_app()), base_url="http://testserver"
+    ) as ac:
+        responses = await asyncio.gather(
+            *(ac.post(url, content=body, headers=_bad_signature(body)) for _ in range(20))
+        )
+    assert [r.status_code for r in responses] == [503] * 20
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_after_a_failed_read_a_new_window_or_secret_change_reads_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept read error ends with the window and with a secret change."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    _failing_secret_reads(monkeypatch)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+    assert client.post(url, content=body, headers=_signed(body)).status_code == 503
+
+    reads = _count_secret_reads(monkeypatch)
+    assert client.post(url, content=body, headers=_signed(body)).status_code == 503
+    for key, entry in list(_entries.items()):
+        _entries[key] = replace(entry, window=entry.window - 1)
+    assert client.post(url, content=body, headers=_signed(body)).status_code == 202
+    assert len(reads) == 1
+
+    _failing_secret_reads(monkeypatch)
+    (secret_ref,) = {ref for _source_id, ref in _entries}
+    await bump_secret_version(secret_ref)
+    other = b'{"alert":"resolved"}'
+    assert client.post(url, content=other, headers=_signed(other)).status_code == 503
+    reads = _count_secret_reads(monkeypatch, value="the-new-secret")
+    await bump_secret_version(secret_ref)
+    new = client.post(url, content=other, headers=_signed(other, secret="the-new-secret"))
+    assert new.status_code == 202
     assert len(reads) == 1
 
 

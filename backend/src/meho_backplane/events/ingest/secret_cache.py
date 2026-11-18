@@ -20,6 +20,11 @@ and reads Vault again, so a changed secret takes effect at once in every
 process. The version is read **before** the Vault read, so a read that
 races a change is stored under the old version and is not used again.
 
+A failed Vault read is kept the same way. Until the window or the secret
+version changes, the next deliveries for the source get the same error
+without a new Vault read. So when Vault is down or refuses the read, each
+process reads Vault about once per source and window, also under a burst.
+
 Within one process, deliveries that find no usable copy wait on one lock
 per source, so only one of them reads Vault. The secret stays a
 :class:`~pydantic.SecretStr`; it is never written to Valkey.
@@ -47,7 +52,8 @@ __all__ = [
 class _Entry:
     window: int
     version: str | None
-    secret: SecretStr
+    secret: SecretStr | None
+    error: Exception | None = None
 
 
 _entries: dict[tuple[UUID, str], _Entry] = {}
@@ -78,6 +84,14 @@ def _usable(entry: _Entry | None, window: int, version: str | None) -> bool:
     return entry is not None and entry.window == window and entry.version == version
 
 
+def _result(entry: _Entry) -> SecretStr:
+    """Return the kept secret, or raise the kept read error again."""
+    if entry.error is not None:
+        raise entry.error.with_traceback(None)
+    assert entry.secret is not None
+    return entry.secret
+
+
 async def cached_secret(
     source_id: UUID,
     secret_ref: str,
@@ -87,23 +101,26 @@ async def cached_secret(
     """Return the source's secret, from this process's copy when it is usable.
 
     *read* is called (at most once at a time per source) when the copy is
-    missing, from another window, or from another secret version. A failed
-    *read* stores nothing and its error propagates.
+    missing, from another window, or from another secret version. When
+    *read* fails, its error propagates and is kept: later calls in the same
+    window and secret version raise it again without calling *read*.
     """
     key = (source_id, secret_ref)
     version = await _secret_version(secret_ref)
     entry = _entries.get(key)
-    if _usable(entry, window, version):
-        assert entry is not None
-        return entry.secret
+    if entry is not None and _usable(entry, window, version):
+        return _result(entry)
     async with _locks.setdefault(key, asyncio.Lock()):
         entry = _entries.get(key)
-        if _usable(entry, window, version):
-            assert entry is not None
-            return entry.secret
-        secret = await read()
+        if entry is not None and _usable(entry, window, version):
+            return _result(entry)
         for old_key in [k for k, e in _entries.items() if e.window != window]:
             del _entries[old_key]
+        try:
+            secret = await read()
+        except Exception as exc:
+            _entries[key] = _Entry(window=window, version=version, secret=None, error=exc)
+            raise
         _entries[key] = _Entry(window=window, version=version, secret=secret)
         return secret
 

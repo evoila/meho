@@ -428,8 +428,12 @@ Run it on an install, from `backend/` with the install's database
 settings:
 
 ```bash
-uv run python -m scripts.retrieval_eval.typed_first --tenant-id <tenant-uuid> --out report.json
+uv run python -m scripts.typed_first_eval --tenant-id <tenant-uuid> > report.json
 ```
+
+Only the report goes to stdout. The logs go to stderr, also the logs
+that the connector imports write while they load. `--out <file>` writes
+the report to a file instead.
 
 The SQLite search of the unit tests ranks by substring only, so its
 numbers say nothing about real ranking. Real numbers come from an

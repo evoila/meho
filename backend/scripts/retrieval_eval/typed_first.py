@@ -23,15 +23,20 @@ the benchmark lane, which reads the same task file.
 Run on an install (from ``backend/``, with the install's database
 settings)::
 
-    uv run python -m scripts.retrieval_eval.typed_first --tenant-id <tenant-uuid>
-    uv run python -m scripts.retrieval_eval.typed_first --tenant-id <tenant-uuid> \\
+    uv run python -m scripts.typed_first_eval --tenant-id <tenant-uuid> > report.json
+    uv run python -m scripts.typed_first_eval --tenant-id <tenant-uuid> \\
         --tasks <private-task-file.yaml> --out report.json
+
+Only the report goes to stdout; logs go to stderr. The entry module
+``scripts.typed_first_eval`` sends the logs of the imports to stderr too,
+so start the test through it, not through this module.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
 import uuid
@@ -282,14 +287,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, help="write the JSON report here; default: stdout")
     args = parser.parse_args(argv)
 
-    report = asyncio.run(_run_and_close(load_typed_first_tasks(args.tasks), args.tenant_id))
+    report_stream = sys.stdout
+    # The connector imports and the search log to stdout; keep stdout for the report.
+    with contextlib.redirect_stdout(sys.stderr):
+        tasks = load_typed_first_tasks(args.tasks)
+        report = asyncio.run(_run_and_close(tasks, args.tenant_id))
     text = json.dumps(report.model_dump(mode="json"), indent=2) + "\n"
     if args.out is None:
-        sys.stdout.write(text)
+        report_stream.write(text)
     else:
         args.out.write_text(text, encoding="utf-8")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

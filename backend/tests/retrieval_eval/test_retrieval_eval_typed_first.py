@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -283,6 +285,38 @@ def test_main_writes_the_json_report(tmp_path: Path, monkeypatch: pytest.MonkeyP
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["summary"]["raw_hidden"]["top_1_rate"] == 1.0
     assert report["tasks"][0]["raw_visible"]["rank"] == 1
+
+
+def test_stdout_holds_only_the_json_report(tmp_path: Path) -> None:
+    """Start the real entry module; the startup logs must not reach stdout."""
+    tasks_path = tmp_path / "tasks.yaml"
+    tasks_path.write_text(
+        "version: 1\ntasks:\n"
+        "  - id: a\n"
+        "    connector_id: nothere-api-1.0\n"
+        "    request: list the pods\n"
+        "    expected_op_ids: [nothere.pod.list]\n",
+        encoding="utf-8",
+    )
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            *("-m", "scripts.typed_first_eval"),
+            *("--tenant-id", str(_TENANT)),
+            *("--tasks", str(tasks_path)),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert "connector_registered" in done.stderr
+    report = json.loads(done.stdout)
+    assert report["summary"]["raw_visible"]["not_run_count"] == 1
 
 
 # ---------------------------------------------------------------------------

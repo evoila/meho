@@ -13490,7 +13490,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(``targets.register`` and the ``topology.*`` writes need\n``tenant_admin``); below it the answer is 403 ``role_floor_required``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(the ``topology.*`` writes need ``tenant_admin``); below it the answer\nis 403 ``role_floor_required``. A grant for ``targets.register`` or\n``targets.update`` is refused, because a person approves each call of\nthese ops: 422, or 403 ``role_floor_required`` below ``tenant_admin``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -44050,6 +44050,14 @@
             "type": "array",
             "title": "Waiting For Approval",
             "default": []
+          },
+          "targets_written": {
+            "items": {
+              "$ref": "#/components/schemas/SettingsTargetWritten"
+            },
+            "type": "array",
+            "title": "Targets Written",
+            "default": []
           }
         },
         "type": "object",
@@ -44061,7 +44069,7 @@
           "diff"
         ],
         "title": "SettingsImportResponse",
-        "description": "The preview and the apply answer: plain JSON, the mistakes and the diff.\n\n``diff`` has one entry per section (``tenants``, ``policies``,\n``conventions``, ``targets``), each with ``added``, ``changed`` (``before``\nand ``after``) and ``not_in_file`` lists. It is ``null`` when the file has\nmistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists\nthe items that could not be written (the rest were), and ``revision_id`` is\nthe new revision (``null`` when nothing changed). ``waiting_for_approval``\nlists each target the file creates or changes: it is not written yet, and\na person approves each one (``meho approvals``, or the console)."
+        "description": "The preview and the apply answer: plain JSON, the mistakes and the diff.\n\n``diff`` has one entry per section (``tenants``, ``policies``,\n``conventions``, ``targets``), each with ``added``, ``changed`` (``before``\nand ``after``) and ``not_in_file`` lists. It is ``null`` when the file has\nmistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists\nthe items that could not be written (the rest were), and ``revision_id`` is\nthe new revision (``null`` when nothing changed). ``waiting_for_approval``\nlists each target the file creates or changes: it is not written yet, and\na person approves each one (``meho approvals``, or the console). When a\nrequest for that target already waits, the import lists that request\n(``already_waiting``) and makes no new one. ``targets_written`` lists a\ntarget call that ran at once."
       },
       "SettingsRevision": {
         "properties": {
@@ -44142,6 +44150,11 @@
             "type": "string",
             "format": "uuid",
             "title": "Approval Request Id"
+          },
+          "already_waiting": {
+            "type": "boolean",
+            "title": "Already Waiting",
+            "default": false
           }
         },
         "type": "object",
@@ -44152,7 +44165,31 @@
           "approval_request_id"
         ],
         "title": "SettingsTargetRequest",
-        "description": "A target of the file that waits for a person's approval."
+        "description": "A target of the file that waits for a person's approval.\n\n``already_waiting`` is true when an earlier call (an earlier import of\nthe same file, for example) made the request: the import made no new one."
+      },
+      "SettingsTargetWritten": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "name",
+          "op_id"
+        ],
+        "title": "SettingsTargetWritten",
+        "description": "A target of the file whose call ran at once."
       },
       "ShowTemplateResponse": {
         "properties": {

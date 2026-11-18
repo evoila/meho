@@ -11442,7 +11442,10 @@ type SessionUploadResultState string
 // the items that could not be written (the rest were), and “revision_id“ is
 // the new revision (“null“ when nothing changed). “waiting_for_approval“
 // lists each target the file creates or changes: it is not written yet, and
-// a person approves each one (“meho approvals“, or the console).
+// a person approves each one (“meho approvals“, or the console). When a
+// request for that target already waits, the import lists that request
+// (“already_waiting“) and makes no new one. “targets_written“ lists a
+// target call that ran at once.
 type SettingsImportResponse struct {
 	Applied            *bool                    `json:"applied,omitempty"`
 	Diff               *map[string]interface{}  `json:"diff"`
@@ -11451,6 +11454,7 @@ type SettingsImportResponse struct {
 	Ok                 bool                     `json:"ok"`
 	Preview            bool                     `json:"preview"`
 	RevisionId         *openapi_types.UUID      `json:"revision_id"`
+	TargetsWritten     *[]SettingsTargetWritten `json:"targets_written,omitempty"`
 	WaitingForApproval *[]SettingsTargetRequest `json:"waiting_for_approval,omitempty"`
 	Warnings           []string                 `json:"warnings"`
 }
@@ -11469,11 +11473,22 @@ type SettingsRevision struct {
 }
 
 // SettingsTargetRequest A target of the file that waits for a person's approval.
+//
+// “already_waiting“ is true when an earlier call (an earlier import of
+// the same file, for example) made the request: the import made no new one.
 type SettingsTargetRequest struct {
+	AlreadyWaiting    *bool              `json:"already_waiting,omitempty"`
 	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
 	Name              string             `json:"name"`
 	OpId              string             `json:"op_id"`
 	Path              string             `json:"path"`
+}
+
+// SettingsTargetWritten A target of the file whose call ran at once.
+type SettingsTargetWritten struct {
+	Name string `json:"name"`
+	OpId string `json:"op_id"`
+	Path string `json:"path"`
 }
 
 // ShowTemplateResponse Full template surface returned by “meho_runbook_show_template“.

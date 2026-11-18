@@ -6,7 +6,7 @@ directory. Passwords stay in the directory.
 
 **Before you start:**
 
-- The realm is set up and the five MEHO groups exist. See
+- The realm is set up and the MEHO role groups exist. See
   [Company login](index.md).
 - You can log in to the Keycloak admin console as the console admin
   (a user of realm `master`, default name `console-admin`; name and
@@ -40,8 +40,7 @@ directory. Passwords stay in the directory.
 You need one directory group per MEHO role. Pick one of two ways:
 
 - **A. Same names (simplest).** Make groups named exactly like the MEHO
-  groups: `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`,
-  `MEHO-Admins`, `MEHO-Approvers`. Keycloak links each one to the MEHO
+  groups: `MEHO-Readers`, `MEHO-Operators`, `MEHO-Admins`. Keycloak links each one to the MEHO
   group of the same name.
 - **B. Your own names.** Use groups you already have or name by your
   rules, for example `SG-MEHO-Ops`. Keycloak puts each one under its
@@ -126,7 +125,7 @@ Paste the filter as one line, exactly as it is here. No spaces and no
 line breaks.
 
 ```text
-(|(cn=MEHO-Readers)(cn=MEHO-Operators)(cn=MEHO-SA-Operators)(cn=MEHO-Admins)(cn=MEHO-Approvers))
+(|(cn=MEHO-Readers)(cn=MEHO-Operators)(cn=MEHO-Admins))
 ```
 
 **B. Your own names:** one mapper per MEHO group, each bringing in
@@ -136,16 +135,14 @@ exactly one directory group under its MEHO group.
 |---|---|---|
 | `meho-readers` | `(cn=SG-MEHO-Read)` | `/MEHO-Readers` |
 | `meho-operators` | `(cn=SG-MEHO-Ops)` | `/MEHO-Operators` |
-| `meho-sa-operators` | `(cn=SG-MEHO-SAOps)` | `/MEHO-SA-Operators` |
 | `meho-admins` | `(cn=SG-MEHO-Admin)` | `/MEHO-Admins` |
-| `meho-approvers` | `(cn=SG-MEHO-Approve)` | `/MEHO-Approvers` |
 
 Save, then click **Sync LDAP groups to Keycloak** on each mapper.
 
 What you see after the sync, in **Groups**:
 
 - **A:** each `MEHO-*` group once, at the top level, still with its
-  attributes. The sync reports the five as *updated*, not *imported*.
+  attributes. The sync reports the three as *updated*, not *imported*.
 - **B:** each directory group as the only child of its MEHO group, for
   example `MEHO-Operators` → `SG-MEHO-Ops`. Nothing new at the top level.
 

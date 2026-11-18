@@ -58,15 +58,13 @@ ADFS) work the same way. Only the clicks in Part 1 differ.
 
 ## How the groups work
 
-MEHO has five role groups. Each group gives a role:
+A new MEHO realm has three role groups. Each group gives a role:
 
 | MEHO group | Role in MEHO (`tenant_role`) | What the person can do |
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
 | `MEHO-Operators` | `operator` | Run actions. Risky changes wait until a second person approves. |
-| `MEHO-SA-Operators` | `operator` | Run actions, and approve their own risky changes on purpose. Also approve other people's `dangerous` and `destructive` changes. |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
-| `MEHO-Approvers` | `read_only`, plus `approver: true` | Approve other people's changes. Cannot run actions. |
 
 The rule: **put each person in exactly one of these groups.**
 
@@ -77,7 +75,7 @@ The rule: **put each person in exactly one of these groups.**
   groups. Who may approve what is in
   [Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
 
-The easiest setup is to give the authentik groups the same five names.
+The easiest setup is to give the authentik groups the same names.
 You can also use groups you already have and map them (see `groupMap`
 in Part 2).
 
@@ -85,8 +83,8 @@ in Part 2).
 
 ### 1. Create the groups
 
-In authentik, open **Directory > Groups > New Group**. Create the five
-groups from the table above, or pick five groups you already have. Put
+In authentik, open **Directory > Groups > New Group**. Create the three
+groups from the table above, or pick three groups you already have. Put
 each person in exactly one of them.
 
 ### 2. Create the application and the provider
@@ -127,7 +125,7 @@ Open **Applications > Applications > New Application**, and choose
     - **Issuer mode**: keep the default, "Each provider has a different
       issuer, based on the application slug".
 - **Bindings** (recommended): **Bind existing policy/group/user**, and
-  bind the five groups. Then authentik refuses people who are in none
+  bind the three groups. Then authentik refuses people who are in none
   of them. Without bindings, such a person reaches Keycloak, and MEHO
   refuses them with `401 missing_tenant_claim`.
 
@@ -199,9 +197,7 @@ coreKeycloak:
     groupMap:                         # authentik group -> MEHO group
       MEHO-Readers: MEHO-Readers
       MEHO-Operators: MEHO-Operators
-      MEHO-SA-Operators: MEHO-SA-Operators
       MEHO-Admins: MEHO-Admins
-      MEHO-Approvers: MEHO-Approvers
     autoRedirect: true                # go straight to authentik
     caBundle:                         # only for a private CA; else leave the name empty
       configMapName: company-login-ca
@@ -288,7 +284,7 @@ group of a removed or changed line.
     - `tenant_id` is your tenant UUID, and `tenant_role` is the role of
       your group;
     - `groups` lists your MEHO group;
-    - `approver: true` appears only for `MEHO-Approvers`.
+    - `approver: true` does not appear: no group of a new realm sets it.
 
 ## Your own Keycloak
 
@@ -297,7 +293,7 @@ built-in one. You set up the same broker by hand. The result is the
 same as with the Helm values above.
 
 **First:** set up the realm with [Keycloak realm setup](keycloak-realm.md),
-including the five groups and the mappers that read them. Check that a
+including the three groups and the mappers that read them. Check that a
 local user in a group can log in. This page writes your Keycloak as
 `<keycloak-host>` and your realm as `<realm>`.
 
@@ -336,7 +332,7 @@ Keycloak admin command line. Both give the same result.
       **Use PKCE** on, **PKCE Method** `S256`.
     - **Trust Email** off. **First login flow override**
       `first broker login`. **Sync mode** `force`. Click **Save**.
-3. **Mappers** tab > **Add mapper**, once for each of the five groups:
+3. **Mappers** tab > **Add mapper**, once for each of the three groups:
     - **Name** `meho-group-MEHO-Operators`, **Sync mode override**
       Force, **Mapper type** Advanced Claim to Group.
     - **Claims**: key `groups`, value `MEHO-Operators` (the authentik
@@ -383,7 +379,7 @@ jq --arg s "$CLIENT_SECRET" '.config.clientSecret = $s' company-idp.json \
   | kcadm.sh create identity-provider/instances -r "$REALM" -f -
 unset CLIENT_SECRET
 
-for G in MEHO-Readers MEHO-Operators MEHO-SA-Operators MEHO-Admins MEHO-Approvers; do
+for G in MEHO-Readers MEHO-Operators MEHO-Admins; do
   jq -n --arg g "$G" '{name: ("meho-group-" + $g), identityProviderAlias: "company",
       identityProviderMapper: "oidc-advanced-group-idp-mapper",
       config: {syncMode: "FORCE", "are.claim.values.regex": "false", group: ("/" + $g),
@@ -481,7 +477,7 @@ Keycloak admin console. With the built-in Keycloak:
 | authentik shows a redirect URI error | The address in authentik does not match. | Copy the redirect address from the install notes into authentik, mode Strict. |
 | The bootstrap Job stops: "publishes no signing keys" | authentik has no signing key. | Pick an RSA **Signing Key** in the authentik provider (Part 1, step 2). |
 | The bootstrap Job stops and names `manage-identity-providers` and `manage-realm` | The company login was off at the first install. | See "You turn on the company login on an existing install" above. |
-| The bootstrap Job stops: "groupMap names the group …, which the realm does not have" | A right side in `groupMap` is not a MEHO group. | Use one of the five MEHO group names. |
+| The bootstrap Job stops: "groupMap names the group …, which the realm does not have" | A right side in `groupMap` is not a MEHO group. | Use one of the MEHO role group names. |
 | Keycloak shows "Unexpected error when authenticating with identity provider" | Keycloak does not trust authentik's certificate. | Set `caBundle` (built-in) or `KC_TRUSTSTORE_PATHS` (your own Keycloak). |
 | `401 missing_tenant_claim` | The person is in no MEHO group. | Check the person's authentik group, the `groupMap` line, and that `profile` is in the scopes. Log in again. |
 | `401 multiple_role_groups` | The person is in two MEHO groups. | Keep one group per person in authentik. |

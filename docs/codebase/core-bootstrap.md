@@ -110,7 +110,7 @@ pair never leaves one person with a stored password that does not work.
 
 Without it nobody could administer realm `meho`: the first-start account
 is removed on the first run, `meho-admin` has only `manage-clients`,
-`manage-realm` and `manage-users`, and the two people have no Keycloak
+`manage-realm` and `manage-users`, and the Admin login has no Keycloak
 admin rights. The
 AD / LDAP recipe (docs-site/install/login/ad-ldap.md) needs a user
 federation, which only a realm admin can add. A company login through
@@ -140,7 +140,7 @@ reset the password of any user of realm `meho`, so a realm admin there
 could be taken over by anyone holding `meho-admin`'s secret. `meho-admin`
 cannot see users of realm `master`. MEHO refuses the console admin's
 tokens: they do not come from realm `meho`. Its password is made like the
-people's (temporary, `UPDATE_PASSWORD`). The Secret
+first admin's (temporary, `UPDATE_PASSWORD`). The Secret
 `<release>-core-console-admin` holds `username` and `password`. The
 Secret keeps the name of the first run: read the name from the Secret,
 not from the values. It is a Secret of its own, not two more keys in

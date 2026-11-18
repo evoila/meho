@@ -746,7 +746,7 @@ Go to this address and sign in as `admin` with the password you set in 6.1:
 echo https://$HOST/ui/
 ```
 
-The install notes also name a third login, the **console admin**: a
+The install notes also name a second login, the **console admin**: a
 user of Keycloak's own realm `master`, for Keycloak's admin page (for
 example to connect a company directory). MEHO itself refuses this
 login. Its user name and temporary password are in the Secret

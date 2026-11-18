@@ -66,7 +66,7 @@ Built-in core: what this install made
        kubectl -n {{ .Release.Namespace }} get secrets -l meho.evoila.com/managed-by=core-bootstrap
   Read once, then keep in your own key store:
 {{- if .Values.coreKeycloak.enabled }}
-    - {{ .Release.Name }}-core-first-login: the first two people's temporary passwords (below)
+    - {{ .Release.Name }}-core-first-login: the Admin login's temporary password (below)
 {{- end }}
 {{- if .Values.coreVault.enabled }}
     - {{ .Release.Name }}-core-vault-unseal: OpenBao's unseal key (above)

@@ -3268,14 +3268,17 @@ log records who approved, how, and when.</p>
   the <code>MEHO-SA-Operators</code> group or an admin. A person may approve their
   own change in three cases only:<ul>
 <li>A member of the <code>MEHO-SA-Operators</code> group or of the <code>MEHO-Admins</code>
-  group may approve their own change at every risk level. See
-  <a href="../../guides/approvals-and-break-glass/">Approvals and break-glass</a>.</li>
+  group may approve their own change at every risk level, but never
+  a change of rights. Another admin approves a change of rights. See
+  <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">Approvals and break-glass</a>.</li>
 <li>An operator or an admin may approve their own <code>caution</code> change
   when it waited only because they sent it with a token. This works
-  only with a click in the web interface.</li>
+  only with a click in the web interface. It never covers a change of
+  rights.</li>
 <li>When an admin turns on the audited emergency switch for the whole
   deploy, a person may approve their own <code>safe</code> or <code>caution</code> change.
-  The switch never covers a <code>dangerous</code> or <code>destructive</code> change.</li>
+  The switch never covers a <code>dangerous</code> or <code>destructive</code> change, and
+  never a change of rights.</li>
 </ul>
 </li>
 <li>The approver does not see the stored parameters of a request. The

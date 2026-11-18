@@ -3461,11 +3461,19 @@ the tenant list. See <a href="../../install/upgrades/#version-specific-notes">Up
 <p class="admonition-title">Each change waits for approval</p>
 <p>Putting a person in a group, or taking them out, runs at the
 <strong>dangerous</strong> risk level when you do it through MEHO, so each change
-waits for approval. Only a <strong>MEHO-SA-Operator</strong> may approve their own
-change; anyone else needs a second person (a MEHO-SA-Operator or an
-admin). The self-approval switch does not cover the dangerous risk
-level (decision record:
+waits for approval. The self-approval switch does not cover the
+dangerous risk level (decision record:
 <a href="https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md">tenant groups stay at the dangerous risk level</a>).</p>
+<ul>
+<li><strong>Putting a person in a group</strong> is a change of rights. Another
+  admin (a tenant admin or a platform admin) must approve it, never
+  the person who asked. A MEHO-SA-Operator who is not an admin cannot
+  approve it. See
+  <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>.</li>
+<li><strong>Taking a person out of a group</strong> only takes rights away. A
+  MEHO-SA-Operator or a MEHO-Admin may approve their own; anyone else
+  needs a second person (a MEHO-SA-Operator or an admin).</li>
+</ul>
 </div>
 <h2 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">&para;</a></h2>
 <ul>
@@ -3495,9 +3503,10 @@ level (decision record:
   <code>tenant_not_chosen</code> to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.</li>
-<li>A MEHO-SA-Operator who approves their own changes, a second person
-  who can approve, or the agent setup from
-  <a href="../approvals-and-break-glass/#option-2-the-agent-requester-pattern">Approvals and break-glass</a>.</li>
+<li>An admin who is not the person who asked, to approve each time you
+  put a person in a group. An install with only one admin adds a second
+  admin first (see
+  <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</li>
 </ul>
 <h2 id="step-1-add-the-tenant-in-keycloak">Step 1: Add the tenant in Keycloak<a class="headerlink" href="#step-1-add-the-tenant-in-keycloak" title="Permanent link">&para;</a></h2>
 <p>A new tenant needs a UUID and a short name. The short name uses
@@ -3529,7 +3538,7 @@ UUID once and keep it:</p>
 <tr>
 <td><code>MEHO-team-b-SA-Operators</code></td>
 <td><code>&lt;tenant-uuid&gt;:team-b:SA-Operators</code></td>
-<td><code>operator</code>, may approve their own changes</td>
+<td><code>operator</code>, may approve their own changes, but not a change of rights</td>
 </tr>
 <tr>
 <td><code>MEHO-team-b-Admins</code></td>
@@ -3720,7 +3729,8 @@ in your first tenant and operate in <code>team-b</code>:</p>
 meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>add<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--username<span class="w"> </span>alice@example.com<span class="w"> </span>--group-name<span class="w"> </span>MEHO-team-b-Operators
 </code></pre></div>
-<p>Each command waits for approval. The second person approves it:</p>
+<p>Each command waits for approval. It is a change of rights, so another
+admin approves it, never the person who asked:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>list
 meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;
 </code></pre></div>

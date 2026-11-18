@@ -2240,13 +2240,30 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#changes-of-rights-need-a-second-person" class="md-nav__link">
+  <a href="#changes-of-rights-need-another-admin" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Changes of rights need a second person
+        Changes of rights need another admin
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Changes of rights need another admin">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#more-rules-for-a-change-of-one-login-or-one-group" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        More rules for a change of one login or one group
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -3322,13 +3339,30 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#changes-of-rights-need-a-second-person" class="md-nav__link">
+  <a href="#changes-of-rights-need-another-admin" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Changes of rights need a second person
+        Changes of rights need another admin
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Changes of rights need another admin">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#more-rules-for-a-change-of-one-login-or-one-group" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        More rules for a change of one login or one group
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -3633,31 +3667,36 @@ come from the <a href="../../install/keycloak-realm/#step-5-create-the-five-grou
 <th>Your own change</th>
 <th>Another person's <code>safe</code> or <code>caution</code> change (also one marked <code>requires_approval</code>)</th>
 <th>Another person's <code>dangerous</code> or <code>destructive</code> change</th>
+<th>Another person's <a href="#changes-of-rights-need-another-admin">change of rights</a></th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>MEHO-SA-Operators</code></td>
-<td>yes, at every risk level</td>
-<td>yes</td>
-<td>yes</td>
+<td>yes, at every risk level, but never a change of rights</td>
+<td>yes, but not a change of rights</td>
+<td>yes, but not a change of rights</td>
+<td>no</td>
 </tr>
 <tr>
 <td><code>MEHO-Admins</code></td>
-<td>yes, at every risk level</td>
+<td>yes, at every risk level, but never a change of rights</td>
+<td>yes</td>
 <td>yes</td>
 <td>yes</td>
 </tr>
 <tr>
 <td><code>MEHO-Operators</code></td>
 <td>only a <code>caution</code> change that waited because you sent it with a token, with a click in the web interface</td>
-<td>yes</td>
+<td>yes, but not a change of rights</td>
+<td>no</td>
 <td>no</td>
 </tr>
 <tr>
 <td><code>MEHO-Approvers</code></td>
 <td>(you cannot run changes)</td>
-<td>yes</td>
+<td>yes, but not a change of rights</td>
+<td>no</td>
 <td>no</td>
 </tr>
 <tr>
@@ -3665,11 +3704,17 @@ come from the <a href="../../install/keycloak-realm/#step-5-create-the-five-grou
 <td>(you cannot run changes)</td>
 <td>no</td>
 <td>no</td>
+<td>no</td>
 </tr>
 </tbody>
 </table>
+<p>A platform admin (<code>MEHO-Platform-Admins</code>) who has no role group in a
+tenant acts as its admin there, so they may approve another person's
+change of rights in that tenant. A platform admin with a lower role
+group in a tenant keeps that role there.</p>
 <p>"SA" means self-approval. MEHO-Admins may approve their own changes in
-the same way. A MEHO-SA-Operator's or a MEHO-Admin's change still waits
+the same way. Self-approval never covers a change of rights (see
+<a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>). A MEHO-SA-Operator's or a MEHO-Admin's change still waits
 like any other. The same person then approves it, on purpose: with a click in
 the web interface, or on the command line after a fresh sign-in. The
 wait keeps three things: the approver sees exactly what will run, sees
@@ -3702,23 +3747,63 @@ neither, gets <code>403 approval_group_required</code>.</p>
 "withdrawn by the sender", nobody can approve it, and the operation does
 not run. A person, an agent or a service account can each withdraw its
 own request.</p>
-<h2 id="changes-of-rights-need-a-second-person">Changes of rights need a second person<a class="headerlink" href="#changes-of-rights-need-a-second-person" title="Permanent link">&para;</a></h2>
-<p>A change that adds a login to a group, gives a login a role, or changes the
-attributes of a group follows more rules:</p>
+<h2 id="changes-of-rights-need-another-admin">Changes of rights need another admin<a class="headerlink" href="#changes-of-rights-need-another-admin" title="Permanent link">&para;</a></h2>
+<p>A change of rights is a change that can give someone more rights. For
+such a change, these rules hold in every realm a Keycloak target
+manages, not only in MEHO's own login realm:</p>
 <ul>
-<li>The login the change is for cannot approve it. This holds for every group.
-  A second login of the same person is not a second person. If you have two
-  logins, ask a colleague to approve.</li>
-<li>A change of a group's attributes changes the rights of everyone in the
-  group. In MEHO's own login realm, a person in the group cannot approve it.</li>
-<li>MEHO must know which login and which group the change is for. When a user
-  name or a group name could not be looked up when the request was made, or
-  when MEHO could not read who is in the group, nobody can approve the
-  request. Send a new one.</li>
-<li>In MEHO's own login realm, a second person who is a tenant admin must
-  approve the change. For the platform admin group or role, a platform admin
-  must approve it. A MEHO-SA-Operator cannot approve such a change of their
-  own.</li>
+<li>Another admin must approve it: a tenant admin (<code>MEHO-Admins</code>) or a
+  platform admin (<code>MEHO-Platform-Admins</code>).</li>
+<li>The person who asked never approves it. This holds in every group, at
+  every risk level, and also with the break-glass switch on.</li>
+<li>A MEHO-SA-Operator who is not an admin cannot approve it, also not
+  another person's change of rights.</li>
+<li>A standing grant or a run approval never covers it. Each call waits
+  for its own approval, also the call of an agent or a service account.</li>
+</ul>
+<p>When you may not approve such a change, MEHO answers: "This is a change
+of rights. Another admin must approve it."</p>
+<p>These Keycloak writes are changes of rights:</p>
+<ul>
+<li><strong>Who has which role or group:</strong> give a user a realm role or a role of
+  a client, add a user to a group, or change the attributes of a group.</li>
+<li><strong>Who may sign in, and how:</strong> create a user, change a user's user name
+  or email, turn a login on, set a new password, remove a passkey or a
+  one-time code, or set the steps a user must do at the next sign-in.</li>
+<li><strong>What a login token says:</strong> create or change a realm or a client,
+  create a client scope, or create or change a protocol mapper.</li>
+<li><strong>How strong a sign-in is:</strong> set up MEHO's approval sign-in, the touch
+  sign-in, or the step that skips the one-time code after a passkey.</li>
+</ul>
+<p>The exact list, with the reason for each write, is in
+<a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md#writes-that-are-changes-of-rights">Writes that are changes of rights</a>.
+A Keycloak write that only takes rights away (remove a user from a
+group, turn a login off, delete) is not a change of rights. A few other
+operations are changes of rights too, for example a policy import (see
+<a href="../policy-file/">the policy file guide</a>).</p>
+<p><strong>An install with only one admin.</strong> There is no other admin there, so
+that admin cannot get their own change of rights approved. Add a second
+admin in Keycloak itself (in <code>MEHO-Admins</code> or <code>MEHO-Platform-Admins</code>)
+before you run such a change. See the v0.47.0 notes in
+<a href="../../install/upgrades/#version-specific-notes">Upgrades</a>.</p>
+<h3 id="more-rules-for-a-change-of-one-login-or-one-group">More rules for a change of one login or one group<a class="headerlink" href="#more-rules-for-a-change-of-one-login-or-one-group" title="Permanent link">&para;</a></h3>
+<p>A change that adds a login to a group, gives a login a role, changes a
+user's details, removes a credential, or changes the attributes of a
+group has more rules:</p>
+<ul>
+<li>The login the change is for cannot approve it. This holds for every
+  group. A second login of the same person is not a second person. If
+  you have two logins, ask a colleague to approve.</li>
+<li>MEHO must know which login and which group the change is for. When a
+  user name or a group name could not be looked up when the request was
+  made, nobody can approve the request. Send a new one.</li>
+<li>In MEHO's own login realm, a change of a group's attributes changes
+  the rights of everyone in the group. A person in the group cannot
+  approve it. When MEHO could not read who is in the group, nobody can
+  approve the request. Send a new one.</li>
+<li>In MEHO's own login realm, a change of the platform admin group or
+  role, or a role of Keycloak's <code>realm-management</code> client, needs a
+  platform admin as the approver.</li>
 </ul>
 <p>The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group
@@ -3747,7 +3832,10 @@ The change applies at your next login. Then:</p>
    approved your own change.</li>
 </ol>
 <p>This works at every risk level, also for <code>dangerous</code> and <code>destructive</code>
-changes. On the command line, <code>meho approvals approve &lt;id&gt;</code> does the
+changes. It never works for a change of rights: another admin must
+approve that (see
+<a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).
+On the command line, <code>meho approvals approve &lt;id&gt;</code> does the
 same after a fresh sign-in, and prints a line that says it was a
 self-approval. The decision record shows <code>self_approved: true</code> and the
 rule <code>sa_operator_self_approval</code>.</p>
@@ -3810,7 +3898,10 @@ agent covers it (a <code>deny</code> grant refuses it). With no grant, it
 depends on the switch <code>AGENT_GRANT_REQUIRED</code>: with <code>off</code> (the default)
 or <code>observe</code> it waits for a person too, and with <code>on</code> it is refused
 (<code>agent_no_grant</code>). For a <code>dangerous</code> or <code>destructive</code> write, the
-person who approves must be a MEHO-SA-Operator or a MEHO-Admin.</p>
+person who approves must be a MEHO-SA-Operator or a MEHO-Admin.
+For a change of rights, the person who approves must be an admin who
+is not the person who asked for it (see
+<a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</p>
 <div class="admonition warning">
 <p class="admonition-title">It must be an <em>autonomous</em> run, not a <em>delegated</em> one</p>
 <p>Only an <strong>autonomous / scheduled</strong> agent run parks the request under
@@ -3868,6 +3959,9 @@ change. Understand exactly what you traded away:</p>
   risk levels. For <code>dangerous</code> and <code>destructive</code> changes only the group
   rules count: a MEHO-SA-Operator or a MEHO-Admin may approve their own,
   everyone else needs a MEHO-SA-Operator or a MEHO-Admin.</li>
+<li><strong>It never covers a change of rights.</strong> Another admin approves a
+  change of rights, also with the flag on (see
+  <a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</li>
 <li><strong>It is for emergencies, not the solo default.</strong> Reach for Option 1
   first. Leaving this on lets every person in every tenant approve their
   own lower-risk changes.</li>
@@ -4099,12 +4193,16 @@ pending. Add the missing line and try again. A reason can be at most
 <td><strong>Agent-requester</strong> (Option 2)</td>
 </tr>
 <tr>
+<td>Solo deploy, a change of rights you asked for</td>
+<td><strong>Add a second admin</strong> first. No option on this page lets you approve your own change of rights. See <a href="#changes-of-rights-need-another-admin">An install with only one admin</a></td>
+</tr>
+<tr>
 <td>Genuine emergency, <code>safe</code> or <code>caution</code> change, and nobody in MEHO-SA-Operators or MEHO-Admins</td>
 <td><strong>Break-glass</strong> (Option 3), then turn it back off</td>
 </tr>
 <tr>
 <td>More than one operator</td>
-<td>Another person approves; for a <code>dangerous</code> or <code>destructive</code> change, a MEHO-SA-Operator or a MEHO-Admin</td>
+<td>Another person approves; for a <code>dangerous</code> or <code>destructive</code> change, a MEHO-SA-Operator or a MEHO-Admin; for a change of rights, another admin</td>
 </tr>
 </tbody>
 </table>
@@ -4121,6 +4219,12 @@ operation.</p>
 <p><strong><code>approve</code> returns <code>approval_group_required</code>.</strong> The change is another
 person's <code>dangerous</code> or <code>destructive</code> change, and you are not a
 MEHO-SA-Operator or a MEHO-Admin. Ask one of them to approve it.</p>
+<p><strong><code>approve</code> returns <code>rights_change_required</code>.</strong> The answer says "This is
+a change of rights. Another admin must approve it." You asked for the
+change yourself, or you are not an admin in this tenant. An admin who is
+not the person who asked must approve it. No group, risk level or
+break-glass flag changes this (see
+<a href="#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</p>
 <p><strong>The Approve button is greyed out in the console.</strong> The request window
 says why: for example, it is your own change and the group rules do not
 let you approve it. For your own change, the window also names ways

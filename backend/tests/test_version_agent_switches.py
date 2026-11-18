@@ -279,6 +279,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "vault_oidc_mount_path",
         "vault_oidc_role",
         "vault_oidc_role_by_tenant",
+        "vault_oidc_role_tenants",
         "vault_scheduler_token",
         "vault_scheduler_token_file",
         "vault_timeout_seconds",

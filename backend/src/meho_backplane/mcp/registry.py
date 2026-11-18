@@ -779,10 +779,25 @@ def get_tool(name: str) -> tuple[ToolDefinition, ToolHandler] | None:
 
 
 def tool_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
-    """Return *definition* as *operator*'s session sees it under the current settings."""
-    if definition.for_settings is None:
-        return definition
-    return definition.for_settings(definition, operator)
+    """Return *definition* as *operator*'s session sees it under the current settings.
+
+    A session that sees the short tool texts (``MCP_SHORT_TOOL_TEXTS``, or
+    ``?texts=short``; see :mod:`meho_backplane.mcp.short_texts`) also gets
+    no ``outputSchema`` (#4714). The output schema is optional in MCP, and
+    the result stays the same JSON in the text block. The ``tools/call``
+    handler uses this tool too, so it sends ``structuredContent`` only when
+    the session's listing has an output schema.
+    """
+    shown = (
+        definition
+        if definition.for_settings is None
+        else definition.for_settings(definition, operator)
+    )
+    if shown.outputSchema is not None and (
+        get_settings().mcp_short_tool_texts or operator.mcp_short_tool_texts
+    ):
+        return shown.model_copy(update={"outputSchema": None})
+    return shown
 
 
 def registered_tool_names() -> frozenset[str]:

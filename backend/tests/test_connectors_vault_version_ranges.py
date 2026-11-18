@@ -11,6 +11,7 @@ until a CI run on it is green.
 
 from __future__ import annotations
 
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,11 @@ from packaging.version import Version
 
 from meho_backplane.checks.connector_fit import connector_fit
 from meho_backplane.connectors.registry import _eager_import_connectors
-from meho_backplane.connectors.resolver import NoMatchingConnector, resolve_connector
+from meho_backplane.connectors.resolver import (
+    NoMatchingConnector,
+    resolve_connector,
+    stale_openbao_probe_hint,
+)
 from meho_backplane.connectors.vault import OpenBaoConnector, VaultConnector
 
 
@@ -104,3 +109,42 @@ def test_sensor_on_vault_connector_warns_for_hashicorp_2_x() -> None:
     fit = connector_fit("vault-1.x", _target("2.0.0", probed_product="vault"))
     assert fit.warning is not None
     assert fit.matching_connector_id is None
+
+
+def test_hint_for_an_old_openbao_target_names_the_probe() -> None:
+    hint = stale_openbao_probe_hint(_target("2.7.1", probed_product="vault"))
+    assert hint is not None
+    assert "`meho targets probe -- t`" in hint
+
+
+@pytest.mark.parametrize(
+    ("name", "quoted"),
+    [
+        ("example;id", "'example;id'"),
+        ("-rf", "-rf"),
+        ("it's", "'it'\"'\"'s'"),
+        ("a b", "'a b'"),
+    ],
+)
+def test_hint_quotes_the_target_name(name: str, quoted: str) -> None:
+    target = _target("2.7.1", probed_product="vault")
+    target.name = name
+    hint = stale_openbao_probe_hint(target)
+    assert hint is not None
+    assert f"`meho targets probe -- {quoted}`" in hint
+    command = hint.split("`")[1]
+    assert shlex.split(command) == ["meho", "targets", "probe", "--", name]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _target("1.21.1"),
+        _target("2.7.1", probed_product="openbao"),
+        _target(None),
+        _target("not-a-version", probed_product="vault"),
+        SimpleNamespace(product="postgres", name="t", version="2.7.1", fingerprint=None),
+    ],
+)
+def test_no_hint_when_the_cause_is_another(target: SimpleNamespace) -> None:
+    assert stale_openbao_probe_hint(target) is None

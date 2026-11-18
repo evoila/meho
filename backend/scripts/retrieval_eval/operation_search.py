@@ -22,9 +22,18 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._code_presence import connector_code_missing
-from meho_backplane.operations._lookup import connector_exists, parse_connector_id
+from meho_backplane.operations._lookup import (
+    connector_exists,
+    parse_connector_id,
+    visible_scope_clause,
+)
+from meho_backplane.operations._search_typed_first import TYPED_KINDS
 from meho_backplane.operations.meta_tools import _run_search
 
 __all__ = [
@@ -40,11 +49,14 @@ class OperationSearchResult:
 
     op_ids: list[str] = field(default_factory=list)
     not_run_reason: str | None = None
+    #: The hits of ``op_ids`` that are raw operations (made from a vendor
+    #: API file), not typed or multi-step ones.
+    raw_op_ids: frozenset[str] = frozenset()
 
 
 #: Type of the ``search_operations_fn`` the runner calls per operations
 #: question. Keyword arguments: ``tenant_id``, ``connector_id``, ``query``,
-#: ``limit``. Tests pass a stub; the default is
+#: ``limit`` and, from the typed-first test, ``typed_only``. Tests pass a stub; the default is
 #: :func:`search_corpus_operations`.
 SearchOperationsCallable = Callable[..., Awaitable[OperationSearchResult]]
 
@@ -55,12 +67,14 @@ async def search_corpus_operations(
     connector_id: str,
     query: str,
     limit: int,
+    typed_only: bool = False,
 ) -> OperationSearchResult:
     """Run the ranked operation search for one eval question.
 
     Returns the ``op_id`` of each hit in rank order, cut to *limit*. A
     connector that this tenant cannot search gives an empty list and a
-    ``not_run_reason`` instead.
+    ``not_run_reason`` instead. *typed_only* hides raw operations, as the
+    switch ``SEARCH_TYPED_FIRST`` does (#4712).
     """
     product, version, impl_id = parse_connector_id(connector_id)
     if not await connector_exists(
@@ -85,6 +99,14 @@ async def search_corpus_operations(
             group_key=None,
             query=query,
             limit=limit,
+            typed_only=typed_only,
+        )
+        op_ids = [hit.op_id for hit in hits]
+        raw_op_ids = await _raw_op_ids(
+            session,
+            tenant_id=tenant_id,
+            connector=(product, version, impl_id),
+            op_ids=op_ids,
         )
     if outcome == "package_not_installed":
         package = detail[0] if detail else "?"
@@ -97,4 +119,34 @@ async def search_corpus_operations(
         return OperationSearchResult(
             not_run_reason=f"connector {connector_id!r} has no enabled operations"
         )
-    return OperationSearchResult(op_ids=[hit.op_id for hit in hits])
+    return OperationSearchResult(op_ids=op_ids, raw_op_ids=raw_op_ids)
+
+
+async def _raw_op_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    connector: tuple[str, str, str],
+    op_ids: list[str],
+) -> frozenset[str]:
+    """Return the ``op_id`` values of *op_ids* that are raw operations."""
+    if not op_ids:
+        return frozenset()
+    product, version, impl_id = connector
+    rows = await session.execute(
+        select(EndpointDescriptor.op_id).where(
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
+            EndpointDescriptor.product == product,
+            EndpointDescriptor.version == version,
+            EndpointDescriptor.impl_id == impl_id,
+            EndpointDescriptor.op_id.in_(op_ids),
+            EndpointDescriptor.source_kind.not_in(TYPED_KINDS),
+        )
+    )
+    return frozenset(rows.scalars().all())

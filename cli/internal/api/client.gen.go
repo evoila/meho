@@ -2157,6 +2157,18 @@ type ApprovalRevealResult_Result struct {
 	union json.RawMessage
 }
 
+// ApprovalScriptPageView One page of the script of a waiting “linux.script.run“ request.
+type ApprovalScriptPageView struct {
+	ApprovalRequestId  openapi_types.UUID `json:"approval_request_id"`
+	Page               int                `json:"page"`
+	Pages              int                `json:"pages"`
+	Script             *string            `json:"script"`
+	ScriptBytes        int                `json:"script_bytes"`
+	ScriptSha256       *string            `json:"script_sha256"`
+	ScriptUnavailable  *string            `json:"script_unavailable"`
+	ScriptValuesHidden *bool              `json:"script_values_hidden,omitempty"`
+}
+
 // ApprovalSignInStatus The state of the approval sign-in flow and its binding (#6280).
 type ApprovalSignInStatus struct {
 	Client string                    `json:"client"`
@@ -13279,6 +13291,13 @@ type RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams defines parameters for GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet.
+type GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams struct {
+	// Page Page number, from 1.
+	Page          *int    `form:"page,omitempty" json:"page,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams defines parameters for WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost.
 type WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -14576,6 +14595,11 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Partial *string `form:"partial,omitempty" json:"partial,omitempty"`
 	Order   *string `form:"order,omitempty" json:"order,omitempty"`
+}
+
+// ApprovalScriptPageUiApprovalsRequestIdScriptGetParams defines parameters for ApprovalScriptPageUiApprovalsRequestIdScriptGet.
+type ApprovalScriptPageUiApprovalsRequestIdScriptGetParams struct {
+	Page *int `form:"page,omitempty" json:"page,omitempty"`
 }
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
@@ -17566,6 +17590,9 @@ type ClientInterface interface {
 	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost request
 	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet request
+	GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18488,6 +18515,9 @@ type ClientInterface interface {
 
 	// ApprovalRunStateUiApprovalsRequestIdRunGet request
 	ApprovalRunStateUiApprovalsRequestIdRunGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalScriptPageUiApprovalsRequestIdScriptGet request
+	ApprovalScriptPageUiApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuditPageUiAuditGet request
 	UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19903,6 +19933,18 @@ func (c *Client) GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.C
 
 func (c *Client) RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetRequest(c.Server, requestId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -24007,6 +24049,18 @@ func (c *Client) ApprovalHistoryRowUiApprovalsRequestIdRowGet(ctx context.Contex
 
 func (c *Client) ApprovalRunStateUiApprovalsRequestIdRunGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApprovalRunStateUiApprovalsRequestIdRunGetRequest(c.Server, requestId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalScriptPageUiApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalScriptPageUiApprovalsRequestIdScriptGetRequest(c.Server, requestId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -29927,6 +29981,77 @@ func NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(server str
 	}
 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetRequest generates requests for GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet
+func NewGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetRequest(server string, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/script", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Page != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "page", runtime.ParamLocationQuery, *params.Page); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -45167,6 +45292,62 @@ func NewApprovalRunStateUiApprovalsRequestIdRunGetRequest(server string, request
 	return req, nil
 }
 
+// NewApprovalScriptPageUiApprovalsRequestIdScriptGetRequest generates requests for ApprovalScriptPageUiApprovalsRequestIdScriptGet
+func NewApprovalScriptPageUiApprovalsRequestIdScriptGetRequest(server string, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/script", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Page != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "page", runtime.ParamLocationQuery, *params.Page); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAuditPageUiAuditGetRequest generates requests for UiAuditPageUiAuditGet
 func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGetParams) (*http.Request, error) {
 	var err error
@@ -54562,6 +54743,9 @@ type ClientWithResponsesInterface interface {
 	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse request
 	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error)
 
+	// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse request
+	GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse, error)
+
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error)
 
@@ -55484,6 +55668,9 @@ type ClientWithResponsesInterface interface {
 
 	// ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse request
 	ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalRunStateUiApprovalsRequestIdRunGetResponse, error)
+
+	// ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse request
+	ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse, error)
 
 	// UiAuditPageUiAuditGetWithResponse request
 	UiAuditPageUiAuditGetWithResponse(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*UiAuditPageUiAuditGetResponse, error)
@@ -57170,6 +57357,29 @@ func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalScriptPageView
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -62711,6 +62921,28 @@ func (r ApprovalRunStateUiApprovalsRequestIdRunGetResponse) StatusCode() int {
 	return 0
 }
 
+type ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAuditPageUiAuditGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -67249,6 +67481,15 @@ func (c *ClientWithResponses) RevealApprovedRequestApiV1ApprovalsRequestIdReveal
 	return ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp)
 }
 
+// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse request returning *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse
+func (c *ClientWithResponses) GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse, error) {
+	rsp, err := c.GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse(rsp)
+}
+
 // WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with arbitrary body returning *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse
 func (c *ClientWithResponses) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error) {
 	rsp, err := c.WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
@@ -70222,6 +70463,15 @@ func (c *ClientWithResponses) ApprovalRunStateUiApprovalsRequestIdRunGetWithResp
 		return nil, err
 	}
 	return ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse(rsp)
+}
+
+// ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse request returning *ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse
+func (c *ClientWithResponses) ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse, error) {
+	rsp, err := c.ApprovalScriptPageUiApprovalsRequestIdScriptGet(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalScriptPageUiApprovalsRequestIdScriptGetResponse(rsp)
 }
 
 // UiAuditPageUiAuditGetWithResponse request returning *UiAuditPageUiAuditGetResponse
@@ -73981,6 +74231,39 @@ func ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp *ht
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ApprovalRevealResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse parses an HTTP response from a GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse call
+func ParseGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse(rsp *http.Response) (*GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalScriptPageView
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -81492,6 +81775,32 @@ func ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse(rsp *http.Response)
 	}
 
 	response := &ApprovalRunStateUiApprovalsRequestIdRunGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalScriptPageUiApprovalsRequestIdScriptGetResponse parses an HTTP response from a ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse call
+func ParseApprovalScriptPageUiApprovalsRequestIdScriptGetResponse(rsp *http.Response) (*ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -307,6 +307,33 @@ A request without a card object (no blast radius) is not checked. The
 re-run path reports the three checks as `target_changed`,
 `preview_changed` and `object_changed`.
 
+**State on the card.** Some approval cards show the object as it is now,
+next to what the call changes (for example the roles a user has now). A
+connector registers such an operation with `register_state_pin(op_id,
+card_key)` (`operations/approval_state_pin.py`). The card holds the state
+under `card_key` and says `<card_key>_available: true`. Right before every
+approved run, with or without a preview hash,
+`state_changed_since_request` builds the card again and compares the
+state:
+
+- the same state: the run goes ahead;
+- another state: the run is refused (`REASON_STATE_CHANGED`: "The object
+  changed since the approval; send the request again.");
+- the approved card did not show the state (MEHO could not read it when the
+  request waited, or the request is older than the card), or MEHO cannot
+  read it now: the run is refused (`REASON_STATE_UNREADABLE`).
+
+A connector can name the part of the state that the run compares with
+`register_state_pin(..., compared=<function>)`. Keycloak's
+`group.member.add` compares only the group id and its roles, not the
+member list. A re-run after a first run that failed part way is refused
+when the first run already changed the object.
+
+The refusal has the `object_changed_since_approval` error code, in the
+shared resume check and in the re-run (`object_changed`). The Keycloak
+writes that use it are listed in
+[connectors-keycloak.md](connectors-keycloak.md#writes-that-are-changes-of-rights).
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -1927,6 +1954,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
+| An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.
@@ -2072,6 +2100,21 @@ for the person who asked, not a run. The code is in
 - A refused fetch answers 409 with `detail` `reveal_<code>: <message>`.
   Codes: `not_a_reveal`, `not_approved`, `already_used`,
   `window_passed`, `params_changed`.
+
+### Reading a long script, page by page
+
+The park-time preview of `linux.script.run` holds page 1 of the script (64 KiB). The
+full script is in the encrypted hand-off store until the approved call runs
+(`consume` deletes it). While the request waits, the approver reads the other
+pages with `GET /api/v1/approvals/{id}/script?page=N` (same access as
+`GET /api/v1/approvals/{id}`; 410 with a plain sentence after the decision; 409
+when the stored script cannot be decrypted; 404 for a request with no script or
+a page that does not exist), with `meho
+approvals show <id> --script-page N`, and with the page links of the console
+block (`GET /ui/approvals/{id}/script?page=N`). The read does not delete the stored
+script (`approval_handoff.read`). After the decision the console block has no
+page links and says that only page 1 is shown. Details and limits:
+[`connectors-linux.md`](connectors-linux.md).
 
 ## Surfacing the approved dispatch's result to the originating consumer (#3209)
 
@@ -2845,7 +2888,7 @@ later, each with its own builder
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace and the whole Job `spec` as it will be created: Job settings (`backoffLimit`, ...), node choice (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), `hostPID` / `hostNetwork` / `hostIPC`, service account, pod and container `securityContext`, image, `command`, `args`, `volumes`, `volumeMounts`, env var names, `envFrom` and `valueFrom` references (Secret or ConfigMap name and key) | every inline `env` value and probe `httpHeaders` value (the name stays); on `command` and `args`, read as one command line: the value of a `NAME=VALUE` or `--name=value` whose name holds a secret word (`PGPASSWORD=...`, `--password=...`, any length), the argument after a secret flag (`--password x`, `-p x`; also across the end of `command`), the password in `user:password` after `-u` / `--user`, the password in a URL, tokens with a known vendor prefix (`ghp_...`). A list item is one argument of the program, so such a value runs to the end of the item, spaces and shell operators included (`PGPASSWORD=x;tail` is hidden whole); only in the item after `-c` (alone or in a short option group such as `-ec` or `-lc`), a shell command string, is the value one shell word, quotes and escapes included, and an unquoted shell operator such as `;` or `&&` ends it, so the commands after it stay visible; secret-shaped text anywhere in the spec (JWTs, bearer tokens); the value of a field with a secret-shaped name (a `secret` volume, `imagePullSecrets`). A secret on a command line with no known shape is shown. |
-| `linux.script.run` | every call | target, interpreter, the script text with its size and SHA-256, the reviewed copy (`script_ref`) and whether the script matches `expected_sha256`, argument byte size, env var names, the `secret_env` references (`path#field`), working directory, `use_sudo`, timeout ([`connectors-linux.md`](connectors-linux.md)) | the argument values and env values; in the script text, values that look like secrets, with the command-line rules of `k8s.job.create` and two changes: `-p` hides its value only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are; and a password glued to `-u` (`curl -uuser:password`) is hidden too (then the SHA-256 is left out too) |
+| `linux.script.run` | every call | target, interpreter, the script text (page 1 of the pages, 64 KiB each, with the page count) with its size and SHA-256, the reviewed copy (`script_ref`) and whether the script matches `expected_sha256`, argument byte size, env var names, the `secret_env` references (`path#field`), working directory, `use_sudo`, timeout ([`connectors-linux.md`](connectors-linux.md)) | the argument values and env values; in the script text, values that look like secrets, with the command-line rules of `k8s.job.create` and two changes: `-p` hides its value only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are; and a password glued to `-u` (`curl -uuser:password`) is hidden too (then the SHA-256 is left out too) |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |

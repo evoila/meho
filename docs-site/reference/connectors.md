@@ -57,19 +57,20 @@ evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF conn
 | --- | --- | --- | --- | --- |
 | VMware vCenter and vSphere | `vmware-rest-9.0`, `vmware-rest-8.0` | 8.0 Update 1 or newer, 9.x | `vmware-rest-9.0`: 9.1.0.0: changes (Oct 2026, last tested with MEHO v0.37.0). `vmware-rest-8.0`: 8.0.3: changes (Oct 2026, last tested with MEHO v0.37.0). | Reads and manages virtual machines, hosts, clusters, storage and networks. |
 | VMware NSX | `nsx-rest-9.0`, `nsx-rest-4.2` | 4.x, 9.x | `nsx-rest-9.0`: 9.1.0.0: reads (Nov 2026). `nsx-rest-4.2`: not yet tested live. | Reads and changes segments, gateways, firewall rules, load balancers and VPNs. |
-| VCF SDDC Manager | `sddc-rest-9.0`, `sddc-vcf5-5.0` | 5.x, 9.x | `sddc-rest-9.0`: 9.1.0.0: reads (Nov 2026). `sddc-vcf5-5.0`: not yet tested live. | Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks. |
+| VCF SDDC Manager | `sddc-rest-9.1`, `sddc-rest-9.0`, `sddc-vcf5-5.0` | 5.x, 9.x | `sddc-rest-9.1`: not yet recorded. `sddc-rest-9.0`: 9.1.0.0: reads (Nov 2026). `sddc-vcf5-5.0`: not yet tested live. | Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks. |
+| VCF Operations for Networks | `vrni-rest-9.0`, `vrni-rest-6.14` | 6.14, 9.x | `vrni-rest-9.0`: not yet recorded. `vrni-rest-6.14`: not yet recorded. | Reads network flows, applications and problems, and the infrastructure it sees. |
 | VCF Installer and Cloud Builder | `installer-rest-9.1`, `installer-cb-5.0` | 5.x, 9.x | `installer-rest-9.1`: 9.1.1.0: changes (Oct 2026, last tested with MEHO v0.37.0). `installer-cb-5.0`: not yet tested live. | Checks a deployment plan and deploys a new VCF instance. |
-| VCF fleet management and Aria Suite Lifecycle | `fleet-lcm-9.0`, `fleet-rest-9.0` | 8.x, 9.x | `fleet-lcm-9.0`: not yet tested live. `fleet-rest-9.0`: not yet tested live. | Installs, updates and scales the VCF management components. |
-| VCF Automation and Aria Automation | `vcfa-rest-9.0`, `vcfa-vra8-8.0` | 8.x, 9.x | `vcfa-rest-9.0`: 9.1.0: changes (Oct 2026, last tested with MEHO v0.37.0); 9.1.1: reads (Nov 2026). `vcfa-vra8-8.0`: not yet tested live. | Reads and manages projects, catalog items, templates and deployments. |
-| VCF Operations and Aria Operations | `vrops-rest-9.0`, `vrops-vrops8-8.0` | 8.x, 9.x | `vrops-rest-9.0`: not yet tested live. `vrops-vrops8-8.0`: not yet tested live. | Reads resources, alerts, metrics and health. |
-| VCF Operations for logs and Aria Operations for Logs | `vrli-rest-9.0`, `vrli-vrli8-8.0` | 8.x, 9.x | `vrli-rest-9.0`: not yet tested live. `vrli-vrli8-8.0`: not yet tested live. | Searches logs and reads log alerts. |
-| VCF Operations orchestrator | `vro-rest-9.0` | 8.x, 9.x | not yet tested live | Reads workflows and their runs, and starts or cancels a workflow run. |
+| VCF fleet management and Aria Suite Lifecycle | `fleet-lcm-9.0`, `fleet-rest-9.0` | 8.18 to 9.x | `fleet-lcm-9.0`: not yet tested live. `fleet-rest-9.0`: not yet tested live. | Installs, updates and scales the VCF management components. |
+| VCF Automation and Aria Automation | `vcfa-rest-9.0`, `vcfa-vra8-8.0` | 8.18 to 9.x | `vcfa-rest-9.0`: 9.1.0: changes (Oct 2026, last tested with MEHO v0.37.0); 9.1.1: reads (Nov 2026). `vcfa-vra8-8.0`: not yet tested live. | Reads and manages projects, catalog items, templates and deployments. |
+| VCF Operations and Aria Operations | `vrops-rest-9.0`, `vrops-vrops8-8.0` | 8.18 to 9.x | `vrops-rest-9.0`: not yet tested live. `vrops-vrops8-8.0`: not yet tested live. | Reads resources, alerts, metrics and health. |
+| VCF Operations for logs and Aria Operations for Logs | `vrli-rest-9.0`, `vrli-vrli8-8.0` | 8.18 to 9.x | `vrli-rest-9.0`: not yet tested live. `vrli-vrli8-8.0`: not yet tested live. | Searches logs and reads log alerts. |
+| VCF Operations orchestrator | `vro-rest-9.0` | 8.18 to 9.x | not yet tested live | Reads workflows and their runs, and starts or cancels a workflow run. |
 | VCF Identity Broker and Workspace ONE Access | `idb-rest-9.0`, `idb-wsa-3.3` | 3.3, 9.x | `idb-rest-9.0`: not yet tested live. `idb-wsa-3.3`: not yet tested live. | Reads users, groups and identity settings. |
 | VMware Cloud Director | `vcd-rest-10.6` | 10.x | not yet tested live | Reads and manages tenants, vApps, virtual machines, networks and edge gateways. |
-| VMware HCX | `hcx-rest-9.0` | 4.7 to 9.x | not yet tested live | Reads site pairings, service meshes and migrations, and changes service meshes. |
+| VMware HCX | `hcx-rest-9.0` | 4.11 to 9.x | not yet tested live | Reads site pairings, service meshes and migrations, and changes service meshes. |
 | VMware Site Recovery Manager | `srm-rest-9.1` | 8.8 to 9.x | not yet tested live | Reads protection groups and recovery plans, and runs recovery tasks. |
 | VMware vSphere Replication | `vr-rest-9.1` | 8.8 to 9.x | not yet tested live | Reads and manages the replication of virtual machines. |
-| VMware Aria Automation Config (Salt) | `salt-raas-8.18` | 8.x, 9.x | not yet tested live | Reads minions and jobs, accepts minion keys and starts jobs. |
+| VMware Aria Automation Config (Salt) | `salt-raas-8.18` | 8.18 to 9.x | not yet tested live | Reads minions and jobs, accepts minion keys and starts jobs. |
 | VMware Holodeck | `holodeck-ssh-9.0` | 9.0 | not yet tested live | Builds and manages nested VCF lab environments. |
 | Fortinet FortiGate | `fortigate-rest-7.x` | 7.2 to 7.x | not yet recorded | Reads firewalls and changes interfaces, routes, addresses, policies and IPsec VPNs. |
 | Fortinet FortiManager | `fortimanager-jsonrpc-7.x` | 7.2 to 7.x | not yet recorded | Changes addresses, groups and policies, then installs the policy package to devices. |

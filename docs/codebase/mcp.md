@@ -502,11 +502,13 @@ client that reads only the text: that client then sees only the short
 line. The benchmark measures the saving before the switch is
 recommended to anyone.
 
-**Size check.** `measure_delivered_wire_bytes(result, structured_only=True)`
-counts the short line plus `structuredContent`, which is what such a
-session sends. The delivery ceilings still measure both copies in every
-session. So every session gets the same result, and a structured-only
-session only sends fewer bytes.
+**Size check.** `sent_wire_bytes(result, structured_only=True)` counts
+the short line plus `structuredContent`, which is what such a session
+sends. The delivery ceilings do not use it. They use
+`measure_delivered_wire_bytes`, which counts both copies in every
+session, with the text as spaced JSON. So every session gets the same
+result, the ceilings decide as before the compact text, and a
+structured-only session only sends fewer bytes.
 
 Tests: `tests/test_mcp_structured_results.py`.
 
@@ -623,13 +625,15 @@ Tests: `tests/test_mcp_call_operation_audit_status.py`.
 
 A completed `call_operation` response is also checked against a wire ceiling,
 `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
-on the real `tools/call` wire by `measure_delivered_wire_bytes`
-(`operations/delivery_budget.py`): the encoded text block (compact JSON)
-plus the encoded `structuredContent` copy, escaping included. It measures
+on the `tools/call` wire by `measure_delivered_wire_bytes`
+(`operations/delivery_budget.py`): the encoded text block plus the encoded
+`structuredContent` copy, escaping included. It measures
 both copies also for a `?results=structured` session, so every session gets
 the same result. It is a byte count, not a token
-count. The MCP dispatcher builds the text block with the same
-`tool_result_text` function, so the measurement cannot drift from what is sent.
+count. The text block that is sent is compact JSON; the count uses the
+same JSON with a space after `,` and `:`. That count is never smaller than
+what is sent, and it keeps the decisions of the ceiling as they were before
+the text became compact.
 
 When an `ok` response is over the ceiling, `bound_complete_response` drops the
 inline `result` and the extras and keeps the status `ok`:

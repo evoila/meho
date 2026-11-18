@@ -10,8 +10,10 @@ blocks: once as the JSON text of ``content[0].text`` and once as the
 text block is a JSON string inside the outer JSON-RPC body, so every quote,
 backslash and escape sequence it holds is escaped a second time.
 
-:func:`measure_delivered_wire_bytes` finds the real size by running the
-same encoders the transport runs and adding up the encoded lengths. It does
+:func:`measure_delivered_wire_bytes` finds the size by running the
+same encoders the transport runs and adding up the encoded lengths. It
+counts the text block as spaced JSON, a few bytes more than the compact
+text that is sent (#4716), so the ceilings decide as they did before. It does
 not guess with a constant factor, and it measures bytes only (it is not a
 token count).
 
@@ -67,6 +69,7 @@ __all__ = [
     "measure_delivered_wire_bytes",
     "receipt_wire_bytes",
     "refuse_undeliverable_receipt",
+    "sent_wire_bytes",
     "tool_result_text",
 ]
 
@@ -83,8 +86,8 @@ def tool_result_text(result: Any, *, structured_only: bool = False) -> str:
 
     The text is compact JSON, with no space after ``,`` and ``:`` (#4716).
     With *structured_only* it is :data:`STRUCTURED_ONLY_TEXT` instead. The
-    MCP dispatcher builds the text block with this function, so the
-    measurement below encodes exactly the string that is sent.
+    MCP dispatcher builds the text block with this function, so
+    :func:`sent_wire_bytes` encodes exactly the string that is sent.
     """
     if structured_only:
         return STRUCTURED_ONLY_TEXT
@@ -106,10 +109,8 @@ def _transport_encode(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def measure_delivered_wire_bytes(
-    result: Any, *, structured: bool = True, structured_only: bool = False
-) -> int:
-    """Return the bytes *result* takes on the ``tools/call`` wire.
+def sent_wire_bytes(result: Any, *, structured: bool = True, structured_only: bool = False) -> int:
+    """Return the bytes *result* really takes on the ``tools/call`` wire.
 
     Sums the encoded text block (the JSON text written as a JSON string,
     escaping included) and, when *structured* is true (the tool declares an
@@ -118,12 +119,32 @@ def measure_delivered_wire_bytes(
     the text block is the short :data:`STRUCTURED_ONLY_TEXT` line. The fixed
     JSON-RPC framing around them is small and is not counted.
 
-    The delivery ceilings measure with both copies in every session, so
-    every session gets the same result and a structured-only session only
-    sends fewer bytes.
+    The delivery ceilings do not use this count. They use
+    :func:`measure_delivered_wire_bytes`, which is never smaller.
     """
     text = tool_result_text(result, structured_only=structured and structured_only)
     total = len(_transport_encode(text))
+    if structured:
+        total += len(_transport_encode(result))
+    return total
+
+
+def measure_delivered_wire_bytes(result: Any, *, structured: bool = True) -> int:
+    """Return the bytes the delivery ceilings count for *result*.
+
+    Counts the text block as ``json.dumps(result)``, with a space after
+    ``,`` and ``:``, plus the encoded ``structuredContent`` object when
+    *structured* is true. Escaping is counted, as on the wire.
+
+    The ``tools/call`` text block has been compact JSON since #4716, so
+    this count is a few bytes larger than :func:`sent_wire_bytes` in every
+    session. That is on purpose: the ceilings decide what reaches the
+    caller (how many search hits fit, whether a result is ``partial``), and
+    counting the spaced text keeps those decisions as they were before the
+    text became compact. A ``resources/read`` text block is still
+    ``json.dumps(body)``, so for it this is the exact size.
+    """
+    total = len(_transport_encode(json.dumps(result)))
     if structured:
         total += len(_transport_encode(result))
     return total

@@ -29,6 +29,7 @@ from meho_backplane.operations.delivery_budget import (
     measure_delivered_wire_bytes,
     receipt_wire_bytes,
     refuse_undeliverable_receipt,
+    sent_wire_bytes,
     tool_result_text,
 )
 
@@ -49,9 +50,11 @@ def _body_len(value: Any) -> int:
 @pytest.mark.parametrize("value", [_AWKWARD, {"rows": []}, {"x": "plain"}])
 def test_measurement_matches_the_real_response_encoder(value: dict[str, Any]) -> None:
     """Each block is measured with the encoder the HTTP layer uses."""
+    spaced = json.dumps(value)
+    assert measure_delivered_wire_bytes(value) == _body_len(spaced) + _body_len(value)
+    assert measure_delivered_wire_bytes(value, structured=False) == _body_len(spaced)
     text = tool_result_text(value)
-    assert measure_delivered_wire_bytes(value) == _body_len(text) + _body_len(value)
-    assert measure_delivered_wire_bytes(value, structured=False) == _body_len(text)
+    assert sent_wire_bytes(value) == _body_len(text) + _body_len(value)
 
 
 def test_escaping_is_counted() -> None:
@@ -59,8 +62,7 @@ def test_escaping_is_counted() -> None:
     text_only = measure_delivered_wire_bytes(_AWKWARD, structured=False)
     object_only = measure_delivered_wire_bytes(_AWKWARD) - text_only
     assert text_only > object_only
-    compact = json.dumps(_AWKWARD, separators=(",", ":"))
-    assert text_only == len(json.dumps(compact, ensure_ascii=False).encode())
+    assert text_only == len(json.dumps(json.dumps(_AWKWARD), ensure_ascii=False).encode())
 
 
 def _fetch_more(drill_in: FetchMoreDrillIn) -> FetchMore:

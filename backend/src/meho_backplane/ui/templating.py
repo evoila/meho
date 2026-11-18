@@ -58,7 +58,13 @@ from __future__ import annotations
 from typing import Any, Final
 
 from fastapi.templating import Jinja2Templates
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from jinja2 import (
+    ChoiceLoader,
+    Environment,
+    FileSystemLoader,
+    StrictUndefined,
+    select_autoescape,
+)
 from starlette.requests import Request
 
 from meho_backplane.connector_packages import installed_connector_packages
@@ -84,6 +90,29 @@ _TEMPLATES: Jinja2Templates | None = None
 _AUTOESCAPE_EXTS: Final[tuple[str, ...]] = ("html", "htm", "xml")
 
 
+def _template_loader() -> ChoiceLoader:
+    """Resolve templates from this package first, then from ``meho-ui``.
+
+    The console's own templates win on a name clash. That ordering is
+    deliberate and not merely conventional: it is what lets a surface be
+    moved onto a shared component one at a time. A conversion of 232
+    templates cannot be atomic, and a shadowing escape hatch that exists
+    beforehand is better than one improvised mid-migration.
+
+    The shared directory is resolved from the installed package, so it
+    works from a wheel in site-packages and from a source checkout alike
+    -- the same reason :func:`templates_dir` resolves from ``__file__``.
+    """
+    from meho_ui.shell import templates_dir as shared_templates_dir
+
+    return ChoiceLoader(
+        [
+            FileSystemLoader(str(templates_dir())),
+            FileSystemLoader(str(shared_templates_dir())),
+        ]
+    )
+
+
 def get_jinja_env() -> Environment:
     """Return the lazily-constructed UI Jinja2 environment.
 
@@ -97,7 +126,7 @@ def get_jinja_env() -> Environment:
     global _ENV
     if _ENV is None:
         _ENV = Environment(
-            loader=FileSystemLoader(str(templates_dir())),
+            loader=_template_loader(),
             autoescape=select_autoescape(_AUTOESCAPE_EXTS),
             undefined=StrictUndefined,
             # ``trim_blocks`` + ``lstrip_blocks`` reduce the

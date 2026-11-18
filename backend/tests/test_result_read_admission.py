@@ -44,6 +44,7 @@ from meho_backplane.mcp.tools import result_query as mcp_result_query
 from meho_backplane.operations.result_query import ResultQuerySpec
 from meho_backplane.settings import Settings
 from tests._result_store_helpers import MemoryResultStore
+from tests.mcp_test_fixtures import required_settings_env  # noqa: F401 — autouse fixture
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000036a0")
 _OTHER_TENANT = uuid.UUID("00000000-0000-0000-0000-0000000036a1")

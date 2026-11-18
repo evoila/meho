@@ -259,8 +259,7 @@ after the upgrade" first.
 - The approval cards of a Keycloak realm create and update show the
   realm's password policy text again (for example `length(8) and
   digits(1)`) (#6650).
-- The `no_connector` error of an OpenBao target that was probed before
-  v0.47.0 tells the operator to probe the target again (#6679).
+- A Vault call on an OpenBao target that was probed before 0.47 now says what to do. The `no_connector` error tells the operator to probe the target again (`meho targets probe -- <name>`). After the probe MEHO stores `openbao`, and the calls work again (#6679).
 
 ### CI and tests
 - The check for secret-shaped text after each test also reads structured

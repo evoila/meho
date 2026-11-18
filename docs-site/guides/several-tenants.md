@@ -26,12 +26,12 @@ one login. At the end:
 
     - **Putting a person in a group** is a change of rights. Another
       admin (a tenant admin or a platform admin) must approve it, never
-      the person who asked. A MEHO-SA-Operator who is not an admin cannot
+      the person who asked. An Operator cannot
       approve it. See
       [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
     - **Taking a person out of a group** only takes rights away. A
-      MEHO-SA-Operator or a MEHO-Admin may approve their own; anyone else
-      needs a second person (a MEHO-SA-Operator or an admin).
+      MEHO-Admin may approve their own; anyone else
+      needs a second person (an admin).
 
 ## How it works
 
@@ -84,9 +84,9 @@ The tenant gets five role groups. They carry **only** `meho_tenant`, no
 |---|---|---|
 | `MEHO-team-b-Readers` | `<tenant-uuid>:team-b:Readers` | `read_only` |
 | `MEHO-team-b-Operators` | `<tenant-uuid>:team-b:Operators` | `operator` |
-| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator`, may approve their own changes, but not a change of rights |
+| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator` (the old group: read as Operators) |
 | `MEHO-team-b-Admins` | `<tenant-uuid>:team-b:Admins` | `tenant_admin` |
-| `MEHO-team-b-Approvers` | `<tenant-uuid>:team-b:Approvers` | `read_only`, may approve |
+| `MEHO-team-b-Approvers` | `<tenant-uuid>:team-b:Approvers` | `read_only` (the old group: read as Readers) |
 
 Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
@@ -385,7 +385,7 @@ A platform admin **may**:
   tenant, the role of that group applies instead.
 - approve their own changes in a tenant where they act as `tenant_admin`.
   They count as an admin there, so they may approve their own changes
-  like members of `MEHO-SA-Operators` and `MEHO-Admins`. This does not
+  like members of `MEHO-Admins`. This does not
   cover a change of rights: another admin must approve that.
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
@@ -395,7 +395,7 @@ A platform admin **may**:
 A platform admin **may not**:
 
 - get the `approver` flag from the platform admin group. It comes only
-  from an `Approvers` group of the current tenant.
+  from a custom role of the current tenant (the old `Approvers` group is read as Readers).
 - pick a tenant that does not exist. MEHO answers
   `403 tenant_not_found` and never makes a tenant from a typo.
 - move a machine login. Agent, service and runner logins always stay in

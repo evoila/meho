@@ -5,8 +5,9 @@
 
 The install's policy file and a tenant's policy file can both hold
 ``routing`` entries (:mod:`meho_backplane.policy.routing`). An entry names
-group kinds (``Readers``, ``Operators``, ``SA-Operators``, ``Admins``,
-``Approvers``). A login group, matched by its full path or its group
+group kinds (``Readers``, ``Operators``, ``Admins``; a file may still use the
+old kinds ``SA-Operators`` and ``Approvers``, read as ``Operators`` and
+``Readers``). A login group, matched by its full path or its group
 attribute, counts as the kind its binding gives it
 (:mod:`meho_backplane.policy.bindings`). So routing compares kinds only.
 

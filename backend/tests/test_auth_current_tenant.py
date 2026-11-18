@@ -243,7 +243,7 @@ async def test_several_tenants_allow_unchosen_marks_the_operator() -> None:
     [
         ("lab-a", _TENANT_A, TenantRole.READ_ONLY, False),
         (str(_TENANT_B), _TENANT_B, TenantRole.OPERATOR, False),
-        ("team3", _TENANT_C, TenantRole.READ_ONLY, True),
+        ("team3", _TENANT_C, TenantRole.READ_ONLY, False),
     ],
 )
 async def test_several_tenants_header_for_one_of_them(

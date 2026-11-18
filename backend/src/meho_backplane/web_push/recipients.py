@@ -112,8 +112,11 @@ def _operator_of(row: PushSubscription) -> Operator | None:
         raw_jwt="",
         tenant_id=row.tenant_id,
         tenant_role=role,
-        approver=row.approver,
-        self_approver=row.self_approver,
+        # The stored approver and self-approval flags are read as off: no
+        # default group sets them, and a row stored by an old group must
+        # not give a "a change waits for you" message.
+        approver=False,
+        self_approver=False,
         platform_admin=row.platform_admin,
         web_session=True,
     )

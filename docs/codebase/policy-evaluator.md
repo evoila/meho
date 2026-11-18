@@ -94,10 +94,10 @@ satellite ladder.
 in the order of `approve_right`: only a person approves (floor); a
 `read_only` person needs the approver flag; only a pending request; a
 change of rights only another admin (floor); the checks of who a login or
-group change is for; own changes (MEHO-SA-Operators and MEHO-Admins, a web
+group change is for; own changes (MEHO-Admins, a web
 click on a token-only `caution` wait, the break-glass switch for a lower
 risk level); another person's `dangerous` or `destructive` change only a
-MEHO-SA-Operator or a MEHO-Admin; then the role floor.
+MEHO-Admin; then the role floor.
 
 It does not check the sign-in age, the deadline, the params or the
 preview binding. The approve still checks those at the click.

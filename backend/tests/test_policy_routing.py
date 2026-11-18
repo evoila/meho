@@ -66,10 +66,10 @@ from tests.test_api_v1_approvals_fresh_sign_in import (
 )
 from tests.test_approval_group_rules import _OTHER, _PARAMS, _REQUESTER, _person, _post, _rest_token
 
-_NETWORK_ONLY_SA: dict[str, Any] = {
+_NETWORK_ONLY_ADMINS: dict[str, Any] = {
     "classifications": [],
     "routing": [
-        {"match": {"category": "network"}, "approvers": ["SA-Operators", "Admins"]},
+        {"match": {"category": "network"}, "approvers": ["Admins"]},
     ],
 }
 
@@ -180,13 +180,13 @@ def test_no_entry_fits_gives_todays_rule() -> None:
     )
 
     assert found.rule == DEFAULT_RULE
-    assert found.kinds == ("Operators", "SA-Operators", "Admins", "Approvers")
+    assert found.kinds == ("Operators", "Admins")
 
 
 def test_no_category_matches_only_entries_without_one() -> None:
     entries = [
         _entry("install:routing[0]", ("Admins",), category="network"),
-        _entry("install:routing[1]", ("SA-Operators",), risk="caution"),
+        _entry("install:routing[1]", ("Operators",), risk="caution"),
     ]
 
     found = route(
@@ -202,10 +202,8 @@ def test_no_category_matches_only_entries_without_one() -> None:
 
 
 def test_the_install_counts_first_and_the_tenant_only_narrows() -> None:
-    install = {"routing": [{"match": {"category": "network"}, "approvers": ["SA-Operators"]}]}
-    tenant = {
-        "routing": [{"match": {"connector": "demo-*"}, "approvers": ["SA-Operators", "Admins"]}]
-    }
+    install = {"routing": [{"match": {"category": "network"}, "approvers": ["Operators"]}]}
+    tenant = {"routing": [{"match": {"connector": "demo-*"}, "approvers": ["Operators", "Admins"]}]}
 
     entries = routes_from_documents(install, tenant)
     found = route(
@@ -222,7 +220,7 @@ def test_the_install_counts_first_and_the_tenant_only_narrows() -> None:
         ("install:routing[0]", True),
     ]
     # The tenant's entry names Admins too, but the install's floor does not.
-    assert found.kinds == ("SA-Operators",)
+    assert found.kinds == ("Operators",)
     assert found.rule == "install:routing[0], tenant:routing[0]"
     assert found.floor == "install:routing[0]"
 
@@ -280,9 +278,9 @@ def test_an_operation_with_the_admin_role_floor_goes_to_admins_only() -> None:
     [
         (TenantRole.READ_ONLY, False, False, "Readers"),
         (TenantRole.OPERATOR, False, False, "Operators"),
-        (TenantRole.OPERATOR, True, False, "SA-Operators"),
+        (TenantRole.OPERATOR, True, False, "Operators"),
         (TenantRole.TENANT_ADMIN, False, False, "Admins"),
-        (TenantRole.READ_ONLY, False, True, "Approvers"),
+        (TenantRole.READ_ONLY, False, True, "Readers"),
     ],
 )
 def test_each_login_has_one_group_kind(
@@ -308,7 +306,7 @@ def test_an_unknown_group_kind_and_a_repeated_match_are_mistakes() -> None:
     repeated = parse_policy_file(
         b"policy: v1\nrouting:\n"
         b"  - match: {category: network}\n    approvers: [Admins]\n"
-        b"  - match: {category: network}\n    approvers: [SA-Operators]\n"
+        b"  - match: {category: network}\n    approvers: [Operators]\n"
     )
     empty_match = parse_policy_file(
         b"policy: v1\nrouting:\n  - match: {}\n    approvers: [Admins]\n"
@@ -327,11 +325,11 @@ def test_routing_is_stored_in_its_order_and_the_order_counts() -> None:
     text = (
         b"policy: v1\nrouting:\n"
         b"  - match: {category: network}\n    approvers: [Admins]\n"
-        b"  - match: {risk: dangerous}\n    approvers: [SA-Operators]\n"
+        b"  - match: {risk: dangerous}\n    approvers: [Operators]\n"
     )
     swapped = (
         b"policy: v1\nrouting:\n"
-        b"  - match: {risk: dangerous}\n    approvers: [SA-Operators]\n"
+        b"  - match: {risk: dangerous}\n    approvers: [Operators]\n"
         b"  - match: {category: network}\n    approvers: [Admins]\n"
     )
     first, second = parse_policy_file(text).model, parse_policy_file(swapped).model
@@ -383,13 +381,13 @@ def test_an_entry_for_one_risk_level_is_checked_on_that_level_only() -> None:
         DEFAULT_TAXONOMY,
     )
     wrong = routing_mistakes(
-        [{"match": {"connector": "nsx-*", "risk": "destructive"}, "approvers": ["Approvers"]}],
+        [{"match": {"connector": "nsx-*", "risk": "destructive"}, "approvers": ["Readers"]}],
         DEFAULT_TAXONOMY,
     )
 
     assert fine == []
     assert wrong == [
-        "`routing[0]` asks `Approvers`, but `Approvers` has no `approve` rule for these changes.",
+        "`routing[0]` asks `Readers`, but `Readers` has no `approve` rule for these changes.",
         (
             "A destructive change matched by `routing[0]` can wait, but no role may approve it. "
             "It would wait until it expires."
@@ -440,9 +438,7 @@ def _check_with_floored_op(routing: list[dict[str, Any]], **kwargs: Any) -> list
 
 
 def test_routing_an_admin_only_operation_to_other_kinds_is_a_mistake() -> None:
-    mistakes = _check_with_floored_op(
-        [{"match": {"risk": "caution"}, "approvers": ["SA-Operators"]}]
-    )
+    mistakes = _check_with_floored_op([{"match": {"risk": "caution"}, "approvers": ["Operators"]}])
 
     assert mistakes == [
         (
@@ -457,11 +453,11 @@ def test_routing_an_admin_only_operation_by_its_category_is_checked() -> None:
     classifications = [{"match": {"connector": "targets-*"}, "category": "identity"}]
 
     wrong = _check_with_floored_op(
-        [{"match": {"category": "identity"}, "approvers": ["SA-Operators"]}],
+        [{"match": {"category": "identity", "risk": "caution"}, "approvers": ["Operators"]}],
         classifications=classifications,
     )
     other_category = _check_with_floored_op(
-        [{"match": {"category": "network"}, "approvers": ["SA-Operators"]}],
+        [{"match": {"category": "network", "risk": "caution"}, "approvers": ["Operators"]}],
         classifications=classifications,
     )
 
@@ -471,13 +467,13 @@ def test_routing_an_admin_only_operation_by_its_category_is_checked() -> None:
 
 def test_an_entry_that_asks_admins_or_does_not_fit_the_operation_is_fine() -> None:
     with_admins = _check_with_floored_op(
-        [{"match": {"connector": "targets-*"}, "approvers": ["SA-Operators", "Admins"]}]
+        [{"match": {"connector": "targets-*"}, "approvers": ["Operators", "Admins"]}]
     )
     other_connector = _check_with_floored_op(
-        [{"match": {"connector": "nsx-*"}, "approvers": ["SA-Operators"]}]
+        [{"match": {"connector": "nsx-*", "risk": "caution"}, "approvers": ["Operators"]}]
     )
     lower_risk = _check_with_floored_op(
-        [{"match": {"risk": "caution"}, "approvers": ["SA-Operators"]}], level="dangerous"
+        [{"match": {"risk": "caution"}, "approvers": ["Operators"]}], level="dangerous"
     )
 
     assert with_admins == []
@@ -489,7 +485,7 @@ def test_an_earlier_entry_that_always_fits_shadows_a_later_one() -> None:
     mistakes = _check_with_floored_op(
         [
             {"match": {"connector": "targets-*"}, "approvers": ["Admins"]},
-            {"match": {"risk": "caution"}, "approvers": ["SA-Operators"]},
+            {"match": {"risk": "caution"}, "approvers": ["Operators"]},
         ]
     )
 
@@ -500,7 +496,7 @@ def test_an_earlier_entry_with_a_risk_level_shadows_a_later_one_at_that_level() 
     mistakes = _check_with_floored_op(
         [
             {"match": {"connector": "targets-*", "risk": "caution"}, "approvers": ["Admins"]},
-            {"match": {"risk": "caution"}, "approvers": ["SA-Operators"]},
+            {"match": {"risk": "caution"}, "approvers": ["Operators"]},
         ]
     )
 
@@ -511,11 +507,12 @@ def test_a_later_entry_is_checked_at_the_levels_an_earlier_one_does_not_fit() ->
     mistakes = _check_with_floored_op(
         [
             {"match": {"connector": "targets-*", "risk": "caution"}, "approvers": ["Admins"]},
-            {"match": {"connector": "targets-*"}, "approvers": ["SA-Operators"]},
+            {"match": {"connector": "targets-*"}, "approvers": ["Operators"]},
         ]
     )
 
-    assert len(mistakes) == 1 and mistakes[0].startswith("`routing[1]` fits `targets.register`")
+    assert mistakes
+    assert all("`routing[1]`" in text and "`routing[0]`" not in text for text in mistakes)
 
 
 def test_the_diff_names_added_changed_and_removed_routing_entries() -> None:
@@ -524,7 +521,7 @@ def test_the_diff_names_added_changed_and_removed_routing_entries() -> None:
         {"match": {"category": "storage"}, "approvers": ["Admins"]},
     ]
     after = [
-        {"match": {"category": "network"}, "approvers": ["SA-Operators", "Admins"]},
+        {"match": {"category": "network"}, "approvers": ["Operators", "Admins"]},
         {"match": {"category": "identity"}, "approvers": ["Admins"]},
     ]
 
@@ -538,20 +535,20 @@ def test_the_diff_names_added_changed_and_removed_routing_entries() -> None:
 
 @pytest.mark.asyncio
 async def test_export_writes_the_routing_back() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
 
     async with get_sessionmaker()() as session:
         text = await export_policy(session, scope="install", tenant_id=None)
 
     parsed = parse_policy_file(text.encode())
     assert parsed.model is not None
-    assert document_of(parsed.model)["routing"] == _NETWORK_ONLY_SA["routing"]
+    assert document_of(parsed.model)["routing"] == _NETWORK_ONLY_ADMINS["routing"]
 
 
 _CATEGORY_AND_RISK_FILE = (
     "policy: v1\n"
     "routing:\n"
-    "  - {match: {category: network}, approvers: [SA-Operators, Admins]}\n"
+    "  - {match: {category: network}, approvers: [Operators, Admins]}\n"
     "  - {match: {risk: caution}, approvers: [Admins]}\n"
 )
 
@@ -624,7 +621,7 @@ def test_separated_duties_passes_the_import_checks(scope: str) -> None:
     assert mistakes == []
 
 
-def test_separated_duties_routes_network_to_sa_operators_and_admins() -> None:
+def test_separated_duties_routes_network_to_admins() -> None:
     parsed = parse_policy_file(_separated_duties())
     assert parsed.model is not None
     entries = routes_from_documents(document_of(parsed.model), None)
@@ -654,7 +651,7 @@ def test_separated_duties_routes_network_to_sa_operators_and_admins() -> None:
         op_id="x",
     )
 
-    assert network.kinds == ("SA-Operators", "Admins")
+    assert network.kinds == ("Admins",)
     assert identity.kinds == ("Admins",)
     assert compute.rule == DEFAULT_RULE
 
@@ -667,11 +664,11 @@ def test_separated_duties_routes_network_to_sa_operators_and_admins() -> None:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_a_waiting_request_stores_the_routed_kinds_and_never_a_person() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
 
     row = await _load(await _park("caution"))
 
-    assert row.approver_roles == ["SA-Operators", "Admins"]
+    assert row.approver_roles == ["Admins"]
     assert row.approver_rule == "install:routing[0]"
     assert set(row.approver_roles) <= set(GROUP_KINDS)
     assert row.principal_sub not in row.approver_roles
@@ -680,7 +677,7 @@ async def test_a_waiting_request_stores_the_routed_kinds_and_never_a_person() ->
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_the_tenants_routing_narrows_the_installs() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     await _store_policy(
         {
             "classifications": [],
@@ -701,14 +698,14 @@ async def test_the_tenants_routing_narrows_the_installs() -> None:
 async def test_without_a_policy_the_stored_kinds_are_todays_rule() -> None:
     row = await _load(await _park("dangerous"))
 
-    assert row.approver_roles == ["SA-Operators", "Admins"]
+    assert row.approver_roles == ["Admins"]
     assert row.approver_rule == DEFAULT_RULE
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_a_rights_change_is_not_routed() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
 
     row = await _load(await _park("caution", rights_change=True))
 
@@ -718,7 +715,7 @@ async def test_a_rights_change_is_not_routed() -> None:
 
 @pytest.mark.asyncio
 async def test_with_the_switch_off_nothing_is_stored() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
 
     row = await _load(await _park("caution"))
 
@@ -757,21 +754,21 @@ async def _audit_rows(path: str) -> list[AuditLog]:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_the_request_and_approve_audit_rows_name_the_routing_rule() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")
 
-    await _approve(request_id, _person(_OTHER, sa_operator=True))
+    await _approve(request_id, _person(_OTHER, role=TenantRole.TENANT_ADMIN))
 
     (request_row,) = await _audit_rows("approval.request")
     (decision_row,) = await _audit_rows("approval.decision")
     for row in (request_row, decision_row):
         assert row.payload["approver_rule"] == "install:routing[0]"
-        assert row.payload["approver_roles"] == ["SA-Operators", "Admins"]
+        assert row.payload["approver_roles"] == ["Admins"]
 
 
 @pytest.mark.asyncio
 async def test_with_the_switch_off_the_audit_rows_name_no_routing_rule() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")
 
     await _approve(request_id, _person(_OTHER))
@@ -790,7 +787,7 @@ async def test_with_the_switch_off_the_audit_rows_name_no_routing_rule() -> None
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_a_person_outside_the_stored_kinds_gets_one_sentence() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")
     operator = _person(_OTHER)
 
@@ -799,7 +796,7 @@ async def test_a_person_outside_the_stored_kinds_gets_one_sentence() -> None:
 
     # The click checks the install's routing first (the floor).
     assert caught.value.reason_text == (
-        "The install's routing (`install:routing[0]`) lets only MEHO-SA-Operators or "
+        "The install's routing (`install:routing[0]`) lets only "
         "MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can "
         "only narrow it."
     )
@@ -807,7 +804,7 @@ async def test_a_person_outside_the_stored_kinds_gets_one_sentence() -> None:
     row = await _load(request_id)
     assert row.status == ApprovalRequestStatus.PENDING.value
     expected = (
-        "Only MEHO-SA-Operators or MEHO-Admins may approve this change "
+        "Only MEHO-Admins may approve this change "
         "(routing rule `install:routing[0]`). You are in MEHO-Operators."
     )
     right = approve_right(operator, row)
@@ -821,10 +818,10 @@ async def test_a_person_outside_the_stored_kinds_gets_one_sentence() -> None:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_a_person_in_the_stored_kinds_approves() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")
 
-    approved = await _approve(request_id, _person(_OTHER, sa_operator=True))
+    approved = await _approve(request_id, _person(_OTHER, role=TenantRole.TENANT_ADMIN))
 
     assert approved.status == ApprovalRequestStatus.APPROVED.value
 
@@ -835,15 +832,15 @@ async def test_routing_also_narrows_an_own_click() -> None:
     await _store_policy(
         {
             "classifications": [],
-            "routing": [{"match": {"category": "network"}, "approvers": ["Admins"]}],
+            "routing": [{"match": {"category": "network"}, "approvers": ["Operators"]}],
         }
     )
     request_id = await _park("caution")
-    # A MEHO-SA-Operator may approve their own change today; routing sends it to Admins.
-    requester_sa = _person(_REQUESTER, sa_operator=True)
+    # An Admin may approve their own change today; routing sends it to Operators.
+    requester_admin = _person(_REQUESTER, role=TenantRole.TENANT_ADMIN)
 
     with pytest.raises(ApprovalRoutingError):
-        await _approve(request_id, requester_sa)
+        await _approve(request_id, requester_admin)
 
 
 @pytest.mark.asyncio
@@ -855,7 +852,7 @@ async def test_todays_checks_still_run_inside_the_stored_kinds() -> None:
             "routing": [
                 {
                     "match": {"category": "network"},
-                    "approvers": ["Operators", "SA-Operators", "Admins"],
+                    "approvers": ["Operators", "Admins"],
                 }
             ],
         }
@@ -883,7 +880,7 @@ async def test_with_the_default_rule_an_operator_approves_a_caution_change_as_to
 async def test_an_old_request_without_stored_kinds_keeps_todays_rule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")  # switch off: nothing stored
     monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
     get_settings.cache_clear()
@@ -898,7 +895,7 @@ async def test_an_old_request_without_stored_kinds_keeps_todays_rule(
 async def test_with_the_switch_off_stored_kinds_are_not_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")
     _routing_off(monkeypatch)
 
@@ -924,10 +921,10 @@ async def test_a_stored_value_that_is_not_a_list_lets_nobody_approve() -> None:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_routing_on")
 async def test_who_can_approve_names_the_groups() -> None:
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     row = await _load(await _park("caution"))
 
-    assert who_can_approve(row.approver_roles) == "Members of MEHO-SA-Operators or MEHO-Admins."
+    assert who_can_approve(row.approver_roles) == "Members of MEHO-Admins."
     assert who_can_approve(None) is None
     assert who_can_approve([]) == (
         "Nobody: no group may approve this change, so it waits until it expires."
@@ -941,12 +938,12 @@ async def test_rest_approve_answers_403_with_the_sentence(
     _fake_resume: list[uuid.UUID],  # noqa: F811
 ) -> None:
     ac, key = _client
-    await _store_policy(_NETWORK_ONLY_SA)
+    await _store_policy(_NETWORK_ONLY_ADMINS)
     request_id = await _park("caution")
     token = _rest_token(key, _OTHER, groups=["MEHO-Operators"])
 
     response = await _post(ac, "approve", request_id, token)
 
     assert response.status_code == 403
-    assert "lets only MEHO-SA-Operators or MEHO-Admins approve this change" in response.text
+    assert "lets only MEHO-Admins approve this change" in response.text
     assert _fake_resume == []

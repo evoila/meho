@@ -22,8 +22,7 @@ For these, MEHO checks when a person approves:
   read who is in the group.
 * In MEHO's own login realm, the change always needs a second person who
   is a tenant admin (a platform admin for the platform admin group or
-  role). No self-approval rule covers it, also not the one of the
-  MEHO-SA-Operators group.
+  role). No self-approval rule covers it.
 
 The connector describes each parked request in
 ``proposed_effect["preview"]["grant"]``: ``user_id`` (the login the change

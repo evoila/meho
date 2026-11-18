@@ -61,6 +61,7 @@ from meho_backplane.policy.classification import (
     install_floor_texts,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.document import read_kind
 from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 from meho_backplane.policy.routing_floor import tenant_floor_mistakes
 
@@ -251,7 +252,7 @@ def _first_route(
             continue
         if match.get("risk") is not None and match["risk"] != level:
             continue
-        return index, {str(kind) for kind in raw.get("approvers") or []}
+        return index, {read_kind(str(kind)) for kind in raw.get("approvers") or []}
     return None
 
 

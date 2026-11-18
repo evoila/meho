@@ -377,6 +377,8 @@ class Settings(BaseModel):
         role (``docs/decisions/login-role-groups.md``). Default: the
         five groups ``MEHO-Readers``, ``MEHO-Operators``,
         ``MEHO-SA-Operators``, ``MEHO-Admins`` and ``MEHO-Approvers``.
+        MEHO reads the old group ``MEHO-SA-Operators`` as Operators and
+        ``MEHO-Approvers`` as Readers.
         A person must be in exactly one of them: in two, Keycloak copies
         ``tenant_role`` from whichever group it finds first, so the role
         is unpredictable. ``verify_jwt`` reads the token's ``groups``
@@ -485,22 +487,14 @@ class Settings(BaseModel):
         grants the claim. Override only when the realm exposes the flag
         under a different attribute.
     jwt_self_approver_group:
-        Name of the login group whose members may approve their own
-        changes (#3327, the rules of #3325). Default
-        ``MEHO-SA-Operators``, the group the shipped login setup creates
-        (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
-        :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
-        the token's ``groups`` claim names this group (a leading ``/``
-        and upper or lower case do not count). This is used only
-        when the token has no ``meho_tenants`` claim; with that claim, the
-        current tenant's ``SA-Operators`` entry decides. Off when the
-        group is missing; a machine login never gets the flag. Change it
-        only together with ``JWT_ROLE_GROUPS``, when the site renamed the
-        groups. A blank value keeps the default. With
-        ``POLICY_APPROVER_ROUTING`` on, this group is also a shipped
-        binding of a tenant without stored bindings: by its top-level
-        full path it gets the kind ``SA-Operators``
-        (:func:`~meho_backplane.policy.bindings.shipped_bindings`).
+        Name of the old login group ``MEHO-SA-Operators`` (default). MEHO
+        reads that group as Operators: it gives no self-approval, and a
+        token without a ``meho_tenants`` claim does not read this setting.
+        The setting stays until the old group names are removed. A blank
+        value keeps the default. With ``POLICY_APPROVER_ROUTING`` on, this
+        group is also a shipped binding of a tenant without stored
+        bindings: by its top-level full path it gets the kind
+        ``Operators`` (:func:`~meho_backplane.policy.bindings.shipped_bindings`).
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -1294,8 +1288,8 @@ class Settings(BaseModel):
         this off, nothing in an install changes. Env ``SPACES_ENABLED``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
-        Default ``False`` (fail-closed): a person who is not a
-        MEHO-SA-Operator may not approve their own request — requester !=
+        Default ``False`` (fail-closed): a person who is not an
+        Admin may not approve their own request — requester !=
         approver is enforced in
         :func:`~meho_backplane.operations.approval_queue.approve_request`,
         so a compromised or careless single account cannot both ask for
@@ -1307,7 +1301,7 @@ class Settings(BaseModel):
         single-operator answer — enabling it posture-wide re-opens, for
         every ``safe`` and ``caution`` op, the single-account
         request+grant hole #1401 closed. A single operator belongs in the
-        MEHO-SA-Operators group instead (#3325); see the "Single-operator
+        MEHO-Admins group instead; see the "Single-operator
         tenants" section of ``docs/codebase/approvals.md``. Reject is
         always allowed regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
@@ -2019,7 +2013,7 @@ class Settings(BaseModel):
     # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine, audited
     # break-glass; every self-approval still writes its decision audit
     # row, so the use is forensically visible. NOT the single-operator
-    # answer -- a single operator belongs in MEHO-SA-Operators (#3325);
+    # answer -- a single operator belongs in MEHO-Admins;
     # see docs/codebase/approvals.md "Single-operator tenants".
     approval_allow_self_approval: bool = False
     # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in

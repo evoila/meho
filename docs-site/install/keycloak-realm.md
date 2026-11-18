@@ -42,7 +42,7 @@ the end, then return to the trail.
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
-| A user in `MEHO-SA-Operators` | Realm user | A second person for daily work: runs changes, approves their own risky changes and other people's |
+| A user in `MEHO-SA-Operators` | Realm user | A second person for daily work: MEHO reads the old group as Operators, so the person runs changes and approves other people's `safe` and `caution` changes |
 | A user of realm `master` with every role of the client `meho-realm` except `impersonation` | `master` user (not in realm `meho`) | The console admin: administers realm `meho` in the Keycloak admin console. MEHO refuses its tokens. |
 
 !!! tip "There is an automation for this"
@@ -689,31 +689,31 @@ without it, the command writes the all-zero UUID to the five groups.
 
 ### Who may approve their own changes
 
-A person in **`MEHO-SA-Operators`** or in **`MEHO-Admins`** may approve
-their own changes, on purpose: with a click in the web interface, or on
-the command line after a fresh sign-in. They may also approve other
-people's `dangerous` and `destructive` changes. Agents and other machine
-logins never approve. The rules for every group are in
+A person in **`MEHO-Admins`** may approve their own changes, on purpose:
+with a click in the web interface, or on the command line after a fresh
+sign-in. They may also approve other people's `dangerous` and
+`destructive` changes. MEHO reads the old group `MEHO-SA-Operators` as
+Operators and the old group `MEHO-Approvers` as Readers. Agents and other
+machine logins never approve. The rules for every group are in
 [Approvals and break-glass](../guides/approvals-and-break-glass.md#who-may-approve).
 
-To make a person a MEHO-SA-Operator:
+To make a person an Admin:
 
 1. In the Keycloak admin console, open the person: **Users** → the
    person → **Groups**.
 2. Leave their current role group (a person is in exactly one of the
-   five groups) and join **`MEHO-SA-Operators`**. With `bootstrap-clients`
+   five groups) and join **`MEHO-Admins`**. With `bootstrap-clients`
    the group already exists.
 3. The person signs in again. MEHO reads the group from the new login
    token; an older token still has the old group.
 
 With a company login, put the person in the company group that your
-setup maps to `MEHO-SA-Operators` instead
+setup maps to `MEHO-Admins` instead
 ([Company login](login/index.md)). The design of the five groups is in
 the [login groups decision record](https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md)
 ([#3959](https://github.com/evoila/meho/issues/3959)).
 
-A person is in exactly one role group per tenant, so an admin is not a
-MEHO-SA-Operator. Both groups may approve their own changes. The rules
+A person is in exactly one role group per tenant. The rules
 are in the
 [decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md).
 
@@ -782,19 +782,18 @@ one. Create at least one user with:
   `tenant_admin` role, and in **`MEHO-Platform-Admins`**.
 
 A `dangerous` or `destructive` change waits until a person approves it
-with a click. A member of **`MEHO-SA-Operators`** or **`MEHO-Admins`**
+with a click. A member of **`MEHO-Admins`**
 may approve their own risky change, on purpose, in the web interface. So
 the first admin can approve their own changes. A person in
-`MEHO-Operators` needs a MEHO-SA-Operator or an admin to approve their
-risky changes. A login holds exactly one role group, so an admin is not
-also a MEHO-SA-Operator; both groups may approve their own changes (see
+`MEHO-Operators` needs an admin to approve their
+risky changes. A login holds exactly one role group (see
 [Who may approve their own changes](#who-may-approve-their-own-changes)
 and the
 [decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md)).
 
-Also create a second person in **`MEHO-SA-Operators`**, for daily work
-without admin rights. This person runs changes, approves their own risky
-changes, and may approve the admin's changes too.
+Also create a second person in **`MEHO-Operators`**, for daily work
+without admin rights. This person runs changes and may approve other
+people's `safe` and `caution` changes.
 
 The user's email does not need to be verified for device-code login to
 complete.

@@ -200,8 +200,10 @@ async def push_service() -> AsyncIterator[_FakePushService]:
 #: The login facts a subscription keeps, by the kind of person.
 _LOGINS: dict[str, dict[str, Any]] = {
     "admin": {"tenant_role": "tenant_admin"},
+    # Stored flags of a person in an old group: they are read as off.
     "sa": {"tenant_role": "operator", "self_approver": True},
     "approver": {"tenant_role": "read_only", "approver": True},
+    "operator": {"tenant_role": "operator"},
     "read_only": {"tenant_role": "read_only"},
 }
 
@@ -282,23 +284,23 @@ async def _rows() -> list[PushSubscription]:
 async def test_a_new_request_goes_to_the_people_who_may_approve_it(
     push_service: _FakePushService,
 ) -> None:
-    admin, approver, operator, elsewhere = (
+    admin, operator, reader, elsewhere = (
         _browser("admin"),
-        _browser("approver", host="web.push.apple.com"),
-        _browser("operator"),
+        _browser("operator", host="web.push.apple.com"),
+        _browser("reader"),
         _browser("elsewhere"),
     )
     await _subscribe(admin, sub="admin", login="admin")
-    await _subscribe(approver, sub="approver", login="approver")
-    await _subscribe(operator, sub="operator", login="read_only")
+    await _subscribe(operator, sub="operator", login="operator")
+    await _subscribe(reader, sub="reader", login="read_only")
     await _subscribe(elsewhere, sub="admin-b", login="admin", tenant_id=_OTHER_TENANT)
 
     request = _request(level="caution")
     await _step(request)
 
     assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
-    assert [m["title"] for m in push_service.to(approver)] == ["An approval waits"]
-    assert push_service.to(operator) == []
+    assert [m["title"] for m in push_service.to(operator)] == ["An approval waits"]
+    assert push_service.to(reader) == []
     assert push_service.to(elsewhere) == []
     message = push_service.to(admin)[0]
     assert message == {
@@ -324,23 +326,43 @@ async def test_a_high_risk_request_goes_only_to_admins_and_sa_operators(
     assert push_service.to(approver) == []
 
 
-async def test_own_request_reaches_only_a_person_who_may_approve_their_own(
+async def test_own_request_reaches_only_an_admin_who_may_approve_their_own(
     push_service: _FakePushService,
 ) -> None:
-    sa_operator, approver = _browser("sa"), _browser("approver")
+    admin, sa_operator, approver = _browser("admin"), _browser("sa"), _browser("approver")
+    await _subscribe(admin, sub="admin", login="admin")
     await _subscribe(sa_operator, sub="sa-op", login="sa")
     await _subscribe(approver, sub="approver", login="approver")
 
-    by_sa_operator = _request(requester="sa-op")
-    by_approver = _request(requester="approver")
-    await _step(by_sa_operator)
+    by_admin = _request(requester="admin", level="dangerous")
+    by_sa_operator = _request(requester="sa-op", level="dangerous")
+    await _step(by_admin)
     send_module.reset_for_testing()
-    await _step(by_approver)
+    await _step(by_sa_operator)
 
-    # The SA-Operator gets both, also their own; the approver gets only the
-    # other person's request, never their own.
-    assert len(push_service.to(sa_operator)) == 2
-    assert [m["tag"] for m in push_service.to(approver)] == [f"approval-{by_sa_operator.id}"]
+    # The admin gets both, also their own. A person of an old group with
+    # stored flags gets none: the stored flags are read as off.
+    assert len(push_service.to(admin)) == 2
+    assert push_service.to(sa_operator) == []
+    assert push_service.to(approver) == []
+
+
+async def test_stored_flags_of_the_old_groups_get_no_push(
+    push_service: _FakePushService,
+) -> None:
+    """A stored approver flag or self-approval flag is read as off."""
+    sa_operator, approver, operator = _browser("sa"), _browser("approver"), _browser("op")
+    await _subscribe(sa_operator, sub="sa-op", login="sa")
+    await _subscribe(approver, sub="approver", login="approver")
+    await _subscribe(operator, sub="operator", login="operator")
+
+    await _step(_request(level="dangerous"))
+    send_module.reset_for_testing()
+    await _step(_request(level="caution"))
+
+    assert push_service.to(approver) == []
+    assert len(push_service.to(operator)) == 1
+    assert len(push_service.to(sa_operator)) == 1
 
 
 async def test_nothing_is_sent_with_the_setting_off(

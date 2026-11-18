@@ -1404,6 +1404,26 @@ def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     return _realm_access_has_platform_admin_role(claims, role_name)
 
 
+#: The old default group that MEHO reads as Readers. A token without a
+#: tenant list that names it does not set the ``approver`` flag.
+_OLD_APPROVERS_GROUP: str = "MEHO-Approvers"
+
+
+def _in_old_approvers_group(claims: Any) -> bool:
+    """Return ``True`` when the ``groups`` claim names the old approvers group.
+
+    MEHO reads ``MEHO-Approvers`` as Readers: the ``approver`` claim of
+    such a token does not count. Any other source of the claim (a
+    customer role) is not affected. A ``groups`` claim that is not a list
+    of strings gives ``False``.
+    """
+    raw = claims.get(_GROUPS_CLAIM_NAME)
+    if not isinstance(raw, list):
+        return False
+    key = _group_key(_OLD_APPROVERS_GROUP)
+    return any(isinstance(item, str) and _group_key(item) == key for item in raw)
+
+
 def _extract_approver(claims: Any, settings: Settings) -> bool:
     """Extract the approve-only ``approver`` capability flag from *claims* (#3243).
 
@@ -1561,57 +1581,32 @@ def _extract_self_approver(
     tenant_id: UUID,
     tenants: tuple[TenantMembership, ...],
 ) -> bool:
-    """Read whether the person is in the SA-Operators group of *tenant_id* (#3327).
+    """Read whether the login group of *tenant_id* gives self-approval.
 
-    SA-Operators may approve their own changes (#3325). The flag is off
-    by default and fails closed: anything unclear gives ``False``.
+    No default group gives it: ``MEHO-SA-Operators`` is read as
+    Operators. An Admin approves their own change through the
+    ``tenant_admin`` role (:attr:`Operator.may_self_approve`). The flag
+    is off by default and fails closed: anything unclear gives ``False``.
 
-    * A machine login (agent, service, runner) always gets ``False``,
-      even when its token carries the group. Agents never approve.
+    * A machine login (agent, service, runner) always gets ``False``.
     * The token has a ``meho_tenants`` claim (``JWT_TENANTS_CLAIM_NAME``):
-      only the list counts. *tenant_id* is the tenant the Operator starts
-      in (the first entry, :func:`_start_tenant`). The flag is on when
-      the list has exactly one entry for it and that entry's group gives
-      ``self_approval`` (:func:`~meho_backplane.auth.operator.group_grant`).
-      An entry of another tenant never counts. The whole claim must be
-      good: a claim that is not a list, has any bad entry (also one of
-      another tenant), or has no good entry for *tenant_id*, gives
-      ``False``. :func:`_extract_tenants` keeps the good entries of such
-      a list for :attr:`Operator.tenants`; this flag does not. When the
-      request then names another tenant of the list,
+      only the list counts. The flag is on when the list has exactly one
+      entry for *tenant_id* and that entry's group gives ``self_approval``
+      (:func:`~meho_backplane.auth.operator.group_grant`). A claim with
+      any bad entry gives ``False``. When the request names another tenant of the list,
       :func:`~meho_backplane.auth.current_tenant.with_membership` reads
       the flag again from that tenant's entry, under the same rule.
-    * The token has no ``meho_tenants`` claim (a site with one tenant
-      and the older mappers): the flag is on when the ``groups`` claim
-      names the group ``JWT_SELF_APPROVER_GROUP`` (default
-      ``MEHO-SA-Operators``). A leading ``/`` and upper or lower case do
-      not count, the same as in the one-group check. A ``groups`` claim that is not
-      a list, or has an entry that is not a string, gives ``False`` and
-      logs ``malformed_groups_claim``.
+    * The token has no ``meho_tenants`` claim: the ``groups`` claim does
+      not set the flag; ``JWT_SELF_APPROVER_GROUP`` is not read.
 
-    Both claims come from the shipped login setup
-    (``docs/decisions/login-role-groups.md``): the ``groups-claim`` mapper
-    and the ``meho-tenants`` mapper. The flag is only ever read from the
-    signed token, never from a request field or header.
+    The flag is only ever read from the signed token, never from a
+    request field or header.
     """
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return False
     if settings.jwt_tenants_claim_name in claims:
         return _self_approver_from_tenants(claims, settings, tenants, tenant_id)
-    raw = claims.get(_GROUPS_CLAIM_NAME)
-    if raw is None:
-        return False
-    log = structlog.get_logger(__name__)
-    if not isinstance(raw, list):
-        log.warning("malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="not_a_list")
-        return False
-    if not all(isinstance(item, str) for item in raw):
-        log.warning(
-            "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
-        )
-        return False
-    names = {_group_key(item) for item in raw}
-    return _group_key(settings.jwt_self_approver_group) in names
+    return False
 
 
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
@@ -1747,7 +1742,7 @@ def _start_tenant(
     return (
         _extract_tenant_id(claims, settings),
         _extract_tenant_role(claims, settings),
-        _extract_approver(claims, settings),
+        _extract_approver(claims, settings) and not _in_old_approvers_group(claims),
     )
 
 

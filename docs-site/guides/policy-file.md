@@ -3,7 +3,7 @@
 The policy file says which category each connector, operation group and
 operation is in, which labels it has, and which operations always wait
 for approval. It can also route approvals: for example, only
-MEHO-SA-Operators and MEHO-Admins approve network changes.
+MEHO-Admins approve network changes.
 
 You keep the policy as one file, `policy: v1`. You can:
 
@@ -106,21 +106,22 @@ click.
 ```yaml
 routing:
   - match: {category: network}
-    approvers: [SA-Operators, Admins]
+    approvers: [Operators, Admins]
   - match: {connector: "<connector-id-pattern>", risk: destructive}
     approvers: [Admins]
 ```
 
 - `match` names a `category`, a `connector` (`*` is any text) and a
   `risk` level, or some of them. All that it names must fit.
-- `approvers` lists login group kinds: `Readers`, `Operators`,
-  `SA-Operators`, `Admins`, `Approvers`.
+- `approvers` lists login group kinds: `Readers`, `Operators`, `Admins`.
+  A file may still use the old kinds `SA-Operators` and `Approvers`: MEHO
+  reads them as `Operators` and `Readers`.
 - In each file, the first entry that fits wins. When no entry fits, the
   same people as today may approve.
 - **The install's routing is a floor.** A tenant can make it narrower,
   never wider (see below).
 - Routing only makes the list shorter. A group never approves more than it
-  may today: for example, Operators and Approvers never approve another
+  may today: for example, Operators never approve another
   person's `dangerous` or `destructive` change.
 - MEHO refuses an entry that asks a group that may approve none of its
   changes, and an entry that leaves a risk level that nobody may approve.
@@ -148,14 +149,14 @@ Example. The install's file says:
 ```yaml
 routing:
   - match: {category: network}
-    approvers: [SA-Operators, Admins]
+    approvers: [Operators, Admins]
 ```
 
 A tenant's file may then say `approvers: [Admins]` for network changes.
 MEHO refuses the tenant's file when an entry:
 
-- adds a group, for example `[Operators, SA-Operators, Admins]`;
-- names another group, for example `[Approvers]`;
+- adds a group, for example `[Readers, Operators, Admins]`;
+- names another group, for example `[Readers]`;
 - takes the network changes away from the install's entry, for example
   `match: {risk: caution}` with every group.
 
@@ -222,19 +223,20 @@ fits no change, so the other install entries decide.
 MEHO ships a starting file, "separated duties"
 (`deploy/policy-profiles/separated-duties.yaml`): identity and secret
 changes only Admins approve, network and storage changes only
-SA-Operators and Admins.
+Admins.
 
 ## Which login group is which team
 
 A tenant's file can say which login group is which team, in `bindings`.
-A binding gives a group one of the five group kinds (`Readers`,
-`Operators`, `SA-Operators`, `Admins`, `Approvers`) and a set of
-categories.
+A binding gives a group one of the three group kinds (`Readers`,
+`Operators`, `Admins`) and a set of categories. A file may still use the
+old kinds `SA-Operators` and `Approvers`: MEHO reads them as `Operators`
+and `Readers`.
 
 ```yaml
 bindings:
   - match: {group: /MEHO-Operators/Network}   # the full path of the group
-    kind: SA-Operators
+    kind: Operators
     categories: [network]
   - match: {attribute: "<tenant>-storage"}    # the group attribute meho_group
     kind: Operators
@@ -247,8 +249,8 @@ bindings:
   the attribute: see [Keycloak realm setup](../install/keycloak-realm.md).
 - `categories: ["*"]` means every category.
 - A binding never changes a person's base level (read-only, operator or
-  admin). It can only pick between the kinds of that level: `Operators`
-  or `SA-Operators`, `Readers` or `Approvers`.
+  admin). Each base level has one kind: `Readers`, `Operators` or
+  `Admins`.
 - A person whose groups match two kinds in one tenant cannot log in. Fix
   the bindings or the groups.
 - A person whose groups match no binding keeps the kind they have today.
@@ -263,22 +265,19 @@ bindings:
   `meho policy export` shows them.
 - A shipped binding counts only when it agrees with the token. The group
   alone never gives or takes the right to approve: a person in the
-  shipped approver group may approve only when the token also says
-  `approver: true`, and a person with `approver: true` keeps that right in
-  the shipped readers group. So a shipped binding on its own gives or
-  takes no right to approve. Approver routing by category can still make
+  shipped readers group keeps an `approver: true` claim. So a shipped
+  binding on its own gives or takes no right to approve. Approver routing by category can still make
   the list of people who may approve a change shorter.
 - The self-approval group (the setting `JWT_SELF_APPROVER_GROUP`) can be
   a group that is not in `JWT_ROLE_GROUPS`. Then a person can be in it
-  and in one role group. Next to an operator group the person gets
-  `SA-Operators`, as today. Next to any other group, that group's kind
-  stays.
+  and in one role group. The old self-approval group counts as `Operators`.
+  Next to any other group, that group's kind stays.
 - With the default settings the self-approval group is a role group. A
   person in it and in a second role group cannot log in
   (`multiple_role_groups`), with the setting on or off.
 - A binding in your file (a stored binding) is your own choice. There the
-  group alone gives the flags of the kind: a read-only person in a group
-  bound to `Approvers` may approve, whatever the token says.
+  group alone gives the flags of the kind: a group bound to `Readers`
+  or `Operators` gives no right to approve, whatever the token says.
 - `meho policy export` with the setting on writes the shipped bindings into
   your file. After an import they are stored bindings, and then they count
   for every person, also for a person with a tenant list, whose groups may
@@ -439,7 +438,7 @@ operation that a file makes always wait:
 
 ```text
 Answer: wait (today's checks decide)
-Who may approve: MEHO-Operators, MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers (rule: default)
+Who may approve: MEHO-Operators, MEHO-Admins (rule: default)
 Today: needs-approval: <today's reason>
 Policy evaluator (shadow): wait, same as today
 Decided by: floor token_runs_only_safe: wait (<rule text>)

@@ -2,8 +2,10 @@
 
 The `bindings` section of a tenant's policy file
 ([policy.md](policy.md)) says which login group is which team. A binding
-gives a group one of today's five group kinds (`Readers`, `Operators`,
-`SA-Operators`, `Admins`, `Approvers`) and a set of categories
+gives a group one of three group kinds (`Readers`, `Operators`,
+`Admins`) and a set of categories. The old kinds `SA-Operators` and
+`Approvers` are still accepted: MEHO reads them as `Operators` and
+`Readers` (`read_kind` in `policy/document.py`)
 ([policy-classification.md](policy-classification.md)). There are no new
 roles.
 
@@ -92,7 +94,7 @@ another case.
      (from the token's `tenant_role`, `approver` and the self-approval
      group).
    - The bindings that match give two kinds (for example `Operators` and
-     `SA-Operators`, or `Operators` and `Readers`): the login is refused
+     `Admins`, or `Operators` and `Readers`): the login is refused
      with `401 multiple_bound_kinds`. A login gets one kind per tenant, as
      today. This check counts every binding that matches, also one of
      another base level. So a person in groups of two base levels (for
@@ -140,10 +142,9 @@ another case.
 `shipped_binding_documents` makes them from the two login settings:
 
 - each group of `JWT_ROLE_GROUPS` gets the kind its name **ends with**
-  (`MEHO-Operators` and `Corp-SA-Operators` give `Operators` and
-  `SA-Operators`; upper and lower case do not count). A group whose name
+  (`MEHO-Operators` and `Corp-SA-Operators` both give `Operators`; upper and lower case do not count). A group whose name
   ends with no kind gets no shipped binding;
-- the group of `JWT_SELF_APPROVER_GROUP` gets `SA-Operators`;
+- the group of `JWT_SELF_APPROVER_GROUP` gets `Operators`;
 - each is matched by its top-level full path (`/MEHO-Operators`) and gets
   every category.
 

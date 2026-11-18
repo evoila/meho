@@ -5,13 +5,14 @@
 
 The ``routing`` section of the policy file maps a category, a connector or
 a risk level to login group kinds (``Readers``, ``Operators``,
-``SA-Operators``, ``Admins``, ``Approvers``):
+``Admins``; the old kinds ``SA-Operators`` and ``Approvers`` are read as
+``Operators`` and ``Readers``):
 
 .. code-block:: yaml
 
     routing:
       - match: {category: network}
-        approvers: [SA-Operators, Admins]
+        approvers: [Operators, Admins]
 
 When a request starts to wait, :func:`approver_set_for` works out the
 group kinds that may approve it and the request stores them
@@ -69,7 +70,7 @@ from meho_backplane.auth.operator import Operator, RoleGroup, TenantRole
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION
 from meho_backplane.policy.classification import RISK_LEVELS, Taxonomy
-from meho_backplane.policy.document import GROUP_KINDS
+from meho_backplane.policy.document import GROUP_KINDS, read_kind
 from meho_backplane.policy.evaluate import approver_groups
 from meho_backplane.policy.store import _documents
 from meho_backplane.settings import get_settings
@@ -149,16 +150,20 @@ class ApproverSet:
 
 
 def _ordered(kinds: Sequence[str] | set[str] | frozenset[str]) -> tuple[str, ...]:
-    """*kinds* in the order of :data:`GROUP_KINDS`, without unknown names."""
-    return tuple(kind for kind in GROUP_KINDS if kind in kinds)
+    """*kinds* in the order of :data:`GROUP_KINDS`, without unknown names.
+
+    An old kind (``SA-Operators``, ``Approvers``) is read as the new one.
+    """
+    read = {read_kind(kind) for kind in kinds}
+    return tuple(kind for kind in GROUP_KINDS if kind in read)
 
 
 def today_kinds(level: str | None, op_id: str) -> tuple[str, ...]:
     """The group kinds that may approve another person's change today.
 
     The same rule as :func:`~meho_backplane.policy.evaluate.approver_groups`:
-    a ``dangerous`` or ``destructive`` change only SA-Operators and Admins;
-    a lower one also Operators and Approvers; an operation with the
+    a ``dangerous`` or ``destructive`` change only Admins;
+    a lower one also Operators; an operation with the
     ``tenant_admin`` role floor only Admins. Readers never approve.
     """
     groups = approver_groups(level or "", op_id)
@@ -169,15 +174,14 @@ def kind_of(operator: Operator) -> str:
     """The login group kind of *operator* in its current tenant.
 
     Admins have the ``tenant_admin`` role (also a platform admin who works
-    in a tenant without a role group there). SA-Operators are operators
-    who may approve their own changes. Approvers are ``read_only`` with the
-    approver flag.
+    in a tenant without a role group there). Operators have the ``operator``
+    role. Everyone else is a Reader.
     """
     if operator.tenant_role == TenantRole.TENANT_ADMIN:
         return RoleGroup.ADMINS.value
     if operator.tenant_role == TenantRole.OPERATOR:
-        return (RoleGroup.SA_OPERATORS if operator.self_approver else RoleGroup.OPERATORS).value
-    return (RoleGroup.APPROVERS if operator.approver else RoleGroup.READERS).value
+        return RoleGroup.OPERATORS.value
+    return RoleGroup.READERS.value
 
 
 def _text(value: Any) -> str | None:
@@ -351,7 +355,7 @@ def stored_kinds(value: Any) -> tuple[str, ...] | None:
 
 
 def group_names(kinds: Sequence[str]) -> str:
-    """``MEHO-SA-Operators or MEHO-Admins``: the kinds as group names."""
+    """``MEHO-Operators or MEHO-Admins``: the kinds as group names."""
     names = [f"MEHO-{kind}" for kind in kinds]
     if len(names) <= 1:
         return "".join(names)
@@ -431,7 +435,7 @@ def _entry_mistakes(index: int, raw: Mapping[str, Any], taxonomy: Taxonomy) -> l
 def _approve_mistakes(index: int, raw: Mapping[str, Any]) -> list[str]:
     match = raw.get("match") or {}
     levels = _levels(match.get("risk"))
-    approvers = [str(kind) for kind in raw.get("approvers") or []]
+    approvers = [read_kind(str(kind)) for kind in raw.get("approvers") or []]
     mistakes = [
         f"`routing[{index}]` asks `{kind}`, but `{kind}` has no `approve` rule for these changes."
         for kind in approvers

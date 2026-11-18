@@ -249,11 +249,9 @@ def _plan(session_id: uuid.UUID, operator: Operator | None = None, *, work_ref: 
             return client.get("/ui/approvals/in-order", params={"work_ref": work_ref})
 
 
-def _sa_operator() -> Operator:
-    """A person in the MEHO-SA-Operators group, with the operator role."""
-    return _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
-        update={"self_approver": True}
-    )
+def _admin() -> Operator:
+    """A person in the MEHO-Admins group, with the tenant admin role."""
+    return _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN)
 
 
 def _step_row(body: str, step: int) -> str:
@@ -408,12 +406,12 @@ def test_plan_shows_for_each_pending_step_whether_the_person_may_approve_it() ->
     _seed(3, "destructive")
     _seed(4, "caution", status_value="approved", resume_result={"status": "ok"})
 
-    body = _plan(session_id, _sa_operator()).text
+    body = _plan(session_id, _admin()).text
 
     own = _step_row(body, 1)
     assert 'data-approve-right="yes"' in own
     assert 'data-approve-reason="own_change"' in own
-    assert "MEHO-SA-Operators and MEHO-Admins may approve their own changes." in own
+    assert "MEHO-Admins may approve their own changes." in own
     other = _step_row(body, 2)
     assert 'data-approve-right="yes"' in other
     assert 'data-approve-reason="ok"' in other
@@ -436,7 +434,7 @@ def test_plan_says_where_the_run_will_stop_for_a_step_the_person_may_not_approve
     refused = _step_row(body, 2)
     assert 'data-approve-right="no"' in refused
     assert 'data-approve-reason="wrong_group"' in refused
-    assert "MEHO-SA-Operator or a MEHO-Admin" in refused
+    assert "Only a MEHO-Admin may approve" in refused
     assert 'data-approval-in-order-refused="2"' in body
     assert "You cannot approve step 2 of 2 (op.step2). The run will stop there." in body
     # Step 1 can still go: the Start button stays.
@@ -686,13 +684,13 @@ def test_self_approval_refusal_stops_the_run() -> None:
 
 
 def test_a_self_approved_step_says_so_and_the_done_banner_counts_it() -> None:
-    """A MEHO-SA-Operator approves their own step: the row and the banner say so (#3329)."""
+    """A MEHO-Admin approves their own step: the row and the banner say so."""
     session_id = _session()
     s1 = _seed(1, "caution", principal_sub=_REVIEWER_SUB)
     s2 = _seed(2, "caution")
     resume = _fake_resume(failing_ops=set())
 
-    response = _post(session_id, resume, operator=_sa_operator())
+    response = _post(session_id, resume, operator=_admin())
 
     assert response.status_code == 200, response.text
     body = response.text
@@ -701,7 +699,7 @@ def test_a_self_approved_step_says_so_and_the_done_banner_counts_it() -> None:
     assert "1 of them was your own change. The audit log records it as a self-approval." in body
     own = _step_row(body, 1)
     assert 'data-testid="approval-self-approved"' in own
-    assert "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins." in own
+    assert "You approved your own change, as a member of MEHO-Admins." in own
     assert "data-approve-right" not in own
     other = _step_row(body, 2)
     assert 'data-testid="approval-self-approved"' not in other
@@ -725,16 +723,16 @@ def test_an_own_destructive_step_waits_with_the_self_approval_note_then_says_so(
     s1 = _seed(1, "destructive", principal_sub=_REVIEWER_SUB)
     resume = _fake_resume(failing_ops=set())
 
-    waiting = _post(session_id, resume, operator=_sa_operator()).text
+    waiting = _post(session_id, resume, operator=_admin()).text
     assert 'data-approval-in-order-waiting="1"' in waiting
     assert 'data-approval-confirm="self-approval"' in waiting
     assert "This is your own change: the audit log records a self-approval." in waiting
     assert _request_status(s1) == "pending"
 
-    done = _post(session_id, resume, operator=_sa_operator(), confirm_id=str(s1)).text
+    done = _post(session_id, resume, operator=_admin(), confirm_id=str(s1)).text
 
     assert _request_status(s1) == "approved"
-    confirmation = "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins."
+    confirmation = "You approved your own change, as a member of MEHO-Admins."
     assert confirmation in _step_row(done, 1)
     assert "1 of them was your own change." in done
 

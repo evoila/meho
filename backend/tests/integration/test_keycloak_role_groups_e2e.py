@@ -83,6 +83,9 @@ _BACKPLANE_AUDIENCE = "meho-backplane"
 _LOGIN_CLIENT = "meho-cli"
 
 # The five role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The second value says whether the token still carries the `approver` claim
+# that Keycloak sets for the group. MEHO reads MEHO-Approvers as Readers, so
+# the backplane does not set the `approver` flag from it.
 _ROLE_GROUPS = {
     "MEHO-Readers": (TenantRole.READ_ONLY, False),
     "MEHO-Operators": (TenantRole.OPERATOR, False),
@@ -341,7 +344,8 @@ async def test_member_of_one_group_gets_its_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    assert operator.approver is False
+    assert operator.self_approver is False
     assert operator.platform_admin is False
 
 

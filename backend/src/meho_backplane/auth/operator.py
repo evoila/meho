@@ -126,12 +126,11 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
   (#5239); the flat ``tenant_id`` / ``tenant_role`` / ``approver`` claims
   are not used.
-* ``self_approver`` — whether the person is in the ``MEHO-SA-Operators``
-  group of the current tenant (#3327). SA-Operators may approve their own
-  changes, at every risk level that waits for approval (#3325). Read by
-  :func:`~meho_backplane.auth.jwt._extract_self_approver`: from the
-  current tenant's ``meho_tenants`` entry when the token has that claim,
-  else from the ``groups`` claim (group name ``JWT_SELF_APPROVER_GROUP``).
+* ``self_approver`` — whether the login group of the current tenant gives
+  self-approval (:func:`group_grant`). No default group gives it:
+  ``MEHO-SA-Operators`` is read as Operators. It stays ``False`` for a
+  token without a ``meho_tenants`` claim. Read by
+  :func:`~meho_backplane.auth.jwt._extract_self_approver`.
   When the request names another tenant of the list,
   :func:`~meho_backplane.auth.current_tenant.with_membership` reads it
   again from that tenant's entry, the same as ``approver``. A platform
@@ -277,10 +276,12 @@ class GroupGrant(NamedTuple):
 
     * ``role`` — the :class:`TenantRole`.
     * ``approver`` — the person may decide approval requests
-      (the same meaning as :attr:`Operator.approver`).
-    * ``self_approval`` — the person may approve their own change. Only
-      ``SA-Operators`` sets it. It sets :attr:`Operator.self_approver`
-      for the current tenant (#3327).
+      (the same meaning as :attr:`Operator.approver`). No default group
+      sets it; a customer role can.
+    * ``self_approval`` — the person may approve their own change. No
+      default group sets it: an Admin approves their own change through
+      the ``tenant_admin`` role (:attr:`Operator.may_self_approve`).
+      It sets :attr:`Operator.self_approver` for the current tenant.
     """
 
     role: TenantRole
@@ -289,13 +290,15 @@ class GroupGrant(NamedTuple):
 
 
 #: The one table from login group kind to role and flags. It must match
-#: the table in ``docs/decisions/login-role-groups.md``.
+#: the table in ``docs/decisions/login-role-groups.md``. The two old
+#: groups stay known: ``SA-Operators`` is read as Operators and
+#: ``Approvers`` is read as Readers.
 _GROUP_GRANTS: dict[RoleGroup, GroupGrant] = {
     RoleGroup.READERS: GroupGrant(TenantRole.READ_ONLY, approver=False, self_approval=False),
     RoleGroup.OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False),
-    RoleGroup.SA_OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=True),
+    RoleGroup.SA_OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False),
     RoleGroup.ADMINS: GroupGrant(TenantRole.TENANT_ADMIN, approver=False, self_approval=False),
-    RoleGroup.APPROVERS: GroupGrant(TenantRole.READ_ONLY, approver=True, self_approval=False),
+    RoleGroup.APPROVERS: GroupGrant(TenantRole.READ_ONLY, approver=False, self_approval=False),
 }
 
 
@@ -387,8 +390,9 @@ class Operator(BaseModel):
     #: claim, and always empty for a machine login. The current tenant is
     #: picked from it per request (#5239).
     tenants: tuple[TenantMembership, ...] = ()
-    #: The person is in the SA-Operators group of the current tenant
-    #: (#3327). Off by default. Read it through :attr:`may_self_approve`.
+    #: The login group of the current tenant gives self-approval. No
+    #: default group does. Off by default. Read it through
+    #: :attr:`may_self_approve`.
     self_approver: bool = False
     #: The ``meho_tenants`` claim had a part MEHO could not read. Then
     #: ``self_approver`` stays off in every tenant (#3327).
@@ -456,9 +460,9 @@ class Operator(BaseModel):
 
         The one place the approval checks ask (#3328). True only for a
         person (``principal_kind=user``) in a chosen current tenant who
-        is in one of two groups there: MEHO-SA-Operators
-        (:attr:`self_approver`), or MEHO-Admins (the ``tenant_admin``
-        role, #5969). A platform admin who works in a tenant without a
+        is an Admin there (the ``tenant_admin`` role, MEHO-Admins), or
+        whose group gives self-approval (:attr:`self_approver`, no
+        default group does). A platform admin who works in a tenant without a
         role group there has the ``tenant_admin`` role
         (:attr:`role_from_platform_admin`), so they count as an admin.
         A machine login (agent, service, runner) always gets ``False``,

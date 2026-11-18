@@ -284,7 +284,7 @@ _ROUTING_REFUSED_STATUS_CODE: int = 409
 #: in words for the refusal texts. The rule itself is in
 #: :func:`_check_approver_group`; the groups come from the decision record
 #: ``docs/decisions/approval-groups-and-self-approval.md`` (#3325).
-_HIGH_RISK_APPROVERS_TEXT: Final[str] = "a MEHO-SA-Operator or a MEHO-Admin"
+_HIGH_RISK_APPROVERS_TEXT: Final[str] = "a MEHO-Admin"
 
 
 class ApprovalRule(StrEnum):
@@ -293,8 +293,8 @@ class ApprovalRule(StrEnum):
     Recorded as ``approval_rule`` on the ``approval.decision`` audit row
     and on the ``approval.approved`` step event, next to ``self_approved``.
 
-    * ``sa_operator_self_approval`` — a MEHO-SA-Operator or a MEHO-Admin
-      approved their own change (both groups may, #5969).
+    * ``sa_operator_self_approval`` — an Admin (MEHO-Admins) approved
+      their own change. The stored value keeps its name.
     * ``break_glass_self_approval`` — the requester approved their own
       ``safe`` or ``caution`` change under ``APPROVAL_ALLOW_SELF_APPROVAL``.
     * ``sa_operator_or_admin`` — another person's ``dangerous`` or
@@ -479,7 +479,7 @@ class SelfApprovalForbiddenError(ApprovalError):
 
     Raised by :func:`approve_request` when
     ``operator.sub == request.principal_sub``, the person is not in the
-    MEHO-SA-Operators or MEHO-Admins group
+    MEHO-Admins group
     (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`), and
     the audited single-operator break-glass mode
     (``Settings.approval_allow_self_approval``) does not cover the change.
@@ -522,8 +522,7 @@ class SelfApprovalForbiddenError(ApprovalError):
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
-            "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
-            f"changes. {who_can}"
+            f"MEHO-Admins group may approve their own changes. {who_can}"
         )
         super().__init__(
             f"operator {principal_sub!r} may not approve approval_request "
@@ -2046,7 +2045,7 @@ async def approve_request(
        (#3243); else 403.
     3. The row is still ``pending`` (else 409).
     4. Who may approve (#1401, #3328, :func:`_check_approver_group`):
-       the approver's own change only for a MEHO-SA-Operator, or for a
+       the approver's own change only for an Admin, or for a
        ``safe`` / ``caution`` change under the audited break-glass mode
        (``Settings.approval_allow_self_approval``); else 403,
        :class:`SelfApprovalForbiddenError`. Another person's
@@ -2117,7 +2116,7 @@ async def approve_request(
             (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
         SelfApprovalForbiddenError: Approver is the requester, is not a
-            MEHO-SA-Operator, and break-glass does not cover the change
+            Admin, and break-glass does not cover the change
             (G11.7-T1 #1401, #3328).
         ApprovalGroupForbiddenError: Another person's ``dangerous`` or
             ``destructive`` change, and the approver is not in a group that
@@ -3781,7 +3780,7 @@ def may_approve_high_risk(operator: Operator) -> bool:
     """True when *operator* may approve another principal's high-risk change (#3328).
 
     The groups of ``docs/decisions/approval-groups-and-self-approval.md``:
-    a MEHO-SA-Operator or a tenant admin. Run approvals use the same rule
+    a tenant admin. Run approvals use the same rule
     (:meth:`~meho_backplane.operations.run_approvals.RunApprovalService.approve`).
     """
     return operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN
@@ -3815,7 +3814,7 @@ def _check_self_approval(
     comparison is on the stable ``sub`` claim, so a renamed display name
     can never turn into a self-approval. Then, in order:
 
-    1. A MEHO-SA-Operator or a MEHO-Admin (:attr:`Operator.may_self_approve`)
+    1. A MEHO-Admin (:attr:`Operator.may_self_approve`)
        may approve their own change at every risk level. On the
        command line and REST the approve routes have already required a
        fresh sign-in (#3979).
@@ -3906,7 +3905,7 @@ def _check_approver_group(
       :func:`~meho_backplane.operations.grant_approval.check_grant_approval`.
     * Own change: :func:`_check_self_approval`.
     * Another person's ``dangerous`` or ``destructive`` change: only a
-      MEHO-SA-Operator or a tenant admin may approve it, as the decision
+      tenant admin may approve it, as the decision
       record ``docs/decisions/approval-groups-and-self-approval.md`` says.
       Everyone else gets :class:`ApprovalGroupForbiddenError` (403).
     * Another person's lower-risk change (also one that waits only because

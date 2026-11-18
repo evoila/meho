@@ -58,6 +58,7 @@ from meho_backplane.instance_settings.schema import (
 from meho_backplane.policy.store import _check_labels
 
 __all__ = [
+    "ACCEPTED_KINDS",
     "ALL_CATEGORIES",
     "BINDING_PRINCIPALS",
     "GROUP_KINDS",
@@ -81,9 +82,27 @@ MAX_POLICY_BYTES: Final[int] = 1024 * 1024
 
 _CATEGORY_RE: Final[str] = r"^[a-z][a-z0-9_-]{0,62}$"
 
-#: The five login group kinds a routing entry may ask and a binding may give,
-#: in this order.
-GROUP_KINDS: Final[tuple[str, ...]] = tuple(kind.value for kind in RoleGroup)
+#: The login group kinds a file shows: Readers, Operators, Admins.
+GROUP_KINDS: Final[tuple[str, ...]] = ("Readers", "Operators", "Admins")
+
+#: The two old kinds a file may still use, and the kind MEHO reads each as.
+_OLD_KINDS_READ_AS: Final[dict[str, str]] = {
+    RoleGroup.SA_OPERATORS.value: RoleGroup.OPERATORS.value,
+    RoleGroup.APPROVERS.value: RoleGroup.READERS.value,
+}
+
+#: Every kind a file accepts: the three kinds and the two old kinds.
+ACCEPTED_KINDS: Final[tuple[str, ...]] = tuple(kind.value for kind in RoleGroup)
+
+
+def read_kind(kind: str) -> str:
+    """The kind MEHO reads *kind* as.
+
+    ``SA-Operators`` is read as ``Operators`` and ``Approvers`` as ``Readers``.
+    """
+    return _OLD_KINDS_READ_AS.get(kind, kind)
+
+
 _PATTERN = Annotated[str, Field(min_length=1, max_length=200)]
 
 #: Who a binding is for. ``person`` is the default.
@@ -183,18 +202,19 @@ class PolicyRoute(_Strict):
     """``routing[]``: one entry. The group kinds that are asked to approve."""
 
     match: PolicyRouteMatch
-    approvers: list[str] = Field(min_length=1, max_length=len(GROUP_KINDS))
+    approvers: list[str] = Field(min_length=1, max_length=len(ACCEPTED_KINDS))
 
     @field_validator("approvers")
     @classmethod
     def _known_kinds(cls, value: list[str]) -> list[str]:
-        if any(kind not in GROUP_KINDS for kind in value):
+        if any(kind not in ACCEPTED_KINDS for kind in value):
             raise ValueError(
                 "names a group kind that does not exist; use " + ", ".join(GROUP_KINDS)
             )
         if len(set(value)) != len(value):
             raise ValueError("names a group kind twice")
-        return value
+        # An old kind is read as the new one; two names for one kind count once.
+        return list(dict.fromkeys(read_kind(kind) for kind in value))
 
 
 class PolicyBindingMatch(_Strict):
@@ -235,9 +255,9 @@ class PolicyBinding(_Strict):
     @field_validator("kind")
     @classmethod
     def _known_kind(cls, value: str) -> str:
-        if value not in GROUP_KINDS:
+        if value not in ACCEPTED_KINDS:
             raise ValueError("is not a group kind; use " + ", ".join(GROUP_KINDS))
-        return value
+        return read_kind(value)
 
     @field_validator("principal")
     @classmethod

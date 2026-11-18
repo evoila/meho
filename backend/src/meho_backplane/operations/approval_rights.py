@@ -149,7 +149,7 @@ def _allowed(rule: ApprovalRule) -> ApproveRight:
     if rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL:
         message = (
             "This is your own change. You may approve it, because members of "
-            "MEHO-SA-Operators and MEHO-Admins may approve their own changes. "
+            "MEHO-Admins may approve their own changes. "
             "The audit log records it as a self-approval."
         )
     elif rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL:
@@ -182,7 +182,7 @@ def self_approval_confirmation(rule: ApprovalRule | None) -> str | None:
     """
     if rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL:
         return (
-            "You approved your own change, as a member of MEHO-SA-Operators or "
+            "You approved your own change, as a member of "
             "MEHO-Admins. The audit log records it as a self-approval."
         )
     if rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL:

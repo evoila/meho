@@ -2629,6 +2629,13 @@ class Settings(BaseModel):
     #: Only the outcome changes, never the hits or their order. Set via
     #: ``SEARCH_CLEAR_LEAD``.
     search_clear_lead: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Typed and multi-step operations first in ``search_operations`` and
+    #: ``list_operation_groups`` (#4712), behind a switch that is off by
+    #: default. When on, both show only ``source_kind`` ``typed`` and
+    #: ``composite`` operations, unless the caller sets ``include_raw`` or
+    #: the connector has no such operation. Off: both are as before. Set via
+    #: ``SEARCH_TYPED_FIRST``.
+    search_typed_first: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
     #: switch that is off by default. When on, each node row also has
     #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
@@ -2662,6 +2669,14 @@ class Settings(BaseModel):
     #: exist when nothing matched. Off: the same answer as before. Set via
     #: ``CONNECTOR_LIST_PRODUCT_ALIASES``.
     connector_list_product_aliases: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Call hints on each ``search_operations`` hit (#4331), behind a switch
+    #: that is off by default. When on, each ranked hit also has
+    #: ``required_params`` (the names in the top-level ``required`` list of
+    #: the op's ``parameter_schema``) and ``target_required`` (the
+    #: dispatcher's own target rule), and the tool's output schema names
+    #: them. Off: the same answers and tool texts as before. Set via
+    #: ``SEARCH_HIT_CALL_HINTS``.
+    search_hit_call_hints: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3728,6 +3743,9 @@ def get_settings() -> Settings:
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
         ),
+        search_typed_first=parse_bool_env(
+            os.environ.get("SEARCH_TYPED_FIRST"),
+        ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
@@ -3739,6 +3757,9 @@ def get_settings() -> Settings:
         ),
         connector_list_product_aliases=parse_bool_env(
             os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),
+        ),
+        search_hit_call_hints=parse_bool_env(
+            os.environ.get("SEARCH_HIT_CALL_HINTS"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

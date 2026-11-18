@@ -965,6 +965,37 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     live run on a test install: set a `custom_description`, search
     with words that appear only in it, check the hit shows the new
     text, set it to `null`, check the original is back.
+- **How to call a hit, behind a switch (#4331).** The backplane switch
+  `SEARCH_HIT_CALL_HINTS` (an env var, off by default) adds two small
+  fields to each ranked hit, so an agent can make a right first call
+  without a second lookup:
+  - `required_params`: the names in the top-level `required` list of the
+    operation's stored `parameter_schema`, in that order. `call_operation`
+    checks `params` against that same schema. Names only, no schemas: the
+    full schema stays in exact-op mode. An operation with no `required`
+    list gives `[]`.
+  - `target_required`: `true` when a call needs a `target`. It uses the
+    dispatcher's own rule, `descriptor_requires_target` in
+    `operations/dispatcher.py`, which the exact-op contract's
+    `target.required` also uses. So the two always agree. Every generic
+    (ingested) operation needs a target; a typed or multi-step operation
+    needs one when its handler reaches the connector through the target.
+  - **Off (default):** both keys are left out, and the handler of a hit is
+    not even imported, so every answer is the same as before. The
+    registered `outputSchema` names both fields; while the switch is off,
+    `call_hints_schema_for_settings`
+    (`mcp/tools/_search_call_hints_schema.py`) takes them out of the
+    schema that `tools/list` sends. The REST `GET /api/v1/operations/search`
+    answer follows the same switch; the CLI `meho operation search --json`
+    prints the fields when the backplane sends them.
+  - **Before turning it on** (measurement plan of the pull request): on
+    the benchmark lane, compare the job score with the switch off and on,
+    for a small model and for Claude, and the size of a search answer
+    (it must grow by less than 10%). Turn it on only if the small model's
+    score goes up and Claude's does not go down. Then one live run on a
+    test install through the agent surface. Code:
+    `operations/_search_call_hints.py`. Tests:
+    `backend/tests/test_search_hit_call_hints.py`.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op
@@ -1060,6 +1091,51 @@ Every other result has an `outcome` field:
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #6014).
+- **Typed and multi-step operations first, behind a switch (#4712).** A
+  big connector holds many more raw operations (made from a vendor API
+  description, `source_kind='ingested'`) than typed and multi-step ones,
+  in the same groups. So a search often finds a raw call first, even
+  when a safer typed or multi-step operation exists. The backplane
+  switch `SEARCH_TYPED_FIRST` (an env var, off by default) changes what
+  `search_operations` and `list_operation_groups` show (MCP, REST and
+  CLI the same):
+  - Ranked search returns only `source_kind` `typed` and `composite`
+    rows. The filter is in the candidate queries, so raw rows cannot
+    push typed ones out of the top hits.
+  - `include_raw: true` (REST `include_raw=true`, CLI `--include-raw`)
+    adds raw operations back.
+  - A connector with no typed or multi-step operation the caller can use
+    (same tenant, enabled and package rules as the search) shows its raw
+    operations without the flag.
+  - Each answer has `raw_operations`: `included`, a count, and a `note`.
+    When a typed-only search is `no_match` or `ambiguous`, the search runs
+    once more with raw operations, and `hidden_matches` says how many
+    raw hits were left out; the note names `include_raw`.
+  - `list_operation_groups` counts typed and multi-step operations
+    (`operation_count`, `enabled_op_count`) and leaves out groups of raw
+    operations only (`hidden_groups`). The filter is in the query, so
+    paging stays correct.
+  - Not changed: exact-op mode (`op_id`) finds any operation; calling,
+    policy and approval are the same. The operator console search still
+    shows every operation.
+  - Off: no `include_raw` input, no `raw_operations` field and no
+    description line in `tools/list`
+    (`mcp/tools/_include_raw.py`); the REST and CLI flag change nothing.
+    Hosted agent runs follow the switch the same way, with the setting
+    `agent_operation_tools_from_mcp` on or off. On: their tools are built
+    for each run (`agent/toolset_operations.py`). Off: the hand-written
+    tools get the `include_raw` input and the line while the switch is on
+    (`with_include_raw_input`), so a hosted run can follow the note.
+  - Code: `operations/_search_typed_first.py`, `typed_only` in
+    `operations/_search.py`, `search_operations` and
+    `list_operation_groups` in `operations/meta_tools.py`. Tests:
+    `tests/test_search_typed_first.py`, and
+    `test_include_raw_follows_the_typed_first_switch` in
+    `tests/test_mcp_surface_conformance.py` and
+    `tests/test_agent_toolset_operations.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #4712).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.

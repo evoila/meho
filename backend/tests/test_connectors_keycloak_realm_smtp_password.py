@@ -494,6 +494,19 @@ async def test_approval_card_hides_a_password_value() -> None:
     assert "smtp_password_source" not in card
 
 
+@pytest.mark.asyncio
+async def test_approval_card_shows_the_password_policy_text() -> None:
+    params = _named_secret_params()
+    params["representation"]["passwordPolicy"] = "length(8) and digits(1)"
+    card = await _realm_update_preview(_card_ctx(params))
+
+    assert card is not None
+    shown = card["representation"]
+    assert shown["passwordPolicy"] == "length(8) and digits(1)"
+    assert shown["attributes"]["someApiKey"] == "***REDACTED***"
+    assert shown["smtpServer"]["authTokenClientSecret"] == "***REDACTED***"
+
+
 #: Made-up values under secret-shaped names that are not in the Keycloak
 #: list of secret fields. The card must hide each of them.
 _NAMED_SECRETS: dict[str, str] = {
@@ -590,6 +603,25 @@ async def test_approval_card_hides_secret_shaped_text_under_plain_keys() -> None
     assert shown["attributes"]["frontendUrl"] == "x"
     text = json.dumps(card)
     for value in _SHAPED_SECRETS:
+        assert value not in text
+
+
+@pytest.mark.asyncio
+async def test_approval_card_checks_the_password_policy_text_for_secrets() -> None:
+    params = _ref_params()
+    params["representation"] = {
+        "passwordPolicy": _JWT,
+        "identityProviders": [{"alias": "corp-idp", "config": {"passwordPolicy": _TOKEN}}],
+    }
+    card = await _realm_update_preview(_card_ctx(params))
+
+    assert card is not None
+    shown = card["representation"]
+    assert shown["identityProviders"] == [
+        {"alias": "corp-idp", "config": {"passwordPolicy": "***REDACTED***"}}
+    ]
+    text = json.dumps(card)
+    for value in (_JWT, _TOKEN):
         assert value not in text
 
 

@@ -1887,7 +1887,8 @@ incidents #634 / #697.
 
 A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
 in `ci.yml` has `continue-on-error: true`. The test images come through the
-Harbor image proxy (the `MEHO_TEST_*_IMAGE` job variables), so the login only
+Harbor image proxy (the step "Read the CI repository secrets" sets the
+`MEHO_TEST_*_IMAGE` variables), so the login only
 adds pull headroom on Docker Hub. A short network problem on the way to Docker
 Hub then costs nothing, and cannot throw a pull request out of the merge queue.
 `backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
@@ -3011,6 +3012,7 @@ their isolation posture:
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job pulls its scan image from the internal image proxy, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
+| `private-names-check.yml` | yes (runs `scripts/ci/check_private_names.py` from the checkout of the pull request over its added lines) | **hosted runner** for every event, also the merge queue; a fork pull request gets no secrets, so the job prints a note and skips the checkout |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
@@ -3025,9 +3027,9 @@ their isolation posture:
   A fork PR (`head.repo.full_name != github.repository`) skips the job;
   a skipped required job reports **Success**, so branch protection is
   satisfied while nothing executes on the internal pool. Used where the
-  job genuinely needs an internal resource — `security-scan.yml` runs in
-  a container pulled through the internal Harbor proxy, so relocating it to a disposable
-  runner is impossible; the real scan runs on the trusted `merge_group`
+  job genuinely needs an internal resource — the Semgrep job of
+  `security-scan.yml` pulls its scan image through the internal image proxy
+  with `docker run`, so relocating it to a disposable runner is impossible; the real scan runs on the trusted `merge_group`
   (queue admission) and `push` refs instead.
 
 - **Route to a disposable runner.** Where the job needs no internal
@@ -3081,15 +3083,15 @@ for a pool that is full. Three rules:
    two pull requests can raise the same plugin version, or break the
    docs build together. A queue run starts about
    12 jobs on `meho-runners-ci`, 6 on `meho-runners-ci-heavy-queue`
-   (the unit shards) and 11 hosted jobs (rule 3).
+   (the unit shards) and 12 hosted jobs (rule 3).
 3. **A short job that must stay and does not need a pool may use a
    hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
    `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
    Today these are: `docs-site.yml` `deploy` and `build`,
    `plugin-version-check.yml` `plugin-version`, `ci.yml` `changes`,
    `python-unit-lane`, `python-integration` and `helm-lint-template`,
-   `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
-   `check`. Each runs for seconds to about a minute, so it does not fill the
+   `chart.yml` `changes` and `helm-test-gate`, `migration-heads.yml`
+   `check`, and `private-names-check.yml` `check`. Each runs for seconds to about a minute, so it does not fill the
    hosted limit. The two kind installs of `chart.yml` (`helm-test` and
    `helm-test-byo`) are hosted too, for a different reason: they need
    more CPU than the heavy queue pool has today (#6347).

@@ -1778,7 +1778,7 @@ jobs:
     # ~2026-06-20 died as an OOM runner-loss (absorbed job failure, null step
     # telemetry) or a memory-thrash wedge (pytest crawls to the 45-min step
     # cap, combine hangs on the debris — the v0.31.0 tag-gate blocker).
-    # a later change resized the pool to 14Gi (request == limit,
+    # A later change resized the pool to 14Gi (request == limit,
     # node-exclusive by memory), giving the sweep ~1.5 GiB of real headroom
     # on this same runs-on label.
     # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`

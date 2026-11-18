@@ -26,6 +26,8 @@ import meho_backplane.connectors.linux  # noqa: F401 -- registers the script pre
 import meho_backplane.connectors.linux.ops_write as linux_write
 import meho_backplane.connectors.linux.script_preview as script_preview
 import meho_backplane.operations._request_preview as request_preview
+import meho_backplane.operations.dispatcher as dispatcher
+import meho_backplane.operations.meta_tools as meta_tools
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
@@ -37,6 +39,7 @@ from tests.test_operations_preview_typed_writes import (  # noqa: F401 -- fixtur
     _register,
     stub_embedding_service,
 )
+from tests.test_operations_request_preview import _FakeTarget, _make_operator
 
 _ONE_MIB = 1 << 20
 _TIME_LIMIT_SECONDS = 2.0
@@ -177,3 +180,46 @@ async def test_preview_of_a_caller_who_waits_for_approval_runs_the_pass(
     )
     assert envelope["status"] == "ok"
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_call_of_a_refused_caller_never_runs_the_pass(
+    stub_embedding_service: AsyncMock,  # noqa: F811 -- fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _register(
+        stub_embedding_service,
+        "linux.script.run",
+        safety_level="dangerous",
+        requires_approval=True,
+        schema={"type": "object", "properties": {"script": {"type": "string"}}},
+    )
+    calls: list[str] = []
+    real = script_preview.hide_shell_script
+
+    def spy(script: str) -> str:
+        calls.append(script)
+        return real(script)
+
+    monkeypatch.setattr(script_preview, "hide_shell_script", spy)
+
+    async def gate(**_: Any) -> tuple[PermissionVerdict, str | None]:
+        return PermissionVerdict.DENY, "by test"
+
+    async def resolved(*_: Any, **__: Any) -> tuple[Any, None]:
+        return _FakeTarget(product="demo", version="1.x", name="demo-prod"), None
+
+    monkeypatch.setattr(dispatcher, "policy_gate", gate)
+    monkeypatch.setattr(meta_tools, "_resolve_target_or_error", resolved)
+
+    answer = await meta_tools.call_operation(
+        _make_operator(),
+        {
+            "connector_id": "demo-1.x",
+            "op_id": "linux.script.run",
+            "target": "demo-prod",
+            "params": {"script": f"echo {_FAKE}\n"},
+        },
+    )
+    assert answer["status"] == "denied"
+    assert calls == []

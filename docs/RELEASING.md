@@ -615,7 +615,7 @@ Walk the gates in the order an operator hits them:
   default fail-closed posture, `"single_operator_break_glass"` when
   the deploy set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true`
   escape (see `docs/codebase/approvals.md` — the endorsed
-  single-operator answer is the MEHO-SA-Operators group, not the flag).
+  single-operator answer is the MEHO-Admins group, not the flag).
 
 - [ ] **Approval custody** (required wherever a credential-write
   operation may wait for approval). Set

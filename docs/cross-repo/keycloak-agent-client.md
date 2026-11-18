@@ -312,7 +312,7 @@ session lists them only when it asked for the `mcp:admin` scope
 - [`mcp-client-setup.md`](mcp-client-setup.md) — MCP browser-flow client
   provisioning (for human-facing MCP sessions, not agent clients)
 - [`../codebase/approvals.md`](../codebase/approvals.md) §
-  "Single-operator tenants" — a single operator in MEHO-SA-Operators
+  "Single-operator tenants" — a single operator in MEHO-Admins
   approves their own change; an `agent:<name>` principal (a distinct
   `sub`) as the requester is the other way, instead of the
   `APPROVAL_ALLOW_SELF_APPROVAL` break-glass

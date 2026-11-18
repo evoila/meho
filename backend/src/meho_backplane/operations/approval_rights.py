@@ -17,11 +17,10 @@ same order, so the sign never says something else than the approve does:
 3. Only a ``pending`` request can be approved.
 4. The group rule (:func:`_check_approver_group`): a change of rights only
    for another admin, whatever the group of the requester; an own change only for
-   a MEHO-SA-Operator or a MEHO-Admin, with a click in the web interface when the
+   a MEHO-Admin, with a click in the web interface when the
    ``caution`` change waited only because it came with a token (#3980),
    or a ``safe`` / ``caution`` change under the break-glass switch;
-   another person's ``dangerous`` or ``destructive`` change only for a
-   MEHO-SA-Operator or an admin.
+   another person's ``dangerous`` or ``destructive`` change only for an admin.
 5. The role floor of the operation (:func:`_check_approver_role_floor`).
 6. With approver routing on, the install's routing as it is now, when the
    caller passes it (:class:`~meho_backplane.policy.routing_floor.InstallFloor`),
@@ -82,7 +81,7 @@ class ApproveRightReason(StrEnum):
 
     * ``ok`` — another person's change; this person may approve it.
     * ``own_change`` — the person's own change. With ``may_approve`` true,
-      a self-approval is allowed (a MEHO-SA-Operator or MEHO-Admin, a web click on a
+      a self-approval is allowed (a MEHO-Admin, a web click on a
       ``caution`` change that waited only for its token, or the
       break-glass switch for a lower-risk change); with false, it is
       refused.

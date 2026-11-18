@@ -255,7 +255,7 @@ async def _check_approver_group(
     A ``dangerous`` (or ``destructive``) operation of another principal may
     be approved only by the groups of
     ``docs/decisions/approval-groups-and-self-approval.md``: a
-    MEHO-SA-Operator or a tenant admin. The same check
+    tenant admin. The same check
     (:func:`~meho_backplane.operations.approval_queue.may_approve_high_risk`)
     decides here, on the risk level each entry's operation has now in this
     tenant. An entry whose operation MEHO cannot find has no known risk

@@ -13,7 +13,7 @@ operations one run may use and approve it once.
 2. **A person approves it in MEHO**, on REST or with
    `meho approvals runs approve <id>`. The CLI shows the list and asks for
    `yes` first. The same group rule as for one request holds: a list with a
-   `dangerous` operation needs a MEHO-SA-Operator or a tenant admin.
+   `dangerous` operation needs a tenant admin.
 3. **The add-on reads the result.** It polls
    `GET /api/v1/service-principals/run-approvals/{id}` until the status is
    `approved` (or `revoked`).

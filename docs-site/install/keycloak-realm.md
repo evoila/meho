@@ -1185,24 +1185,21 @@ realm settings. So on a running realm, do one of these:
 
 ## Approve-only principal
 
-By default, clearing the approval queue needs the **operator** role. For
-separation of duties you can instead grant a dedicated approver the
-**`approver`** capability — an optional claim, orthogonal to the tenant
-role. A principal provisioned as `read_only` role **plus**
-`approver=true` may approve and reject parked requests but is refused
-`call_operation`: "approve, but never operate." (See
-[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver).)
+Clearing the approval queue needs the **operator** role. MEHO keeps an
+**`approver`** capability for custom roles: a `read_only` login with it
+may approve and reject waiting requests but is refused `call_operation`
+(see
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver)).
+No default group gives it:
 
-The claim is fail-closed — absent or malformed means *not* an approver.
-To make a person an approver, put them in the **`MEHO-Approvers`**
-group ([Step 5](#step-5-create-the-five-groups)), and in no other of the
-five groups. That group carries `tenant_role` = `read_only` and
-`approver` = `true`, and the `approver` mapper from
-[Step 3](#step-3-add-the-protocol-mappers) copies it into the
-token. Its **Token Claim Name** must match the backplane's
-`JWT_APPROVER_CLAIM_NAME` (default `approver`). The person keeps a low
-tenant role (`read_only`), so the capability adds approval power
-without adding dispatch power.
+- MEHO reads the old group **`MEHO-Approvers`** as Readers. Its members
+  do not approve and do not see the Approvals pages.
+- MEHO does not read the `approver` claim of the token, in any token
+  form. A token that carries it gets no approval right from it.
+
+To let a person approve, put them in `MEHO-Operators` (other people's
+`safe` and `caution` changes) or `MEHO-Admins` (also `dangerous` and
+`destructive` changes, and their own changes).
 
 ## Remember the browser, and passkeys
 

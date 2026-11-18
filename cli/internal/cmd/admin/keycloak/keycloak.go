@@ -130,7 +130,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * `offline_access` as an optional scope on the CLI client, with a 48-hour idle limit, so `meho login` gets a login that renews itself (`--cli-offline-access=0` turns it off, also on an existing client)\n" +
 			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
 			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
-			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only, plus approver=true)\n" +
+			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only)\n" +
 			"  * the group MEHO-Platform-Admins (platform_admin=true): rights across all tenants\n" +
 			"  * an admin user in MEHO-Admins and MEHO-Platform-Admins with a password\n\n" +
 			"A person gets their tenant and role from their group. Put each " +

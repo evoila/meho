@@ -326,8 +326,10 @@ URL and code, you approve it in a browser, and the CLI stores the
 resulting token in your OS keyring.
 
 **Who logs in.** The install made two users with temporary passwords: the first admin (`admin`, in `MEHO-Admins`)
-and an approver (`approver`, in `MEHO-SA-Operators`). The approver is not an admin. The approver can approve the
-admin's risky changes, but not a change of rights: a change of rights needs a second admin. See
+and an approver (`approver`, in `MEHO-SA-Operators`). The approver is not an admin. MEHO reads the old group `MEHO-SA-Operators` as
+Operators, so the approver can approve the admin's `safe` and `caution`
+changes. The admin approves their own `dangerous` and `destructive`
+changes. A change of rights needs a second admin. See
 [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). Both logins are in the
 Secret `meho-core-first-login`. Keycloak asks for a new password, a
 name and an email at the first login. Then it asks you to set up an
@@ -598,8 +600,9 @@ realm needs:
    person their tenant and role. The groups are the only source: no
    login client carries a fixed tenant or role;
 8. a first **user** in `MEHO-Admins` and `MEHO-Platform-Admins`, and a
-   second one in `MEHO-SA-Operators` who can approve the first one's
-   changes.
+   second one in `MEHO-SA-Operators`. MEHO reads that old group as
+   Operators, so the second person can approve the first one's `safe`
+   and `caution` changes.
 
 **Follow [Keycloak realm setup](keycloak-realm.md) now** — it is the
 step-by-step recipe, including the non-obvious Keycloak 25+ `basic`

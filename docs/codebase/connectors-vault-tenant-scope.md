@@ -408,6 +408,33 @@ convention, and the exact expected path — rather than the bare
 invited widening the deploy-owned policy (the wrong fix). See
 `error-message-shape.md` for both rows.
 
+## A tenant with its own Vault role
+
+A tenant that has an entry in `VAULT_OIDC_ROLE_BY_TENANT` always gets the
+folder check. When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty, MEHO uses the
+built-in folder `secret/tenants/{tenant_id}/` for that tenant.
+`effective_tenant_scope_template` in `tenant_scope.py` picks the template:
+the setting when it is not empty, else the built-in folder when the tenant
+has a role entry, else none.
+
+These paths use the helper:
+
+| Path | Check |
+|---|---|
+| `vault.kv.*` handlers | `enforce_tenant_scope` |
+| Check runner and event intake reads of a target's secret | `enforce_tenant_scope`, in `VaultCredentialBackend.load_secret_data` |
+| A person's run-time read of a target's secret | the same check, when the tenant has a role entry |
+| Secret refs in operation parameters | `check_param_secret_ref`, through `enforce_tenant_scope` |
+| Target create and update (`secret_ref`) | `_tenant_prefix_or_empty` in `api/v1/targets.py` (422 `secret_ref_outside_tenant_scope`) |
+| Vault picker start path in the console | `_default_path` in `ui/routes/vault/routes.py` |
+
+A tenant without a role entry is unchanged. The system operator and the
+read-only platform path `secret/meho/test/federation` keep their
+exceptions. The plain-path rule runs for every caller. `meho status` and
+`/ready` still report the install-wide setting. The start-up log has one
+line, `vault_tenant_scope_tenants_with_own_role`, with the number of tenants
+that get the check through their own role.
+
 ## Scope notes
 
 - This is **defense-in-depth, not the primary gate.** The guard never

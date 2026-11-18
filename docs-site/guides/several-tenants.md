@@ -159,6 +159,10 @@ identity and adds them to every login, with any role. So the person also
 leaves the Vault groups of Step 6 (item 4), and you check each role
 (item 5).
 
+A tenant with an entry in `VAULT_OIDC_ROLE_BY_TENANT` also always gets the
+MEHO folder check: every Vault path MEHO reads or writes for it must be
+under `secret/tenants/<tenant-uuid>/`, also when `VAULT_KV_TENANT_SCOPE_PREFIX` is empty.
+
 1. **Write a policy for this tenant's path only.** Put the tenant UUID
    into the path itself. A read-only example:
 

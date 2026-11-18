@@ -397,6 +397,12 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     """
     enforced = bool(get_settings().vault_kv_tenant_scope_prefix)
     VAULT_TENANT_SCOPE_ENFORCED.set(1 if enforced else 0)
+    from meho_backplane.connectors.vault.tenant_scope import count_tenants_with_own_vault_role
+
+    structlog.get_logger().info(
+        "vault_tenant_scope_tenants_with_own_role",
+        count=count_tenants_with_own_vault_role(),
+    )
     if not enforced:
         structlog.get_logger().warning(
             "vault_tenant_scope_unenforced",

@@ -67,6 +67,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import _resolve_role_for_tenant
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -74,9 +75,12 @@ __all__ = [
     "REASON_OUTSIDE_TENANT",
     "REASON_PATH_COULD_MOVE",
     "VaultTenantScopeError",
+    "count_tenants_with_own_vault_role",
+    "effective_tenant_scope_template",
     "enforce_tenant_scope",
     "is_plain_kv_path",
     "rendered_tenant_prefix",
+    "tenant_has_own_vault_role",
 ]
 
 #: The Nil UUID the vault-connector shim synthesises as the system
@@ -148,6 +152,41 @@ class VaultTenantScopeError(Exception):
         self.reason = reason
 
 
+#: The folder template a tenant with its own Vault login role gets when the
+#: install-wide ``VAULT_KV_TENANT_SCOPE_PREFIX`` is empty.
+DEFAULT_TENANT_SCOPE_TEMPLATE = "secret/tenants/{tenant_id}/"
+
+
+def tenant_has_own_vault_role(operator: Operator) -> bool:
+    """Whether *operator*'s tenant has an entry in ``VAULT_OIDC_ROLE_BY_TENANT``."""
+    return (
+        _resolve_role_for_tenant(get_settings().vault_oidc_role_by_tenant, operator.tenant_id)
+        is not None
+    )
+
+
+def count_tenants_with_own_vault_role() -> int:
+    """Count the entries of ``VAULT_OIDC_ROLE_BY_TENANT`` (for the start-up log)."""
+    raw = get_settings().vault_oidc_role_by_tenant
+    return sum(1 for entry in raw.split(",") if "=" in entry)
+
+
+def effective_tenant_scope_template(operator: Operator) -> str:
+    """Return the folder template that applies to *operator*; ``""`` means no folder check.
+
+    * ``VAULT_KV_TENANT_SCOPE_PREFIX`` when it is not empty;
+    * else ``secret/tenants/{tenant_id}/`` when the operator's tenant has its
+      own Vault login role;
+    * else empty.
+    """
+    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    if template:
+        return template
+    if tenant_has_own_vault_role(operator):
+        return DEFAULT_TENANT_SCOPE_TEMPLATE
+    return ""
+
+
 def rendered_tenant_prefix(operator: Operator, *, template: str) -> str:
     """Render the per-tenant logical-path prefix for *operator*.
 
@@ -201,7 +240,9 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
        Enforced by default
        (``vault_kv_tenant_scope_prefix="secret/tenants/{tenant_id}/"``).
        Skipped only when the prefix is explicitly emptied
-       (``VAULT_KV_TENANT_SCOPE_PREFIX=""``), when *operator* is the
+       (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) and the operator's tenant has
+       no entry in ``VAULT_OIDC_ROLE_BY_TENANT`` (a tenant with its own
+       Vault login role gets ``secret/tenants/{tenant_id}/``), when *operator* is the
        Nil-tenant system shim, or — for **read-only** ops only — when the
        path is one of the fixed :data:`PLATFORM_EXEMPT_PATHS` (shared
        non-tenant platform secrets, e.g. the federation-proof health read).
@@ -246,9 +287,9 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
             reason=REASON_PATH_COULD_MOVE,
         )
 
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    template = effective_tenant_scope_template(operator)
     if not template:
-        # Tenant prefix check off — any plain path passes, as before the guard.
+        # No folder check for this caller; only the plain-path rule above applies.
         return
     if operator.tenant_id == _SYSTEM_TENANT_ID:
         # System/shim operator: no real tenant to bind against; its only

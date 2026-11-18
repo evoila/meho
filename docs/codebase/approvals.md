@@ -3540,7 +3540,11 @@ that is allowed but risky, for example a Keycloak target that manages the
 realm MEHO itself signs in with
 (`targets/keycloak_realm_warnings.py`). The dispatcher stamps it onto the
 card when there is at least one line, and the console modal shows it as a
-"Check the target" box.
+"Check the target" box. For `targets.register` and `targets.update` the lines
+come from the target as it will be after the write: an op registers a
+builder with `register_card_warnings` (`operations/_preview.py`), and the
+dispatcher adds its lines (`build_card_warnings`, fail-soft). So the approver
+sees the warning before approving.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes

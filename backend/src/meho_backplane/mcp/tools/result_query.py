@@ -41,6 +41,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.jsonflux.query.contract import SmallFormQuerySpec
 from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
 from meho_backplane.mcp.registry import (
     READ_ONLY,
@@ -50,6 +51,12 @@ from meho_backplane.mcp.registry import (
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._result_query_small_form import (
+    contract_error_text,
+    small_form_for_settings,
+    small_form_on,
+    spec_error_text,
+)
 from meho_backplane.mcp.tools._short_tool_texts import RESULT_QUERY_SHORT
 from meho_backplane.operations.result_query import (
     DEFAULT_LIMIT,
@@ -150,21 +157,34 @@ async def _run_query(
     time-budget, and output-byte violations surface from the core. All map
     to a recoverable ``-32602`` with a machine-readable ``data.reason`` so
     the agent can narrow and retry.
+
+    With ``RESULT_QUERY_SMALL_FORM`` on (#4174), the filter also takes
+    ``contains``, an error names the path of the wrong input, and a filter
+    that matched no row gets a ``no_match`` block.
     """
+    small_form = small_form_on()
+    spec_type = SmallFormQuerySpec if small_form else ResultQuerySpec
     try:
-        spec = ResultQuerySpec.model_validate(raw_query)
+        spec = spec_type.model_validate(raw_query)
     except ValidationError as exc:
-        raise McpInvalidParamsError(
-            f"invalid query spec: {exc.error_count()} validation error(s); "
-            f"first: {exc.errors()[0].get('msg', 'invalid')}",
-            data={"reason": "invalid_query"},
-        ) from exc
+        message = (
+            spec_error_text(exc)
+            if small_form
+            else (
+                f"invalid query spec: {exc.error_count()} validation error(s); "
+                f"first: {exc.errors()[0].get('msg', 'invalid')}"
+            )
+        )
+        raise McpInvalidParamsError(message, data={"reason": "invalid_query"}) from exc
     try:
-        return await run_result_query(operator, handle_id, spec, offset=offset, limit=limit)
+        return await run_result_query(
+            operator, handle_id, spec, offset=offset, limit=limit, small_form=small_form
+        )
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
     except QueryContractError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_query"}) from exc
+        message = contract_error_text(exc) if small_form else str(exc)
+        raise McpInvalidParamsError(message, data={"reason": "invalid_query"}) from exc
     except ResultQueryTimeoutError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
@@ -201,7 +221,7 @@ register_mcp_tool(
         name="result_query",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(RESULT_QUERY_SHORT),
+        for_settings=with_short_text(RESULT_QUERY_SHORT, then=small_form_for_settings),
         description=(
             "Read the full data behind a result handle. When "
             "`call_operation` (or `list_targets`) returns a large list, you "

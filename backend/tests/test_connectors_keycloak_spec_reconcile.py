@@ -156,6 +156,8 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     # Safe reads of the login setup: required actions and the event settings.
     "_REQUIRED_ACTIONS_PATH": ("GET",),
     "_EVENTS_CONFIG_PATH": ("GET",),
+    "_EVENTS_PATH": ("GET",),
+    "_ADMIN_EVENTS_PATH": ("GET",),
     # The passkey step op: copy the browser flow, configure and move the step.
     "_AUTH_FLOW_COPY_PATH": ("POST",),
     "_AUTH_EXECUTION_CONFIG_PATH": ("POST",),
@@ -227,6 +229,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "DELETE:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "DELETE:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
         "GET:/admin/realms/{realm}",
+        "GET:/admin/realms/{realm}/admin-events",
         "GET:/admin/realms/{realm}/authentication/config/{id}",
         "GET:/admin/realms/{realm}/authentication/flows",
         "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
@@ -240,6 +243,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users",
+        "GET:/admin/realms/{realm}/events",
         "GET:/admin/realms/{realm}/events/config",
         "GET:/admin/realms/{realm}/groups",
         "GET:/admin/realms/{realm}/groups/count",

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
+    "_ADMIN_EVENTS_PATH",
     "_AUTH_CONFIG_PATH",
     "_AUTH_EXECUTION_CONFIG_PATH",
     "_AUTH_EXECUTION_RAISE_PRIORITY_PATH",
@@ -61,6 +62,7 @@ __all__ = [
     "_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH",
     "_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH",
     "_EVENTS_CONFIG_PATH",
+    "_EVENTS_PATH",
     "_GROUP_ROLE_MAPPINGS_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
@@ -152,6 +154,9 @@ _IDENTITY_PROVIDERS_PATH = "/admin/realms/{realm}/identity-provider/instances"
 # Safe reads of the login setup: required actions and the event settings.
 _REQUIRED_ACTIONS_PATH = "/admin/realms/{realm}/authentication/required-actions"
 _EVENTS_CONFIG_PATH = "/admin/realms/{realm}/events/config"
+# Safe reads of the saved login events and admin events.
+_EVENTS_PATH = "/admin/realms/{realm}/events"
+_ADMIN_EVENTS_PATH = "/admin/realms/{realm}/admin-events"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

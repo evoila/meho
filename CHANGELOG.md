@@ -125,10 +125,9 @@ after the upgrade" first.
 - The upgrade ends every approval request that still waits, as every
   upgrade since 0.39.0 does (`release_changed`). Decide waiting requests
   first, or ask the requesters to send them again.
-- After the upgrade, probe every Vault or OpenBao target again
-  (`meho targets probe <name>`). A target that was probed before the
-  upgrade to 0.47 can still carry an old detected product and version, and
-  then no connector matches it.
+- Probe every OpenBao target again after the upgrade: `meho targets probe
+  <name>`. The probe finds `openbao` and stores it, and calls work again
+  (#6679).
 - Run `meho doctor`. When the line "second admin" warns, add a second admin
   in Keycloak: a member of the tenant's admin group (`MEHO-Admins` for the
   first tenant) or of `MEHO-Platform-Admins` (#6653).
@@ -260,6 +259,8 @@ after the upgrade" first.
 - The approval cards of a Keycloak realm create and update show the
   realm's password policy text again (for example `length(8) and
   digits(1)`) (#6650).
+- The `no_connector` error of an OpenBao target that was probed before
+  v0.47.0 tells the operator to probe the target again (#6679).
 
 ### CI and tests
 - The check for secret-shaped text after each test also reads structured

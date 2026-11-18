@@ -26,8 +26,8 @@ notes.
   given rules, and reads of Keycloak login and admin events.
 - **Reset a lost second factor.** A host command on the appliance and on
   the Linux server install resets the code app of a local account.
-- **No database migration.** After the upgrade, probe every Vault or
-  OpenBao target again.
+- **No database migration.** After the upgrade, probe every OpenBao
+  target again.
 
 ## [v0.47.0](https://github.com/evoila/meho/releases/tag/v0.47.0) — 2026-11-17
 

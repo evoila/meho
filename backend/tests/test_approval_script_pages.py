@@ -476,12 +476,14 @@ def test_rest_page_read_of_a_script_that_cannot_be_decrypted_is_a_plain_refusal(
 def test_reading_ten_pages_runs_the_redaction_pass_once(client: TestClient) -> None:
     from unittest.mock import patch
 
-    from meho_backplane.connectors.linux import script_preview
+    from meho_backplane.connectors.linux.script_preview import _hide_secret_values
 
     script = _text(SCRIPT_SHOWN_MAX_BYTES * 10)
     request_id = _seed(script)
-    real = script_preview._hide_secret_values
-    with patch.object(script_preview, "_hide_secret_values", side_effect=real) as spy:
+    with patch(
+        "meho_backplane.connectors.linux.script_preview._hide_secret_values",
+        side_effect=_hide_secret_values,
+    ) as spy:
         pages = []
         for page in range(1, 11):
             response = _get(

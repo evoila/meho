@@ -21,10 +21,14 @@ compares the state under the key with the approved card:
   request was made before the card had it), or MEHO cannot read it now:
   the run is refused with :data:`REASON_STATE_UNREADABLE`. MEHO cannot tell
   that nothing changed, so it never treats an unknown state as the same.
-* The approved card showed only part of the state (the connector's
-  *complete* check says so, for example a group with more members than
-  MEHO reads): the run is refused with :data:`REASON_STATE_INCOMPLETE`.
-  A change in the part the card did not show would go unseen.
+
+A connector can name the part of the state that matters for the run with
+*compared* (for example the id and the roles of a group, and not its
+member list). Then only that part is compared.
+
+A re-run after a first run that failed part way builds the card again
+too. When the first run already changed the object, the state is not the
+one the approver saw, and the re-run is refused.
 
 Every way an approved request runs calls the check: the approve surfaces
 and the agent's own resume through
@@ -48,7 +52,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "REASON_STATE_CHANGED",
-    "REASON_STATE_INCOMPLETE",
     "REASON_STATE_UNREADABLE",
     "register_state_pin",
     "state_changed_since_request",
@@ -69,32 +72,26 @@ REASON_STATE_UNREADABLE: Final[str] = (
     "the request again. The operation did not run."
 )
 
-#: Why a run was refused: the card showed only part of the object.
-REASON_STATE_INCOMPLETE: Final[str] = (
-    "The approval request showed only part of the object, so MEHO cannot check that "
-    "it did not change since the approval. The operation did not run."
-)
-
 #: op_id -> the card key that holds the object as it is now.
 _PINNED: dict[str, str] = {}
 
-#: op_id -> whether a state on the card is the whole object (not only a part).
-_COMPLETE: dict[str, Callable[[Any], bool]] = {}
+#: op_id -> the part of the state the run compares, when not the whole state.
+_COMPARED: dict[str, Callable[[Any], Any]] = {}
 
 
 def register_state_pin(
-    op_id: str, card_key: str, *, complete: Callable[[Any], bool] | None = None
+    op_id: str, card_key: str, *, compared: Callable[[Any], Any] | None = None
 ) -> None:
     """Refuse an approved run of *op_id* when the card's *card_key* state changed.
 
-    *complete* says whether a state is the whole object. When the approved
-    card holds only a part, the run is refused: MEHO cannot compare the rest.
+    *compared* picks the part of the state that the run compares; without
+    it, the whole state is compared.
     """
     _PINNED[op_id] = card_key
-    if complete is None:
-        _COMPLETE.pop(op_id, None)
+    if compared is None:
+        _COMPARED.pop(op_id, None)
     else:
-        _COMPLETE[op_id] = complete
+        _COMPARED[op_id] = compared
 
 
 def state_pin_key(op_id: str) -> str | None:
@@ -142,10 +139,6 @@ async def state_changed_since_request(
     if not shown:
         _log.warning("approval_resume_state_not_on_card", **log_fields)
         return REASON_STATE_UNREADABLE
-    complete = _COMPLETE.get(request.op_id)
-    if complete is not None and not complete(approved):
-        _log.warning("approval_resume_state_incomplete", **log_fields)
-        return REASON_STATE_INCOMPLETE
     # Imported late, and read off the module, so the live card is the one
     # the object check uses (both modules import from the approval queue).
     from meho_backplane.operations import approval_object_check
@@ -161,7 +154,8 @@ async def state_changed_since_request(
     if not readable:
         _log.warning("approval_resume_state_unreadable", **log_fields)
         return REASON_STATE_UNREADABLE
-    if live != approved:
+    compared = _COMPARED.get(request.op_id, lambda state: state)
+    if compared(live) != compared(approved):
         _log.warning("approval_resume_state_changed", **log_fields)
         return REASON_STATE_CHANGED
     return None

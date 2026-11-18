@@ -29,8 +29,10 @@ op_id                                      card key             what it holds
 
 The card says ``<key>_available: true`` with the state under ``<key>``, or
 ``<key>_available: false`` when MEHO could not read it (no live connection,
-an unknown user, group or client, an error, an odd answer). It never shows
-an empty state as if the object had none.
+an unknown user, group or client, an error, an odd answer). Then the card
+also says it in plain words under ``<key>_note`` (:data:`STATE_NOT_READ`),
+and MEHO logs ``approval_card_state_not_read``. It never shows an empty
+state as if the object had none.
 
 No secret goes on the card. ``current_user`` takes three fields of the user
 by name and nothing else: no credential, no password, no attribute.
@@ -39,12 +41,21 @@ Each of these operations is registered with
 :func:`~meho_backplane.operations.approval_state_pin.register_state_pin`.
 Right before the approved run, MEHO builds the card again and compares the
 state. When it changed while the request waited, or MEHO cannot read it,
-the run is refused and the requester sends the request again.
+the run is refused and the requester sends the request again. A re-run
+after a first run that failed part way is refused the same way when the
+first run already changed the object.
+
+For ``keycloak.group.member.add`` the run compares only the group id and
+the roles the group gives (:func:`_group_rights`), not the member list.
+The new member gets the group's roles; who else is in the group does not
+change that. So a big group, or a member who joined or left while the
+request waited, does not refuse the run.
 
 The group members are read in pages of :data:`_MEMBER_PAGE`, up to
-:data:`~.ops_write_grant.MEMBER_CAP`. A group with more members shows the
-first ones and ``members_complete: false``. The approved run of such a
-request is refused: MEHO cannot check the members the card did not show.
+:data:`~.ops_write_grant.MEMBER_CAP`, and one row more to know whether
+there are more. The card lists the first :data:`MEMBERS_SHOWN` by id, the
+number read (``member_count``), ``members_complete``, and one line
+(``members_not_shown``) such as "950 more members not shown".
 
 The approval request a person reads always shows the state. What the
 caller gets back from ``preview_operation`` and from the MCP approval tools
@@ -57,6 +68,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final
+
+import structlog
 
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.keycloak._paths import (
@@ -88,7 +101,9 @@ __all__ = [
     "CURRENT_GROUP",
     "CURRENT_ROLES",
     "CURRENT_USER",
+    "MEMBERS_SHOWN",
     "PINNED_STATE_OPS",
+    "STATE_NOT_READ",
     "with_current_binding",
     "with_current_group",
     "with_current_roles",
@@ -114,6 +129,16 @@ PINNED_STATE_OPS: Final[dict[str, str]] = {
 }
 
 _MEMBER_PAGE: Final[int] = 100
+
+#: How many members the ``current_group`` card lists.
+MEMBERS_SHOWN: Final[int] = 50
+
+#: What the card says when MEHO could not read the object as it is now.
+STATE_NOT_READ: Final[str] = (
+    "MEHO could not read the object as it is now; an approved run will be refused."
+)
+
+_log = structlog.get_logger(__name__)
 
 #: Reads the state now for a card; ``None`` when it cannot be read.
 _Reader = Callable[[PreviewContext, dict[str, Any]], Awaitable[Any]]
@@ -144,14 +169,24 @@ def _with_state(key: str, read: _Reader) -> Callable[[PreviewBuilder], PreviewBu
             card = await builder(ctx)
             if card is None or (ctx.agent_preview and not _cards_on()):
                 return card
+            error: str | None = None
             try:
                 state = await read(ctx, card)
-            except Exception:
+            except Exception as exc:
                 # The card is still useful without the state; it says so.
-                state = None
+                state, error = None, type(exc).__name__
             card[f"{key}_available"] = state is not None
             if state is not None:
                 card[key] = state
+                return card
+            card[f"{key}_note"] = STATE_NOT_READ
+            _log.warning(
+                "approval_card_state_not_read",
+                op_id=ctx.descriptor.op_id,
+                connector_id=ctx.connector_id,
+                card_key=key,
+                error=error,
+            )
             return card
 
         return _wrapped
@@ -239,30 +274,53 @@ with_current_user: Final = _with_state(CURRENT_USER, _read_user)
 async def _read_members(
     connector: KeycloakConnector, ctx: PreviewContext, realm: str, group_id: str
 ) -> tuple[list[dict[str, str]], bool] | None:
-    """The group's members (``id``, ``username``) and whether the list is complete."""
+    """Up to :data:`MEMBER_CAP` members (``id``, ``username``), and whether that is all.
+
+    After a full last page at the cap, one more row tells whether there
+    are more members.
+    """
     path = fill_path(_GROUP_MEMBERS_PATH, {"realm": realm, "group-id": group_id})
-    members: list[dict[str, str]] = []
-    while len(members) <= MEMBER_CAP:
+
+    async def page(first: int, size: int) -> list[dict[str, str]] | None:
         rows = await connector._get_admin_list(
             ctx.target,
             path,
             operator=ctx.operator,
-            params={
-                "first": str(len(members)),
-                "max": str(_MEMBER_PAGE),
-                "briefRepresentation": "true",
-            },
+            params={"first": str(first), "max": str(size), "briefRepresentation": "true"},
             strict=True,
         )
+        out: list[dict[str, str]] = []
         for row in rows:
             member_id = _text(row.get("id")) if isinstance(row, dict) else None
             username = _text(row.get("username")) if isinstance(row, dict) else None
             if member_id is None or username is None:
                 return None
-            members.append({"id": member_id, "username": username})
-        if len(rows) < _MEMBER_PAGE:
+            out.append({"id": member_id, "username": username})
+        return out
+
+    members: list[dict[str, str]] = []
+    while len(members) < MEMBER_CAP:
+        size = min(_MEMBER_PAGE, MEMBER_CAP - len(members))
+        rows = await page(len(members), size)
+        if rows is None:
+            return None
+        members.extend(rows)
+        if len(rows) < size:
             return sorted(members, key=lambda m: m["id"]), True
-    return sorted(members[:MEMBER_CAP], key=lambda m: m["id"]), False
+    more = await page(MEMBER_CAP, 1)
+    if more is None:
+        return None
+    return sorted(members, key=lambda m: m["id"]), not more
+
+
+def _not_shown(count: int, complete: bool) -> str | None:
+    """The line under the listed members, or ``None`` when every member is listed."""
+    hidden = count - MEMBERS_SHOWN
+    if complete and hidden <= 0:
+        return None
+    if complete:
+        return f"{hidden} more members not shown"
+    return f"More than {hidden} more members not shown"
 
 
 async def _read_group(ctx: PreviewContext, card: dict[str, Any]) -> dict[str, Any] | None:
@@ -285,10 +343,13 @@ async def _read_group(ctx: PreviewContext, card: dict[str, Any]) -> dict[str, An
     client_roles = _client_mappings(mappings)
     if realm_roles is None or client_roles is None:
         return None
+    listed, complete = members
     return {
         "id": group_id,
-        "members": members[0],
-        "members_complete": members[1],
+        "members": listed[:MEMBERS_SHOWN],
+        "member_count": len(listed),
+        "members_complete": complete,
+        "members_not_shown": _not_shown(len(listed), complete),
         "realm_roles": realm_roles,
         "client_roles": client_roles,
     }
@@ -381,21 +442,25 @@ def with_current_binding(*, client: bool = False) -> Callable[[PreviewBuilder], 
     return _with_state(CURRENT_BINDING, read)
 
 
-def _members_complete(state: Any) -> bool:
-    """Whether a ``current_group`` state lists every member of the group."""
-    return isinstance(state, dict) and state.get("members_complete") is True
+def _group_rights(state: Any) -> Any:
+    """The part of a ``current_group`` state the run compares: the id and the roles."""
+    if not isinstance(state, dict):
+        return state
+    return {k: state.get(k) for k in ("id", "realm_roles", "client_roles")}
 
 
-#: op_id -> whether its state on the card is the whole object.
-_COMPLETE_CHECKS: Final[dict[str, Callable[[Any], bool]]] = {
-    "keycloak.group.member.add": _members_complete,
+#: op_id -> the part of its state the run compares, when not the whole state.
+_COMPARED: Final[dict[str, Callable[[Any], Any]]] = {
+    "keycloak.group.member.add": _group_rights,
 }
 
 
 def _register() -> None:
     for op_id, key in PINNED_STATE_OPS.items():
-        register_state_pin(op_id, key, complete=_COMPLETE_CHECKS.get(op_id))
-        register_person_only_preview_keys(op_id, _cards_on, frozenset({key, f"{key}_available"}))
+        register_state_pin(op_id, key, compared=_COMPARED.get(op_id))
+        register_person_only_preview_keys(
+            op_id, _cards_on, frozenset({key, f"{key}_available", f"{key}_note"})
+        )
 
 
 _register()

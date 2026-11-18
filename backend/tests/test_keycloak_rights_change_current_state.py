@@ -28,6 +28,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 import meho_backplane.connectors.keycloak.ops_write_current_state as current_state
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -55,7 +56,6 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.approval_rerun import _object_changed
 from meho_backplane.operations.approval_state_pin import (
     REASON_STATE_CHANGED,
-    REASON_STATE_INCOMPLETE,
     REASON_STATE_UNREADABLE,
     state_changed_since_request,
     state_pin_key,
@@ -267,7 +267,9 @@ async def test_group_member_add_shows_the_members_and_the_roles_of_the_group() -
     assert card["current_group"] == {
         "id": _GROUP,
         "members": [{"id": _MEMBER, "username": "member-one"}],
+        "member_count": 1,
         "members_complete": True,
+        "members_not_shown": None,
         "realm_roles": ["operator"],
         "client_roles": {"example-app": ["writer"]},
     }
@@ -288,6 +290,16 @@ async def test_group_member_add_reads_every_page_of_members(
     assert card["current_group"]["members_complete"] is True
 
 
+def _members(count: int) -> list[dict[str, str]]:
+    return [{"id": f"member-{i}", "username": f"member-{i}"} for i in range(count)]
+
+
+def _rows_read(connector: KeycloakConnector) -> int:
+    """How many member rows the connector was asked for, in all."""
+    calls = connector._get_admin_list.await_args_list  # type: ignore[attr-defined]
+    return sum(int(c.kwargs["params"]["max"]) for c in calls if c.kwargs.get("params"))
+
+
 @pytest.mark.asyncio
 async def test_a_group_with_more_members_than_the_cap_says_the_list_is_not_complete(
     monkeypatch: pytest.MonkeyPatch,
@@ -295,14 +307,67 @@ async def test_a_group_with_more_members_than_the_cap_says_the_list_is_not_compl
     monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
     monkeypatch.setattr(current_state, "MEMBER_CAP", 3)
     state = _state()
-    state[f"{_BASE}/groups/{_GROUP}/members"] = [
-        {"id": f"member-{i}", "username": f"member-{i}"} for i in range(6)
-    ]
+    state[f"{_BASE}/groups/{_GROUP}/members"] = _members(6)
+    connector = _connector(state)
 
-    card = await _card("keycloak.group.member.add", state)
+    card = (await _effect("keycloak.group.member.add", connector))["preview"]
 
     assert len(card["current_group"]["members"]) == 3
+    assert card["current_group"]["member_count"] == 3
     assert card["current_group"]["members_complete"] is False
+    # The cap, and one row more to know that there are more.
+    assert _rows_read(connector) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_group_of_exactly_the_cap_is_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
+    monkeypatch.setattr(current_state, "MEMBER_CAP", 3)
+    state = _state()
+    state[f"{_BASE}/groups/{_GROUP}/members"] = _members(3)
+    connector = _connector(state)
+
+    card = (await _effect("keycloak.group.member.add", connector))["preview"]
+
+    assert card["current_group"]["member_count"] == 3
+    assert card["current_group"]["members_complete"] is True
+    assert _rows_read(connector) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_card_lists_only_the_first_members_and_says_how_many_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
+    monkeypatch.setattr(current_state, "MEMBERS_SHOWN", 2)
+    state = _state()
+    state[f"{_BASE}/groups/{_GROUP}/members"] = _members(5)
+
+    group = (await _card("keycloak.group.member.add", state))["current_group"]
+
+    assert [m["id"] for m in group["members"]] == ["member-0", "member-1"]
+    assert group["member_count"] == 5
+    assert group["members_not_shown"] == "3 more members not shown"
+
+
+@pytest.mark.asyncio
+async def test_a_group_past_the_cap_says_more_than_that_many_are_not_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
+    monkeypatch.setattr(current_state, "MEMBER_CAP", 4)
+    monkeypatch.setattr(current_state, "MEMBERS_SHOWN", 2)
+    state = _state()
+    state[f"{_BASE}/groups/{_GROUP}/members"] = _members(9)
+
+    group = (await _card("keycloak.group.member.add", state))["current_group"]
+
+    assert len(group["members"]) == 2
+    assert group["members_not_shown"] == "More than 2 more members not shown"
+
+
+def test_the_card_lists_at_most_fifty_members() -> None:
+    assert current_state.MEMBERS_SHOWN == 50
 
 
 @pytest.mark.asyncio
@@ -363,10 +428,18 @@ async def test_a_client_with_no_flow_of_its_own_shows_none() -> None:
 async def test_a_failed_read_says_the_state_is_not_available(op_id: str) -> None:
     key = current_state.PINNED_STATE_OPS[op_id]
 
-    card = (await _effect(op_id, _connector(_state(), fails=True)))["preview"]
+    with capture_logs() as logs:
+        card = (await _effect(op_id, _connector(_state(), fails=True)))["preview"]
 
     assert card[f"{key}_available"] is False
     assert key not in card
+    assert card[f"{key}_note"] == (
+        "MEHO could not read the object as it is now; an approved run will be refused."
+    )
+    [event] = [e for e in logs if e["event"] == "approval_card_state_not_read"]
+    assert event["log_level"] == "warning"
+    assert (event["op_id"], event["card_key"]) == (op_id, key)
+    assert event["connector_id"] == "keycloak-admin-26.x"
 
 
 @pytest.mark.asyncio
@@ -401,6 +474,7 @@ async def test_an_odd_answer_says_the_state_is_not_available(
 
     assert card[f"{key}_available"] is False
     assert key not in card
+    assert card[f"{key}_note"] == current_state.STATE_NOT_READ
 
 
 @pytest.mark.asyncio
@@ -427,6 +501,7 @@ async def test_switch_off_the_agent_preview_has_no_state(
 
     assert key not in effect["preview"]
     assert f"{key}_available" not in effect["preview"]
+    assert f"{key}_note" not in effect["preview"]
 
 
 @pytest.mark.asyncio
@@ -462,8 +537,8 @@ def _change_client_roles(state: dict[str, Any]) -> None:
     mappings["example-app"]["mappings"].append({"name": "admin"})
 
 
-def _change_members(state: dict[str, Any]) -> None:
-    state[f"{_BASE}/groups/{_GROUP}/members"].append({"id": "new-member", "username": "new"})
+def _change_group_roles(state: dict[str, Any]) -> None:
+    state[f"{_BASE}/groups/{_GROUP}/role-mappings"]["realmMappings"].append({"name": "admin"})
 
 
 def _change_user(state: dict[str, Any]) -> None:
@@ -481,7 +556,7 @@ def _change_client_flow(state: dict[str, Any]) -> None:
 _CHANGES: dict[str, Callable[[dict[str, Any]], None]] = {
     "keycloak.role_mapping.assign": _change_roles,
     "keycloak.role_mapping.client.assign": _change_client_roles,
-    "keycloak.group.member.add": _change_members,
+    "keycloak.group.member.add": _change_group_roles,
     "keycloak.user.reset_password": _change_user,
     "keycloak.user.enable": _change_user,
     "keycloak.authflow.ensure_passkey_code_skip": _change_realm_flow,
@@ -600,39 +675,53 @@ def _big_group(monkeypatch: pytest.MonkeyPatch, last: str) -> dict[str, Any]:
     monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
     monkeypatch.setattr(current_state, "MEMBER_CAP", 3)
     state = _state()
-    members = [{"id": f"member-{i}", "username": f"member-{i}"} for i in range(3)]
-    state[f"{_BASE}/groups/{_GROUP}/members"] = [*members, {"id": last, "username": last}]
+    state[f"{_BASE}/groups/{_GROUP}/members"] = [*_members(3), {"id": last, "username": last}]
     return state
 
 
 @pytest.mark.asyncio
-async def test_the_run_is_refused_when_a_member_beyond_the_cap_changed(
+async def test_a_group_past_the_cap_still_runs_when_its_roles_are_the_same(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The run compares the group id and its roles, not the member list."""
     op_id = "keycloak.group.member.add"
     approved = await _effect(op_id, _connector(_big_group(monkeypatch, "member-x")))
-    live = await _effect(op_id, _connector(_big_group(monkeypatch, "member-y")))
-    built = _live_effect(monkeypatch, live)
-    # Both cards are the same: the replaced member is beyond the cap.
-    assert approved["preview"]["current_group"] == live["preview"]["current_group"]
+    _live_effect(monkeypatch, await _effect(op_id, _connector(_big_group(monkeypatch, "m-y"))))
+    assert approved["preview"]["current_group"]["members_complete"] is False
 
     reason = await state_changed_since_request(
         _operator(), _request(op_id, approved), None, _PARAMS[op_id]
     )
 
-    assert reason == REASON_STATE_INCOMPLETE
-    assert built == []
+    assert reason is None
 
 
 @pytest.mark.asyncio
-async def test_a_complete_group_that_grew_past_the_cap_counts_as_changed(
+async def test_a_member_who_joined_while_the_request_waited_does_not_refuse_the_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     op_id = "keycloak.group.member.add"
-    monkeypatch.setattr(current_state, "_MEMBER_PAGE", 2)
-    monkeypatch.setattr(current_state, "MEMBER_CAP", 3)
     approved = await _effect(op_id, _connector(_state()))
-    _live_effect(monkeypatch, await _effect(op_id, _connector(_big_group(monkeypatch, "m-x"))))
+    changed = _state()
+    changed[f"{_BASE}/groups/{_GROUP}/members"].append({"id": "new-member", "username": "new"})
+    _live_effect(monkeypatch, await _effect(op_id, _connector(changed)))
+
+    reason = await state_changed_since_request(
+        _operator(), _request(op_id, approved), None, _PARAMS[op_id]
+    )
+
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_a_group_past_the_cap_is_refused_when_its_roles_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    op_id = "keycloak.group.member.add"
+    approved = await _effect(op_id, _connector(_big_group(monkeypatch, "member-x")))
+    changed = _big_group(monkeypatch, "member-x")
+    _change_group_roles(changed)
+    _live_effect(monkeypatch, await _effect(op_id, _connector(changed)))
 
     reason = await state_changed_since_request(
         _operator(), _request(op_id, approved), None, _PARAMS[op_id]

@@ -19,8 +19,9 @@ Keycloak write is on neither table, so each new write gets this decision.
 
 Each change of rights is also on one of two more tables: the card key
 that shows the object as it is now (:data:`CURRENT_STATE_ON_CARD`), or the
-reason why there is no such object yet (:data:`NEW_OBJECT_OPS`). The same
-test fails when a change of rights is on neither.
+reason why there is no such object yet (:data:`NEW_OBJECT_OPS`).
+``tests/test_keycloak_rights_change_current_state.py`` fails when a change
+of rights is on neither.
 
 :func:`register_rights_change_ops` registers every write of
 :data:`RIGHTS_CHANGE_OPS` with

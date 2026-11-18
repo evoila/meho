@@ -3501,6 +3501,14 @@ made from the vendor API description, come back with <code>--include-raw</code>
 (<code>include_raw: true</code> on MCP and REST), or when the connector has no
 other operations. The answer's <code>raw_operations</code> part says what was left
 out. You can still call a raw operation by its <code>op_id</code>.</p>
+<p><strong>Operations in the group list (optional setting).</strong> An operator can turn
+on the backplane setting <code>GROUP_LISTING_OPERATIONS</code> (off by default). Then
+each group in the group list also lists its typed and multi-step
+operations, each with a one-line summary and its safety flags. You can
+pick an operation from the list and get its full contract with
+<code>search_operations</code> and <code>op_id</code>, without a search query. <code>--group</code> lists
+one group. A long list comes in pages: pass <code>--cursor</code> with the
+<code>next_cursor</code> of the last answer.</p>
 <h2 id="step-3-preview-when-you-want-the-wire-truth">Step 3 — preview (when you want the wire truth)<a class="headerlink" href="#step-3-preview-when-you-want-the-wire-truth" title="Permanent link">&para;</a></h2>
 <p><code>preview_operation</code> resolves the exact operation + target + params a
 call would use and returns the literal would-be HTTP request —

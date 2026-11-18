@@ -105,15 +105,25 @@ _settings_admin = Depends(_require_settings_admin)
 _human_settings_admin = Depends(_require_human_settings_admin)
 
 
-class SettingsTargetRequest(BaseModel):
-    """A target of the file that waits for a person's approval."""
+class SettingsTargetWritten(BaseModel):
+    """A target of the file whose call ran at once."""
 
     model_config = ConfigDict(frozen=True)
 
     path: str
     name: str
     op_id: str
+
+
+class SettingsTargetRequest(SettingsTargetWritten):
+    """A target of the file that waits for a person's approval.
+
+    ``already_waiting`` is true when an earlier call (an earlier import of
+    the same file, for example) made the request: the import made no new one.
+    """
+
     approval_request_id: UUID
+    already_waiting: bool = False
 
 
 class SettingsImportResponse(BaseModel):
@@ -126,7 +136,10 @@ class SettingsImportResponse(BaseModel):
     the items that could not be written (the rest were), and ``revision_id`` is
     the new revision (``null`` when nothing changed). ``waiting_for_approval``
     lists each target the file creates or changes: it is not written yet, and
-    a person approves each one (``meho approvals``, or the console).
+    a person approves each one (``meho approvals``, or the console). When a
+    request for that target already waits, the import lists that request
+    (``already_waiting``) and makes no new one. ``targets_written`` lists a
+    target call that ran at once.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -140,6 +153,7 @@ class SettingsImportResponse(BaseModel):
     revision_id: UUID | None = None
     failed: list[str] = []
     waiting_for_approval: list[SettingsTargetRequest] = []
+    targets_written: list[SettingsTargetWritten] = []
 
 
 class SettingsRevision(BaseModel):
@@ -276,6 +290,7 @@ async def import_settings(
         revision_id=result.revision_id,
         failed=result.failed,
         waiting_for_approval=[SettingsTargetRequest.model_validate(w) for w in result.waiting],
+        targets_written=[SettingsTargetWritten.model_validate(w) for w in result.written],
     )
 
 

@@ -766,6 +766,8 @@ class ImportResult:
     #: One entry per target that waits for approval (``path``, ``name``,
     #: ``op_id``, ``approval_request_id``).
     waiting: list[dict[str, Any]] = field(default_factory=list)
+    #: One entry per target call that ran at once (``path``, ``name``, ``op_id``).
+    written: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def _apply_tenant_rows(
@@ -895,6 +897,7 @@ async def apply_import(
         _target_writes(plan),
     )
     result.waiting = asks.waiting
+    result.written = asks.written
     result.failed.extend(asks.failed)
 
     audit_id = uuid.uuid4()

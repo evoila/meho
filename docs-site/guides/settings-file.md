@@ -203,6 +203,9 @@ What the import does:
   `approval_request_id`. A person approves each one with
   `meho approvals` or in the console. Only then does MEHO write the
   target. The rest of the file is written at once.
+- When you import the same file again while a request still waits,
+  MEHO makes no second request for that target. It lists the waiting
+  request with `already_waiting: true`.
 - A target in a tenant that the same file creates gets no request yet,
   because its tenant does not exist when MEHO asks. It is in `failed`.
   Import the file a second time after the first import: then MEHO asks

@@ -315,7 +315,8 @@ may not import, 413 for a body over 4 MiB):
   "applied": false,
   "revision_id": null,
   "failed": [],
-  "waiting_for_approval": []
+  "waiting_for_approval": [],
+  "targets_written": []
 }
 ```
 
@@ -339,7 +340,11 @@ body and writes nothing. Otherwise it adds or updates, never deletes:
   `targets.update` call, as the person who imports
   (`instance_settings/target_requests.py`). Each call waits for approval;
   the import writes no target. `waiting_for_approval` lists one entry per
-  target: `{path, name, op_id, approval_request_id}`. The approval card
+  target: `{path, name, op_id, approval_request_id, already_waiting}`.
+  When a request for the same target still waits (the same file imported
+  twice, for example), the import makes no new request: it lists that
+  request with `already_waiting: true`. A call that runs at once is listed
+  in `targets_written` (`{path, name, op_id}`). The approval card
   shows the values: the new target's fields, or the old and the new value
   of each changed field (also `extras`). A person approves each request in
   the console or with `meho approvals approve <id>`; then MEHO writes the

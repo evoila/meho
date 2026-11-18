@@ -16,6 +16,9 @@ the call ``meho settings import`` makes):
   makes no request.
 * **A target in a tenant the same file creates** -- it is not sent; the
   answer says to import the file again.
+* **The same file imported twice** -- the second import makes no new
+  request while the first one waits; it lists the waiting request.
+* **A target call that runs at once** -- it is listed in ``targets_written``.
 """
 
 from __future__ import annotations
@@ -30,10 +33,13 @@ import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Target, Tenant
 from meho_backplane.main import app
+from meho_backplane.operations import dispatcher
 
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
@@ -213,3 +219,51 @@ async def test_a_target_of_a_new_tenant_is_not_sent(client: TestClient) -> None:
     assert "Import the file again" in failed
     assert await _requests() == []
     assert await _target("new-01") is None
+
+
+async def test_a_second_import_lists_the_waiting_request_and_makes_no_new_one(
+    client: TestClient,
+) -> None:
+    await _tenant()
+    await _insert_target(tenant_id=_TENANT, name="old-01", product="ssh", host="old.example")
+    content = _file(
+        [
+            {
+                "id": str(_TENANT),
+                "targets": [
+                    {"name": "new-01", "product": "ssh", "host": "new.example"},
+                    {"name": "old-01", "product": "ssh", "host": "old-moved.example"},
+                ],
+            }
+        ]
+    )
+
+    first = _import(content, client)
+    clear_jwks_cache()  # the second import signs with a new key under the same kid
+    second = _import(content, client)
+
+    assert len(await _requests()) == 2
+    assert [w.get("already_waiting") for w in first["waiting_for_approval"]] == [False, False]
+    assert [w["already_waiting"] for w in second["waiting_for_approval"]] == [True, True]
+    assert [w["approval_request_id"] for w in second["waiting_for_approval"]] == [
+        w["approval_request_id"] for w in first["waiting_for_approval"]
+    ]
+
+
+async def test_a_target_call_that_runs_at_once_is_listed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _tenant()
+
+    async def _runs_at_once(**_: Any) -> OperationResult:
+        return OperationResult(status="ok", op_id="targets.register", duration_ms=1.0)
+
+    monkeypatch.setattr(dispatcher, "dispatch", _runs_at_once)
+    target = {"name": "now-01", "product": "ssh", "host": "now.example"}
+
+    body = _import(_file([{"id": str(_TENANT), "targets": [target]}]), client)
+
+    assert body["waiting_for_approval"] == []
+    assert body["targets_written"] == [
+        {"path": "spec.tenants[0].targets[0]", "name": "now-01", "op_id": "targets.register"}
+    ]

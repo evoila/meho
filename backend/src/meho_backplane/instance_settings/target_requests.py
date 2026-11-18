@@ -15,6 +15,11 @@ values for a new target, the old and the new value of each changed field
 for a changed one. The target is written only when a person approves its
 request. An import that creates or changes no target writes no request.
 
+When a request for the same target already waits (a second import of the
+same file, for example), the import makes no new request. It lists the
+waiting request with ``already_waiting`` set, so the caller sees its id. A
+call that runs at once is listed in ``written``.
+
 The calls run before the import writes anything else, so a request row and
 the import's own transaction never wait for each other. A target in a tenant
 that the same file creates waits for the next import: its tenant does not
@@ -28,8 +33,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.instance_settings.schema import contains_secret
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 
@@ -56,6 +64,8 @@ class TargetAsks:
     """What :func:`ask_for_target_writes` did: the requests and the failures."""
 
     waiting: list[dict[str, Any]] = field(default_factory=list)
+    #: Calls that ran at once (``path``, ``name``, ``op_id``).
+    written: list[dict[str, Any]] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
 
 
@@ -72,11 +82,51 @@ def _call_of(write: TargetWrite) -> tuple[str, dict[str, Any]]:
     return TARGETS_UPDATE_OP_ID, {"target_id": str(write.target_id), **sent}
 
 
+def _same_target(request: ApprovalRequest, write: TargetWrite) -> bool:
+    params = request.params or {}
+    if write.target_id is not None and params.get("target_id") == str(write.target_id):
+        return True
+    return write.target_id is None and params.get("name") == write.name
+
+
+async def _waiting_request(tenant_id: uuid.UUID, write: TargetWrite) -> uuid.UUID | None:
+    """The id of a request for the same target that still waits, or ``None``."""
+    from meho_backplane.connectors.targets.ops import (
+        TARGETS_REGISTER_OP_ID,
+        TARGETS_REGISTRY_CONNECTOR_ID,
+    )
+    from meho_backplane.connectors.targets.update import TARGETS_UPDATE_OP_ID
+    from meho_backplane.operations.approval_queue import _is_overdue_pending
+
+    async with get_sessionmaker()() as session:
+        rows = await session.scalars(
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.tenant_id == tenant_id,
+                ApprovalRequest.connector_id == TARGETS_REGISTRY_CONNECTOR_ID,
+                ApprovalRequest.op_id.in_((TARGETS_REGISTER_OP_ID, TARGETS_UPDATE_OP_ID)),
+                ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            )
+            .order_by(ApprovalRequest.created_at)
+        )
+        for row in rows:
+            if _same_target(row, write) and not _is_overdue_pending(row):
+                return row.id
+    return None
+
+
 async def _ask(operator: Operator, write: TargetWrite, asks: TargetAsks) -> None:
     from meho_backplane.connectors.targets.ops import TARGETS_REGISTRY_CONNECTOR_ID
     from meho_backplane.operations.dispatcher import dispatch
 
     op_id, params = _call_of(write)
+    entry: dict[str, Any] = {"path": write.path, "name": write.name, "op_id": op_id}
+    waiting_id = await _waiting_request(operator.tenant_id, write)
+    if waiting_id is not None:
+        asks.waiting.append(
+            {**entry, "approval_request_id": str(waiting_id), "already_waiting": True}
+        )
+        return
     result = await dispatch(
         operator=operator,
         connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
@@ -86,15 +136,11 @@ async def _ask(operator: Operator, write: TargetWrite, asks: TargetAsks) -> None
     )
     if result.status == "awaiting_approval":
         asks.waiting.append(
-            {
-                "path": write.path,
-                "name": write.name,
-                "op_id": op_id,
-                "approval_request_id": str(result.extras["approval_request_id"]),
-            }
+            {**entry, "approval_request_id": str(result.extras["approval_request_id"])}
         )
         return
     if result.status == "ok":
+        asks.written.append(entry)
         return
     message = str(result.extras.get("exception_message") or result.error or result.status)
     reason = "" if contains_secret(message) else f": {message.strip().rstrip('.')}"
@@ -115,8 +161,9 @@ async def ask_for_target_writes(
     *writes* maps a tenant id to the target writes of that tenant, and
     *operators* maps it to the importing person as seen in that tenant.
     Returns the waiting requests (``path``, ``name``, ``op_id``,
-    ``approval_request_id``) and one sentence per write that could not be
-    sent. A failure never stops the other writes.
+    ``approval_request_id``, and ``already_waiting`` for a request an earlier
+    call made), the calls that ran at once, and one sentence per write that
+    could not be sent. A failure never stops the other writes.
     """
     asks = TargetAsks()
     for tenant_id, tenant_writes in writes.items():

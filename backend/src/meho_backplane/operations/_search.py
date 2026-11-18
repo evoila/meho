@@ -67,6 +67,10 @@ from meho_backplane.operations._lookup import (
     installed_owner_clause,
     visible_scope_clause,
 )
+from meho_backplane.operations._search_call_hints import (
+    required_param_names,
+    search_hit_call_hints,
+)
 from meho_backplane.operations._search_typed_first import TYPED_KINDS
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.embedding import get_embedding_service
@@ -674,8 +678,11 @@ async def _hydrate_hits(
 
     Each hit shows the risk level and approval that apply to *tenant_id*,
     with the operator overrides (#4711) — the same values a call uses —
-    and the category and labels of the classification.
+    the category and labels of the classification, and, while the
+    ``SEARCH_HIT_CALL_HINTS`` switch is on, the call hints
+    (``required_params``, ``target_required``, #4331).
     """
+    from meho_backplane.operations.dispatcher import descriptor_requires_target
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
     descriptor_ids = [e.descriptor_id for e in fused]
@@ -694,6 +701,8 @@ async def _hydrate_hits(
         rows=[descriptor for descriptor, _ in by_id.values()],
         group_keys={descriptor_id: group_key for descriptor_id, (_, group_key) in by_id.items()},
     )
+    # Off: the handler of each hit is not even imported (#4331).
+    call_hints = search_hit_call_hints()
     hits: list[OperationSearchHit] = []
     for entry in fused:
         pair = by_id.get(entry.descriptor_id)
@@ -713,6 +722,10 @@ async def _hydrate_hits(
                 requires_approval=policy.requires_approval,
                 category=policy.category,
                 labels=dict(policy.labels),
+                required_params=(
+                    required_param_names(descriptor.parameter_schema) if call_hints else []
+                ),
+                target_required=call_hints and descriptor_requires_target(descriptor),
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,

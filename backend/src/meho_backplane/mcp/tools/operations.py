@@ -84,6 +84,10 @@ from meho_backplane.mcp.tools._operation_recall import (
 )
 from meho_backplane.mcp.tools._preview_policy_fields import PREVIEW_POLICY_OUTPUT_SCHEMA
 from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
+from meho_backplane.mcp.tools._search_call_hints_schema import (
+    CALL_HINT_PROPERTIES,
+    call_hints_schema_for_settings,
+)
 from meho_backplane.mcp.tools._search_classification import (
     CLASSIFICATION_PROPERTIES,
     classification_schema_for_settings,
@@ -452,7 +456,9 @@ _SAFETY_LEVEL_SCHEMA: dict[str, Any] = {
 #: Ranked mode: slim hits. The three score fields appear only when a
 #: tenant_admin caller sets ``include_scores`` (#3668). ``category`` and
 #: ``labels`` appear only while the ``POLICY_CLASSIFICATION`` switch is on
-#: (``_search_classification``).
+#: (``_search_classification``). ``required_params`` and ``target_required``
+#: appear only while the ``SEARCH_HIT_CALL_HINTS`` switch is on
+#: (``_search_call_hints_schema``, #4331).
 _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -474,6 +480,7 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
                     "safety_level": _SAFETY_LEVEL_SCHEMA,
                     "requires_approval": {"type": "boolean"},
                     **CLASSIFICATION_PROPERTIES,
+                    **CALL_HINT_PROPERTIES,
                     "fused_score": {"type": "number"},
                     "bm25_score": {"type": ["number", "null"]},
                     "cosine_score": {"type": ["number", "null"]},
@@ -595,8 +602,13 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def _search_schema_for_settings(definition: ToolDefinition) -> ToolDefinition:
+    """Take the switched-off fields out of the ``search_operations`` output schema."""
+    return call_hints_schema_for_settings(classification_schema_for_settings(definition))
+
+
 _search_operations_short_text = with_short_text(
-    SEARCH_OPERATIONS_SHORT, then=classification_schema_for_settings
+    SEARCH_OPERATIONS_SHORT, then=_search_schema_for_settings
 )
 
 

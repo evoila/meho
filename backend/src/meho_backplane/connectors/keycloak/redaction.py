@@ -151,8 +151,10 @@ def redact_preview_fields(value: Any) -> Any:
 #: operation that reads them leaves them out of its result, but the trace
 #: stores the whole vendor answer, so the mask must hide them there too.
 #: ``lastIPFailure`` is the IP address of a user's last failed sign-in
-#: (``GET /attack-detection/brute-force/users/{id}``).
-_TRACE_ONLY_FIELDS: frozenset[str] = frozenset({"lastipfailure"})
+#: (``GET /attack-detection/brute-force/users/{id}``). ``representation`` is
+#: the JSON text of what an admin event changed; it can hold a password
+#: (``GET /admin-events``).
+_TRACE_ONLY_FIELDS: frozenset[str] = frozenset({"lastipfailure", "representation"})
 
 
 def redact_trace_fields(value: Any) -> Any:

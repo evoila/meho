@@ -42,6 +42,7 @@ from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
 from meho_backplane.mcp.tools._kb_similar_text import similar_check_for_settings
 from meho_backplane.mcp.tools._operation_recall import recall_schema_for_settings
 from meho_backplane.mcp.tools._preview_policy_fields import policy_schema_for_settings
+from meho_backplane.mcp.tools._search_call_hints_schema import call_hints_schema_for_settings
 from meho_backplane.mcp.tools._search_classification import classification_schema_for_settings
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -77,6 +78,7 @@ def _set_switches(monkeypatch: pytest.MonkeyPatch, *, short: bool, others: bool)
     monkeypatch.setenv("KB_SIMILAR_CHECK", "true" if others else "false")
     monkeypatch.setenv("TEAM_KNOWLEDGE_RECALL", "true" if others else "false")
     monkeypatch.setenv("POLICY_CLASSIFICATION", "true" if others else "false")
+    monkeypatch.setenv("SEARCH_HIT_CALL_HINTS", "true" if others else "false")
     monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true" if others else "false")
     get_settings.cache_clear()
 
@@ -112,7 +114,7 @@ def _before(name: str) -> dict[str, Any]:
     if name == "preview_operation":
         definition = policy_schema_for_settings(definition)
     if name == "search_operations":
-        definition = classification_schema_for_settings(definition)
+        definition = call_hints_schema_for_settings(classification_schema_for_settings(definition))
     if name in {"meho_connector_edit_op", "meho_connector_edit_group"}:
         definition = classification_for_settings(definition, _operator())
     if name in {"search_operations", "list_operation_groups"}:

@@ -112,6 +112,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations._search_call_hints import hidden_call_hint_fields
 from meho_backplane.operations._search_clear_lead import (
     search_clear_lead,
     top_hit_lead_is_unclear,
@@ -410,6 +411,11 @@ class OperationSearchHit(BaseModel):
     caller's tenant. :func:`search_operations` leaves them out while the
     ``POLICY_CLASSIFICATION`` switch is off. ``category`` is ``None`` when
     two classification entries conflict.
+
+    ``required_params`` and ``target_required`` tell the agent how to make
+    a first call. :func:`search_operations` leaves them out while the
+    ``SEARCH_HIT_CALL_HINTS`` switch is off
+    (:mod:`~meho_backplane.operations._search_call_hints`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -422,6 +428,8 @@ class OperationSearchHit(BaseModel):
     requires_approval: bool
     category: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
+    required_params: list[str] = Field(default_factory=list)
+    target_required: bool = False
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
@@ -1470,7 +1478,8 @@ async def search_operations(
     [str]}``. Each hit carries ``op_id`` / ``summary`` / ``description``
     / ``group_key`` / ``safety_level`` / ``requires_approval``, and
     ``category`` / ``labels`` while the ``POLICY_CLASSIFICATION`` switch
-    is on. The
+    is on, and ``required_params`` / ``target_required`` while the
+    ``SEARCH_HIT_CALL_HINTS`` switch is on (#4331). The
     ranking scores are added only when ``include_scores`` is true and
     the caller is ``tenant_admin``; anyone else gets the slim hit. Tenant
     boundary enforced: every candidate query filters on the same
@@ -1605,7 +1614,11 @@ async def search_operations(
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )
-    exclude = hidden_classification_fields() | (set() if show_scores else set(_SCORE_FIELDS))
+    exclude = (
+        hidden_classification_fields()
+        | hidden_call_hint_fields()
+        | (set() if show_scores else set(_SCORE_FIELDS))
+    )
     answer: dict[str, Any] = {
         "hits": [h.model_dump(mode="json", exclude=exclude) for h in hits],
         "query_duration_ms": duration_ms,

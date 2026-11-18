@@ -340,7 +340,9 @@ sign-in levels, and makes the flow the browser flow of `meho-cli-approve`. It wa
 for approval
 ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
 It is a change of rights: another admin (a tenant admin or a platform
-admin) approves it, never the person who asked.
+admin) approves it, never the person who asked. So an install needs two
+admins before it runs this call. Add the second admin in Keycloak itself
+(Step 6, and put them in `MEHO-Admins` or `MEHO-Platform-Admins`).
 With the built-in Keycloak, `helm upgrade` adds the flow without this call.
 
 ```bash
@@ -514,7 +516,10 @@ The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 `keycloak.authflow.ensure_approval_touch` instead. It waits for
 approval. It is a change of rights: another admin (a tenant admin or a
-platform admin) approves it, never the person who asked.
+platform admin) approves it, never the person who asked. So an install
+needs two admins before it runs this call. Add the second admin in
+Keycloak itself (Step 6, and put them in `MEHO-Admins` or
+`MEHO-Platform-Admins`).
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch \

@@ -55,7 +55,7 @@ The design is in the
 ## Before you start
 
 - Your realm has the `meho-tenants` mapper and the `meho_tenant`
-  attribute on the five groups of your first tenant. The standard setup
+  attribute on the role groups of your first tenant. The standard setup
   adds them from v0.39.0 on. To add them to an older realm, run the
   setup again (see [Upgrades](../install/upgrades.md#version-specific-notes)).
 - MEHO v0.40.0 or later. In v0.40.0 to v0.43.0 the web interface answers
@@ -92,7 +92,7 @@ Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
 Run the setup command with `--add-tenant`. Pass the **same**
 `--tenant-id` as on the first run: without it, the command writes
-the all-zero UUID to the five groups of your first tenant. If your
+the all-zero UUID to the role groups of your first tenant. If your
 first tenant is not called `main`, pass its name with
 `--tenant-name` too.
 
@@ -123,7 +123,7 @@ client `meho-web`. If you use the web interface, add the mapper to
 ### The built-in Keycloak
 
 Add the tenant to the Helm values, then run `helm upgrade`. The
-bootstrap Job makes the five groups.
+bootstrap Job makes the three groups.
 
 ```yaml
 coreKeycloak:
@@ -138,7 +138,7 @@ The built-in realm already has the `meho-tenants` mapper on
 
 ### By hand
 
-Create the five groups at the top level, each with the one
+Create the three groups at the top level, each with the one
 attribute `meho_tenant` from the table above. Check that the
 `meho-tenants` mapper is on every client people log in with, with
 **Multivalued** and **Aggregate attribute values** on. The settings

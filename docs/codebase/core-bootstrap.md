@@ -97,11 +97,6 @@ key line works the same way. The Secret is the source on later runs: if a person
 the Secret exists, the Job makes the person again with the stored password.
 Changing a user name in values after the first install has no effect.
 
-The two names must be two different Keycloak users. Keycloak ignores case
-and surrounding spaces in a user name, so `Admin` and `admin` are the same
-person. The Job refuses such a pair before it makes the Secret, so a wrong
-pair never leaves one person with a stored password that does not work.
-
 ## The console admin
 
 | User | Values key (user name) | Realm | Rights |

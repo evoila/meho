@@ -504,7 +504,11 @@ from meho_backplane.operations.shutdown_drain import (
     shutting_down_result,
     track_operation,
 )
-from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.operations.uncertain_outcome import (
+    changes_target,
+    connection_lost_after_send,
+    with_uncertain_outcome,
+)
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
@@ -2081,11 +2085,18 @@ async def _run_branch_with_error_handling(
         # importing ``connectors.net`` at module scope would close a cycle
         # back through ``operations/__init__``. A probe refused because its
         # tenant's share of the probe pool was in use is narrowed the same way.
+        #
+        # A change whose call timed out or lost its connection on a client
+        # library that is not httpx (an SSH command under ``wait_for``, the
+        # Kubernetes client, a database driver) may have reached the target.
+        # It is stored as uncertain, like the httpx arms above do.
         duration_ms = _elapsed_ms(started)
         if is_probe_refused(exc):
             exc_result = result_connector_probe_refused(op_id, exc, duration_ms)
         elif is_probe_pool_busy(exc):
             exc_result = result_probe_pool_busy(op_id, exc, duration_ms)
+        elif changes_target(descriptor.safety_level) and connection_lost_after_send(exc):
+            exc_result = with_uncertain_outcome(result_connector_error(op_id, exc, duration_ms))
         else:
             exc_result = result_connector_error(op_id, exc, duration_ms)
         return await _audit_error_and_return(

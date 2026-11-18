@@ -7,7 +7,9 @@ An approved change can end in a way MEHO cannot judge. The vendor system
 may have done the work, and MEHO lost the answer. Three cases:
 
 * The request was sent, then the answer never came (a read timeout or a
-  dropped connection) on an operation that changes something.
+  dropped connection) on an operation that changes something. This holds
+  for every kind of connection: HTTP, SSH and the other client libraries
+  the typed connectors use.
 * The change ran, but the audit record could not be saved.
 * MEHO stopped in the middle of an approved run (a restart), so no result
   was stored.
@@ -24,8 +26,11 @@ the views, the dispatcher and the restart recovery say the same thing.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any, Final
 
+import aiohttp
+import asyncssh
 import httpx
 
 from meho_backplane.connectors import OperationResult
@@ -34,9 +39,11 @@ __all__ = [
     "UNCERTAIN_ADVICE",
     "UNCERTAIN_OUTCOME",
     "changes_target",
+    "connection_lost_after_send",
     "envelope_is_uncertain",
     "request_may_have_reached_vendor",
     "result_interrupted_by_restart",
+    "with_uncertain_outcome",
 ]
 
 #: Value of ``extras["execution_outcome"]`` when MEHO does not know.
@@ -60,6 +67,58 @@ _MAY_HAVE_SENT: Final[tuple[type[httpx.TransportError], ...]] = (
 )
 
 
+#: Faults of the non-HTTP client libraries that end a call before MEHO sent
+#: anything: a refused connection, a connect timeout, no server to talk to.
+#: Checked before :data:`_LOST_AFTER_SEND`, because some of them are
+#: subclasses of the types there (``ConnectionRefusedError`` is a
+#: ``ConnectionError``, aiohttp's connect timeout is a ``TimeoutError``).
+_NOT_SENT: Final[tuple[type[BaseException], ...]] = (
+    ConnectionRefusedError,
+    aiohttp.ClientConnectorError,
+    aiohttp.ConnectionTimeoutError,
+)
+
+#: Faults of the non-HTTP client libraries after which the target may already
+#: hold the call: a timeout, or a connection that was lost. ``TimeoutError``
+#: is what ``asyncio.wait_for`` raises around an SSH command. The httpx types
+#: are not here: the dispatcher's httpx arms judge them with
+#: :data:`_MAY_HAVE_SENT`. The types of ``requests`` (the Vault client) are
+#: not here either: MEHO reads the target's secret with it before the call,
+#: and a fault of that read must stay a plain error.
+_LOST_AFTER_SEND: Final[tuple[type[BaseException], ...]] = (
+    TimeoutError,
+    ConnectionError,
+    asyncssh.ConnectionLost,
+    aiohttp.ServerDisconnectedError,
+    aiohttp.ClientOSError,
+    aiohttp.ClientPayloadError,
+)
+
+
+@lru_cache(maxsize=1)
+def _database_driver_types() -> tuple[
+    tuple[type[BaseException], ...], tuple[type[BaseException], ...]
+]:
+    """The not-sent and lost-after-send types of the database drivers.
+
+    Imported when first needed, so the dispatcher does not load three
+    database drivers at start. An error of a driver can only exist once the
+    driver is loaded.
+    """
+    import asyncpg
+    import pymongo.errors
+    import pytds
+
+    not_sent: tuple[type[BaseException], ...] = (pymongo.errors.ServerSelectionTimeoutError,)
+    lost: tuple[type[BaseException], ...] = (
+        pymongo.errors.AutoReconnect,
+        asyncpg.exceptions.ConnectionDoesNotExistError,
+        pytds.TimeoutError,
+        pytds.ClosedConnectionError,
+    )
+    return not_sent, lost
+
+
 def changes_target(safety_level: str | None) -> bool:
     """Whether an operation with this risk level may change the target.
 
@@ -72,6 +131,30 @@ def changes_target(safety_level: str | None) -> bool:
 def request_may_have_reached_vendor(exc: httpx.TransportError) -> bool:
     """Whether the vendor may already hold the request that raised *exc*."""
     return isinstance(exc, _MAY_HAVE_SENT)
+
+
+def connection_lost_after_send(exc: BaseException) -> bool:
+    """Whether *exc* is a timeout or a lost connection after MEHO may have sent the call.
+
+    For the client libraries that are not httpx: asyncssh, aiohttp (the
+    Kubernetes client) and the database drivers. A fault known to come
+    before sending (see :data:`_NOT_SENT`) is ``False``. Only the type of
+    *exc* counts, not its cause.
+    """
+    db_not_sent, db_lost = _database_driver_types()
+    if isinstance(exc, _NOT_SENT + db_not_sent):
+        return False
+    return isinstance(exc, _LOST_AFTER_SEND + db_lost)
+
+
+def with_uncertain_outcome(result: OperationResult) -> OperationResult:
+    """*result* marked as uncertain: ``execution_outcome``, ``retry=False`` and the advice."""
+    extras = dict(result.extras)
+    extras["execution_outcome"] = UNCERTAIN_OUTCOME
+    extras["retry"] = False
+    extras["remediation"] = UNCERTAIN_ADVICE
+    error = f"{result.error}. {UNCERTAIN_ADVICE}" if result.error else UNCERTAIN_ADVICE
+    return OperationResult.model_validate({**dict(result), "error": error, "extras": extras})
 
 
 def envelope_is_uncertain(envelope: Mapping[str, Any] | None) -> bool:

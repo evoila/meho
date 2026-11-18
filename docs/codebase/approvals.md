@@ -2380,23 +2380,47 @@ One rule for every view: `result_state_of_envelope` in
 console all read it. Every view gives the same advice: do not run it again,
 check the target first. No view says "failed" or "did not succeed" for it.
 
-Four cases end as `uncertain`:
+Six cases end as `uncertain`:
 
 | Case | Where | Stored result |
 |---|---|---|
 | The audit record could not be saved after the change ran. | `result_audit_commit_failed` | `error_code` `audit_commit_failed` |
 | A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
+| The same on a connection that is not HTTP: an SSH command that timed out or lost its connection, or the same fault of the Kubernetes client or a database driver. | the general error arm of the dispatcher (`connection_lost_after_send`) | `error_code` `connector_error`, `retry: false` |
+| An approved re-run stopped with such a timeout or lost connection. | `rerun_failed_request` (`connection_lost_after_send`) | `error` `rerun_failed: ...`, `retry: false` |
 | MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
 | An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
 
-A connect timeout, a pool timeout and a refused connection stay plain errors,
-because nothing was sent. A timeout of a read operation (`safety_level`
-`safe`) stays a plain error. Any other level counts as a change
-(`changes_target`).
+The rule holds for every kind of connection. On HTTP, a connect timeout, a
+pool timeout and a refused connection stay plain errors, because nothing was
+sent. On the other connections, the types are listed once, in
+`operations/uncertain_outcome.py`:
+
+- uncertain: `TimeoutError` (what `asyncio.wait_for` raises around an SSH
+  command), `ConnectionError` (reset, aborted, broken pipe),
+  `asyncssh.ConnectionLost`, aiohttp's `ServerDisconnectedError`,
+  `ClientOSError` and `ClientPayloadError`, pymongo's `AutoReconnect`,
+  asyncpg's `ConnectionDoesNotExistError`, and pytds's `TimeoutError` and
+  `ClosedConnectionError`;
+- a plain error, because nothing was sent: `ConnectionRefusedError`,
+  aiohttp's `ClientConnectorError` and `ConnectionTimeoutError`, and
+  pymongo's `ServerSelectionTimeoutError`.
+
+Errors of the steps before the call stay plain errors too: the target or
+secret lookup, the input checks and a refused probe. The `requests` types
+(the Vault client) are not on the list, because MEHO also reads the
+target's secret with it. Only the type of the error counts. A timeout while
+an SSH connection opens has the same type as a timeout of the command, so
+it counts as uncertain: in doubt, MEHO does not run the change again.
+
+A timeout of a read operation (`safety_level` `safe`) stays a plain error.
+Any other level counts as a change (`changes_target`).
 
 MEHO never runs an uncertain change again. `retry` is `false`, an approved
 request starts only once (`resumed_at`), and the re-run (#5417) refuses a
-request whose state is not `failed`, so it refuses `uncertain` too.
+request whose state is not `failed`, so it refuses `uncertain` too. The
+claim of the re-run (`_claim_rerun`) also leaves out a stored result whose
+`extras.execution_outcome` is `uncertain`, in its SQL.
 
 The summary of such a run (`resume_outcome`, see below) carries the advice
 as its `guidance`, because a timeout, a failed audit write and a restart
@@ -2630,7 +2654,9 @@ shape, odd envelopes, a resume that errors shows on REST show, list and
 MCP, the `guidance` stamp rules, a credential operation with no vendor
 text, and a result stored before the stamp that shows no guidance),
 `tests/test_uncertain_outcome.py` (the shared rule, the timeout rule and the
-restart recovery), `tests/test_ui_approvals.py` (run badge, failed-run modal,
+restart recovery), `tests/test_uncertain_outcome_any_connection.py` (an SSH
+timeout or lost connection of a change, the re-run refusal and its SQL, a
+failed secret lookup, a read that times out), `tests/test_ui_approvals.py` (run badge, failed-run modal,
 uncertain-run badge, modal and card, failed approve card, the "Next step" line, and no "Next step" for an older stored result),
 `tests/test_connectors_vmware_rest_typed_vm_question.py` (a CD-ROM change
 that times out on a VM question names the question id in the summary) and

@@ -2229,6 +2229,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-second-person-is-a-second-login" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A second person is a second login
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#who-may-approve" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3317,6 +3328,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-second-person-is-a-second-login" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A second person is a second login
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#who-may-approve" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3634,6 +3656,12 @@ when your realm asks for one.</p>
 </ul>
 <p>Without a browser (for example over SSH), the command prints the sign-in
 link and stops. Approve in the console instead.</p>
+<h2 id="a-second-person-is-a-second-login">A second person is a second login<a class="headerlink" href="#a-second-person-is-a-second-login" title="Permanent link">&para;</a></h2>
+<p>MEHO tells two people apart by their login: the login ID in the token.
+It does not know when two logins belong to one person. So "a second
+person" always means a second login. If one person has two logins, MEHO
+treats them as two people. The approval card in the web console says the
+same in one line.</p>
 <h2 id="who-may-approve">Who may approve<a class="headerlink" href="#who-may-approve" title="Permanent link">&para;</a></h2>
 <p>Your login group decides. MEHO reads it only from your signed login
 token, never from a request field or a command-line flag. The groups
@@ -3773,8 +3801,10 @@ user's details, removes a credential, or changes the attributes of a
 group has more rules:</p>
 <ul>
 <li>The login the change is for cannot approve it. This holds for every
-  group. A second login of the same person is not a second person. If
-  you have two logins, ask a colleague to approve.</li>
+  group. MEHO treats a second login as a second person (see
+  <a href="#a-second-person-is-a-second-login">A second person is a second login</a>).
+  If you have two logins, do not approve with the other one: ask a
+  colleague to approve.</li>
 <li>MEHO must know which login and which group the change is for. When a
   user name or a group name could not be looked up when the request was
   made, nobody can approve the request. Send a new one.</li>

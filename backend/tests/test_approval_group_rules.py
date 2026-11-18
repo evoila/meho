@@ -209,7 +209,14 @@ async def test_others_cannot_approve_their_own_lower_risk_change(level: str | No
         await _approve(request_id, _person(_REQUESTER))
 
     assert exc.value.high_risk is False
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in str(exc.value)
+    message = str(exc.value)
+    assert (
+        "Ask another person in MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or "
+        "MEHO-Approvers to approve it." in message
+    )
+    assert "Approvals page" in message
+    assert "APPROVAL_ALLOW_SELF_APPROVAL" not in message
+    assert "break-glass" not in message
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
@@ -420,7 +427,7 @@ async def test_rest_an_operator_cannot_approve_their_own_dangerous_change(
     detail = response.json()["detail"]
     assert detail.startswith("self_approval_forbidden:")
     assert "Only members of the MEHO-SA-Operators and MEHO-Admins groups" in detail
-    assert "MEHO-SA-Operator or a MEHO-Admin" in detail
+    assert "Ask another person in MEHO-SA-Operators or MEHO-Admins to approve it." in detail
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
     assert _fake_resume == []
 

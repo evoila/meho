@@ -1566,6 +1566,12 @@ class Settings(BaseModel):
         stay the same. A small model keeps more of its context window for
         the job. It stays off until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
+    mcp_call_flow_guide:
+        Off by default. When on, the MCP session-start text starts with a
+        short guide that explains, in order, how to find and call an
+        operation (:mod:`meho_backplane.mcp.call_flow_guide`). It names
+        only tools the session can see. It stays off until model tests
+        show it helps. Env ``MCP_CALL_FLOW_GUIDE``.
     mcp_profile_connector_lists:
         Off by default. When on, the profiles of ``mcp_connector_profiles``
         count: a session that names one at ``/mcp?profile=<name>`` may use
@@ -2540,6 +2546,7 @@ class Settings(BaseModel):
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3696,6 +3703,9 @@ def get_settings() -> Settings:
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
+        ),
+        mcp_call_flow_guide=parse_bool_env(
+            os.environ.get("MCP_CALL_FLOW_GUIDE"),
         ),
         mcp_profile_connector_lists=parse_bool_env(
             os.environ.get("MCP_PROFILE_CONNECTOR_LISTS"),

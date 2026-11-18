@@ -1209,6 +1209,51 @@ Every other result has an `outcome` field:
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #4712).
+- **Operations in the group listing, behind a switch (#4713).** A model
+  had to search to see any operation, and a search needs good words. The
+  backplane switch `GROUP_LISTING_OPERATIONS` (an env var, off by default)
+  lets a model walk down without a search query: connector, group,
+  operation, contract (`search_operations` with `op_id`), call. When on,
+  `list_operation_groups` changes like this (MCP, REST
+  `GET /api/v1/operations/groups` and CLI `meho operation groups` the
+  same):
+  - Each group has `operations`: its typed and multi-step operations
+    (`source_kind` `typed` and `composite`), by `op_id`. Each line has
+    `op_id`, `summary` (the first sentence of the summary, cut to 100
+    characters; `null` when there is none), `safety_level` and
+    `requires_approval`. The risk level and the approval flag are the
+    ones a call uses, operator overrides included. Only operations that
+    are on for the tenant, in its scope, with their package installed.
+  - Raw operations are never listed one by one (a big connector has
+    thousands). `operation_count` still counts them when the listing
+    shows them; search finds them.
+  - Size limits, as compact JSON: one group under 4 KB, one answer under
+    12 KB. A group with more operations than fit lists the first ones (by
+    `op_id`) and says how many are left out in `operations_more`. An
+    answer whose groups do not fit ends early, with `next_cursor` set to
+    the last group shown, like a full page. Every group of every
+    built-in connector fits whole.
+  - `group` (REST `group=`, CLI `--group`) lists one group. A `group`
+    that matches no group gives an empty list and a `note`. The CLI also
+    has `--cursor`.
+  - Not changed: the operator console list and the hosted agent tools
+    that have no `cursor` input (the hand-written `list_operation_groups`
+    and the agent's default tool) keep the old listing
+    (`list_operations=False`). The hosted tool built from the MCP tool
+    (`agent_operation_tools_from_mcp` on) follows the switch.
+  - Off: no `group` input, no `operations`, `operations_more` or `note`
+    field and no description line in `tools/list`
+    (`mcp/tools/_group_operations.py`); the REST and CLI `group` change
+    nothing.
+  - Code: `operations/_group_listing_operations.py`, called from
+    `list_operation_groups` in `operations/meta_tools.py`. Tests:
+    `tests/test_group_listing_operations.py` (with the size check over
+    every connector MEHO registers at start-up), and
+    `test_group_operations_follow_their_switch` in
+    `tests/test_mcp_surface_conformance.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #4713).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.

@@ -943,6 +943,8 @@ async def test_include_raw_follows_the_typed_first_switch(
     also when the short texts replace the description (#4712).
     """
     monkeypatch.setenv("SEARCH_TYPED_FIRST", "true" if on else "false")
+    # The other switch of list_operation_groups on, so the full schema shows.
+    monkeypatch.setenv("GROUP_LISTING_OPERATIONS", "true")
     get_settings.cache_clear()
     tools = await _listed_tools(_operator())
     for name in ("search_operations", "list_operation_groups"):
@@ -954,3 +956,31 @@ async def test_include_raw_follows_the_typed_first_switch(
             registered = mcp_registry._TOOLS[name][0].to_wire()
             assert tool["inputSchema"] == registered["inputSchema"]
             assert tool["description"] == registered["description"]
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["group-ops-off", "group-ops-on"])
+async def test_group_operations_follow_their_switch(
+    monkeypatch: pytest.MonkeyPatch, on: bool, short_tool_texts: bool
+) -> None:
+    """``list_operation_groups`` lists operation lines only with ``GROUP_LISTING_OPERATIONS`` on.
+
+    Off: no ``group`` input, no ``operations`` / ``operations_more`` field of
+    a group, no ``note`` and no description line, so the listing is as before
+    the switch existed. On: all of them (#4713).
+    """
+    monkeypatch.setenv("GROUP_LISTING_OPERATIONS", "true" if on else "false")
+    # The other switch of the tool on, so the full schema shows.
+    monkeypatch.setenv("SEARCH_TYPED_FIRST", "true")
+    get_settings.cache_clear()
+    tool = (await _listed_tools(_operator()))["list_operation_groups"]
+    output = tool["outputSchema"]
+    group_fields = output["properties"]["groups"]["items"]["properties"]
+    assert ("group" in tool["inputSchema"]["properties"]) is on
+    assert ("operations" in group_fields) is on
+    assert ("operations_more" in group_fields) is on
+    assert ("note" in output["properties"]) is on
+    assert ("`operations_more`" in tool["description"]) is on
+    if on and not short_tool_texts:
+        registered = mcp_registry._TOOLS["list_operation_groups"][0].to_wire()
+        assert tool["inputSchema"] == registered["inputSchema"]
+        assert tool["outputSchema"] == registered["outputSchema"]

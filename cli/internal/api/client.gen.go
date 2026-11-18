@@ -13828,7 +13828,10 @@ type GetGroupsApiV1OperationsGroupsGetParams struct {
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
 	// IncludeRaw Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.
-	IncludeRaw    *bool   `form:"include_raw,omitempty" json:"include_raw,omitempty"`
+	IncludeRaw *bool `form:"include_raw,omitempty" json:"include_raw,omitempty"`
+
+	// Group A `group_key`: list only this group. Used only while the backplane switch `GROUP_LISTING_OPERATIONS` is on; then each group also lists its typed and multi-step `operations`, and an answer ends early (with `next_cursor`) to stay under 12 KB.
+	Group         *string `form:"group,omitempty" json:"group,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -35688,6 +35691,22 @@ func NewGetGroupsApiV1OperationsGroupsGetRequest(server string, params *GetGroup
 		if params.IncludeRaw != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_raw", runtime.ParamLocationQuery, *params.IncludeRaw); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Group != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "group", runtime.ParamLocationQuery, *params.Group); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

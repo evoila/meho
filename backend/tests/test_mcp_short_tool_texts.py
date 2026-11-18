@@ -38,6 +38,7 @@ from meho_backplane.mcp.short_texts import (
 )
 from meho_backplane.mcp.tools import _short_tool_texts as texts
 from meho_backplane.mcp.tools._connector_classification import classification_for_settings
+from meho_backplane.mcp.tools._group_operations import group_operations_for_settings
 from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
 from meho_backplane.mcp.tools._kb_similar_text import similar_check_for_settings
 from meho_backplane.mcp.tools._operation_recall import recall_schema_for_settings
@@ -119,6 +120,8 @@ def _before(name: str) -> dict[str, Any]:
         definition = classification_for_settings(definition, _operator())
     if name in {"search_operations", "list_operation_groups"}:
         definition = include_raw_for_settings(definition)
+    if name == "list_operation_groups":
+        definition = group_operations_for_settings(definition)
     return definition.to_wire()
 
 

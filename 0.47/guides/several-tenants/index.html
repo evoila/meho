@@ -3680,6 +3680,13 @@ MEHO from starting, so check the value before you roll it out. More
 about this setting is in
 <a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes">deploying.md</a>
 (row v0.35.13).</p>
+<p>Optional: set <code>VAULT_OIDC_ROLE_TENANTS</code> to the tenant ids that may
+use the shared login role <code>VAULT_OIDC_ROLE</code>, separated by commas. A
+tenant that is not in this list and has no entry in
+<code>VAULT_OIDC_ROLE_BY_TENANT</code> then gets a clear refusal, and MEHO tries
+no Vault login. The list also covers the login of checks (Sensors)
+and of incoming events when <code>VAULT_CHECK_RUNNER_ROLE</code> is empty.
+Leave it empty on the built-in Vault.</p>
 </li>
 <li>
 <p><strong>Take the person out of the Vault groups of Step 6.</strong> The roles

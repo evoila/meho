@@ -3874,6 +3874,11 @@ Rows of the next release are in this table at once.</p>
 <td>MEHO now says when a change of rights cannot be approved because the tenant has only one admin: the answer of the call says "This change needs a second admin to approve it. This tenant has only one admin." with a link to the guide. <code>meho doctor</code> shows a new line "second admin", a warning when the tenant has one admin. <code>/api/v1/health</code> and <code>meho_status</code> report the number in <code>approvals.rights_change_admins</code>. See https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin.</td>
 <td>Run <code>meho doctor</code>. When the line "second admin" warns, add a second admin in Keycloak (in <code>MEHO-Admins</code> or <code>MEHO-Platform-Admins</code>). No schema action.</td>
 </tr>
+<tr>
+<td><strong>v0.48.0</strong></td>
+<td>New optional setting <code>VAULT_OIDC_ROLE_TENANTS</code> (through the chart's <code>extraEnv</code>): a comma-separated list of the tenant ids that may use the shared Vault login role <code>VAULT_OIDC_ROLE</code>. When it is set, a tenant that is not in the list and has no entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> gets a clear refusal, and MEHO tries no Vault login. A wrong entry stops MEHO from starting.</td>
+<td>No action needed. The default is empty, and then nothing changes. To turn it on, set it to the ids of the tenants that use the shared role, then restart MEHO. Leave it empty on the built-in Vault of the chart.</td>
+</tr>
 </tbody>
 </table>
 <p>New rows come from one small file per row in

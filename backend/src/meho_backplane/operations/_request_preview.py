@@ -1006,6 +1006,23 @@ async def _preview_resolved_op(
     if fault is not None:
         return fault  # structured unavailable / invalid_params / invalid_op_schema
     if descriptor.source_kind != "ingested":
+        if is_credential_builder_op(descriptor):
+            # The builder of a credential write runs only for a caller the policy does not refuse.
+            verdict, reason = await policy_gate(
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                connector_id=connector_id,
+                params=params,
+                decide_only=True,
+            )
+            if verdict is PermissionVerdict.DENY:
+                return _refused_envelope(
+                    result_denied(op_id, reason or "denied by policy", 0.0),
+                    op_id=op_id,
+                    connector_id=connector_id,
+                    source_kind=descriptor.source_kind,
+                )
         # A destructive/requires_approval typed/composite op cleared the
         # previewability gate (#3198/#3312) — bind the logical request tuple
         # + reuse the park-time proposed_effect, no handler runs. Imported

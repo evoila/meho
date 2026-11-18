@@ -134,7 +134,7 @@ are in the [connector reference](../reference/connectors.md#evoilas-enterprise-p
 
 | VCF part | `product` value | Connector ids |
 | --- | --- | --- |
-| vCenter (and ESXi hosts) | `vmware` | `vmware-rest-9.0`, `vmware-rest-8.0` |
+| vCenter | `vmware` | `vmware-rest-9.0`, `vmware-rest-8.0` |
 | NSX Manager | `nsx` | `nsx-rest-9.0`, `nsx-rest-4.2` |
 | SDDC Manager | `sddc` | `sddc-rest-9.0`, `sddc-vcf5-5.0` |
 | VCF Installer and Cloud Builder | `installer` | `installer-rest-9.1`, `installer-cb-5.0` |
@@ -193,7 +193,7 @@ Add the other parts (`fleet`, `vrli`, `vro`, `idb`, `installer`) the same
 way: a `name`, the `product` value from the table, and a `host`. Add
 `tls_ca_pin` or `tls_server_name` as for any target. Then
 [import and probe](#import-and-verify) each one. A probe that is green
-for a part shows that MEHO reaches it and can log in.
+for a part shows that MEHO reaches it and identified its product and version.
 
 #### What VCF Automation reads
 
@@ -205,7 +205,7 @@ and the tenant plane. The connector reads these values.
 | Target `fqdn` | `fqdn` | The appliance picks the organisation from the `Host` name. When you reach it by IP, set `fqdn` to its FQDN. |
 | Target `extras` | `domain` | The tenant organisation to log in to. It is a target setting, **not** a field in the secret. |
 | Target `extras` | `provider_username` | Optional. The user name for the provider plane, when the provider plane needs another login than the tenant plane. |
-| Target `extras` | `provider_secret_ref` | Optional. The `secret_ref` of a second secret that holds the password of the provider user. It follows the same rules as `secret_ref` for your credential backend. |
+| Target `extras` | `provider_secret_ref` | Optional. The `secret_ref` of a second secret that holds the login of the provider user. It follows the same rules as `secret_ref` for your credential backend. |
 | Secret | `username`, `password` | The tenant login. |
 | Secret | `refresh_token` | Optional. A VCF Automation API token. For a VCF Automation 9.1 target whose appliance does not serve the usual login, add it to the secret of the target. |
 

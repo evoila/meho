@@ -466,6 +466,13 @@ class ToolDefinition(BaseModel):
     ``None`` by default. internal: dropped from the wire shape like the
     RBAC fields.
 
+    ``input_error_path`` (#4174): when ``True``, an error of the
+    ``tools/call`` input check starts with the path of the wrong input (for
+    example ``query.filter[0]: ...``). ``False`` by default, so the error
+    text stays as it was. A tool sets it from its ``for_settings`` function
+    while its switch is on. internal: dropped from the wire shape like the
+    RBAC fields.
+
     ``for_settings`` is an optional function that gives the tool as it is
     shown under the current settings, to the session of the given
     :class:`Operator` (a session can ask for the short tool texts, see
@@ -500,6 +507,7 @@ class ToolDefinition(BaseModel):
     broadcast_omit_args: frozenset[str] = frozenset()
     approver_may_call: bool = False
     caller_check: Callable[[Operator], None] | None = None
+    input_error_path: bool = False
     for_settings: Callable[[ToolDefinition, Operator], ToolDefinition] | None = None
     annotations: ToolAnnotations | None = None
     meta: dict[str, Any] | None = None

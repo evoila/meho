@@ -32,8 +32,8 @@ approval, so the park-time preview shows it. The fields are:
   SHA-256 of the script (``expected_sha256``).
 
 The arguments and the ``env`` values are not part of this module: the preview
-builder in :mod:`~meho_backplane.connectors.linux.ops_write` shows only their
-size and names.
+builder in :mod:`~meho_backplane.connectors.linux.ops_write` shows the size of
+the arguments and each ``env`` name with its value.
 """
 
 from __future__ import annotations

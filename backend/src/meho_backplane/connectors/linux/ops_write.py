@@ -28,8 +28,8 @@ Tier table:
   stdout / stderr / exit. Its ``arguments`` / ``env`` may carry secrets, so it
   is pinned ``credential_write`` and previews only at park time via its
   bespoke builder: the approver reads the script body and its SHA-256
-  (:mod:`~meho_backplane.connectors.linux.script_preview`), never the argument
-  values or env values. A credential
+  (:mod:`~meho_backplane.connectors.linux.script_preview`) and each ``env``
+  name with its value, never the argument values. A credential
   the script needs is instead passed by reference via ``secret_env``
   (``ENV_NAME -> "<vault-path>#<field>"``), resolved from Vault server-side at
   execution time (the same ``_resolve_secret`` seam the sudo password uses) and
@@ -65,7 +65,7 @@ from __future__ import annotations
 import base64
 import shlex
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "ENV_NOTE",
     "FIREWALL_BACKENDS",
     "LINUX_WRITE_ROOTS",
     "SERVICE_ACTIONS",
@@ -220,9 +221,15 @@ _ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])"
 #: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.
 _MAX_SECRET_ENV: int = 32
 
+#: The line the ``linux.script.run`` approval card shows next to the ``env``
+#: values.
+ENV_NOTE: Final[str] = "The approver sees every env value. Put secrets in secret_env, not in env."
+
 #: env-var names that ``env`` and ``secret_env`` must NOT bind. The approver
-#: sees the script and the env NAMES, not the env values, so a value must not
-#: change which code runs. Two groups:
+#: never sees a ``secret_env`` value (it is read from Vault only at run time),
+#: so such a value must not change which code runs. ``env`` values are on the
+#: approval card, and ``env`` keeps the same list as a second guard. Three
+#: groups:
 #:
 #: * the ``script.run`` wrapper's own shell variables
 #:   (:func:`build_script_run_wrapper` sets ``tmp`` and, when arguments are
@@ -1121,7 +1128,7 @@ async def _linux_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview builder for ``linux.script.run`` -- the script, never the values.
+    """Preview builder for ``linux.script.run`` -- the script and the ``env`` values.
 
     ``linux.script.run`` classifies ``credential_write`` (its ``arguments`` /
     ``env`` may carry secrets). ``preview_operation`` returns
@@ -1132,9 +1139,13 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     shows it with its SHA-256 and the optional check against a reviewed copy
     (:func:`~meho_backplane.connectors.linux.script_preview.script_preview_fields`).
     Next to it: the target, the interpreter, the argument byte size, the
-    env-var NAMES, the ``secret_env`` reference mapping (non-secret
-    ``ENV -> path#field`` Vault pointers), the working directory, the sudo
-    intent, and the timeout -- never the argument values or the env values.
+    env-var names, each ``env`` name with its value (``env``, sorted by name,
+    each value as the handler exports it) and the line :data:`ENV_NOTE`, the
+    ``secret_env`` reference mapping (non-secret ``ENV -> path#field`` Vault
+    pointers), the working directory, the sudo intent, and the timeout --
+    never the argument values. An ``env`` value can change which code the
+    script runs (``TAR_OPTIONS``, ``GIT_SSH_COMMAND``), so the approver reads
+    every one; the params hash binds them to the approved run.
     Declines (``None``) on malformed params.
     """
     script = ctx.params.get("script")
@@ -1153,6 +1164,10 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     env = ctx.params.get("env")
     if isinstance(env, dict) and env:
         preview["env_var_names"] = sorted(str(name) for name in env)
+        preview["env"] = {
+            str(name): str(value) for name, value in sorted(env.items(), key=lambda kv: str(kv[0]))
+        }
+        preview["env_note"] = ENV_NOTE
     secret_env = ctx.params.get("secret_env")
     if isinstance(secret_env, dict) and secret_env:
         # The references are non-secret Vault pointers (``path#field``) -- the
@@ -1413,9 +1428,8 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "env": {
                 "type": "object",
-                # Checked by the dispatcher before the call waits for approval:
-                # the approver sees the names, not the values, so a name that
-                # changes how the script starts is refused at once.
+                # Checked by the dispatcher before the call waits for approval,
+                # so a name that changes how the script starts is refused at once.
                 "propertyNames": _ENV_PROPERTY_NAMES_SCHEMA,
                 "additionalProperties": {"type": "string"},
                 "description": (

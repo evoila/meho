@@ -619,11 +619,11 @@ differently, by design:
   (`register_preview_builder`, fail-soft). For `file.write` it echoes only
   shape — path + content byte size + backup path + validate command, never
   the `content`. For `script.run` it shows interpreter + argument byte size +
-  env-var **names** + the `secret_env` **reference mapping**
+  each `env` name **with its value** + the `secret_env` **reference mapping**
   (`ENV → <vault-path>#<field>`, the non-secret Vault pointers) + working
   directory + sudo intent + timeout, and **the script itself** (see "What the
-  approver of `script.run` reads" below) — never the argument values / env
-  values / resolved `secret_env` values.
+  approver of `script.run` reads" below) — never the argument values /
+  resolved `secret_env` values.
 - `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
   register **no** bespoke builder and stay previewable via
   `preview_operation` on the generic params-echo default. For
@@ -645,6 +645,19 @@ the approver reads it. `linux/script_preview.py` builds these preview fields:
 | `script_ref` | The optional `script_ref` param: where the reviewed copy lives. |
 | `script_check` | `matches` or `does not match`, when the caller sent the optional `expected_sha256` param. |
 
+Next to the script fields, `ops_write.py` (`_linux_script_run_preview`) adds:
+
+| Field | What it holds |
+|---|---|
+| `env_var_names` | The `env` names, sorted. |
+| `env` | Each `env` name with its value, sorted by name, each value as the handler exports it. An `env` value can change which code the script runs (for example `TAR_OPTIONS` or `GIT_SSH_COMMAND`), so the approver reads every one. |
+| `env_note` | One line: the approver sees every env value; put secrets in `secret_env`, not in `env`. |
+| `secret_env` | The `ENV → <vault-path>#<field>` references, never a value. |
+
+The params hash of the approval request covers `env`, so the approved run
+uses the `env` values on the card: an approval or a run with other values is
+refused (`ParamsMismatchError`).
+
 When `expected_sha256` is set and the script does not match it, the handler
 refuses to run the script. The preview lives only in the approval row's
 `proposed_effect`; the audit row keeps only the params hash, and the
@@ -654,7 +667,11 @@ The console approval modal shows the text as code in a "Script to run"
 block (`ui/templates/approvals/_script.html`), with the hash, the reviewed
 copy and the check. `meho approvals show` and the `meho approvals approve`
 prompt print the same block, one line per script line
-(`cli/internal/cmd/approvals/script.go`).
+(`cli/internal/cmd/approvals/script.go`). The `env` values show in the
+preview fields: the console table renders them as JSON, and the CLI prints
+the preview as JSON made safe for the terminal (`output.SafeLines`), so a
+control character in a value shows as a visible escape (`\u001b`). The MCP
+approval read (`meho_approvals_get`) returns the same fields.
 
 ### Approval + secret hygiene
 
@@ -672,7 +689,8 @@ deliberately not writable here.
 `content` / `arguments` / `env`. `ApprovalRequest.params` stores the params
 verbatim so the approved call can be re-dispatched, so a secret placed
 there is durable on the approval row (the same rule as the guest
-`program.run` / `file.write` verbs). For `script.run`, pass the credential by
+`program.run` / `file.write` verbs). The `script.run` approval card also
+shows every `env` value to the approver. For `script.run`, pass the credential by
 reference via `secret_env` (below) — the backplane resolves it server-side at
 run time, so the value never touches the params.
 
@@ -740,8 +758,9 @@ to extend it to.
 
 ### Reserved env names (`env` and `secret_env`)
 
-The approver of `script.run` sees the script and the env **names**, not the
-env values. So an env value must not change which code runs. `env` and
+The approver of `script.run` sees the script and each `env` name with its
+value, but never a `secret_env` value: MEHO reads it from Vault only at run
+time. So a `secret_env` value must not change which code runs. `env` and
 `secret_env` refuse the same reserved names:
 
 - the wrapper's own shell variables: `tmp`, `args`, `f`;

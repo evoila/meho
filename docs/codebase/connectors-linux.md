@@ -645,6 +645,11 @@ the approver reads it. `linux/script_preview.py` builds these preview fields:
 | `script_ref` | The optional `script_ref` param: where the reviewed copy lives. |
 | `script_check` | `matches` or `does not match`, when the caller sent the optional `expected_sha256` param. |
 
+The hiding pass runs in a worker thread (`asyncio.to_thread`), so the backend
+keeps answering other requests while it works. In `preview_operation`
+with the `PREVIEW_TYPED_WRITES` switch on, the preview builder of a credential
+write runs only for a caller whom the policy does not refuse.
+
 When `expected_sha256` is set and the script does not match it, the handler
 refuses to run the script. The preview lives only in the approval row's
 `proposed_effect`; the audit row keeps only the params hash, and the

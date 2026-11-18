@@ -98,6 +98,7 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -250,7 +251,7 @@ async def _job_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "resource": "job",
         "name": ctx.params.get("name"),
         "namespace": ctx.params.get("namespace"),
-        "spec": _job_spec_echo(ctx, ctx.params.get("spec")),
+        "spec": await asyncio.to_thread(_job_spec_echo, ctx, ctx.params.get("spec")),
     }
 
 
@@ -281,7 +282,9 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "suspend": bool(spec.suspend),
         "concurrency_policy": spec.concurrency_policy,
         "active_jobs": [ref.name for ref in active or [] if ref.name],
-        "job_spec": _job_spec_echo(ctx, model_to_json(spec.job_template.spec)),
+        "job_spec": await asyncio.to_thread(
+            _job_spec_echo, ctx, model_to_json(spec.job_template.spec)
+        ),
     }
 
 

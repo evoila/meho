@@ -4034,6 +4034,7 @@ needs the UBI one. With v0.46.0 or newer, also make the file of
 </tr>
 </tbody>
 </table>
+<p><strong>Plan for two admins.</strong> A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.</p>
 <p><strong>Tools on your laptop:</strong></p>
 <ul>
 <li><code>oc</code>, the OpenShift command line, to log in. The web console has it
@@ -4502,8 +4503,12 @@ bash<span class="w"> </span>install-verify.sh<span class="w"> </span>--host<span
 <code>GET /api/v1/health (authenticated) returns 200</code>.</p>
 <h2 id="step-6-the-first-two-users-meho-login-meho-status">Step 6: The first two users, <code>meho login</code>, <code>meho status</code><a class="headerlink" href="#step-6-the-first-two-users-meho-login-meho-status" title="Permanent link">&para;</a></h2>
 <p>The install made two users with temporary passwords: the first admin
-(<code>admin</code>) and a second person who can approve the admin's changes
-(<code>approver</code>). Write them into a file that only you can read:</p>
+(<code>admin</code>, in <code>MEHO-Admins</code>) and an approver (<code>approver</code>, in
+<code>MEHO-SA-Operators</code>). The approver is not an admin. The approver can
+approve the admin's risky changes, but not a change of rights: a change
+of rights needs a second admin. See
+<a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.
+Write the two logins into a file that only you can read:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
 kubectl<span class="w"> </span>-n<span class="w"> </span><span class="nv">$NS</span><span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span><span class="nv">$REL</span>-core-first-login<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-o<span class="w"> </span>go-template<span class="o">=</span><span class="s1">'{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}'</span><span class="w"> </span>&gt;<span class="w"> </span><span class="nv">$W</span>/first-login.txt

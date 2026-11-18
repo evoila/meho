@@ -3832,6 +3832,7 @@ own command, <code>meho-host</code>.</p>
 </ul>
 <p>You also need a computer on the management network with a browser:
 Chrome 111, Safari 16.4 or Firefox 128, or newer.</p>
+<p><strong>Plan for two admins.</strong> A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.</p>
 <p>MEHO runs on your management network only, never on the internet. Users
 reach it on ports 80 and 443 from the management network. MEHO holds the
 logins for your systems, so an address on the internet is a risk you do
@@ -3909,7 +3910,7 @@ sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span 
 </tr>
 <tr>
 <td><code>--approver-user &lt;name&gt;</code></td>
-<td>The user name of the second person, who approves the admin's changes.</td>
+<td>The user name of the approver (in <code>MEHO-SA-Operators</code>), who approves the admin's risky changes but not a change of rights.</td>
 <td><code>approver</code></td>
 </tr>
 <tr>
@@ -4018,8 +4019,11 @@ the first login (<a href="#step-4-first-login">Step 4</a>).</p>
 <p>Before v0.47.0, the result has no <code>Console CA</code> line, and the last line
 says <code>First-start list: not in this version yet</code>.</p>
 <h2 id="step-4-first-login">Step 4: First login<a class="headerlink" href="#step-4-first-login" title="Permanent link">&para;</a></h2>
-<p>The install made two users with temporary passwords: the first admin,
-and a second person who approves the admin's changes.</p>
+<p>The install made two users with temporary passwords: the first admin
+(in <code>MEHO-Admins</code>) and an approver (in <code>MEHO-SA-Operators</code>). The approver
+is not an admin. The approver can approve the admin's risky changes, but
+not a change of rights: a change of rights needs a second admin. See
+<a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.</p>
 <ol>
 <li>
 <p>On the server, read the file with the passwords:</p>

@@ -383,7 +383,9 @@ func renderBroadcastSSE(r io.Reader, w io.Writer, jsonOut bool) error {
 					if err := json.Unmarshal([]byte(raw), &event); err != nil {
 						return err
 					}
-					if _, err := fmt.Fprintf(w, "%v\n", event); err != nil {
+					// The event text comes from the server and may hold
+					// control characters; print them as visible escapes.
+					if _, err := fmt.Fprintln(w, output.SafeText(fmt.Sprintf("%v", event))); err != nil {
 						return err
 					}
 				}

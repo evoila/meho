@@ -1048,6 +1048,14 @@ lines (indented JSON, an error message) and keeps the line breaks.
   human output through `SafeText`. A stored request path with control
   codes shows as visible escapes, so each field stays on its own line
   and reads as the server holds it.
+- The commands that print text an agent or another member of the tenant
+  wrote use them too: `meho status --watch` (every text field of a feed
+  line, and the "unparseable event" line), `meho broadcast watch` (each
+  line without `--json`), `meho kb show`, `kb list`, `kb search`,
+  `meho conventions show`, `list`, `history`, `meho memory list`, the
+  `meho memory recall` hit table and `meho runbook show-template`. A body
+  goes through `SafeLines`, so its line breaks stay; a tab in a body
+  shows as `\x09`.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control

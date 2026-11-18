@@ -306,6 +306,9 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
     → resolve_agent_admission(operator)  (auth/agent_admission.py, #3736)
       → not a trusted agent → AgentIdentityRequiredError
            → MCP -32602, error.data.code = "agent_identity_required" (REST 403)
+    → announcement_text_problem(activity, target, targets, scope)  (broadcast/agent_events.py)
+      → a C0 or C1 control character or DEL (also a line break or a tab)
+           → MCP -32602 / REST 422, "<field>: must not contain control characters"
     → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
       → (skipped when broadcast_announce_rate_per_minute == 0)
       → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}

@@ -176,7 +176,7 @@ func printHistoryDiffs(w io.Writer, slug string, entries []api.ConventionHistory
 			fmt.Fprintln(w)
 		}
 		tsStr := e.Ts.UTC().Format("2006-01-02T15:04:05Z")
-		fmt.Fprintf(w, "=== %s  actor=%s  history_id=%s\n", tsStr, e.ActorSub, e.Id.String())
+		fmt.Fprintf(w, "=== %s  actor=%s  history_id=%s\n", tsStr, output.SafeText(e.ActorSub), e.Id.String())
 		printHistoryProvenance(w, e)
 
 		if e.BodyBefore == nil {
@@ -186,7 +186,7 @@ func printHistoryDiffs(w io.Writer, slug string, entries []api.ConventionHistory
 			fmt.Fprintln(w, "--- /dev/null")
 			fmt.Fprintf(w, "+++ %s @ %s\n", slug, tsStr)
 			for _, line := range strings.Split(strings.TrimRight(e.BodyAfter, "\r\n"), "\n") {
-				fmt.Fprintf(w, "+ %s\n", line)
+				fmt.Fprintf(w, "+ %s\n", output.SafeText(line))
 			}
 			continue
 		}
@@ -250,14 +250,14 @@ func writeUnifiedDiff(w io.Writer, before, after string) {
 	// '.[]|.body_after' | diff -u <(meho conventions history ... --json | jq...)`.
 	for _, line := range beforeLines {
 		if afterSet[line] {
-			fmt.Fprintf(w, "  %s\n", line)
+			fmt.Fprintf(w, "  %s\n", output.SafeText(line))
 		} else {
-			fmt.Fprintf(w, "- %s\n", line)
+			fmt.Fprintf(w, "- %s\n", output.SafeText(line))
 		}
 	}
 	for _, line := range afterLines {
 		if !beforeSet[line] {
-			fmt.Fprintf(w, "+ %s\n", line)
+			fmt.Fprintf(w, "+ %s\n", output.SafeText(line))
 		}
 	}
 }

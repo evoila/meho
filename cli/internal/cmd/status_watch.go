@@ -392,7 +392,7 @@ func renderEvent(w io.Writer, eventType, data string, jsonOut bool) {
 	}
 	line, err := humanLine(data)
 	if err != nil {
-		fmt.Fprintf(w, "meho: unparseable event: %s\n", data)
+		fmt.Fprintf(w, "meho: unparseable event: %s\n", output.SafeText(data))
 		return
 	}
 	fmt.Fprintln(w, line)
@@ -426,8 +426,9 @@ type broadcastEvent struct {
 
 	// Agent-authored ``AgentAnnouncementEvent`` fields (kind ==
 	// "agent_announcement"). ``Activity`` is agent-authored text; the CLI
-	// renders it verbatim to a terminal (it does not interpret it and, as a
-	// non-LLM sink, does not need the untrusted-text envelope).
+	// prints it with control characters escaped (humanLine) and never
+	// interprets it. As a non-LLM sink it does not need the
+	// untrusted-text envelope.
 	Phase    string   `json:"phase"`
 	Activity string   `json:"activity"`
 	Target   *string  `json:"target"`
@@ -461,16 +462,23 @@ func humanLine(data string) (string, error) {
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		return "", fmt.Errorf("decode event: %w", err)
 	}
+	var line string
 	if ev.isAnnouncement() {
-		return announcementLine(ev), nil
+		line = announcementLine(ev)
+	} else {
+		line = fmt.Sprintf("%s  %-22s  %-18s  %-6s  %s",
+			ev.TS.UTC().Format(time.RFC3339),
+			ev.PrincipalSub,
+			ev.OpID,
+			ev.ResultStatus,
+			summariseEvent(ev),
+		)
 	}
-	return fmt.Sprintf("%s  %-22s  %-18s  %-6s  %s",
-		ev.TS.UTC().Format(time.RFC3339),
-		ev.PrincipalSub,
-		ev.OpID,
-		ev.ResultStatus,
-		summariseEvent(ev),
-	), nil
+	// Every text field of the line comes from the server, and an agent
+	// or another member of the tenant may have written it. SafeText shows
+	// control characters as visible escapes, so the line cannot move the
+	// cursor or send control codes to the terminal.
+	return output.SafeText(line), nil
 }
 
 // announcementLine formats one agent-authored announcement as a single
@@ -482,9 +490,9 @@ func humanLine(data string) (string, error) {
 // The “op_id“ column is the literal "announce" (an announcement is not
 // an operation), the “result_status“ column carries the announcement
 // “phase“ (start / update / completion), and the summary column carries
-// the agent's activity text plus any target attribution. The activity is
-// rendered verbatim — the operator reads it as prose, and the CLI never
-// treats it as input.
+// the agent's activity text plus any target attribution. The operator
+// reads the activity as prose, and the CLI never treats it as input;
+// humanLine escapes its control characters.
 func announcementLine(ev broadcastEvent) string {
 	phase := ev.Phase
 	if phase == "" {

@@ -170,7 +170,10 @@ func (e *showHTTPError) Error() string {
 }
 
 // printConventionBody writes the convention's Markdown body to stdout
-// verbatim with exactly one trailing newline. The substrate stores the
+// with exactly one trailing newline. Another login may have written
+// the body, so each line goes through output.SafeLines: control
+// characters (also a tab) show as visible escapes and the line breaks
+// stay. A CRLF line end counts as a plain line break. The substrate stores the
 // body unmodified, so a body that already ends in `\n` (the
 // conventional shape — most editors enforce a trailing LF on save)
 // would otherwise produce two newlines when Fprintln adds its own.
@@ -181,5 +184,6 @@ func printConventionBody(w io.Writer, c *api.Convention) {
 	if c == nil {
 		return
 	}
-	fmt.Fprintln(w, strings.TrimRight(c.Body, "\r\n"))
+	body := strings.ReplaceAll(strings.TrimRight(c.Body, "\r\n"), "\r\n", "\n")
+	fmt.Fprintln(w, output.SafeLines(body))
 }

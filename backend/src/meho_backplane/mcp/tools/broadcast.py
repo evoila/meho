@@ -94,6 +94,7 @@ from meho_backplane.broadcast import (
     AnnounceRateLimitError,
     InvalidArchiveCursorError,
     PlannedOpClass,
+    announcement_text_problem,
     build_trusted_announcement,
     encode_watch_checkpoint,
     enforce_announce_rate_limit,
@@ -455,6 +456,17 @@ def _parse_announce_claims(arguments: dict[str, Any]) -> _AnnounceClaims:
     )
 
 
+def _check_announce_text(
+    activity: str, target: str | None, targets: list[str], scope: str | None
+) -> None:
+    """Refuse control characters in the announcement text fields; -32602."""
+    problem = announcement_text_problem(
+        activity=activity, target=target, targets=targets, scope=scope
+    )
+    if problem is not None:
+        raise McpInvalidParamsError(problem)
+
+
 async def _publish_agent_announcement_impl(
     operator: Operator,
     admission: AgentAdmission,
@@ -630,6 +642,7 @@ async def _handler_announce(
     # a malformed request from a looping caller still gets a clean
     # ``-32602`` rather than being masked by the rate-limit gate below.
     claims = _parse_announce_claims(arguments)
+    _check_announce_text(activity, target, claims.targets, scope)
     # Per-principal flood control BEFORE the publish (G6.5-T6 #2546): the
     # tenant stream is count-trimmed (``BROADCAST_MAXLEN`` = 10000), so a
     # looping principal could otherwise evict the whole tenant's

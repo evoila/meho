@@ -656,9 +656,9 @@ config:
   # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
   # single-operator answer — enabling it posture-wide re-opens, for every
   # op, the single-account request+grant hole the guard closes. The
-  # endorsed single-operator posture is an **agent-requester** (park the
-  # write under a scheduled agent run whose distinct subject clears the
-  # gate with no flag). Even under break-glass the self-approval is
+  # endorsed single-operator posture is the **MEHO-SA-Operators** group:
+  # its members approve their own changes on purpose, with a click in the
+  # web interface. Even under break-glass the self-approval is
   # forensically visible: it writes a decision audit row (requester ==
   # approver), emits a WARNING `approval_self_approval_break_glass` log,
   # and flips `GET /ready` → `features.approval_queue.effective_posture`

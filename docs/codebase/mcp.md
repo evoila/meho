@@ -2268,6 +2268,50 @@ build, once with `MCP_SHORT_TOOL_TEXTS=false` and once with `true`, with a
 small model and with Claude. `/ready` tells which state a run used.
 Compare the task scores and the tokens used before the first answer.
 
+## A guide to the call flow in the session-start text (`MCP_CALL_FLOW_GUIDE`, off by default, #4715)
+
+With the `MCP_CALL_FLOW_GUIDE` switch on, the session-start text (the
+`instructions` of `initialize`) starts with a short guide. It explains
+once, in order, how to find and call an operation:
+
+1. connectors and targets (`meho_connector_list`, `list_targets`; a
+   target is named, not given by its id);
+2. operation groups (`list_operation_groups`);
+3. search, then the exact contract (`search_operations` with `query`,
+   then with `op_id`);
+4. preview before a change (`preview_operation`);
+5. the call (`call_operation`);
+6. large results come back as a handle, read with `result_query`;
+7. a call that waits for a person's approval: `status` is
+   `awaiting_approval`, nothing has run, do not call again. A call with
+   `reveal_secret: true` is different: the approval runs nothing. With
+   `MCP_REVEAL_FETCH` on, the guide says to call `call_operation` again
+   with `approval_request_id` to get the value. With it off, the guide
+   says the person who asked gets the value in the console or on the
+   command line.
+
+- **Off (default):** the session-start text does not change.
+- **On:** the guide comes first, before the other bands. The full guide
+  is about 235 words, 434 tokens by the same estimate the
+  `mcp_preamble_receipt` log uses (`estimate_tokens`), and 446 tokens with
+  `MCP_REVEAL_FETCH` on. A test keeps both at 450 or less.
+- The text is the same for every client. It names only tools the
+  session can see (`all_tools_for`, the filter `tools/list` uses). A step
+  whose tool is not on the list is left out, and the steps are numbered
+  again. For example, the `investigate` profile has no preview step. A
+  session without `call_operation` gets no guide.
+- A client may ignore `instructions`. So each tool description still
+  carries the rules a correct call needs. The guide adds the overview.
+- Code: `mcp/call_flow_guide.py`, used by `_session_call_flow_guide` in
+  `mcp/server.py`. Tests: `tests/test_mcp_call_flow_guide.py`.
+
+How to measure it: run the same benchmark task set twice against one
+build, once with `MCP_CALL_FLOW_GUIDE=false` and once with `true`, with a
+small model and with Claude. Compare the steps and the tokens to the
+first correct call. Then do one live run on the sandbox MEHO with the
+switch on. The switch goes on by default only in a later pull request
+that links this measurement.
+
 ## Empty optional text on read tools (#4110)
 
 Small models often send an unused filter as empty text, for example

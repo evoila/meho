@@ -1053,9 +1053,18 @@ lines (indented JSON, an error message) and keeps the line breaks.
   line, and the "unparseable event" line), `meho broadcast watch` (each
   line without `--json`), `meho kb show`, `kb list`, `kb search`,
   `meho conventions show`, `list`, `history`, `meho memory list`, the
-  `meho memory recall` hit table and `meho runbook show-template`. A body
-  goes through `SafeLines`, so its line breaks stay; a tab in a body
-  shows as `\x09`.
+  `meho memory recall` hit table, `meho runbook show-template`, and
+  `meho runbook start` and `next` (the template slug, the step id, title
+  and body, the op_id, the verify prompt and the "Run complete" lines).
+  A body goes through `SafeLines`, so its line breaks stay; a tab in a
+  body shows as `\x09`.
+- `meho docs ask` uses its own helpers (`sanitizeText`, `sanitizeBlock`
+  in `cmd/docs/ask.go`) for the answer and the sources.
+- Not escaped yet: `meho sessions show` and `list`, the wiki hits of
+  `meho kb search`, `meho agent run` and `agent run status` (the error
+  line and the event stream), `meho docs read` and `docs search`, and an
+  error that a command returns as a plain Go error, which cobra prints
+  itself.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control

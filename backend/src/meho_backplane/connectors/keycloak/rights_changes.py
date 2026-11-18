@@ -17,6 +17,12 @@ Every Keycloak write is on exactly one of the two tables below, with the
 reason. ``tests/test_keycloak_rights_change_writes.py`` fails when a new
 Keycloak write is on neither table, so each new write gets this decision.
 
+Each change of rights is also on one of two more tables: the card key
+that shows the object as it is now (:data:`CURRENT_STATE_ON_CARD`), or the
+reason why there is no such object yet (:data:`NEW_OBJECT_OPS`).
+``tests/test_keycloak_rights_change_current_state.py`` fails when a change
+of rights is on neither.
+
 :func:`register_rights_change_ops` registers every write of
 :data:`RIGHTS_CHANGE_OPS` with
 :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`,
@@ -33,7 +39,13 @@ from typing import Final
 
 from meho_backplane.operations.grant_approval import register_rights_change_op
 
-__all__ = ["NOT_RIGHTS_CHANGE_OPS", "RIGHTS_CHANGE_OPS", "register_rights_change_ops"]
+__all__ = [
+    "CURRENT_STATE_ON_CARD",
+    "NEW_OBJECT_OPS",
+    "NOT_RIGHTS_CHANGE_OPS",
+    "RIGHTS_CHANGE_OPS",
+    "register_rights_change_ops",
+]
 
 #: op_id -> how the write can change what a token says, who has a role,
 #: who may sign in, or how strong a sign-in is.
@@ -111,6 +123,38 @@ NOT_RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
     "keycloak.group.delete": "removes a group; it only takes away",
     "keycloak.client.delete": "removes a client; it only takes away",
     "keycloak.realm.delete": "removes a realm; it only takes away",
+}
+
+
+#: op_id -> the approval card key that shows the object as it is now, for each
+#: change of rights of an object that already exists. The approver sees it
+#: next to what the call changes.
+CURRENT_STATE_ON_CARD: Final[dict[str, str]] = {
+    "keycloak.realm.update": "current_values",
+    "keycloak.client.update": "current_values",
+    "keycloak.protocol_mapper.create": "current_mappers",
+    "keycloak.client_scope.protocol_mapper.update": "current",
+    "keycloak.user.reset_password": "current_user",
+    "keycloak.role_mapping.assign": "current_roles",
+    "keycloak.role_mapping.client.assign": "current_roles",
+    "keycloak.user.update": "current",
+    "keycloak.user.credential.delete": "will_remove",
+    "keycloak.user.enable": "current_user",
+    "keycloak.user.required_actions.update": "current_required_actions",
+    "keycloak.group.member.add": "current_group",
+    "keycloak.group.update_attributes": "current_attributes",
+    "keycloak.authflow.ensure_approval_flow": "current_binding",
+    "keycloak.authflow.ensure_passkey_code_skip": "current_binding",
+    "keycloak.authflow.ensure_approval_touch": "current_binding",
+}
+
+#: op_id -> why the approval card of this change of rights shows no object
+#: as it is now: the write makes a new object, so there is nothing to read.
+NEW_OBJECT_OPS: Final[dict[str, str]] = {
+    "keycloak.realm.create": "makes a new realm",
+    "keycloak.client.create": "makes a new client",
+    "keycloak.client_scope.create": "makes a new client scope",
+    "keycloak.user.create": "makes a new user",
 }
 
 

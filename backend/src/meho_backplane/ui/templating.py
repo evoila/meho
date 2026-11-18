@@ -55,6 +55,7 @@ the candidate, but the factory below leaves the choice open).
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, Final
 
 from fastapi.templating import Jinja2Templates
@@ -126,7 +127,35 @@ def get_jinja_env() -> Environment:
         # Installed connector packages (#5036): the same list GET /version
         # shows, rendered next to the deployed version on the dashboard.
         _ENV.globals["connector_packages"] = installed_connector_packages
+        _ENV.filters["visible_marks"] = visible_marks
     return _ENV
+
+
+#: The kinds of characters a reader cannot see as text: control (C0, DEL,
+#: C1), format (bidi controls, zero-width characters), line and paragraph
+#: separators, and lone surrogates. The same set the CLI escapes.
+_UNSEEN_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
+
+
+def visible_marks(text: str) -> str:
+    """*text* with each character a reader cannot see shown as a visible mark.
+
+    A new line and a tab stay. Any other control or format character is
+    shown as ``\\x1b`` (below U+0100) or ``\\u202e``, as ``meho approvals
+    show`` prints it. So a right-to-left override or an escape code cannot
+    change what an approver reads. The result is still escaped by autoescape.
+    """
+    if not any(unicodedata.category(ch) in _UNSEEN_CATEGORIES for ch in text):
+        return text
+    out: list[str] = []
+    for ch in text:
+        if ch in "\n\t" or unicodedata.category(ch) not in _UNSEEN_CATEGORIES:
+            out.append(ch)
+        elif ord(ch) < 0x100:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(f"\\u{ord(ch):04x}")
+    return "".join(out)
 
 
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:

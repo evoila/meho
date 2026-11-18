@@ -56,9 +56,10 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
 * ``approver`` — whether this principal holds the **approve-only**
   capability: the right to decide (list / show / approve / reject /
   decide) parked approval requests, orthogonal to :class:`TenantRole`
-  and deliberately *decoupled from dispatch* (#3243). Lifted from a
-  configurable JWT claim (default ``approver``) and defaults to
-  ``False`` so every pre-existing token is unaffected (fail-closed).
+  and deliberately *decoupled from dispatch*. Set only by a
+  login group whose grant gives it (a custom role); no default group
+  does, and MEHO does not read the ``approver`` JWT claim. Defaults to
+  ``False``.
   The approvals plane admits a principal that is **either**
   ``operator``-or-higher **or** carries this flag
   (:func:`~meho_backplane.auth.rbac.require_approvals_access`), so a
@@ -174,6 +175,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
+    "OLD_GROUPS",
     "GroupGrant",
     "Operator",
     "PrincipalKind",
@@ -182,6 +184,7 @@ __all__ = [
     "TenantRole",
     "group_grant",
     "is_human_principal",
+    "old_group_of",
 ]
 
 
@@ -302,6 +305,17 @@ _GROUP_GRANTS: dict[RoleGroup, GroupGrant] = {
 }
 
 
+#: The two old login group kinds. MEHO reads them as Operators and Readers.
+#: A routing entry that names one matches only the members of that group
+#: (:attr:`Operator.old_group`).
+OLD_GROUPS: frozenset[RoleGroup] = frozenset({RoleGroup.SA_OPERATORS, RoleGroup.APPROVERS})
+
+
+def old_group_of(group: RoleGroup) -> RoleGroup | None:
+    """*group* when it is one of the two old kinds, else ``None``."""
+    return group if group in OLD_GROUPS else None
+
+
 def group_grant(group: RoleGroup) -> GroupGrant:
     """Return the role and the flags that the login group *group* gives.
 
@@ -397,6 +411,11 @@ class Operator(BaseModel):
     #: The ``meho_tenants`` claim had a part MEHO could not read. Then
     #: ``self_approver`` stays off in every tenant (#3327).
     tenants_claim_malformed: bool = False
+    #: The old login group (SA-Operators or Approvers) the token names for the
+    #: current tenant, or ``None``. It gives no right. A routing entry that
+    #: names an old kind matches only the members of that group
+    #: (:func:`~meho_backplane.policy.routing.routing_refusal`).
+    old_group: RoleGroup | None = None
     #: The group kind the bindings of the policy file give this login in the
     #: current tenant (:mod:`meho_backplane.policy.bindings`). ``None`` when
     #: the ``POLICY_APPROVER_ROUTING`` switch is off or no binding matched.

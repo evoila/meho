@@ -166,8 +166,9 @@ this stage it exposes:
   (`/api/v1/approvals*` except the principal-scoped `/result` read). It
   admits a principal that is **either** `operator`-or-higher on the linear
   `_ROLE_ORDER` lattice **or** carries the orthogonal `approver` capability
-  (`Operator.approver`, lifted from the optional fail-closed `approver` JWT
-  claim by `jwt._extract_approver`, mirroring `platform_admin`). This
+  (`Operator.approver`, set only by a login group whose grant gives it, a
+  customer role; MEHO does not read the `approver` JWT claim in any token
+  form, and no default group gives the flag). This
   decouples the *decide* right from the *dispatch* right: a dedicated
   approver provisioned as `read_only` role + `approver=true` clears a
   four-eyes gate yet is refused `POST /api/v1/operations/call` (still

@@ -11,9 +11,11 @@
   tenant list ``meho_tenants`` and without it).
 * An Admin approves their own change at every risk level. An Operator
   approves their own token ``caution`` change only with a console click.
-* A policy file with an old group kind loads and reads it as the new kind.
-* A login with the ``approver`` claim and no old group keeps the approval
-  right with routing on, and its push row keeps the flag.
+* A policy file with an old group kind loads. A binding reads it as the
+  new kind. A routing entry keeps it: it matches only the members of that
+  old login group (``test_policy_routing_old_kinds.py``).
+* The ``approver`` claim gives no approval right and no approvals pages in
+  any token form. Such a login reads like a Reader.
 """
 
 from __future__ import annotations
@@ -31,8 +33,9 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_approvals_access
 from meho_backplane.operations.approval_queue import may_approve_high_risk
 from meho_backplane.operations.approval_rights import ApproveRightReason, approve_right
+from meho_backplane.policy.bindings import bind, shipped_bindings
 from meho_backplane.policy.document import document_of, parse_policy_file
-from meho_backplane.policy.routing import DEFAULT_RULE, today_kinds
+from meho_backplane.policy.routing import DEFAULT_RULE, kind_of, today_kinds
 from meho_backplane.settings import get_settings
 from meho_backplane.web_push.recipients import login_facts_for
 from tests.test_approval_group_rules import _OTHER, _REQUESTER, _person
@@ -133,31 +136,66 @@ def test_a_person_in_approvers_is_a_reader(form: str) -> None:
     assert refused.value.status_code == 403
 
 
-def test_another_source_of_the_approver_claim_still_counts() -> None:
-    """Only the old group is read as Readers: a login with the claim and no old group keeps it."""
-    operator = _login(
-        {
-            "tenant_id": str(_TENANT),
-            "tenant_role": "read_only",
-            "approver": True,
-            "groups": ["MEHO-Readers"],
-        }
-    )
+#: Token forms that carry the ``approver`` claim. None of them gives a right.
+_APPROVER_CLAIM_FORMS: dict[str, dict[str, Any]] = {
+    "flat, no groups claim": {"tenant_id": str(_TENANT), "tenant_role": "read_only"},
+    "flat, a readers group": {
+        "tenant_id": str(_TENANT),
+        "tenant_role": "read_only",
+        "groups": ["MEHO-Readers"],
+    },
+    "flat, a sub-group of the old approvers group": {
+        "tenant_id": str(_TENANT),
+        "tenant_role": "read_only",
+        "groups": ["/MEHO-Approvers/team-a"],
+    },
+    "flat, a directory group": {
+        "tenant_id": str(_TENANT),
+        "tenant_role": "read_only",
+        "groups": ["/directory/ops-approvers"],
+    },
+    "tenant list": {"meho_tenants": [f"{_TENANT}:lab-a:Readers"]},
+    "tenant list, old approvers group": {"meho_tenants": [f"{_TENANT}:lab-a:Approvers"]},
+}
 
-    assert operator.approver is True
+
+def _claim_approver(form: str) -> Operator:
+    """A login whose only approval right would come from the ``approver`` claim."""
+    claims = {"sub": _OTHER, "approver": True, **_APPROVER_CLAIM_FORMS[form]}
+    return _login(claims)
 
 
-def _custom_approver() -> Operator:
-    """A ``read_only`` login with the ``approver`` claim and no old group."""
-    return _login(
-        {
-            "sub": _OTHER,
-            "tenant_id": str(_TENANT),
-            "tenant_role": "read_only",
-            "approver": True,
-            "groups": ["MEHO-Readers"],
-        }
-    )
+@pytest.mark.parametrize("form", list(_APPROVER_CLAIM_FORMS))
+def test_the_approver_claim_gives_no_right_in_any_token_form(form: str) -> None:
+    operator = _claim_approver(form)
+
+    assert operator.tenant_role is TenantRole.READ_ONLY
+    assert operator.approver is False
+    assert approve_right(operator, _row("safe")).may_approve is False
+    with pytest.raises(HTTPException) as refused:
+        require_approvals_access(operator)
+    assert refused.value.status_code == 403
+
+
+@pytest.mark.parametrize("form", list(_APPROVER_CLAIM_FORMS))
+def test_the_approver_claim_stores_no_push_flag(form: str) -> None:
+    assert login_facts_for(_claim_approver(form)).approver is False
+
+
+@pytest.mark.parametrize("form", list(_APPROVER_CLAIM_FORMS))
+def test_with_routing_on_the_approver_claim_gives_no_right(
+    form: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Also with routing on and the shipped bindings of a directory-group setup."""
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
+    get_settings.cache_clear()
+    claims = {"sub": _OTHER, "approver": True, **_APPROVER_CLAIM_FORMS[form]}
+    operator = bind(_login(claims), claims, shipped_bindings(get_settings()))
+
+    assert operator.approver is False
+    assert kind_of(operator) == "Readers"
+    caution = approve_right(operator, _routed("caution", today_kinds("caution", "")))
+    assert caution.may_approve is False
 
 
 def _routed(level: str, kinds: tuple[str, ...]) -> Any:
@@ -166,23 +204,6 @@ def _routed(level: str, kinds: tuple[str, ...]) -> Any:
     row.approver_roles = list(kinds)
     row.approver_rule = DEFAULT_RULE
     return row
-
-
-def test_with_routing_on_a_custom_approver_keeps_the_approval_right(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No routing entry narrows access: the default kinds let the custom approver approve."""
-    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
-    get_settings.cache_clear()
-    approver = _custom_approver()
-
-    caution = approve_right(approver, _routed("caution", today_kinds("caution", "")))
-    dangerous = approve_right(approver, _routed("dangerous", today_kinds("dangerous", "")))
-    admins_only = approve_right(approver, _routed("caution", ("Admins",)))
-
-    assert caution.may_approve is True
-    assert dangerous.may_approve is False
-    assert admins_only.may_approve is False
 
 
 @pytest.mark.parametrize("form", _FORMS)
@@ -204,13 +225,6 @@ def test_a_login_of_an_old_group_stores_no_approval_flags_for_push(form: str) ->
         facts = login_facts_for(operator)
         assert facts.approver is False
         assert facts.self_approver is False
-
-
-def test_a_custom_approver_login_stores_the_approver_flag_for_push() -> None:
-    facts = login_facts_for(_custom_approver())
-
-    assert facts.tenant_role == TenantRole.READ_ONLY.value
-    assert facts.approver is True
 
 
 def test_an_admin_approves_their_own_change_at_every_risk_level() -> None:
@@ -244,7 +258,8 @@ def test_a_person_in_an_old_group_still_signs_in(form: str) -> None:
     assert _approver(form).tenant_id == _TENANT
 
 
-def test_a_policy_file_with_an_old_kind_is_read_as_the_new_kind() -> None:
+def test_a_policy_file_with_an_old_kind_loads() -> None:
+    """A binding reads the old kind as the new one; a routing entry keeps it as written."""
     parsed = parse_policy_file(
         b"policy: v1\n"
         b"bindings:\n"
@@ -260,7 +275,7 @@ def test_a_policy_file_with_an_old_kind_is_read_as_the_new_kind() -> None:
     assert parsed.model is not None
     document = document_of(parsed.model)
     assert document["bindings"][0]["kind"] == "Operators"
-    assert document["routing"][0]["approvers"] == ["Operators", "Admins"]
+    assert document["routing"][0]["approvers"] == ["SA-Operators", "Admins"]
 
 
 def test_the_shipped_separated_duties_file_names_no_old_kind() -> None:

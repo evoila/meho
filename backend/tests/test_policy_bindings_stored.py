@@ -103,8 +103,12 @@ _BOUND_AND_ROUTED: dict[str, Any] = {
 
 
 @pytest.mark.asyncio
-async def test_old_kinds_in_a_stored_file_are_read_as_the_new_kinds() -> None:
-    """A stored binding and a stored routing entry of ``SA-Operators`` count as ``Operators``."""
+async def test_old_kinds_in_a_stored_file() -> None:
+    """A stored binding of ``SA-Operators`` gives ``Operators``.
+
+    A stored routing entry of ``SA-Operators`` keeps the old kind: only a
+    person whose token names the old group approves, not every Operator.
+    """
     await _store(_TENANT_A, _BOUND_AND_ROUTED)
     try:
         bound = await bind_current_tenant(_person(_OTHER), {"groups": ["/MEHO-Operators/Network"]})
@@ -113,9 +117,12 @@ async def test_old_kinds_in_a_stored_file_are_read_as_the_new_kinds() -> None:
 
         request_id = await _park("caution")
         row = await _load(request_id)
-        assert row.approver_roles == ["Operators"]
-        assert approve_right(bound, row).may_approve is True
-        approved = await _approve(request_id, bound)
+        assert row.approver_roles == ["SA-Operators"]
+        assert approve_right(bound, row).may_approve is False
+
+        member = bound.model_copy(update={"old_group": RoleGroup.SA_OPERATORS})
+        assert approve_right(member, row).may_approve is True
+        approved = await _approve(request_id, member)
         assert approved.status == ApprovalRequestStatus.APPROVED.value
     finally:
         await _store(_TENANT_A, None)

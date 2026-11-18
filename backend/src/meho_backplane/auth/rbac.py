@@ -198,8 +198,8 @@ def require_approvals_access(
       (``operator.approver``), regardless of tenant role.
 
     This **decouples the decide right from the dispatch right**. A
-    dedicated approver principal provisioned as ``read_only`` role +
-    ``approver=true`` clears this gate yet is denied
+    dedicated approver with the ``read_only`` role and the ``approver``
+    flag of a custom role clears this gate yet is denied
     ``POST /api/v1/operations/call`` — dispatch stays
     ``Depends(require_role(TenantRole.OPERATOR))`` and ``read_only`` ranks
     below ``operator`` — so it can clear a four-eyes gate without holding

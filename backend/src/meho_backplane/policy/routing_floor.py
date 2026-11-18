@@ -81,7 +81,9 @@ from meho_backplane.policy.routing import (
     ApproverSet,
     RouteEntry,
     _routes,
+    covers,
     group_names,
+    in_kinds,
     kind_of,
     route,
     routing_enabled,
@@ -208,7 +210,7 @@ def wider_findings(tenant: Sequence[RouteEntry], install: Sequence[RouteEntry]) 
     found: list[Wider] = []
     for index, mine in enumerate(tenant):
         for floor in install:
-            extra = [kind for kind in mine.approvers if kind not in floor.approvers]
+            extra = [kind for kind in mine.approvers if not covers(floor.approvers, kind)]
             if not extra or not may_share(mine, floor):
                 continue
             text = (
@@ -430,8 +432,7 @@ class InstallFloor:
             return None
         if found.rule == CATEGORY_NOT_STORED:
             return _CATEGORY_NOT_KNOWN_REFUSAL
-        kind = kind_of(operator)
-        if kind in found.kinds:
+        if in_kinds(operator, found.kinds):
             return None
         if not found.kinds:
             return (
@@ -440,7 +441,8 @@ class InstallFloor:
             )
         return (
             f"The install's routing (`{found.rule}`) lets only {group_names(found.kinds)} "
-            f"approve this change. You are in MEHO-{kind}. A tenant's routing can only narrow it."
+            f"approve this change. You are in MEHO-{kind_of(operator)}. A tenant's routing can "
+            "only narrow it."
         )
 
 

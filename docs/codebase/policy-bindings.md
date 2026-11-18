@@ -5,7 +5,9 @@ The `bindings` section of a tenant's policy file
 gives a group one of three group kinds (`Readers`, `Operators`,
 `Admins`) and a set of categories. The old kinds `SA-Operators` and
 `Approvers` are still accepted: MEHO reads them as `Operators` and
-`Readers` (`read_kind` in `policy/document.py`)
+`Readers` (`read_kind` in `policy/document.py`). A routing entry keeps an
+old kind as written: it matches only the members of that old login group
+(`covers`, `narrow` and `in_kinds` in `policy/routing.py`)
 ([policy-classification.md](policy-classification.md)). There are no new
 roles.
 
@@ -123,12 +125,10 @@ another case.
      category. A machine login never gets either flag. A token with a bad
      `meho_tenants` claim never gets `self_approver`.
    - The one exception to the two-kinds rule: when only shipped bindings
-     match and they give `SA-Operators` and one other kind (a person in a
-     role group and in a self-approval group that is not a role group),
-     the self-approval group does not make it two kinds. Next to
-     `Operators` the login gets `SA-Operators`: today such a person is an
-     operator who may approve their own changes. Next to any other kind
-     (for example `Admins` or `Readers`) that kind stays, as with the
+     match and they give `Operators` for the old self-approval group and
+     one other kind (a person in a role group and in that old group, which
+     is not a role group), the old group does not make it two kinds. The
+     other kind (for example `Admins` or `Readers`) stays, as with the
      switch off, where the role group decides. Two role groups never get
      this far: the token parser refuses them first
      (`multiple_role_groups`).

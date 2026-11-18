@@ -426,11 +426,12 @@ async def test_a_routed_request_reaches_only_the_routed_groups(
 
     await _step(request)
 
-    # The old kind SA-Operators is read as Operators. A login with the
-    # approver flag approves what an Operator approves.
+    # The old kind SA-Operators matches only the members of the old group,
+    # by the group in the token. A push row stores no login group, so the
+    # message goes to the Admins only, never to every Operator.
     assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
-    assert [m["title"] for m in push_service.to(sa_operator)] == ["An approval waits"]
-    assert [m["title"] for m in push_service.to(approver)] == ["An approval waits"]
+    assert push_service.to(sa_operator) == []
+    assert push_service.to(approver) == []
     assert push_service.to(reader) == []
 
 

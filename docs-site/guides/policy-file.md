@@ -114,8 +114,11 @@ routing:
 - `match` names a `category`, a `connector` (`*` is any text) and a
   `risk` level, or some of them. All that it names must fit.
 - `approvers` lists login group kinds: `Readers`, `Operators`, `Admins`.
-  A file may still use the old kinds `SA-Operators` and `Approvers`: MEHO
-  reads them as `Operators` and `Readers`.
+  A file may still use the old kinds `SA-Operators` and `Approvers`. Such
+  a kind matches only the people whose login token names that old group,
+  never every Operator or Reader. `SA-Operators` may approve only what an
+  Operator may approve. `Approvers` lets nobody approve: MEHO reads its
+  members as Readers.
 - In each file, the first entry that fits wins. When no entry fits, the
   same people as today may approve.
 - **The install's routing is a floor.** A tenant can make it narrower,

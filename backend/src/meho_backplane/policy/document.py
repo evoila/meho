@@ -99,6 +99,9 @@ def read_kind(kind: str) -> str:
     """The kind MEHO reads *kind* as.
 
     ``SA-Operators`` is read as ``Operators`` and ``Approvers`` as ``Readers``.
+    A binding gives this kind. A routing entry keeps the old kind: it
+    matches only the members of that old login group
+    (:mod:`meho_backplane.policy.routing`).
     """
     return _OLD_KINDS_READ_AS.get(kind, kind)
 
@@ -213,8 +216,9 @@ class PolicyRoute(_Strict):
             )
         if len(set(value)) != len(value):
             raise ValueError("names a group kind twice")
-        # An old kind is read as the new one; two names for one kind count once.
-        return list(dict.fromkeys(read_kind(kind) for kind in value))
+        # An old kind stays as written: it matches only the members of that
+        # old login group, never the whole new role.
+        return value
 
 
 class PolicyBindingMatch(_Strict):

@@ -5,8 +5,7 @@
 
 The ``routing`` section of the policy file maps a category, a connector or
 a risk level to login group kinds (``Readers``, ``Operators``,
-``Admins``; the old kinds ``SA-Operators`` and ``Approvers`` are read as
-``Operators`` and ``Readers``):
+``Admins``):
 
 .. code-block:: yaml
 
@@ -45,6 +44,13 @@ The rules:
   example ``install:routing[0], tenant:routing[1]``.
 * No entry fits: today's rule. Everyone who may approve today may approve
   (``approver_rule`` ``"default"``).
+* A file may still name the old kinds ``SA-Operators`` and ``Approvers``.
+  An old kind matches only the members of that old login group, by the
+  group in the token (:attr:`~meho_backplane.auth.operator.Operator.old_group`),
+  never the whole new role. It is narrower than the kind it is read as
+  (:func:`narrow`): ``SA-Operators`` may approve only what an Operator may
+  approve, and ``Approvers`` (read as Readers) never approves. A request
+  keeps the kinds it was stored with, read by the same rule.
 * A change of rights is not routed. Only another admin approves it, as
   today.
 * The stored value holds group kinds, never people. The requester is not
@@ -70,7 +76,7 @@ from meho_backplane.auth.operator import Operator, RoleGroup, TenantRole
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION
 from meho_backplane.policy.classification import RISK_LEVELS, Taxonomy
-from meho_backplane.policy.document import GROUP_KINDS, read_kind
+from meho_backplane.policy.document import ACCEPTED_KINDS, read_kind
 from meho_backplane.policy.evaluate import approver_groups
 from meho_backplane.policy.store import _documents
 from meho_backplane.settings import get_settings
@@ -83,8 +89,11 @@ __all__ = [
     "RouteEntry",
     "approver_set_for",
     "category_routing_warnings",
+    "covers",
     "group_names",
+    "in_kinds",
     "kind_of",
+    "narrow",
     "route",
     "routes_from_documents",
     "routing_enabled",
@@ -150,12 +159,46 @@ class ApproverSet:
 
 
 def _ordered(kinds: Sequence[str] | set[str] | frozenset[str]) -> tuple[str, ...]:
-    """*kinds* in the order of :data:`GROUP_KINDS`, without unknown names.
+    """*kinds* in the order of :data:`ACCEPTED_KINDS`, without unknown names.
 
-    An old kind (``SA-Operators``, ``Approvers``) is read as the new one.
+    An old kind (``SA-Operators``, ``Approvers``) stays as it is.
     """
-    read = {read_kind(kind) for kind in kinds}
-    return tuple(kind for kind in GROUP_KINDS if kind in read)
+    return tuple(kind for kind in ACCEPTED_KINDS if kind in kinds)
+
+
+def covers(kinds: Sequence[str], kind: str) -> bool:
+    """True when every member of *kind* is in one of *kinds*.
+
+    *kind* itself, or for an old kind the kind it is read as: every member
+    of ``SA-Operators`` is an Operator. A new kind is never covered by an
+    old one.
+    """
+    return kind in kinds or read_kind(kind) in kinds
+
+
+def narrow(first: Sequence[str], second: Sequence[str]) -> tuple[str, ...]:
+    """The kinds whose members are in both *first* and *second*.
+
+    ``[Operators, Admins]`` and ``[SA-Operators, Admins]`` give
+    ``[SA-Operators, Admins]``: the old kind is the narrower one.
+    """
+    both = {kind for kind in (*first, *second) if covers(first, kind) and covers(second, kind)}
+    return _ordered(both)
+
+
+def in_kinds(operator: Operator, kinds: Sequence[str]) -> bool:
+    """True when *operator* is a member of one of *kinds*.
+
+    A new kind matches by :func:`kind_of`. An old kind matches only a
+    person whose token names that old login group for the current tenant
+    (:attr:`~meho_backplane.auth.operator.Operator.old_group`), and whose
+    kind is the kind the old one is read as.
+    """
+    kind = kind_of(operator)
+    if kind in kinds:
+        return True
+    old = operator.old_group
+    return old is not None and old.value in kinds and read_kind(old.value) == kind
 
 
 def today_kinds(level: str | None, op_id: str) -> tuple[str, ...]:
@@ -273,7 +316,7 @@ def route(
         )
         if entry is not None:
             fitting.append(entry)
-            kinds = tuple(k for k in kinds if k in entry.approvers)
+            kinds = narrow(kinds, entry.approvers)
     if not fitting:
         return ApproverSet(kinds=kinds, rule=DEFAULT_RULE)
     floor = fitting[0].ref if fitting[0].install else None
@@ -398,12 +441,11 @@ def routing_refusal(
             f"No group may approve this change (routing rule `{rule}`), so it waits until "
             "it expires."
         )
-    kind = kind_of(operator)
-    if kind in kinds:
+    if in_kinds(operator, kinds):
         return None
     return (
         f"Only {group_names(kinds)} may approve this change (routing rule `{rule}`). "
-        f"You are in MEHO-{kind}."
+        f"You are in MEHO-{kind_of(operator)}."
     )
 
 
@@ -436,11 +478,11 @@ def _entry_mistakes(index: int, raw: Mapping[str, Any], taxonomy: Taxonomy) -> l
 def _approve_mistakes(index: int, raw: Mapping[str, Any]) -> list[str]:
     match = raw.get("match") or {}
     levels = _levels(match.get("risk"))
-    approvers = [read_kind(str(kind)) for kind in raw.get("approvers") or []]
+    approvers = [str(kind) for kind in raw.get("approvers") or []]
     mistakes = [
         f"`routing[{index}]` asks `{kind}`, but `{kind}` has no `approve` rule for these changes."
         for kind in approvers
-        if not any(kind in today_kinds(level, "") for level in levels)
+        if not any(covers(today_kinds(level, ""), kind) for level in levels)
     ]
     where = (
         f"in category {match['category']}"
@@ -451,7 +493,7 @@ def _approve_mistakes(index: int, raw: Mapping[str, Any]) -> list[str]:
         f"A {level} change {where} can wait, but no role may approve it. It would wait "
         "until it expires."
         for level in levels
-        if not set(approvers) & set(today_kinds(level, ""))
+        if not any(covers(today_kinds(level, ""), kind) for kind in approvers)
     )
     return mistakes
 

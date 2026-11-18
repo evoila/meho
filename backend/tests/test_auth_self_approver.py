@@ -33,7 +33,7 @@ with warnings.catch_warnings():
 from meho_backplane.auth import current_tenant
 from meho_backplane.auth.current_tenant import select_current_tenant
 from meho_backplane.auth.jwt import _operator_from_claims, clear_jwks_cache, verify_jwt
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
 from meho_backplane.settings import get_settings
 
 _ISSUER: str = "https://keycloak.test/realms/meho"
@@ -456,7 +456,9 @@ def test_flag_changes_nothing_else() -> None:
     sa = _operator(_claims(groups=["MEHO-SA-Operators"]))
     assert sa.tenant_role is plain.tenant_role is TenantRole.OPERATOR
     assert sa.approver is plain.approver is False
-    assert sa.model_dump(exclude={"self_approver"}) == plain.model_dump(exclude={"self_approver"})
+    assert sa.old_group is RoleGroup.SA_OPERATORS
+    excluded = {"self_approver", "old_group"}
+    assert sa.model_dump(exclude=excluded) == plain.model_dump(exclude=excluded)
 
 
 def test_operator_stays_frozen() -> None:

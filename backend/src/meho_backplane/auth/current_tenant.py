@@ -56,6 +56,7 @@ from meho_backplane.auth.operator import (
     TenantRole,
     group_grant,
     is_human_principal,
+    old_group_of,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
@@ -82,7 +83,8 @@ _MAX_HEADER_LENGTH = 200
 def with_membership(operator: Operator, membership: TenantMembership) -> Operator:
     """Return *operator* working in the tenant of *membership*.
 
-    The role, the ``approver`` flag and the ``self_approver`` flag come
+    The role, the ``approver`` flag, the ``self_approver`` flag and the
+    old group (:attr:`~meho_backplane.auth.operator.Operator.old_group`) come
     from the login group of that entry
     (:func:`~meho_backplane.auth.operator.group_grant`), never from
     another tenant. ``self_approver`` stays off when the token's tenant
@@ -95,6 +97,7 @@ def with_membership(operator: Operator, membership: TenantMembership) -> Operato
             "tenant_role": grant.role,
             "approver": grant.approver,
             "self_approver": grant.self_approval and not operator.tenants_claim_malformed,
+            "old_group": old_group_of(membership.group) if is_human_principal(operator) else None,
             "tenant_chosen": True,
             "role_from_platform_admin": False,
         }
@@ -296,6 +299,7 @@ async def _as_platform_admin(operator: Operator, wanted: str) -> Operator:
             "tenant_role": TenantRole.TENANT_ADMIN,
             "approver": False,
             "self_approver": False,
+            "old_group": None,
             "tenant_chosen": True,
             "role_from_platform_admin": True,
         }

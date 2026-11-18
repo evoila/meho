@@ -1443,6 +1443,16 @@ How the kinds are found:
    therefore asks the same people as today.
 4. A change of rights is not routed (both columns stay NULL). Only another
    admin approves it, as today.
+5. An old kind (`SA-Operators`, `Approvers`) in an entry stays as written.
+   It is narrower than the kind it is read as (`covers` and `narrow` in
+   `policy/routing.py`): `[Operators, Admins]` and `[SA-Operators, Admins]`
+   give `[SA-Operators, Admins]`. `Approvers` is read as Readers, who never
+   approve, so it is never stored. At the click (`in_kinds`), an old kind
+   matches only a person whose token names that old login group for the
+   current tenant (`Operator.old_group`: the `meho_tenants` entry, or the
+   `groups` claim group `JWT_SELF_APPROVER_GROUP` / `MEHO-Approvers`; a
+   sub-group does not count), never every Operator. A request that waits
+   keeps the kinds it was stored with, read by the same rule.
 
 The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
@@ -4440,8 +4450,9 @@ were read (`facts_read_at`). MEHO reads them from the login when the person
 switches the messages on, at each console sign-in (also when they pick a
 tenant), and each time they open the account page. No default group sets
 `approver` or `self_approver`: a login in MEHO-Approvers or
-MEHO-SA-Operators stores both as false. Only a login with the `approver`
-claim of a customer role stores `approver` as true. Migration `0175` set
+MEHO-SA-Operators stores both as false. MEHO does not read the `approver`
+claim of the token, so only a login group that gives the flag (a customer
+role) stores `approver` as true. Migration `0175` set
 both flags to false on the rows that existed at the upgrade; the next
 sign-in stores the person's current flags.
 
@@ -4453,6 +4464,9 @@ own-change rules, the rule for a change of rights (only another admin), and
 the role an operation needs from its approver (for example `tenant_admin`
 for `targets.register`). It only leaves out the "still pending" check, so
 the decision message goes to the same people as the first message.
+A row stores no login group, so with approver routing on, a request whose
+stored kinds name an old kind (`SA-Operators`) sends no message to the
+members of that old group; the other stored kinds still get it.
 
 Only subscriptions of the request's tenant count. A row whose facts are
 more than 7 days old gets no message, because the person's groups may have

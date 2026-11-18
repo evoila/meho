@@ -182,6 +182,7 @@ from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
 from meho_backplane.policy.routing import (
     ROUTING_INVALID_RULE,
     group_names,
+    narrow,
     routing_enabled,
     routing_refusal,
     stamp_approver_set,
@@ -3885,7 +3886,7 @@ def _approver_kinds(request: ApprovalRequest) -> tuple[str, ...]:
     stored = stored_kinds(request.approver_roles)
     if stored is None:
         return kinds
-    return tuple(kind for kind in kinds if kind in stored)
+    return narrow(kinds, stored)
 
 
 def _check_approver_group(

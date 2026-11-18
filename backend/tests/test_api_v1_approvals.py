@@ -622,13 +622,11 @@ def _approve_only_token(key: Any, *, sub: str = "approve-only") -> str:
 
 
 @pytest.mark.asyncio
-async def test_approve_only_principal_admitted_to_approvals_list() -> None:
-    """A ``read_only`` + ``approver`` token clears the approvals-plane gate.
+async def test_the_approver_claim_does_not_open_the_approvals_list() -> None:
+    """A ``read_only`` token with the ``approver`` claim is refused.
 
-    The list route is ``operator``-gated for the linear lattice, so a
-    ``read_only`` token without the flag 403s (the parametrised negative
-    test above). With the orthogonal ``approver`` capability the same
-    ``read_only`` principal is admitted — 200 + the (empty) tenant queue.
+    MEHO does not read the ``approver`` claim, so the login reads like a
+    Reader: 403 ``insufficient_role``.
     """
     key = make_rsa_keypair("kid-appr-list")
     with respx.mock as r:
@@ -641,8 +639,8 @@ async def test_approve_only_principal_admitted_to_approvals_list() -> None:
                 "/api/v1/approvals",
                 headers={"Authorization": f"Bearer {_approve_only_token(key)}"},
             )
-    assert response.status_code == 200, response.text
-    assert response.json() == []
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "insufficient_role"}
 
 
 def test_approve_only_principal_denied_call_operation_dispatch(client: TestClient) -> None:
@@ -873,25 +871,24 @@ def test_human_admin_passes_kind_gate_on_decision_routes(
 
 
 @pytest.mark.parametrize("method, path, body", _DECISION_ENDPOINTS)
-def test_human_approver_passes_kind_gate_on_decision_routes(
+def test_the_approver_claim_does_not_open_the_decision_routes(
     client: TestClient,
     method: str,
     path: str,
     body: dict[str, Any],
 ) -> None:
-    """A human ``read_only`` + ``approver`` also clears the kind gate (#3243 preserved).
+    """A person with ``read_only`` and the ``approver`` claim is refused (403).
 
-    The approver capability model is unchanged for **human** principals:
-    a dedicated human approver reaches the deeper not-found handler (404),
-    never the human-only gate's 403.
+    MEHO does not read the ``approver`` claim, so the login reads like a
+    Reader and never reaches the request lookup.
     """
     key = make_rsa_keypair("kid-human-approver")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         headers = {"Authorization": f"Bearer {_approve_only_token(key)}"}
         response = client.request(method, path, headers=headers, json=body)
-    assert response.status_code == 404, response.text
-    assert response.json() == {"detail": "approval_request_not_found"}
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "insufficient_role"}
 
 
 @pytest.mark.asyncio

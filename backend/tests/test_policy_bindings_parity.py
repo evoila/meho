@@ -392,12 +392,12 @@ async def test_a_custom_self_approval_group_next_to_another_role_group_changes_n
         ),
         pytest.param(
             _person(groups=["/MEHO-Readers"], tenant_role="read_only", approver=True),
-            True,
+            False,
             id="readers-group-claim-true",
         ),
         pytest.param(
             _person(groups=["/MEHO-Operators"], approver=True),
-            True,
+            False,
             id="operators-group-claim-true",
         ),
     ],
@@ -405,7 +405,10 @@ async def test_a_custom_self_approval_group_next_to_another_role_group_changes_n
 async def test_a_shipped_group_alone_gives_or_takes_no_approve_right(
     monkeypatch: pytest.MonkeyPatch, claims: dict[str, Any], want_approver: bool
 ) -> None:
-    """No tenant list, full group paths, no stored bindings: the token decides."""
+    """No tenant list, full group paths, no stored bindings: no approver flag.
+
+    MEHO does not read the ``approver`` claim, with the switch on or off.
+    """
     _switch(monkeypatch, on=False)
     off = await _login(monkeypatch, claims, None)
     _switch(monkeypatch, on=True)

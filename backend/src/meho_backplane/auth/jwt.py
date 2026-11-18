@@ -102,6 +102,7 @@ from meho_backplane.auth.operator import (
     TenantMembership,
     TenantRole,
     group_grant,
+    old_group_of,
 )
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
@@ -1404,68 +1405,43 @@ def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     return _realm_access_has_platform_admin_role(claims, role_name)
 
 
-#: The old default group that MEHO reads as Readers. A token without a
-#: tenant list that names it does not set the ``approver`` flag.
+#: The old default group that MEHO reads as Readers.
 _OLD_APPROVERS_GROUP: str = "MEHO-Approvers"
 
 
-def _in_old_approvers_group(claims: Any) -> bool:
-    """Return ``True`` when the ``groups`` claim names the old approvers group.
+def _old_group(
+    claims: Any,
+    settings: Settings,
+    principal_kind: PrincipalKind,
+    tenants: tuple[TenantMembership, ...],
+) -> RoleGroup | None:
+    """The old login group (SA-Operators or Approvers) of the start tenant, or ``None``.
 
-    MEHO reads ``MEHO-Approvers`` as Readers: the ``approver`` claim of
-    such a token does not count. Any other source of the claim (a
-    customer role) is not affected. A ``groups`` claim that is not a list
-    of strings gives ``False``.
+    It gives no right. A routing entry that names an old kind matches only
+    its members.
+
+    * A machine login: ``None``.
+    * A token with a tenant list: the group of the first entry, when it is
+      an old kind. A list that MEHO could not read gives ``None``.
+    * A token without a tenant list: the ``groups`` claim. The group
+      ``JWT_SELF_APPROVER_GROUP`` (default ``MEHO-SA-Operators``) gives
+      ``SA-Operators``, ``MEHO-Approvers`` gives ``Approvers``. A leading
+      ``/`` and upper or lower case do not count; a sub-group does not
+      match. A ``groups`` claim that is not a list of texts gives ``None``.
     """
+    if principal_kind in MACHINE_PRINCIPAL_KINDS:
+        return None
+    if settings.jwt_tenants_claim_name in claims:
+        return old_group_of(tenants[0].group) if tenants else None
     raw = claims.get(_GROUPS_CLAIM_NAME)
-    if not isinstance(raw, list):
-        return False
-    key = _group_key(_OLD_APPROVERS_GROUP)
-    return any(isinstance(item, str) and _group_key(item) == key for item in raw)
-
-
-def _extract_approver(claims: Any, settings: Settings) -> bool:
-    """Extract the approve-only ``approver`` capability flag from *claims* (#3243).
-
-    The ``approver`` claim is **optional** and **fail-closed**: a token
-    that carries no claim — every pre-existing token, and every principal
-    whose Keycloak client does not emit it — resolves to ``False``. The
-    flag is orthogonal to
-    :class:`~meho_backplane.auth.operator.TenantRole`; it grants the
-    approvals plane (list / show / approve / reject / decide) **without**
-    granting ``call_operation`` dispatch, so a dedicated approver
-    principal can be provisioned as ``read_only`` role + ``approver=true``
-    and clear a four-eyes gate while remaining unable to dispatch ops
-    (:func:`~meho_backplane.auth.rbac.require_approvals_access`).
-
-    Accepted shapes mirror :func:`_extract_platform_admin`: a JSON boolean
-    ``true`` / ``false`` (the canonical Keycloak boolean protocol-mapper
-    output) or the strings ``"true"`` / ``"false"`` (case-insensitive) for
-    realms whose mapper emits the claim as a string. Only an explicit
-    truthy value grants the flag; every other shape (absent, ``null``, a
-    number, an object, an unrecognised string) fails closed to ``False`` —
-    a malformed claim must never *grant* the approvals capability. A
-    present-but-malformed value is logged under ``malformed_approver_claim``.
-
-    The claim name is configurable via ``JWT_APPROVER_CLAIM_NAME`` (default
-    ``approver``) so realms that surface the flag under a different
-    attribute are accommodated without a code change.
-    """
-    claim_name = settings.jwt_approver_claim_name
-    raw = claims.get(claim_name)
-    if raw is None:
-        return False
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
-        return raw.strip().lower() == "true"
-    log = structlog.get_logger(__name__)
-    log.warning(
-        "malformed_approver_claim",
-        claim_name=claim_name,
-        reason="not_a_boolean",
-    )
-    return False
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return None
+    names = {_group_key(item) for item in raw}
+    if _group_key(settings.jwt_self_approver_group) in names:
+        return RoleGroup.SA_OPERATORS
+    if _group_key(_OLD_APPROVERS_GROUP) in names:
+        return RoleGroup.APPROVERS
+    return None
 
 
 #: The claim that marks a login that may only import knowledge (#5728).
@@ -1732,7 +1708,9 @@ def _start_tenant(
     first entry is the start value; the flat claims are not used.
     :func:`~meho_backplane.auth.current_tenant.select_current_tenant` then
     picks the tenant the request names. A token without a list: today's
-    one-group check and the flat claims.
+    one-group check and the flat ``tenant_id`` and ``tenant_role`` claims.
+    MEHO does not read the ``approver`` claim in any token form: it gives
+    no right, so the flag is off.
     """
     if tenants:
         reject_duplicate_tenants(tenants)
@@ -1742,7 +1720,7 @@ def _start_tenant(
     return (
         _extract_tenant_id(claims, settings),
         _extract_tenant_role(claims, settings),
-        _extract_approver(claims, settings) and not _in_old_approvers_group(claims),
+        False,
     )
 
 
@@ -1869,6 +1847,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             runner_id=runner_id,
             tenants=tenants,
             self_approver=self_approver,
+            old_group=_old_group(claims, settings, principal_kind, tenants),
             tenants_claim_malformed=tenants_claim_malformed,
             auth_time=auth_time,
             acr=acr,

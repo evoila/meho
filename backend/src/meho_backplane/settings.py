@@ -481,22 +481,16 @@ class Settings(BaseModel):
         the source stays **fail-closed**: a malformed ``realm_access``
         shape or an absent role resolves to ``False``.
     jwt_approver_claim_name:
-        Name of the JWT claim that carries the approve-only ``approver``
-        capability flag (a JSON boolean) added by #3243. Default
-        ``approver``. The flag is orthogonal to
-        :class:`~meho_backplane.auth.operator.TenantRole`; it admits a
-        principal to the approvals plane (list / show / approve / reject /
-        decide) **without** granting ``call_operation`` dispatch, so a
-        dedicated approver can be provisioned as ``read_only`` role + this
-        flag. The claim is **optional** and **fail-closed** — tokens that
-        carry no claim (or a malformed value) resolve to ``False``, so
-        every existing token is unaffected unless a realm explicitly
-        grants the claim. Override only when the realm exposes the flag
-        under a different attribute.
+        Name of the JWT claim ``approver`` (default). MEHO does not read
+        this claim in any token form: it gives no approval right. The
+        ``approver`` flag comes only from a login group whose grant gives
+        it (a custom role). The setting stays until the old group names
+        are removed.
     jwt_self_approver_group:
         Name of the old login group ``MEHO-SA-Operators`` (default). MEHO
-        reads that group as Operators: it gives no self-approval, and a
-        token without a ``meho_tenants`` claim does not read this setting.
+        reads that group as Operators: it gives no self-approval. A token
+        without a ``meho_tenants`` claim that names this group may still
+        approve where a routing entry names the old kind ``SA-Operators``.
         The setting stays until the old group names are removed. A blank
         value keeps the default. With ``POLICY_APPROVER_ROUTING`` on, this
         group is also a shipped binding of a tenant without stored

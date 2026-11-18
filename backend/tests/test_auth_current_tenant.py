@@ -146,8 +146,8 @@ async def test_no_list_gives_the_same_operator_as_today() -> None:
         raw_jwt="raw.jwt.token",
         tenant_id=_TENANT_A,
         tenant_role=TenantRole.OPERATOR,
-        approver=True,
     )
+    # MEHO does not read the ``approver`` claim, so the flag stays off.
     operator = _operator(approver=True)
     assert operator == expected
     assert await select_current_tenant(operator, None) == expected

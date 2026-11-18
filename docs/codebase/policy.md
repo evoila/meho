@@ -57,8 +57,10 @@ routing:
 - Each `routing` entry has a `match` (at least one of `category`,
   `connector`, `risk`; `connector` is a pattern, the other two are exact)
   and `approvers`: one to five of the login group kinds `Readers`,
-  `Operators`, `Admins`; the old kinds `SA-Operators` and `Approvers` are
-  read as `Operators` and `Readers`. The order counts:
+  `Operators`, `Admins`; the old kinds `SA-Operators` and `Approvers`
+  stay as written and match only the members of that old login group
+  (`Operator.old_group`, read from the token), never the whole new role.
+  The order counts:
   in each file, the first entry that fits a waiting change wins. Two
   entries with the same `match` are a mistake. Routing only narrows who
   may approve; see [approvals.md](approvals.md), "Approver routing".

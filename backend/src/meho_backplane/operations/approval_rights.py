@@ -23,9 +23,10 @@ same order, so the sign never says something else than the approve does:
    another person's ``dangerous`` or ``destructive`` change only for a
    MEHO-SA-Operator or an admin.
 5. The role floor of the operation (:func:`_check_approver_role_floor`).
-6. With approver routing on, the login group kinds the request stored as
-   the ones that may approve it
-   (:func:`~meho_backplane.policy.routing.routing_refusal`).
+6. With approver routing on, the install's routing as it is now, when the
+   caller passes it (:class:`~meho_backplane.policy.routing_floor.InstallFloor`),
+   and then the login group kinds the request stored as the ones that may
+   approve it (:func:`~meho_backplane.policy.routing.routing_refusal`).
 
 The answer is about the person and the request. It does not check what
 the approve checks at the moment of the click: the sign-in age, the
@@ -55,6 +56,7 @@ from meho_backplane.operations.approval_queue import (
     _check_reviewer_role,
 )
 from meho_backplane.policy.routing import routing_enabled, routing_refusal
+from meho_backplane.policy.routing_floor import InstallFloor
 from meho_backplane.policy.shadow import shadow_approval
 
 __all__ = [
@@ -95,8 +97,9 @@ class ApproveRightReason(StrEnum):
     * ``not_a_person`` — an AI tool or another machine login.
     * ``not_pending`` — the request is already decided, expired or
       withdrawn.
-    * ``not_routed`` — approver routing is on, and the request goes to
-      other login groups than the person's.
+    * ``not_routed`` — approver routing is on, and the install's routing
+      or the request's stored routing sends it to other login groups than
+      the person's.
     """
 
     OK = "ok"
@@ -196,12 +199,17 @@ def self_approval_confirmation(rule: ApprovalRule | None) -> str | None:
     return None
 
 
-def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
+def approve_right(
+    operator: Operator, request: ApprovalRequest, *, floor: InstallFloor | None = None
+) -> ApproveRight:
     """Return whether *operator* may approve *request*, and why not.
 
     Runs the checks of
     :func:`~meho_backplane.operations.approval_queue.approve_request` in
     the same order and turns each refusal into an answer. Raises nothing.
+    *floor* is the install's routing as it is now
+    (:func:`~meho_backplane.policy.routing_floor.current_install_floor`),
+    which the click checks first; pass it so the answer matches the click.
     With the ``POLICY_ENGINE_SHADOW`` switch on, the policy evaluator
     gives its own answer next to it and logs a difference
     (:func:`~meho_backplane.policy.shadow.shadow_approval`). The evaluator
@@ -209,23 +217,33 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
     """
     right = _right(operator, request, check_pending=True)
     shadow_approval(operator, request, today=right.may_approve)
-    return _routed(operator, request, right)
+    return _routed(operator, request, right, floor)
 
 
-def approve_right_any_status(operator: Operator, request: ApprovalRequest) -> ApproveRight:
+def approve_right_any_status(
+    operator: Operator, request: ApprovalRequest, *, floor: InstallFloor | None = None
+) -> ApproveRight:
     """Like :func:`approve_right`, but without the "still pending" check.
 
     The push messages (:mod:`meho_backplane.web_push.recipients`) ask who
     may approve a request also after it was decided: its decision message
     goes to the same people as its first message.
     """
-    return _routed(operator, request, _right(operator, request, check_pending=False))
+    return _routed(operator, request, _right(operator, request, check_pending=False), floor)
 
 
-def _routed(operator: Operator, request: ApprovalRequest, right: ApproveRight) -> ApproveRight:
-    """*right*, or a refusal when the person is not in the stored group kinds."""
+def _routed(
+    operator: Operator,
+    request: ApprovalRequest,
+    right: ApproveRight,
+    floor: InstallFloor | None,
+) -> ApproveRight:
+    """*right*, or a refusal when the install's routing or the stored group kinds refuse."""
     if not right.may_approve or not routing_enabled():
         return right
+    refusal = floor.refusal(operator, request) if floor is not None else None
+    if refusal is not None:
+        return _refused(ApproveRightReason.NOT_ROUTED, refusal)
     refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
     if refusal is None:
         return right

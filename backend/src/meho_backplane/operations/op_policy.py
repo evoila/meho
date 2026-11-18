@@ -468,14 +468,20 @@ async def apply_step_classification(
     the step's declared risk level and approval flag. This raises them the
     same way :func:`_with_classification` does for a stored row, and sets
     ``step.policy_always_wait``, so no standing grant and no approval of
-    the run clears an "always wait" step. With the
+    the run clears an "always wait" step. The category and labels of an
+    override row of the step's operation count too, as for a direct call,
+    so the step's approval request is routed like a direct call's. With the
     ``POLICY_CLASSIFICATION`` switch off, *step* is returned unchanged and
     no database session is opened.
     """
     if not classification_enabled():
         return step
+    key = OpKey.of(step)
     async with get_sessionmaker()() as session:
-        classified = await classify_step(session, tenant_id=tenant_id, step=step)
+        overrides = await load_overrides(session, tenant_id=tenant_id, keys=[key])
+        classified = await classify_step(
+            session, tenant_id=tenant_id, step=step, overrides=overrides.get(key, [])
+        )
     policy = _with_classification(
         EffectivePolicy(safety_level=step.safety_level, requires_approval=step.requires_approval),
         classified,

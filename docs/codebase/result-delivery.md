@@ -118,6 +118,17 @@ escaped again) and as `structuredContent`. The function runs the same
 encoders the transport runs and adds the lengths. It counts bytes, not
 tokens.
 
+The text block that is sent is compact JSON (no space after `,` and
+`:`). The ceilings still count the text with those spaces, as
+`json.dumps(result)`. So the count is a few bytes larger than what is
+sent, and the ceilings decide exactly as they did before the text became
+compact: the same search hits fit, and the same results are `partial`.
+A `resources/read` text block still has the spaces, so for a Memory read
+the count is exact. `sent_wire_bytes` gives the real size in each mode.
+The ceilings count both copies also for a session that asked for
+`?results=structured` (see [`mcp.md`](mcp.md)), so every session gets the
+same result.
+
 **Delivery states of a completed call.** The operation already ran, so
 its status stays `ok`:
 

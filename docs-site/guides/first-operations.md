@@ -116,6 +116,14 @@ Each hit carries the fields that matter before you call anything:
 Read those two flags on every hit **before** calling — see
 [Safety flags at first contact](#safety-flags-at-first-contact).
 
+**Raw operations (optional setting).** An operator can turn on the
+backplane setting `SEARCH_TYPED_FIRST` (off by default). Then search and
+the group list show only typed and multi-step operations. Raw operations,
+made from the vendor API description, come back with `--include-raw`
+(`include_raw: true` on MCP and REST), or when the connector has no
+other operations. The answer's `raw_operations` part says what was left
+out. You can still call a raw operation by its `op_id`.
+
 ## Step 3 — preview (when you want the wire truth)
 
 `preview_operation` resolves the exact operation + target + params a

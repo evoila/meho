@@ -66,6 +66,11 @@
         been parked for a reviewer &mdash; it has <span class="font-semibold">not</span>
         run yet.
       </p>
+      {%- if extras.get("approval_note") %}
+        {#- A note the person must read about the wait (#6641), for example
+            that no other admin of the tenant could approve a change of rights. -#}
+        <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-run-approval-note>{{ extras.get("approval_note") }}</p>
+      {%- endif %}
       {% if approval_id %}
         <p class="mt-1 text-xs opacity-70">
           Request id <code data-approval-request-id>{{ approval_id }}</code>

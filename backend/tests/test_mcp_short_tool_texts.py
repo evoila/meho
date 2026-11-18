@@ -10,7 +10,8 @@ These tests check:
 * with it on, each tool with a short text is shorter, shows that text with
   its maturity label, and accepts exactly the same inputs (the schema
   without its ``description`` strings is unchanged);
-* with it on, no other tool changes;
+* with it on, no tool sends an ``outputSchema`` (#4714), and no other tool
+  changes;
 * every input path of a short text names a real input of its tool;
 * the short ``add_to_knowledge`` text still follows ``KB_SIMILAR_CHECK``;
 * the short texts hold no issue numbers or planning codes;
@@ -67,7 +68,13 @@ SHORT_TEXTS: dict[str, ShortText] = {
     "list_targets": texts.LIST_TARGETS_SHORT,
     "search_docs": texts.SEARCH_DOCS_SHORT,
     "meho_broadcast_watch": texts.BROADCAST_WATCH_SHORT,
+    "search_memory": texts.SEARCH_MEMORY_SHORT,
+    "list_operation_groups": texts.LIST_OPERATION_GROUPS_SHORT,
+    "meho_connector_list": texts.CONNECTOR_LIST_SHORT,
 }
+
+#: The wire keys a short text changes. The output schema is left out too.
+_SHORT_KEYS = {"description", "inputSchema", "outputSchema"}
 
 #: The other switches, all off and all on.
 _OTHER_SWITCHES = [pytest.param(False, id="other-switches-off"), pytest.param(True, id="on")]
@@ -171,8 +178,8 @@ async def test_switch_on_each_changed_tool_is_shorter_with_the_same_inputs(
         assert _without_descriptions(tool["inputSchema"]) == _without_descriptions(
             before["inputSchema"]
         ), f"{name} accepts other inputs with the switch on"
-        assert {k: v for k, v in tool.items() if k not in {"description", "inputSchema"}} == {
-            k: v for k, v in before.items() if k not in {"description", "inputSchema"}
+        assert {k: v for k, v in tool.items() if k not in _SHORT_KEYS} == {
+            k: v for k, v in before.items() if k not in _SHORT_KEYS
         }
 
 
@@ -180,7 +187,20 @@ async def test_switch_on_changes_no_other_tool(monkeypatch: pytest.MonkeyPatch) 
     _set_switches(monkeypatch, short=True, others=False)
     listed = await _listed()
     changed = {name for name, tool in listed.items() if tool != _before(name)}
-    assert changed == set(SHORT_TEXTS)
+    with_output_schema = {name for name in listed if "outputSchema" in _before(name)}
+    assert changed == set(SHORT_TEXTS) | with_output_schema
+    for name in changed - set(SHORT_TEXTS):
+        before = _before(name)
+        before.pop("outputSchema")
+        assert listed[name] == before, f"{name} changed more than its output schema"
+
+
+async def test_switch_on_lists_no_output_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The short texts leave out every output schema (#4714); off, they stay."""
+    _set_switches(monkeypatch, short=False, others=False)
+    assert any("outputSchema" in tool for tool in (await _listed()).values())
+    _set_switches(monkeypatch, short=True, others=False)
+    assert not [name for name, tool in (await _listed()).items() if "outputSchema" in tool]
 
 
 def test_short_texts_are_for_working_surface_tools() -> None:

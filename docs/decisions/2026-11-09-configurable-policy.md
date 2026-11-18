@@ -1,6 +1,6 @@
 # Configurable policy: categories, custom roles, bindings and approver routing (decision)
 
-**Status:** Proposed, waits for the owner's confirmation. The owner answered the twelve questions below on 9 Nov 2026. This record becomes the decision only when the owner confirms it in his own words.
+**Status:** Accepted. The owner answered the twelve questions below on 9 Nov 2026 and confirmed this record in his own words on 17 Nov 2026.
 **Date:** 2026-11-09
 **Initiatives:** [#6033](https://github.com/evoila/meho/issues/6033) (part 1: categories, approver routing by category, the policy file) and [#6049](https://github.com/evoila/meho/issues/6049) (part 2: roles that the customer defines)
 **Replaces in part:** the "No exceptions" rule in [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md), and rule 1 "One group per person" in [login-role-groups.md](login-role-groups.md). See "What this record replaces" below.

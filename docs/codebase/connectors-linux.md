@@ -494,6 +494,11 @@ backplane rather than around it. It returns `stdout` as a list of lines so
 a large output spills to a `result_query` handle through the JSONFlux
 reducer rather than flooding agent context; `stderr` is capped inline.
 
+`script.run` sends its wrapper (the script, the `arguments` and every `env`
+and `secret_env` value) on stdin, with and without sudo. Without sudo the
+remote command is always `bash -s`; with sudo it is the fixed `_sudo.py`
+command (see "Root elevation"). No value is on the host's command line.
+
 ### Firewall changes with a timed way back
 
 A rule with good syntax can still cut the SSH path to the host. Then only

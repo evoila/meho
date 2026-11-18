@@ -86,7 +86,10 @@ from meho_backplane.connectors.linux.connector import LinuxSshConnector
 from meho_backplane.connectors.linux.ops_write import _resolve_sudo_password
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.targets.resolver import resolve_target
 
 if TYPE_CHECKING:
@@ -485,6 +488,7 @@ class LinuxSecretSinkEndpoint:
                 f"the linux store writes only to a {LinuxSshConnector.product!r} target"
             )
         target = cast("Target", row)
+        await forget_target_if_changed(target)
 
         sudo_password = await _resolve_sudo_password(connector, target, operator)
         await self._check_home(connector, target, operator, sudo_password)

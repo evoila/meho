@@ -488,8 +488,9 @@ async def test_script_run_without_sudo_uses_run_command_not_sudo() -> None:
     assert result["stdout"] == ["ok"]
     sudo_mock.assert_not_awaited()
     run_command.assert_awaited_once()
-    # The wrapper is run under bash, not spliced into the login shell verbatim.
-    assert run_command.await_args.args[1].startswith("bash -c ")
+    # bash reads the wrapper from stdin; the command line is fixed.
+    assert run_command.await_args.args[1] == "bash -s"
+    assert "echo ok" in _decode_b64_tokens(run_command.await_args.kwargs["stdin"])
 
 
 def test_script_run_large_stdout_is_a_spillable_collection() -> None:
@@ -962,9 +963,11 @@ async def test_secret_env_resolves_on_non_sudo_path_too() -> None:
                 "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF},
             },
         )
-    cmd = run_command.await_args.args[1]  # bash -c '<wrapper>'
-    assert _SECRET_ENV_VALUE_CANARY not in cmd
-    assert _SECRET_ENV_VALUE_CANARY in _decode_b64_tokens(cmd)
+    cmd = run_command.await_args.args[1]
+    wrapper = run_command.await_args.kwargs["stdin"]
+    assert cmd == "bash -s"
+    assert _SECRET_ENV_VALUE_CANARY not in wrapper
+    assert _SECRET_ENV_VALUE_CANARY in _decode_b64_tokens(wrapper)
 
 
 @pytest.mark.asyncio

@@ -277,12 +277,20 @@ Nothing fails open: an install routing that is not valid refuses the
 click. A request that waited with stored groups before migration `0173`
 has the empty text as both categories: MEHO does not know them. Such a request is
 refused when an install entry that matches on a `category` could fit it;
-reject it and start the call again. A request with stored group kinds
-but no stored install category (only builds of main between 15 November
-2026 and pull request #6542 could write one) counts the same, "category
-not known", while `POLICY_CLASSIFICATION` is on. With that switch off, no
-change has a category, so a `category` entry fits nothing for it, as when
-it started to wait. A request without stored group kinds
+reject it and start the call again. A request can have stored group
+kinds but no stored install category (NULL) in two cases:
+
+- It started to wait while `POLICY_CLASSIFICATION` was off. No change has
+  a category then, so MEHO stored none.
+- A build of main between 15 November 2026 and pull request #6542 wrote
+  it. Those builds stored the group kinds but not the install category.
+
+MEHO does the same in both cases. While `POLICY_CLASSIFICATION` is on,
+the category counts as "not known", like the empty text: the click is
+refused when an install entry that matches on a `category` could fit the
+request. Reject it and start the call again. While the switch is off, a
+`category` entry fits nothing for it, as when it started to wait, and the
+other install entries decide. A request without stored group kinds
 (it started to wait while the switch was off) keeps today's rule until it
 is decided or expires: the install's routing is not checked for it.
 

@@ -212,6 +212,13 @@ could fit it. This holds also when no entry names either category. Give
 the operation one category in the install's file, reject the waiting
 request, and start the call again.
 
+MEHO also does not know the install's category of a waiting change that
+started to wait while `POLICY_CLASSIFICATION` was off, once you turn that
+switch on. The same rule holds: nobody may approve it if an install entry
+that matches on a category could fit it. Reject it and start the call
+again. While the switch stays off, an entry that matches on a category
+fits no change, so the other install entries decide.
+
 MEHO ships a starting file, "separated duties"
 (`deploy/policy-profiles/separated-duties.yaml`): identity and secret
 changes only Admins approve, network and storage changes only

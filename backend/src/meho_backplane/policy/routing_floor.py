@@ -341,7 +341,8 @@ def _install_category(request: ApprovalRequest) -> str | None:
     """The install's category of *request*, as the floor uses it.
 
     The stored ``approver_install_category``. A request with stored group
-    kinds but no stored install category was written by a build that did
+    kinds but no stored install category started to wait while
+    ``POLICY_CLASSIFICATION`` was off, or was written by a build that did
     not store it yet. With ``POLICY_CLASSIFICATION`` on, its category is
     then not known (the empty text). With the switch off, no change has a
     category, so ``None`` stays: an entry that matches on a category fits

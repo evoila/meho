@@ -1430,11 +1430,15 @@ changes), the role floor. Then `_check_install_floor`
 (`InstallFloor.refusal` in `policy/routing_floor.py`): MEHO routes the
 request again with the install's file as it is now, the stored risk level
 and the stored `approver_install_category`. A request with stored kinds
-but no stored install category (NULL; only builds of main between 15
-November 2026 and pull request #6542 wrote such a row) counts as "category not known" while
-`POLICY_CLASSIFICATION` is on, like the empty text. With that switch off,
-no change has a category, so a `category` entry fits nothing, as when the
-request started to wait. A request without stored
+can have no stored install category (NULL) in two cases: it started to
+wait while `POLICY_CLASSIFICATION` was off (no change has a category
+then), or a build of main between 15 November 2026 and pull request #6542
+wrote it (those builds did not store the install category). In both
+cases the category counts as "not known" while `POLICY_CLASSIFICATION` is
+on, like the empty text, so the click is refused when an install entry
+that matches on a `category` could fit. With that switch off, a
+`category` entry fits nothing, as when the request started to wait. A
+request without stored
 kinds (it started to wait while the switch was off) is not checked here:
 it keeps today's rule until it is decided or expires. When an install
 entry fits and the

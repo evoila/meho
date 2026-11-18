@@ -1278,6 +1278,37 @@ through the same `is_rights_change` check, so an upgrade weakens nothing.
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
 
+**A tenant with one admin (#6641).** There, nobody can approve that
+admin's change of rights. MEHO says so; it builds no exception.
+
+- `auth/tenant_admins.py` counts the admins of a tenant with MEHO's own
+  Keycloak admin client: the enabled members of every group (at any level)
+  whose attributes give `tenant_admin` in the tenant (`tenant_role` with
+  `tenant_id`, or `meho_tenant` `<tenant>:<name>:Admins`) or
+  `platform_admin`. A child group takes a missing attribute from its
+  parent, as the token does. A service account (a username that starts
+  with `JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`) is not counted: only a
+  person may approve. The answer is kept 60 seconds per tenant.
+- The count is "not known" (`None`) when the admin client is not set up,
+  a read fails or is refused, platform admins come from a realm role
+  (`JWT_PLATFORM_ADMIN_ROLE_NAME`), or no enabled admin is found. "Not
+  known" never gives a warning.
+- At request time, `rights_change_note` in `operations/approval_queue.py`
+  runs after the request and its approval step event are saved (the
+  dispatcher and the composite step), outside the `try` that answers
+  "denied". A failed read of the note gives no note; the call still waits
+  for approval. When the requester is the only admin, the answer gets
+  `extras.approval_note`: "This change needs a second admin to approve it.
+  This tenant has only one admin." and a link to the approvals guide. The
+  note is added to `error` too. The request is still stored, so an admin
+  added later can approve it. `meho operation call` prints the note under
+  the parked hint. The web console shows it in the waiting answer of the
+  Keycloak pages, the operation run window, and the classify page.
+- `/api/v1/health` and `meho_status` report the count in
+  `approvals.rights_change_admins`. `meho doctor` shows the line "second
+  admin": a warning with the same sentence for one admin, ok for two or
+  more, and no line when the count is not known or the backplane is older.
+
 ## The "may I approve this?" answer (#3329)
 
 People see, for each request, whether they may approve it and why not.

@@ -208,15 +208,22 @@ def _target_block(row: TargetORM) -> dict[str, Any]:
 async def _load_state(
     session: AsyncSession,
     tenant_ids: list[uuid.UUID],
+    *,
+    lock: bool = False,
 ) -> tuple[
     dict[uuid.UUID, Tenant],
     dict[uuid.UUID, list[TenantConvention]],
     dict[uuid.UUID, list[TargetORM]],
 ]:
-    tenants = {
-        t.id: t
-        for t in (await session.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))).scalars()
-    }
+    query = select(Tenant).where(Tenant.id.in_(tenant_ids))
+    if lock:
+        # Held until the commit: a second import waits here and then reads the
+        # policies this one wrote, so its console-only check sees them. The id
+        # order keeps two imports of the same tenants from waiting on each other.
+        query = (
+            query.order_by(Tenant.id).with_for_update().execution_options(populate_existing=True)
+        )
+    tenants = {t.id: t for t in (await session.execute(query)).scalars()}
     conventions: dict[uuid.UUID, list[TenantConvention]] = {tid: [] for tid in tenant_ids}
     for row in (
         await session.execute(
@@ -648,12 +655,36 @@ def _add_realm_warnings(path: str, block: dict[str, Any], warnings: list[str]) -
     )
 
 
+def _before_blocks(
+    tenant_ids: list[uuid.UUID],
+    tenants: dict[uuid.UUID, Tenant],
+    conventions: dict[uuid.UUID, list[TenantConvention]],
+    targets: dict[uuid.UUID, list[TargetORM]],
+) -> dict[str, dict[str, Any]]:
+    """The stored blocks of the file's tenants that exist, keyed by tenant id."""
+    return {
+        str(tid): {
+            "id": str(tid),
+            "policies": _policies_block(tenants[tid]),
+            "conventions": [_convention_block(c) for c in conventions[tid]],
+            "targets": [_target_block(t) for t in targets[tid]],
+        }
+        for tid in tenant_ids
+        if tid in tenants
+    }
+
+
 async def build_plan(
     session: AsyncSession,
     operator: Operator,
     content: bytes,
+    *,
+    lock: bool = False,
 ) -> ImportPlan:
     """Check *content* and work out the diff. Reads the database; writes nothing.
+
+    With *lock*, the tenant rows of the file stay locked until the caller's
+    transaction ends (the apply uses this; the preview does not).
 
     Raises :class:`SettingsForbiddenError` when the caller may not import the
     tenants the file names (the preview has the same rules as the apply).
@@ -676,17 +707,8 @@ async def build_plan(
     if warning:
         plan.warnings.append(warning)
 
-    tenants, conventions, targets = await _load_state(session, tenant_ids)
-    plan.before = {
-        str(tid): {
-            "id": str(tid),
-            "policies": _policies_block(tenants[tid]),
-            "conventions": [_convention_block(c) for c in conventions[tid]],
-            "targets": [_target_block(t) for t in targets[tid]],
-        }
-        for tid in tenant_ids
-        if tid in tenants
-    }
+    tenants, conventions, targets = await _load_state(session, tenant_ids, lock=lock)
+    plan.before = _before_blocks(tenant_ids, tenants, conventions, targets)
     stored = stored_secret_mistakes(plan.before)
     if stored:
         # A diff shows "before" values and a revision keeps them for good, so a
@@ -892,7 +914,7 @@ async def apply_import(
     changes nothing (empty diff, no revision). The caller's session dependency
     commits the one transaction after the route returns.
     """
-    plan = await build_plan(session, operator, content)
+    plan = await build_plan(session, operator, content, lock=True)
     refusal = None if plan.mistakes else console_only_refusal(operator, plan.console_only)
     if refusal is not None:
         raise SettingsForbiddenError(refusal)

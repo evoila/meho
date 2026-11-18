@@ -152,7 +152,14 @@ Tenant rows and conventions change no approval or gate.
 - The console has no settings page yet. Until it has one, no caller can
   make these two changes; they have no REST route of their own.
 
-Tests: `tests/test_settings_import_console_policies.py`.
+- The apply locks the rows of the tenants in the file before it reads
+  their policies, and holds the lock until its commit. A second import of
+  the same tenant waits, then reads what the first one wrote. So it checks
+  and writes the stored policies, not an older copy. The preview takes no
+  lock.
+
+Tests: `tests/test_settings_import_console_policies.py`, and on PostgreSQL
+`tests/integration/test_settings_import_overlap_pg.py`.
 
 ## Never in the file
 

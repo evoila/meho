@@ -90,9 +90,11 @@ from meho_backplane.connectors.linux.ops_host import (
     validate_unit_name,
 )
 from meho_backplane.connectors.linux.script_preview import (
+    SCRIPT_MAX_BYTES,
     has_secret_shape,
     script_matches_expected,
     script_preview_fields,
+    script_too_large_message,
 )
 from meho_backplane.redaction.command_line import is_secret_shaped_name
 
@@ -1223,6 +1225,40 @@ def _person_only_keys_shown_to_agents() -> bool:
     return False
 
 
+def _check_script_size(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Params check of ``linux.script.run``: refuse a script over the size limit.
+
+    A script that is not valid UTF-8 (it holds a lone surrogate) is refused
+    too, with a plain sentence, since it has no size in bytes and cannot run.
+
+    Runs before the call can wait for approval. The schema ``maxLength``
+    counts characters; this counts UTF-8 bytes, which is what the limit means.
+    When ``maxLength`` fails too, this plain sentence replaces its error
+    (``params_errors``).
+    """
+    script = params.get("script")
+    if not isinstance(script, str):
+        return None
+    from meho_backplane.operations._validate import params_problem
+
+    try:
+        size = len(script.encode("utf-8"))
+    except UnicodeEncodeError:
+        # A lone surrogate (JSON ``"\ud800"``) has no UTF-8 form.
+        return params_problem(
+            "script",
+            "a script that is valid UTF-8 text",
+            "The script is not valid UTF-8 text. Send the script as UTF-8 text.",
+        )
+    if size <= SCRIPT_MAX_BYTES:
+        return None
+    return params_problem(
+        "script",
+        f"a script of at most {SCRIPT_MAX_BYTES:,} bytes",
+        script_too_large_message(size),
+    )
+
+
 def register_linux_write_previews() -> None:
     """Register the two credential-class bespoke preview builders (import-time).
 
@@ -1239,9 +1275,11 @@ def register_linux_write_previews() -> None:
         register_person_only_preview_keys,
         register_preview_builder,
     )
+    from meho_backplane.operations._validate import register_params_check
 
     register_preview_builder("linux.file.write", _linux_file_write_preview)
     register_preview_builder("linux.script.run", _linux_script_run_preview)
+    register_params_check("linux.script.run", _check_script_size)
     register_park_check("linux.script.run", _refuse_secret_in_env)
     register_person_only_preview_keys(
         "linux.script.run", _person_only_keys_shown_to_agents, _PERSON_ONLY_SCRIPT_RUN_KEYS
@@ -1442,9 +1480,11 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "script": {
                 "type": "string",
+                "maxLength": SCRIPT_MAX_BYTES,
                 "description": (
-                    "The script body to run. The approver reads it and its "
-                    "SHA-256. Do NOT embed bare secrets."
+                    "The script body to run, at most 1,048,576 bytes. The "
+                    "approver reads it page by page, and its SHA-256. Do NOT "
+                    "embed bare secrets."
                 ),
             },
             "script_ref": {

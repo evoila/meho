@@ -410,6 +410,37 @@ async def test_switch_off_refuses_the_parameter_before_approval(
     assert await _approval_count() == 1
 
 
+def _linked_required_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Schemas whose linked schema requires the hidden property declared beside the link."""
+    marked = _schema()["properties"][_HIDDEN]
+    needs = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name", _HIDDEN],
+    }
+    beside_ref = {
+        "$ref": "#/$defs/Needs",
+        "properties": {_HIDDEN: marked},
+        "$defs": {"Needs": needs},
+    }
+    ref_in_all_of = {
+        "type": "object",
+        "properties": {_HIDDEN: marked},
+        "allOf": [{"$ref": "#/$defs/Needs"}],
+        "$defs": {"Needs": needs},
+    }
+    two_levels = {
+        "$ref": "#/$defs/Outer",
+        "properties": {_HIDDEN: marked},
+        "$defs": {"Outer": {"$ref": "#/$defs/Needs"}, "Needs": needs},
+    }
+    return [
+        ("required-beside-ref", beside_ref, {"name": "a"}),
+        ("required-ref-in-all-of", ref_in_all_of, {"name": "a"}),
+        ("required-two-levels", two_levels, {"name": "a"}),
+    ]
+
+
 def _open_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
     """Schemas that accept more than their properties, each with one other valid input."""
     no_rule = _schema()
@@ -470,6 +501,7 @@ def _open_schemas() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
         "$defs": base,
     }
     return [
+        *_linked_required_schemas(),
         ("no-rule", no_rule, {"name": "a", "other": 1}),
         ("open", open_true, {"name": "a", "other": 1}),
         ("typed", open_typed, {"name": "a", "other": "x"}),
@@ -519,6 +551,69 @@ async def test_switch_off_refuses_only_the_parameter_of_an_open_schema(
     )
     assert ok.status == "awaiting_approval", ok.error
     assert await _approval_count() == 1
+
+
+@pytest.mark.parametrize(
+    ("schema", "other"),
+    [(schema, other) for _, schema, other in _linked_required_schemas()],
+    ids=[name for name, _, _ in _linked_required_schemas()],
+)
+def test_switch_off_a_linked_schema_does_not_require_the_hidden_property(
+    schema: dict[str, Any], other: dict[str, Any]
+) -> None:
+    stored = copy.deepcopy(schema)
+    shown = visible_parameter_schema(schema)
+    _no_trace(shown, _HIDDEN, SWITCH_MARKER)
+    checked = checked_parameter_schema(schema)
+    assert Draft202012Validator(checked).is_valid(other)
+    assert not Draft202012Validator(checked).is_valid({**other, _HIDDEN: "abc"})
+    assert schema == stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema", "other"),
+    [(schema, other) for _, schema, other in _linked_required_schemas()],
+    ids=[name for name, _, _ in _linked_required_schemas()],
+)
+async def test_switch_off_preview_accepts_a_call_without_the_linked_required_property(
+    stub_embedding_service: AsyncMock, schema: dict[str, Any], other: dict[str, Any]
+) -> None:
+    await _register(stub_embedding_service, schema)
+    preview = await preview_operation(
+        _operator(), {"connector_id": _CONNECTOR, "op_id": _OP, "params": other}
+    )
+    assert preview["status"] != "error", preview
+    _no_trace(preview, _HIDDEN, SWITCH_MARKER)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schema",
+    [schema for _, schema, _ in _linked_required_schemas()],
+    ids=[name for name, _, _ in _linked_required_schemas()],
+)
+async def test_switch_on_a_linked_schema_requires_the_property(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch, schema: dict[str, Any]
+) -> None:
+    _switch_on(monkeypatch)
+    await _register(stub_embedding_service, schema)
+    operator = _operator()
+    exact = await search_operations(operator, {"connector_id": _CONNECTOR, "op_id": _OP})
+    assert exact["operation"]["parameter_schema"] == schema
+    missing = await dispatch(
+        operator=operator, connector_id=_CONNECTOR, op_id=_OP, target=None, params={"name": "a"}
+    )
+    assert missing.error is not None
+    assert missing.error.startswith("invalid_params")
+    given = await dispatch(
+        operator=operator,
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        target=None,
+        params={"name": "a", _HIDDEN: "abc"},
+    )
+    assert given.status == "awaiting_approval", given.error
 
 
 @pytest.mark.asyncio

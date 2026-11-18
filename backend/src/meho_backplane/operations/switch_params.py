@@ -278,9 +278,9 @@ class _Walk:
         if not isinstance(node, dict):
             return node
         ref = node.get("$ref")
-        if inherited and isinstance(ref, str) and ref not in refs:
+        if isinstance(ref, str) and ref not in refs:
             target = _pointer(self.root, ref)
-            if isinstance(target, dict):
+            if isinstance(target, dict) and (inherited or self._beside_ref(node)):
                 return self._inline(node, ref, target, inherited, refs)
         hidden = frozenset(inherited | _all_hidden_names(self.root, node))
         result = {key: self._keyword(node, key, hidden, refs) for key in node}
@@ -291,6 +291,15 @@ class _Walk:
                 for name in hidden:
                     properties[name] = False
         return result
+
+    def _beside_ref(self, node: dict[str, Any]) -> set[str]:
+        """Return the names hidden by the keywords beside the ``$ref`` of *node*.
+
+        The schema that the link points to must not require them either, so
+        the walk takes it in place with these names.
+        """
+        rest = {key: value for key, value in node.items() if key != "$ref"}
+        return _all_hidden_names(self.root, rest)
 
     def _inline(
         self,

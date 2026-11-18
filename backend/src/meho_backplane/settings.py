@@ -271,6 +271,13 @@ class Settings(BaseModel):
         via ``VAULT_OIDC_ROLE_BY_TENANT``. Lets one fixed role stop
         spanning tenants on a shared multi-tenant instance; the fail-closed boundary is each role's
         Vault policy + ``bound_claims``, provisioned consumer-side.
+    vault_oidc_role_tenants:
+        Optional list of the tenants that may use ``vault_oidc_role``.
+        Comma-separated tenant UUIDs. Empty (the default) keeps
+        ``vault_oidc_role`` for every tenant without an entry in
+        ``vault_oidc_role_by_tenant``. When set, a tenant in neither list
+        gets a clear refusal and no Vault login is tried. Set via
+        ``VAULT_OIDC_ROLE_TENANTS``.
     vault_oidc_mount_path:
         Mount path of Vault's JWT/OIDC auth method, **without** the
         ``auth/`` prefix. Vault's recommended convention is to mount
@@ -1566,6 +1573,12 @@ class Settings(BaseModel):
         stay the same. A small model keeps more of its context window for
         the job. It stays off until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
+    mcp_call_flow_guide:
+        Off by default. When on, the MCP session-start text starts with a
+        short guide that explains, in order, how to find and call an
+        operation (:mod:`meho_backplane.mcp.call_flow_guide`). It names
+        only tools the session can see. It stays off until model tests
+        show it helps. Env ``MCP_CALL_FLOW_GUIDE``.
     mcp_profile_connector_lists:
         Off by default. When on, the profiles of ``mcp_connector_profiles``
         count: a session that names one at ``/mcp?profile=<name>`` may use
@@ -1710,6 +1723,11 @@ class Settings(BaseModel):
     # Enforcement stays Vault-side: the boundary is the policy + ``bound_claims``
     # on each selected role; this setting only decides which role a login uses.
     vault_oidc_role_by_tenant: str = Field(default="")
+    # Tenants that may use ``vault_oidc_role``. Comma-separated tenant UUIDs.
+    # Empty (the default) keeps ``vault_oidc_role`` for every tenant that has
+    # no entry in ``vault_oidc_role_by_tenant``. When set, a tenant that is
+    # in neither list is refused before any Vault call.
+    vault_oidc_role_tenants: str = Field(default="")
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
@@ -2540,6 +2558,7 @@ class Settings(BaseModel):
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3050,6 +3069,25 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("vault_oidc_role_tenants")
+    @classmethod
+    def _vault_oidc_role_tenants_must_be_uuid_csv(cls, value: str) -> str:
+        """Stop the start when ``VAULT_OIDC_ROLE_TENANTS`` has an entry that is not a UUID."""
+        chunks = [part.strip() for part in value.split(",") if part.strip()]
+        if value.strip() and not chunks:
+            raise ValueError(
+                f"VAULT_OIDC_ROLE_TENANTS has no tenant UUID; got {value!r}. "
+                "Leave it empty, or list tenant UUIDs."
+            )
+        for chunk in chunks:
+            try:
+                UUID(chunk)
+            except ValueError as exc:
+                raise ValueError(
+                    f"VAULT_OIDC_ROLE_TENANTS entries must be tenant UUIDs; got {chunk!r}"
+                ) from exc
+        return value
+
     @field_validator("audit_wrapper_rows_retired")
     @classmethod
     def _wrapper_cutover_needs_request_usage(cls, value: bool, info: ValidationInfo) -> bool:
@@ -3196,6 +3234,7 @@ def get_settings() -> Settings:
         # #3852 -- empty/blank keeps the single-role behaviour byte-for-byte
         # (the resolver falls back to ``vault_oidc_role`` for every tenant).
         vault_oidc_role_by_tenant=os.environ.get("VAULT_OIDC_ROLE_BY_TENANT", "").strip(),
+        vault_oidc_role_tenants=os.environ.get("VAULT_OIDC_ROLE_TENANTS", "").strip(),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
         # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no
         # header) from empty-string (operator misconfiguration); the
@@ -3696,6 +3735,9 @@ def get_settings() -> Settings:
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
+        ),
+        mcp_call_flow_guide=parse_bool_env(
+            os.environ.get("MCP_CALL_FLOW_GUIDE"),
         ),
         mcp_profile_connector_lists=parse_bool_env(
             os.environ.get("MCP_PROFILE_CONNECTOR_LISTS"),

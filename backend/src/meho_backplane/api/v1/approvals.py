@@ -881,9 +881,8 @@ async def _capture_operator_decision(
             detail="insufficient_role",
         ) from exc
     except SelfApprovalForbiddenError as exc:
-        # Same token-prefix + ``str(exc)`` hint as the /approve path so
-        # /decide's self-approval rejection also names the
-        # ``APPROVAL_ALLOW_SELF_APPROVAL`` break-glass flag (#1483).
+        # Same token prefix + ``str(exc)`` as the /approve path: the text
+        # says who may approve the change and where to ask.
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=f"self_approval_forbidden: {exc}",
@@ -1244,9 +1243,8 @@ async def _record_approval_decision(
         ) from exc
     except SelfApprovalForbiddenError as exc:
         # Keep the ``self_approval_forbidden`` token prefix (stable for
-        # clients matching on it) but append ``str(exc)``, which carries
-        # the ``APPROVAL_ALLOW_SELF_APPROVAL=true`` break-glass hint the
-        # exception already constructs (#1483).
+        # clients matching on it) and append ``str(exc)``, which says who
+        # may approve the change and where to ask.
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=f"self_approval_forbidden: {exc}",

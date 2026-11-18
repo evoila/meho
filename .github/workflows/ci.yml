@@ -1261,7 +1261,18 @@ jobs:
           # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
           # node), shards that pass every test can take 674-710 s, and 660 s
           # dropped good pull requests from the merge queue.
+          # Shard 2 only: 1200 s, so its slowest measured run stays under 80
+          # percent of its budget (#6662). Measured pytest wall of shard 2:
+          # 915 s in merge-queue run 44201692298 (all tests passed; the other
+          # shards took 765-873 s), 683 s and 772 s in pull request runs
+          # 44212040368 and 44214999634. 915 / 0.8 = 1144 s, rounded up.
+          # Fixture timing of shard 2 (MEHO_FIXTURE_TIMING_FILE): the
+          # `azure` and `registered` fixtures take 4.3 s per test,
+          # `_audit_db_url` 28 s per test file. The other shards keep 900 s.
           budget_s=900
+          if [ "$SHARD" = "2" ] && [ "$TOTAL" = "6" ]; then
+            budget_s=1200
+          fi
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
           # in each xdist worker, so a test that stops making progress fails

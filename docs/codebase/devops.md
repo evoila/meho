@@ -2156,7 +2156,7 @@ Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=900`; 660 s until 2026-10-24, scaled
+perf-budget-guard step (`budget_s=900`, 1200 s for shard 2; 660 s until 2026-10-24, scaled
 from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
@@ -2238,7 +2238,11 @@ shape (deterministic file-level matrix + fan-in):
   morning, and the count is 6. In the run that failed on time, the
   slowest shard carried 2,568 s of test time (933 s). Fresh file times
   with five shards would still leave 2,344 s (about 850 s); with six
-  shards it is 1,965 s (about 720 s). To change the count, edit the
+  shards it is 1,965 s (about 720 s). On 2026-11-17 shard 2 ran 915 s
+  in the merge queue, with every test passing (#6662). The file times
+  were refreshed again, and shard 2 alone got a budget of 1200 s, so
+  its slowest measured run (915 s) stays under 80 percent of its
+  budget. The other shards keep 900 s. To change the count, edit the
   matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a

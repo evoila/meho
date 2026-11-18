@@ -49,6 +49,7 @@ from meho_backplane.connectors.keycloak.ops_write_account_common import (
     resolve_user,
 )
 from meho_backplane.connectors.keycloak.ops_write_client_role import role_names
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_roles
 from meho_backplane.connectors.keycloak.ops_write_grant import with_grant_facts
 from meho_backplane.connectors.keycloak.ops_write_preview import (
     _live_keycloak_connector,
@@ -245,7 +246,10 @@ async def _credential_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
 
 def _register() -> None:
     for op_id, builder in (
-        ("keycloak.role_mapping.client.assign", _client_role_preview("assign")),
+        (
+            "keycloak.role_mapping.client.assign",
+            with_current_roles(client=True)(_client_role_preview("assign")),
+        ),
         ("keycloak.user.update", _user_update_preview),
         ("keycloak.user.credential.delete", _credential_delete_preview),
     ):

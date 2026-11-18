@@ -75,6 +75,7 @@ from meho_backplane.operations.approval_queue import (
     rehydrate_resume_target,
 )
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
+from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import is_secret_reveal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
 from meho_backplane.operations.uncertain_outcome import (
@@ -223,10 +224,15 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
 async def _object_changed(
     operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
 ) -> bool:
-    """The object of the call, or the login or group a change of rights is for, moved."""
+    """The object of the call, or the login or group a change of rights is for, moved.
+
+    Also true when the object is no longer as the approval card showed it.
+    """
     if await object_changed_since_request(operator, request, target, params) is not None:
         return True
-    return await grant_changed_since_request(operator, request, target, params) is not None
+    if await grant_changed_since_request(operator, request, target, params) is not None:
+        return True
+    return await state_changed_since_request(operator, request, target, params) is not None
 
 
 def _target_refusal(denied: OperationResult) -> RerunRefusal:

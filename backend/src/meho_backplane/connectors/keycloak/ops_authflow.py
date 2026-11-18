@@ -90,6 +90,7 @@ from meho_backplane.connectors.keycloak.ops_authflow_schemas import (
     ENSURE_APPROVAL_FLOW_OP_ID,
     WHEN_TO_USE_AUTHFLOW_BY_GROUP,
 )
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
@@ -675,5 +676,8 @@ async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 register_rights_check(
-    ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview, per_object=_PER_CLIENT
+    ENSURE_APPROVAL_FLOW_OP_ID,
+    _ROLES,
+    with_current_binding(client=True)(_approval_flow_preview),
+    per_object=_PER_CLIENT,
 )

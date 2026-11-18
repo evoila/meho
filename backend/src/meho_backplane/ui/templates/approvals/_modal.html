@@ -711,6 +711,7 @@
           values pretty-printed per row. -#}
       {% set fields = effect.get("params_echo") or effect.get("preview") %}
       {% if fields is mapping and fields %}
+        {% set script_request_id = request.id if request.status == "pending" else none %}
         {% include "approvals/_script.html" %}
         {#- The script block above shows every script_* field, so the table skips them. -#}
         {% set shows_script = fields.get("script") is string or fields.get("script_unavailable") %}

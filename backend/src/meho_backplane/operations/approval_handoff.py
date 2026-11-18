@@ -67,6 +67,24 @@ def store(
     return handle
 
 
+def _open(
+    row: ApprovalExecutionPayload, request_id: uuid.UUID, tenant_id: uuid.UUID
+) -> dict[str, Any]:
+    """Decrypt and check the stored payload of *row*."""
+    try:
+        payload = json.loads(_fernet().decrypt(row.ciphertext))
+    except (InvalidToken, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApprovalHandoffError("approval execution payload cannot be decrypted") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("request_id") != str(request_id)
+        or payload.get("tenant_id") != str(tenant_id)
+        or not isinstance(payload.get("payload"), dict)
+    ):
+        raise ApprovalHandoffError("approval execution payload has an invalid shape")
+    return cast(dict[str, Any], payload["payload"])
+
+
 async def consume(
     session: AsyncSession, handle: uuid.UUID, request_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> dict[str, Any]:
@@ -83,19 +101,30 @@ async def consume(
     ).scalar_one_or_none()
     if row is None:
         raise ApprovalHandoffMissingError("approval execution payload is unavailable")
-    try:
-        payload = json.loads(_fernet().decrypt(row.ciphertext))
-    except (InvalidToken, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ApprovalHandoffError("approval execution payload cannot be decrypted") from exc
-    if (
-        not isinstance(payload, dict)
-        or payload.get("request_id") != str(request_id)
-        or payload.get("tenant_id") != str(tenant_id)
-        or not isinstance(payload.get("payload"), dict)
-    ):
-        raise ApprovalHandoffError("approval execution payload has an invalid shape")
+    payload = _open(row, request_id, tenant_id)
     await session.delete(row)
-    return cast(dict[str, Any], payload["payload"])
+    return payload
+
+
+async def read(
+    session: AsyncSession, handle: uuid.UUID, request_id: uuid.UUID, tenant_id: uuid.UUID
+) -> dict[str, Any]:
+    """Decrypt the stored payload and leave it stored (``consume`` deletes it).
+
+    Only the approver's page read of a script uses this.
+    """
+    row = (
+        await session.execute(
+            select(ApprovalExecutionPayload).where(
+                ApprovalExecutionPayload.handle == handle,
+                ApprovalExecutionPayload.request_id == request_id,
+                ApprovalExecutionPayload.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ApprovalHandoffMissingError("approval execution payload is unavailable")
+    return _open(row, request_id, tenant_id)
 
 
 async def discard(session: AsyncSession, request_id: uuid.UUID, tenant_id: uuid.UUID) -> None:

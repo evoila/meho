@@ -3886,6 +3886,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The approval request of 8 more Keycloak changes of rights now shows the object as it is now (<code>role_mapping.assign</code>, <code>role_mapping.client.assign</code>, <code>group.member.add</code>, <code>user.reset_password</code>, <code>user.enable</code> and the three login flow writes), and MEHO reads it again right before the approved run. When it changed, or MEHO cannot read it, the run is refused. A request of these 8 operations that already waited before the upgrade has no such state, so it is refused when approved. For <code>group.member.add</code> the run compares only the group id and the roles the group gives, not the member list, so a big group still runs. The switch <code>KEYCLOAK_RIGHTS_CHANGE_CARDS</code> now also covers these 8 writes: it decides only whether <code>preview_operation</code>, <code>meho_approvals_get</code> and <code>meho_approvals_list</code> show the new card keys. The run check is always on.</td>
+<td>Send such a request again after the upgrade. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> now always gets the tenant folder check: every Vault path that a caller or a target names for it must be in the tenant's folder. With an empty <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> that folder is <code>secret/tenants/&lt;tenant id&gt;/</code>; with a non-empty setting the folder of that setting applies. With either setting, MEHO now also checks a person's read of a target's secret when a call runs on a target of such a tenant. A tenant without an entry is unchanged.</td>
 <td>For each tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code>: run <code>meho tenants use &lt;tenant&gt;</code>, then <code>meho targets list --json</code>, and look at the field <code>secret_ref</code> of each target. Move each secret whose <code>secret_ref</code> is outside the tenant's folder into the folder, and set the new <code>secret_ref</code> on the target. A call on a target that is not moved yet fails with <code>connector_error: VaultTenantScopeError</code> and the text <code>vault.kv request outside tenant namespace: requested '&lt;path&gt;' is not within tenant prefix '&lt;folder&gt;'</code>.</td>
 </tr>

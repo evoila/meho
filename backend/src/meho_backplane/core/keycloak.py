@@ -139,7 +139,6 @@ CI_GROUP = "MEHO-CI-Admins"
 # which carries only ``platform_admin``; it is not one of the role groups, so
 # the one-role-group rule still holds.
 ADMIN_GROUPS = ("MEHO-Admins", "MEHO-Platform-Admins")
-FIRST_LOGIN_KEYS = ("admin_username", "admin_password")
 # The role part of a role group's name, and of its ``meho_tenant`` value
 # ``<tenant-uuid>:<tenant>:<Role>`` (docs/decisions/login-role-groups.md).
 TENANT_ROLES = ("Readers", "Operators", "Admins")

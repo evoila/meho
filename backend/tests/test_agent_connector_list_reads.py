@@ -14,8 +14,9 @@ With the agent's list bound (``connector_limit``):
 * ``query_topology`` is not registered for an agent with a list when the
   ``AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST`` setting is on, and is kept when
   it is off (the default);
-* an ``unknown_op`` answer and the agent tool's own refusal name no
-  connector outside the list.
+* an ``unknown_op`` answer, the "did you mean" ids of an unknown
+  ``connector_id`` and the agent tool's own refusal name no connector
+  outside the list.
 
 Without a list every answer stays the same. The connectors, the products
 and the targets here are made up.
@@ -30,7 +31,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from pydantic_ai import ModelRetry, RunContext
+from pydantic_ai import ModelRetry, RunContext, ToolFailed
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RunUsage
@@ -445,3 +446,29 @@ async def test_unknown_op_names_only_connectors_in_the_list() -> None:
     with connector_limit(frozenset({"hostos-ssh-1.0", _OTHER})):
         both = await call()
     assert both.extras["connectors_with_op"] == [_OTHER]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [("search_operations", {"query": "about"}), ("list_operation_groups", {})],
+)
+async def test_unknown_connector_names_only_close_ids_in_the_list(
+    tool: str, arguments: dict[str, Any]
+) -> None:
+    await _register("hostos", "hostos-ssh", "hostos.about")
+    await _register("clusteros", "clusteros-ssh", "clusteros.about")
+
+    async def ask(connectors: list[str] | None, connector_id: str) -> str:
+        with pytest.raises(ToolFailed) as failed:
+            await _tools([tool], connectors)[tool].function(
+                _ctx(_agent()), connector_id=connector_id, **arguments
+            )
+        return str(failed.value)
+
+    assert _OTHER in await ask(None, "clusteros-ssh")
+    limited = await ask(["hostos-ssh-1.0"], "clusteros-ssh")
+    assert "Did you mean" not in limited
+    assert _OTHER not in limited
+    assert "hostos-ssh-1.0" in await ask(["hostos-ssh-1.0"], "hostos-ssh")
+    assert _OTHER not in await ask([], "clusteros-ssh-1")

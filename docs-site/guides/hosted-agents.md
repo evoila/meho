@@ -630,6 +630,10 @@ meho agent run-cancel <run-id>                # stop a run
 meho agent run-events pod-reader --input "..." # start a run and watch each step live
 ```
 
+You can stop a run that you started. A tenant admin can stop any run of
+the tenant, and so can a platform admin. An agent or service login can stop
+only its own runs.
+
 ### A run as the agent, with its grants
 
 The [scheduler](scheduler.md) starts runs with the agent's own

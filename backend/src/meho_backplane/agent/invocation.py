@@ -1685,6 +1685,10 @@ class AgentInvoker:
             AgentRunNotFoundError: no run for *run_id* in the tenant.
             run_lifecycle.UnauthorizedCancellationError: the operator's
                 role ranks below the cancel minimum.
+            run_lifecycle.RunNotOwnedCancellationError: the operator is
+                not the run's owner and not a person with the
+                ``tenant_admin`` role or a platform admin in the tenant.
+                The run goes on.
             run_lifecycle.IllegalTransitionError: the run is already
                 terminal (succeeded / failed / cancelled).
         """

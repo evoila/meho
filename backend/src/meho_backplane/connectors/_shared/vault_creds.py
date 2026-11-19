@@ -126,6 +126,7 @@ __all__ = [
     "SecretRefScopeError",
     "TargetSecretForbiddenError",
     "TargetSecretNotFoundError",
+    "TargetSecretReadFailedError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
     "check_param_secret_ref",
@@ -254,6 +255,28 @@ class OperatorTokenRequiredError(VaultCredentialsReadError):
     expected outcome (#4952) catch this class; every other read-phase
     failure stays a plain :class:`VaultCredentialsReadError`.
     """
+
+
+class TargetSecretReadFailedError(Exception):
+    """The read of the target's own ``secret_ref`` did not get an answer.
+
+    Raised by the shared loader when the Vault client (``requests``) fails
+    during the read: a timeout, a lost connection or a cut answer. It is a
+    plain error of the step before the call, so the call to the target has
+    not started yet. It has its own type, so the rule for uncertain results
+    (:mod:`meho_backplane.operations.uncertain_outcome`) keeps it a plain
+    failure that can run again, while the same ``requests`` fault during a
+    Vault change counts as uncertain. The message names the target and the
+    class of the fault, never the Vault URL or the client text.
+    """
+
+    def __init__(self, *, target_name: str, cause: BaseException) -> None:
+        self.target_name = target_name
+        self.cause_class = type(cause).__name__
+        super().__init__(
+            f"the secret of target {target_name!r} could not be read from Vault "
+            f"({self.cause_class}); the call to the target did not start"
+        )
 
 
 def secret_ref_prefix(secret_ref: str) -> str:
@@ -669,6 +692,8 @@ async def _resolve_and_load(
         raise TargetSecretNotFoundError(target_name=target.name, secret_ref=ref) from exc
     except hvac.exceptions.Forbidden as exc:
         raise TargetSecretForbiddenError(target_name=target.name, secret_ref=ref) from exc
+    except requests.exceptions.RequestException as exc:
+        raise TargetSecretReadFailedError(target_name=target.name, cause=exc) from exc
     return store_ref, secret_data
 
 
@@ -945,9 +970,13 @@ async def load_param_secret_data(
     check_param_secret_ref(operator, target.secret_ref or "", param=param, mount=mount)
     try:
         return await load_vault_secret_data(target, operator, mount=mount)
-    except (TargetSecretNotFoundError, TargetSecretForbiddenError) as exc:
+    except (
+        TargetSecretNotFoundError,
+        TargetSecretForbiddenError,
+        TargetSecretReadFailedError,
+    ) as exc:
         # The ref came from a param, not from the target: report it as a
-        # param read error, with the hvac class as its cause.
+        # param read error, with the hvac or requests class as its cause.
         cause = exc.__cause__ if exc.__cause__ is not None else exc
         raise SecretRefReadError(
             param=param, secret_ref=target.secret_ref or "", cause=cause

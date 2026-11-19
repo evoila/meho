@@ -79,8 +79,13 @@ from meho_backplane.agents.grant_schemas import (
     AgentGrantCreate,
     GrantVerdict,
 )
-from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
-from meho_backplane.auth.operator import Operator
+from meho_backplane.agents.grants import (
+    AgentGrantService,
+    GrantRevokeNeedsPersonError,
+    GrantValidationError,
+)
+from meho_backplane.auth.operator import Operator, is_human_principal
+from meho_backplane.ui.auth.human import ensure_ui_human
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import subject_ref
@@ -475,11 +480,19 @@ async def submit_revoke(
     the REST DELETE contract; a clean revoke returns 204 +
     ``HX-Redirect: /ui/agents/grants``. Revoking drops the principal's
     explicit permission, reverting it to the ``safety_level`` default
-    (which never auto-executes a dangerous op).
+    (which never auto-executes a dangerous op). A console session of a
+    machine login removes only an ``auto-execute`` grant; a ``deny`` or
+    ``needs-approval`` grant gets 403 ``human_principal_required`` and
+    stays, the same as on REST and MCP.
     """
-    del operator  # gate only; the service revoke is tenant-scoped by session.
     service = AgentGrantService()
-    deleted = await service.revoke(session_ctx.tenant_id, grant_id)
+    try:
+        deleted = await service.revoke(
+            session_ctx.tenant_id, grant_id, auto_execute_only=not is_human_principal(operator)
+        )
+    except GrantRevokeNeedsPersonError:
+        ensure_ui_human(operator)
+        raise
     if not deleted:
         from fastapi import HTTPException
 

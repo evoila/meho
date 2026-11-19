@@ -733,7 +733,7 @@ async def enforce_subop_policy(
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
-    from meho_backplane.operations.op_policy import apply_step_classification
+    from meho_backplane.operations.op_policy import apply_step_policy
     from meho_backplane.policy.stamp import take_rule
 
     started = time.monotonic()
@@ -796,10 +796,11 @@ async def enforce_subop_policy(
         requires_approval=requires_approval,
         parameter_schema={},
     )
-    # A classification entry can raise the step's level or make it always
-    # wait, the same as for a called operation. Only the step's group key is
-    # read from a stored row; the step runs without one.
-    await apply_step_classification(tenant_id=operator.tenant_id, step=descriptor)
+    # The override rows of the step's operation and a classification entry
+    # can raise the step's level or make it wait, the same as for a called
+    # operation. Only the step's group key is read from a stored row; the
+    # step runs without one.
+    await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No

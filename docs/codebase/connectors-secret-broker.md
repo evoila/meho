@@ -230,6 +230,32 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   or written. Send a new request". The check runs before the sudo password
   lookup, before the source is read and before any SSH call. A `vault:`
   side names no MEHO target.
+- For each `keycloak:` side (a user password sink or a client secret
+  source) the card shows the Keycloak target the name points to
+  (`target_id`, `target_name`), how MEHO connects to it (`host`, `port`,
+  `scheme` and the TLS check `tls`) and the reference of its admin login
+  (`secret_ref`). The `port` is the one MEHO dials: the target's own port,
+  or 443 for https and 80 for http. `tls` says whether MEHO checks the
+  certificate, and names a pinned CA (by a short SHA-256 digest) and a TLS
+  server name when the target sets them. The server name shows also when
+  MEHO does not check the certificate, because MEHO still sends it in the
+  TLS handshake. The approved run compares the
+  id, these connection fields and the secret reference with the target it
+  finds (`connectors/keycloak/secret_move_target.py`, called where the
+  Keycloak store finds its target). Another target, a new host, port,
+  scheme, TLS setting or secret reference on the same target, or a card
+  without one of them, refuses the run with `KeycloakTargetChangedError`:
+  "Nothing was read or written. Send a new request". The check runs before
+  any Keycloak login; for a sink it also runs before the source is read.
+  `preview_operation`, `meho_approvals_get` and `meho_approvals_list`
+  leave these fields out; only the card a person reads shows them.
+- A move with a `keycloak:` side is a change of rights, like
+  `keycloak.user.reset_password`: it sets a Keycloak user's password or
+  reads a client secret. The request carries the rights-change mark
+  (`register_rights_change_check("secret.move", has_keycloak_side)` in
+  `move_preview.py`). So the requester never approves it, and another
+  admin (a tenant admin or a platform admin) must. A move between two
+  Vault places (or to a `linux:` place) is not a change of rights.
 - Before the `linux:` store uses SSH, it drops the SSH logins this server
   keeps for the target when a person changed the target since this server
   last saw it (`forget_target_if_changed`). So the script goes to the host
@@ -377,8 +403,9 @@ meho secret move \
 - `--to` writes it into the `client_secret` field of the KV-v2 secret at
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).
-- The op is `requires_approval=True`, so the move parks at
-  `awaiting_approval` and a human approves it before it runs. The response
+- The op is `requires_approval=True`, so the move waits for approval
+  before it runs. A `keycloak:` side makes it a change of rights, so
+  another admin must approve it, never the requester. The response
   is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 

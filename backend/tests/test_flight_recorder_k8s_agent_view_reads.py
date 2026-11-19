@@ -29,7 +29,6 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.api.v1.audit as audit_api
 import meho_backplane.operations.result_query as result_query_core
-from meho_backplane.api.v1.audit import router as audit_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -41,7 +40,6 @@ from meho_backplane.flight_recorder import SpanInput, load_trace, record_trace
 from meho_backplane.flight_recorder.agent_read import materialize_agent_trace_handle
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.middleware import RequestContextMiddleware
-from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.redaction.command_line import HIDDEN
 from meho_backplane.settings import get_settings
 
@@ -99,7 +97,7 @@ def client() -> Iterator[TestClient]:
     app = FastAPI()
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestContextMiddleware)
-    app.include_router(audit_router)
+    app.include_router(audit_api.router)
     yield TestClient(app)
 
 
@@ -289,7 +287,9 @@ async def test_agent_trace_handle_holds_the_cleaned_copy(
 
     assert handle is not None
     assert _FAKE not in handle.model_dump_json()
-    window = await read_result_window(operator, handle.handle_id, offset=0, limit=50)
+    window = await result_query_core.read_result_window(
+        operator, handle.handle_id, offset=0, limit=50
+    )
     _assert_cleaned({"spans": window["rows"]})
 
     # The stored trace, which a person reads, is unchanged.
@@ -311,5 +311,7 @@ async def test_agent_trace_handle_of_a_non_kubernetes_call_is_unchanged(
     handle = await materialize_agent_trace_handle(operator=operator, audit_id=audit_id, store=store)
 
     assert handle is not None
-    window = await read_result_window(operator, handle.handle_id, offset=0, limit=50)
+    window = await result_query_core.read_result_window(
+        operator, handle.handle_id, offset=0, limit=50
+    )
     assert window["rows"][0]["attributes"] == _spans("vmware-rest-9.0")[0].attributes

@@ -35,7 +35,6 @@ from meho_backplane.connectors.kubernetes.trace_agent_view import (
     LAST_APPLIED_MARKER,
     agent_view,
 )
-from meho_backplane.flight_recorder.agent_view import agent_view_attributes, agent_view_rows
 from meho_backplane.redaction.command_line import HIDDEN
 
 _FAKE = "made-up-value-not-real-8812"
@@ -266,7 +265,9 @@ def test_texts_inside_a_json_annotation_are_checked_for_secret_shapes(value: Any
 
 
 def test_managed_fields_are_left_out_of_body_and_summary() -> None:
-    attributes = agent_view_attributes(_k8s_span({"kind": "PodList", "items": [_pod()]}))
+    attributes = agent_view_mod.agent_view_attributes(
+        _k8s_span({"kind": "PodList", "items": [_pod()]})
+    )
 
     assert "managedFields" not in json.dumps(attributes)
     assert attributes["response_object"] == {"kind": "PodList", "item_count": 1}
@@ -327,7 +328,7 @@ def test_only_the_listed_values_change_in_a_kubernetes_span() -> None:
     original = _k8s_span({"kind": "PodList", "items": [_pod(args=["--password", _FAKE])]})
     before = copy.deepcopy(original)
 
-    view = agent_view_attributes(original)
+    view = agent_view_mod.agent_view_attributes(original)
 
     assert original == before  # the stored span is not touched
     expected = copy.deepcopy(original)
@@ -346,7 +347,7 @@ def test_a_non_kubernetes_span_is_copied_unchanged() -> None:
     span["connector_id"] = "vmware-rest-9.0"
     span["op_id"] = "vsphere.vm.list"
 
-    assert agent_view_attributes(span) == span
+    assert agent_view_mod.agent_view_attributes(span) == span
 
 
 @pytest.mark.parametrize(
@@ -367,7 +368,7 @@ def test_kubernetes_span_is_found_by_connector_or_operation(
     span["connector_id"] = connector_id
     span["op_id"] = op_id
 
-    view = agent_view_attributes(span)
+    view = agent_view_mod.agent_view_attributes(span)
 
     assert (view != span) is cleaned
 
@@ -375,7 +376,7 @@ def test_kubernetes_span_is_found_by_connector_or_operation(
 async def test_rows_without_a_kubernetes_span_are_returned_as_they_are() -> None:
     rows = [{"seq": 0, "attributes": {"connector_id": "vault", "response_body": {"a": 1}}}]
 
-    assert await agent_view_rows(rows) is rows
+    assert await agent_view_mod.agent_view_rows(rows) is rows
 
 
 # --------------------------------------------------------------------------
@@ -391,7 +392,7 @@ def test_large_pod_list_is_cleaned_in_time_in_line_with_its_size() -> None:
     span = _k8s_span({"kind": "PodList", "items": pods})
 
     started = time.perf_counter()
-    view = agent_view_attributes(span)
+    view = agent_view_mod.agent_view_attributes(span)
     elapsed = time.perf_counter() - started
 
     assert elapsed < _TIME_LIMIT_SECONDS
@@ -421,7 +422,7 @@ async def test_the_walk_runs_in_a_worker_thread(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(agent_view_mod, "agent_view_attributes", _spy)
     rows = [{"seq": 0, "attributes": _k8s_span(_pod())}]
 
-    cleaned = await agent_view_rows(rows)
+    cleaned = await agent_view_mod.agent_view_rows(rows)
 
     assert seen
     assert all(thread is not threading.main_thread() for thread in seen)
@@ -434,4 +435,4 @@ def test_a_body_nested_too_deep_raises_so_the_trace_is_withheld() -> None:
         node = {"a": node}
 
     with pytest.raises(RecursionError):
-        agent_view_attributes(_k8s_span(node))
+        agent_view_mod.agent_view_attributes(_k8s_span(node))

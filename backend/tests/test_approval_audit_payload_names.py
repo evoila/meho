@@ -85,6 +85,7 @@ def _person(sub: str, name: str) -> Operator:
 
 
 async def _park(session: AsyncSession, **kwargs: Any) -> uuid.UUID:
+    kwargs.setdefault("proposed_effect", {"safety_level": "caution"})
     request = await create_pending_request(
         session,
         operator=_person(_REQUESTER_SUB, _REQUESTER_NAME),

@@ -12,8 +12,8 @@ section 6 (hardware version 20).
 
 `deploy/appliance/build.sh <version> <out-dir>` runs the steps against the
 lab's vSphere 8 cluster with `govc`. `.github/workflows/appliance-build.yml`
-runs it on the lab runner and keeps the OVA and `SHA256SUMS` as workflow
-artifacts. Publishing is #4814.
+runs it on the lab runner and keeps the OVA and `SHA256SUMS-ova` as
+workflow artifacts. Its `publish` job signs and uploads them (below).
 
 The clean step is the security-relevant part. A file missed there would be
 copied from one OVA into every appliance: the same RKE2 keys, the same SSH
@@ -257,7 +257,9 @@ signs `SHA256SUMS` with cosign and checks it, and on a release run (input
 `publish`, started from the tag) makes the OS-package file, signs in to
 Google Cloud and uploads. Only a release run uses the GitHub environment
 `release` with the signing key ([RELEASING.md](../RELEASING.md),
-"Appliance release files"). The job log of a public repository is public.
+"Appliance release files"). A release run first reads that environment
+through the GitHub API and stops when it has no required reviewer or its
+deployment rule is not "tags `v*` only". The job log of a public repository is public.
 The vCenter login is in the repository secrets `GOVC_URL`,
 `GOVC_USERNAME` and `GOVC_PASSWORD`. The place of the build VM and its
 network are repository secrets too: `MEHO_LAB_DATASTORE`,

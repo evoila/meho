@@ -8,9 +8,9 @@
 # Runs by hand (workflow_dispatch) with a release tag. It fetches the
 # signed form-2 download of that tag from the GitHub release, checks the
 # signature and the checksum, builds the OVA, and keeps the OVA,
-# SHA256SUMS and the CIS scan's result list (#4640) as workflow artifacts.
-# Publishing is #4814. A run on every release tag comes once the release
-# test exists (#4816).
+# SHA256SUMS-ova and the CIS scan's result list (#4640) as workflow
+# artifacts. A run on every release tag comes once the release test
+# exists (#4816).
 #
 # Two jobs. The build job runs on the lab's runner, reads nothing secret
 # but the lab's own settings, and gets only read rights. The publish job
@@ -222,8 +222,9 @@ jobs:
 
       - name: Keep the OS update packages for the publish job
         # The .deb files are the OS updates of the build day, in
-        # ${RUNNER_TEMP}/os-debs. A release run stops in the publish job
-        # with a plain message when there are none.
+        # ${RUNNER_TEMP}/os-debs. When there are none, no artifact is kept,
+        # and the step "Download the OS update packages" of a release run
+        # fails.
         if: ${{ inputs.publish }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
@@ -252,6 +253,43 @@ jobs:
       TAG: ${{ inputs.tag }}
       RELEASE_RUN: ${{ (inputs.publish && github.ref == format('refs/tags/{0}', inputs.tag)) && '1' || '' }}
     steps:
+      - name: Check the settings of the environment release
+        # The workflow cannot enforce these two settings, so a release run
+        # reads them first and stops before the key is read. Without the
+        # tag rule, a branch run could use the environment and read the
+        # key. Without a required reviewer, anyone with write access could
+        # start a release run from an existing tag. This public repository
+        # lets the job's read-only token read both.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="repos/${GITHUB_REPOSITORY}/environments/release"
+          if ! environment=$(gh api "${api}"); then
+            echo "::error::Cannot read the environment release. Ask the release owner to check it in the repository settings."
+            exit 1
+          fi
+          reviewers=$(jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' <<<"${environment}")
+          if [[ "${reviewers}" -lt 1 ]]; then
+            echo "::error::The environment release has no required reviewer. Ask the release owner to add the release owner and the backup person as required reviewers."
+            exit 1
+          fi
+          if [[ "$(jq -r '.deployment_branch_policy.custom_branch_policies // false' <<<"${environment}")" != "true" ]]; then
+            echo "::error::The environment release has no tag rule. Ask the release owner to allow tags v* only."
+            exit 1
+          fi
+          if ! policies=$(gh api --paginate "${api}/deployment-branch-policies" --jq '.branch_policies[]'); then
+            echo "::error::Cannot read the tag rule of the environment release. Ask the release owner to check it in the repository settings."
+            exit 1
+          fi
+          # Only tag rules, and one of them is v*.
+          if [[ "$(jq -s 'any(.type == "tag" and .name == "v*") and all(.type == "tag")' <<<"${policies}")" != "true" ]]; then
+            echo "::error::The environment release must allow tags v* only. Ask the release owner to fix its deployment rule."
+            exit 1
+          fi
+          echo "The environment release has a required reviewer and allows tags v* only."
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -337,7 +375,8 @@ jobs:
         # service account are secrets of the environment "release", not
         # variables: the job log prints the inputs of an action, and GitHub
         # masks only secrets there. The service account may only create and
-        # read objects in the release bucket.
+        # read objects in the release bucket. The provider's condition must
+        # allow only this repository and the environment "release".
         if: ${{ env.RELEASE_RUN == '1' }}
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
         with:

@@ -458,7 +458,7 @@ class OsPackagesTests(ReleaseFilesCase):
 
                 self.assertEqual(1, result.returncode)
                 self.assertIn(
-                    "The signing key is not set up. The project owner adds it.",
+                    "The signing key is not set up. The release owner adds it.",
                     result.stderr,
                 )
         self.assertFalse(self.package_file.exists())
@@ -603,7 +603,7 @@ class UploadTests(ReleaseFilesCase):
 
         self.assertEqual(1, result.returncode)
         self.assertIn(
-            "The bucket is not set up. The project owner creates it.", result.stderr
+            "The bucket is not set up. The release owner creates it.", result.stderr
         )
         self.assertFalse(self.log.exists())
 

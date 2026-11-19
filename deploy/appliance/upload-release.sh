@@ -74,7 +74,7 @@ main() {
     # Not local: in_bucket reads it.
     bucket=${MEHO_RELEASE_BUCKET:-}
     [[ -n $bucket ]] ||
-        fail "The bucket is not set up. The project owner creates it." \
+        fail "The bucket is not set up. The release owner creates it." \
             "ask the release owner to create the bucket and set the variable MEHO_RELEASE_BUCKET."
     [[ $bucket =~ ^[a-z0-9][a-z0-9._-]*$ ]] || usage_error "the bucket name is not valid."
     command -v gcloud >/dev/null || fail "gcloud is not installed." "install the Google Cloud CLI on the runner."

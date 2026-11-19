@@ -77,6 +77,7 @@ main() {
     done
 
     local key=${MEHO_OS_PACKAGES_SIGNING_KEY:-} release=
+    unset MEHO_OS_PACKAGES_SIGNING_KEY
     [[ ${MEHO_RELEASE:-} != 1 ]] || release=1
     local want_fingerprint=
     if [[ -n $release ]]; then
@@ -91,7 +92,7 @@ main() {
     fi
     if [[ -z $key ]]; then
         if [[ -n $release ]]; then
-            fail "The signing key is not set up. The project owner adds it." \
+            fail "The signing key is not set up. The release owner adds it." \
                 "ask the release owner to add the secret MEHO_OS_PACKAGES_SIGNING_KEY to the environment \"release\"."
         fi
         usage_error "give a signing key in MEHO_OS_PACKAGES_SIGNING_KEY or MEHO_OS_PACKAGES_SIGNING_KEY_FILE."

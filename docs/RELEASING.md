@@ -148,6 +148,19 @@ key and never uploads.
   `MEHO_RELEASE_GCP_SERVICE_ACCOUNT` for the Google Cloud sign-in (see
   below).
 
+Both the tag rule and the required reviewers are needed. The workflow
+cannot set or enforce them; only the repository settings can.
+
+- Without the tag rule, a run from a branch can use the environment and
+  read the signing key.
+- Without a required reviewer, anyone with write access can start a
+  release run from an existing tag.
+
+So the first step of a release run, "Check the settings of the
+environment release", reads the environment through the GitHub API. It
+stops the run, before the key is read, when the environment has no
+required reviewer, or when its deployment rule is not "tags `v*` only".
+
 **Signing the OS-package file.** A release run (`MEHO_RELEASE=1`) reads the
 key only from `MEHO_OS_PACKAGES_SIGNING_KEY`, never from a file. It stops
 with a plain message when the secret is empty. It stops when the key's
@@ -166,6 +179,16 @@ each step, and GitHub hides only secrets there. The service account may
 only create and read objects in the release bucket (for example the role
 "Storage Object Creator" plus "Storage Object Viewer" on that bucket
 only), nothing else.
+
+Set the condition of the workload identity provider to this repository
+and the environment `release`, for example:
+
+```text
+assertion.repository == 'evoila/meho' && assertion.environment == 'release'
+```
+
+Without this condition, any workflow run of this repository could sign in
+as the upload account.
 
 **The upload step.** `deploy/appliance/upload-release.sh` copies the OVA,
 the OS-package file, `SHA256SUMS` and its bundle to the folder of the

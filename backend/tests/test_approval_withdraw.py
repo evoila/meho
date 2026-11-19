@@ -11,6 +11,8 @@ on a withdrawn request, and the agent waiter. The rules:
   else, an approver included, gets 403. A person, an agent and a service
   principal can each withdraw their own request.
 * Only a ``pending`` request; a closed one gets 409.
+* The people behind the sender are shown only to a person: an agent login
+  that withdraws or reads the request gets ``None`` for them.
 * One ``approval.withdraw`` audit row, which is not a decision row and
   not an operation run: the audit query shows it as ``withdrawn`` (#5717).
 * Approve / reject / decide on a withdrawn request answer 409, and the
@@ -329,6 +331,37 @@ async def test_route_each_principal_kind_withdraws_its_own_request(
     assert body["withdrawn_at"] is not None
     assert body["reviewed_by"] is None
     assert body["decided_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_route_people_behind_are_shown_only_to_a_person(
+    client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = client
+    request_id = await _park()
+
+    withdrawn = await ac.post(
+        f"/api/v1/approvals/{request_id}/withdraw",
+        json={},
+        headers=_headers(key, sub=_SENDER_SUB, role=TenantRole.READ_ONLY, kind="agent"),
+    )
+    agent_reader = _headers(key, sub="agent:reader", role=TenantRole.OPERATOR, kind="agent")
+    shown = await ac.get(f"/api/v1/approvals/{request_id}", headers=agent_reader)
+    listed = await ac.get("/api/v1/approvals?status=withdrawn", headers=agent_reader)
+    person = await ac.get(
+        f"/api/v1/approvals/{request_id}", headers=_headers(key, sub=_APPROVER_SUB, kind="user")
+    )
+
+    for response in (withdrawn, shown, person):
+        assert response.status_code == 200, response.text
+    assert listed.status_code == 200, listed.text
+    machine_views = [withdrawn.json(), shown.json(), *listed.json()]
+    assert len(machine_views) == 3
+    for view in machine_views:
+        assert view["people_behind"] is None
+        assert view["people_behind_known"] is None
+    assert person.json()["people_behind_known"] is True
+    assert person.json()["people_behind"]
 
 
 @pytest.mark.asyncio

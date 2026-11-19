@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -43,6 +44,7 @@ from meho_backplane.operations.approval_queue import (
     UnknownRequesterApprovalError,
     approve_request,
     create_pending_request,
+    record_approval_step_event,
     requester_of,
 )
 from meho_backplane.operations.approval_rights import (
@@ -197,6 +199,19 @@ async def test_an_admin_behind_the_agent_approves_it_as_an_own_change() -> None:
     assert row.payload["self_approved"] is True
     assert row.payload["approver_behind_requester"] is True
     assert row.payload["approver_behind_why"] == ["registered", "owns"]
+
+    target = (
+        "meho_backplane.operations.addon_step_events."
+        "AddonStepEventService.record_if_owned_committed"
+    )
+    with patch(target, new_callable=AsyncMock) as record:
+        await record_approval_step_event(
+            tenant_id=_TENANT, request=decided, decision="approved", audit_id=uuid.uuid4()
+        )
+    step = record.await_args.kwargs["payload"]
+    assert step["self_approved"] is True
+    assert "approver_behind_requester" not in step
+    assert "approver_behind_why" not in step
 
 
 async def test_a_person_not_behind_the_agent_approves_as_today() -> None:

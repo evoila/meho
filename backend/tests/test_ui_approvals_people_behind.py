@@ -6,7 +6,8 @@
 REST (``ApprovalRequestView.people_behind`` and ``people_behind_known``)
 returns them, and the console shows them on the request card and in the
 request modal. When MEHO knows nobody behind the login, every surface says
-"not known". A person's request shows nothing extra.
+"not known". A person's request shows nothing extra. REST shows the list
+only to a person; an agent, service or runner login reads ``None``.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import respx
 from sqlalchemy import update
 
 from meho_backplane.api.v1.approvals import _view
+from meho_backplane.auth.operator import PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from tests.test_ui_approvals import (
@@ -93,9 +95,10 @@ def _panel() -> str:
 
 
 def test_rest_view_names_the_people_behind() -> None:
-    known = _view(_load(_seed(kind="agent", people=_PEOPLE)))
-    unknown = _view(_load(_seed(kind="service", people=[])))
-    person = _view(_load(_seed(kind="user", people=None)))
+    reader = _operator(tenant_id=_TENANT_A)
+    known = _view(_load(_seed(kind="agent", people=_PEOPLE)), viewer=reader)
+    unknown = _view(_load(_seed(kind="service", people=[])), viewer=reader)
+    person = _view(_load(_seed(kind="user", people=None)), viewer=reader)
 
     assert known.people_behind_known is True
     assert known.people_behind is not None
@@ -107,6 +110,17 @@ def test_rest_view_names_the_people_behind() -> None:
     assert unknown.people_behind == []
     assert person.people_behind is None
     assert person.people_behind_known is None
+
+
+def test_rest_view_hides_the_people_behind_from_an_agent_login() -> None:
+    reader = _operator(tenant_id=_TENANT_A).model_copy(
+        update={"principal_kind": PrincipalKind.AGENT}
+    )
+    row = _load(_seed(kind="agent", people=_PEOPLE))
+
+    for view in (_view(row, viewer=reader), _view(row)):
+        assert view.people_behind is None
+        assert view.people_behind_known is None
 
 
 def test_modal_and_card_name_the_people_behind_an_agent() -> None:

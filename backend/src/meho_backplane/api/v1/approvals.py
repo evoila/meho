@@ -99,7 +99,7 @@ from meho_backplane.auth.approval_sign_in import (
     fresh_sign_in_required,
 )
 from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.auth.rbac import (
     require_approvals_access,
     require_fresh_approval_sign_in,
@@ -429,10 +429,12 @@ class ApprovalRequestView(BaseModel):
     #: The people behind the agent, service or runner login that asked
     #: (who set it up, changed it, gave its grants, made its schedules or
     #: started its run). They count as the requester. ``None`` for a
-    #: person's request. Additive.
+    #: person's request, and ``None`` when an agent, service or runner
+    #: login reads the request. Additive.
     people_behind: list[PersonBehindView] | None = None
     #: ``False`` when a machine login asked and MEHO knows nobody behind it:
-    #: then only an Admin may approve. ``None`` for a person's request.
+    #: then only an Admin may approve. ``None`` for a person's request,
+    #: and ``None`` when an agent, service or runner login reads it.
     #: Additive.
     people_behind_known: bool | None = None
     op_id: str
@@ -719,8 +721,14 @@ def _execution_outcome(dispatch_result: Any) -> str | None:
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
-def _people_behind_fields(row: ApprovalRequest) -> dict[str, Any]:
-    """``people_behind`` and ``people_behind_known`` of *row* for the view."""
+def _people_behind_fields(row: ApprovalRequest, viewer: Operator | None) -> dict[str, Any]:
+    """``people_behind`` and ``people_behind_known`` of *row* for the view.
+
+    Only a person reads them: for an agent, service or runner login that
+    calls the API, and without a known caller, both fields stay ``None``.
+    """
+    if viewer is None or not is_human_principal(viewer):
+        return {}
     if people_behind_line(row.principal_kind, row.people_behind) is None:
         return {}
     people = [
@@ -735,6 +743,8 @@ def _view(
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
     right: ApproveRight | None = None,
+    *,
+    viewer: Operator | None = None,
 ) -> ApprovalRequestView:
     """Convert an ORM row to a response view.
 
@@ -744,6 +754,8 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row. *right* (#3329) says
     whether the caller may approve the request; list and show pass it.
+    *viewer* is the caller: the people behind a machine login are shown
+    only to a person.
     """
     expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
@@ -754,7 +766,7 @@ def _view(
         principal_act=row.principal_act,
         principal_name=row.principal_name,
         principal_kind=row.principal_kind,
-        **_people_behind_fields(row),
+        **_people_behind_fields(row, viewer),
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,
@@ -1047,7 +1059,10 @@ async def list_approvals(
                 order=order,
             )
             floor = await load_install_floor(session)
-        return [_view(r, right=approve_right(operator, r, floor=floor)) for r in unknown_rows]
+        return [
+            _view(r, right=approve_right(operator, r, floor=floor), viewer=operator)
+            for r in unknown_rows
+        ]
     # Validate status value against the closed enum; "all" means no filter.
     status_filter: ApprovalRequestStatus | None = None
     if status != "all":
@@ -1080,7 +1095,7 @@ async def list_approvals(
         rows = list(result.scalars().all())
         floor = await load_install_floor(session)
 
-    return [_view(r, right=approve_right(operator, r, floor=floor)) for r in rows]
+    return [_view(r, right=approve_right(operator, r, floor=floor), viewer=operator) for r in rows]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -1116,7 +1131,13 @@ async def get_approval_request(
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
         floor = await load_install_floor(session)
-    return _view(row, reviewer_context, delegation, approve_right(operator, row, floor=floor))
+    return _view(
+        row,
+        reviewer_context,
+        delegation,
+        approve_right(operator, row, floor=floor),
+        viewer=operator,
+    )
 
 
 @router.get("/{request_id}/script", response_model=ApprovalScriptPageView)
@@ -1560,7 +1581,7 @@ async def withdraw_approval_request(
         decision="withdrawn",
         audit_id=request._audit_id,  # type: ignore[attr-defined]
     )
-    return _view(request)
+    return _view(request, viewer=operator)
 
 
 @router.post(
@@ -1624,7 +1645,9 @@ async def mark_approval_outcome_checked(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="note_required"
         ) from exc
     return _view(
-        request, right=approve_right(operator, request, floor=await current_install_floor())
+        request,
+        right=approve_right(operator, request, floor=await current_install_floor()),
+        viewer=operator,
     )
 
 

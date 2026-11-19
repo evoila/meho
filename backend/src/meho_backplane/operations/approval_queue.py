@@ -4531,8 +4531,6 @@ async def record_approval_step_event(
         payload["reviewed_by"] = request.reviewed_by
         reviewer = request.reviewed_by
         payload["self_approved"] = reviewer is not None and is_self_approval(reviewer, request)
-        if reviewer is not None:
-            payload.update(_behind_audit_fields(reviewer, request))
         rule = getattr(request, "_approval_rule", None)
         if rule is not None:
             payload["approval_rule"] = str(rule)

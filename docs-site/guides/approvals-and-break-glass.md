@@ -246,7 +246,8 @@ Keycloak), only an Admin may approve its requests.
 
 The request shows these people: the request card and window in the web
 interface ("Set up by ... Grant by ..."), `meho approvals show`
-("Behind it:"), and the REST answer (`people_behind`). When MEHO knows
+("Behind it:"), and the REST answer (`people_behind`) when a person asks.
+An agent, add-on or runner login reads `null` there. When MEHO knows
 nobody, they say "Set up by: not known".
 
 Use an agent to run changes on a schedule. An agent is never a way to

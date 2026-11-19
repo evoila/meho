@@ -105,6 +105,7 @@ __all__ = [
     "crd_row",
     "crd_version_row",
     "custom_resource_row",
+    "custom_resource_rows",
 ]
 
 
@@ -727,3 +728,10 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
 
 #: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
 OPS: tuple[KubernetesOp, ...] = CUSTOM_RESOURCE_OPS
+
+
+def custom_resource_rows(
+    items: list[dict[str, Any]], fields: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Build one :func:`custom_resource_row` for each object in *items*."""
+    return [custom_resource_row(obj, fields) for obj in items]

@@ -9,10 +9,13 @@
   and ``status`` hidden before ``spec_excerpt``, ``status_excerpt`` and
   ``fields`` are built, also a secret-named field inside a text value, and
   also when the excerpt is cut.
+* ``k8s.cr.list`` builds its rows in a worker thread: other work goes on
+  while a large text value is read.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -236,6 +239,49 @@ async def test_cr_list_of_another_kind_hides_credential_fields_in_excerpt_and_fi
     assert row["fields"]["spec.auth"]["password"] == _MARKER
     assert row["fields"]["status.connection"] == {"token": _MARKER}
     assert row["annotations"] == {"note": f'password: "{_MARKER}"', "owner": "team-a"}
+
+
+async def test_cr_list_with_a_large_text_value_lets_other_work_go_on() -> None:
+    entry = {"name": "app", "password": _FAKE_TEXT, "note": "n" * 4000}
+    bootstrap = json.dumps([entry] * (10 * 1024 * 1024 // len(json.dumps(entry)) + 1))
+    assert len(bootstrap) >= 10 * 1024 * 1024
+    database = _database()
+    database["spec"]["bootstrap"] = bootstrap
+    ticks = 0
+    done = asyncio.Event()
+
+    async def other_work() -> None:
+        nonlocal ticks
+        while not done.is_set():
+            ticks += 1
+            await asyncio.sleep(0.001)
+
+    client_patch, co_patch = _api_client_patches()
+    with client_patch, co_patch as co_cls:
+        co_cls.return_value.list_namespaced_custom_object = AsyncMock(
+            return_value={"kind": "DatabaseList", "items": [database]}
+        )
+        worker = asyncio.create_task(other_work())
+        await asyncio.sleep(0)
+        ticks_before = ticks
+        result = await _make_connector().k8s_cr_list(
+            _make_operator(),
+            _TARGET,
+            {
+                "group": "db.example.test",
+                "version": "v1",
+                "plural": "databases",
+                "namespace": "team-a",
+                "fields": ["spec.bootstrap"],
+            },
+        )
+        done.set()
+        await worker
+
+    assert ticks - ticks_before >= 20
+    assert _shown_fakes(result) == []
+    (row,) = result["rows"]
+    assert json.loads(row["fields"]["spec.bootstrap"])[0]["password"] == _MARKER
 
 
 def test_cut_excerpt_hides_the_secret_before_the_cut() -> None:

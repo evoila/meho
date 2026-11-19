@@ -1962,12 +1962,12 @@ There is no MCP tool for it; the agent working surface is unchanged.
 |---|---|
 | The caller made the request (`sub == principal_sub`). | 403 `not_request_owner` |
 | `result_state` is `failed`. Not `executed`, not `uncertain` (MEHO does not know if the change happened, so it never runs it again), not `started` (still running), not a request that is not `approved`. | 409 `approval_rerun_not_allowed` |
+| The request is not for a step of a multi-step operation (`resume_parent` is not set). A re-run would send the steps after the approved step again, so the requester starts a new run of the operation. | 409 `approval_rerun_needs_new_approval` (`multi_step_run`) |
 | MEHO has params to run with: the caller sent them, or the request stored them. | 422 `approval_rerun_params_required` |
 | The `expires_at` deadline has not passed. | 409 `approval_rerun_needs_new_approval` (`deadline_passed`) |
 | MEHO was not updated since the request was made (same check as `refuse_resume_if_release_changed`). | same (`release_changed`) |
 | The work reference (`Meho-Work-Ref` header) is the approved one. | same (`work_ref_changed`) |
 | The params match `params_hash`. | same (`params_changed`) |
-| A multi-step credential write still has its input. MEHO keeps it only until the first run, so this one always needs a new approval. | same (`input_not_kept`) |
 | The saved target still resolves. | same (`target_gone`) |
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
@@ -4796,22 +4796,90 @@ completes in a **single** resume, each step running exactly once. The
 invariant is explicit: **every governed sub-op of a composite that must
 finish in one resume is not `destructive` and not `requires_approval`**.
 
-A **multi-gate re-park** — a governed sub-op that is `destructive` or
-`requires_approval=True` — is **not supported** by this re-entry
-mechanism. The mechanism clears exactly one
-sub-op and keeps no record of already-executed legs, so a second park +
-second resume would re-enter the composite from the top and re-run every
-earlier governed leg — a duplicate write (the reviewer reproduced a duplicate
-`CreateVM_Task` this way). Rather than allow that, the guard **fails closed**:
-while `composite_resume_scope_var` is set, if any sub-op *other* than the
-approved one reaches `NEEDS_APPROVAL`, `enforce_subop_policy` returns
-`composite_resume_multi_gate_unsupported` — a distinct error naming the
-composite, the approved sub-op, and the sub-op that would have parked — and
-does **not** park a second request or continue. It is audited via the
-composite's own dispatch audit row. This is enforced in
-`enforce_subop_policy` (the `NEEDS_APPROVAL` branch, keyed off the unconsumed
-`composite_resume_scope_var`). Only a `destructive` or `requires_approval`
-step can reach it.
+A later step that is `destructive` or marked `requires_approval` waits for
+its own approval, also during a resume. The steps the run already did are
+stored with that new request, so its resume sends none of them again. See
+the next section.
+
+#### How a multi-step run goes on after an approval
+
+MEHO never sends a step of a multi-step operation twice. The approval of
+a step runs the operation again from its first step, so MEHO keeps a record
+of the steps each run went through (`operations/composite_steps.py`):
+
+- **Recording.** `dispatch_composite` binds one `StepJournal` for each run
+  of a composite handler (`composite_step_journal`). Each step gets an
+  entry with its connector, op id, target and params hash. The target is
+  kept as its id (`step_target_key`), or its name when it has no id.
+  Its status:
+  - a `dispatch_child` call: `started` before it runs, then `done` with
+    the `OperationResult` the composite got back;
+  - a `run_governed_subop(..., call=...)` call: `started` after the gate
+    lets it go ahead, then `done` with what `call` returned;
+  - a step that only `enforce_subop_policy` checks: `started`. The seam
+    does not see the handler's own call, so this step never has a stored
+    end.
+  A result is kept only when the step's operation does not read, write or
+  make a credential (its class from `classify_op` is not
+  `credential_read`, `credential_mint` or `credential_write`, and its
+  answer does not hide its values, `hides_secret_values`), and the result
+  is JSON and holds no secret-named value, also no number under a secret
+  name (`scrub_secret_fields` with `hide_numbers=True`); otherwise the
+  entry stays `started`. A `call`
+  that raises leaves its entry `started` too.
+- **Storing.** When a step waits, the record goes on the new request as
+  `resume_parent["steps"]` (left out when it is empty). Like the rest of
+  `resume_parent` it is internal and never shown. For a credential write
+  it is inside the encrypted copy of the run input.
+- **Replaying.** `composite_resume_binding` hands the stored steps to the
+  first run of that composite (`composite_resume_steps`). For each step,
+  `StepJournal.take` looks for the first entry in the rest of the record
+  with the same connector, op id, target and params hash. A step with such
+  an entry is not sent again. The step gets a copy of the stored entry,
+  so a handler that changes the result does not change what a later wait
+  stores:
+  - `done`: it returns the stored result (`run_governed_subop` gives
+    `SubopStep(value=<stored>, replayed=True)`, `dispatch_child` gives the
+    stored `OperationResult`);
+  - `started`: the run stops with `composite_resume_step_outcome_unknown`
+    (`execution_outcome: "uncertain"`, `retry: false`). MEHO does not know
+    if that change happened.
+- **Before the approved step.** Until the approved step has run, every step
+  must come from the record. A governed step that is not in it, and is not
+  `after_main_effect`, is refused before it runs
+  (`composite_resume_repeats_write`). So is a `dispatch_child` step, unless
+  the approved step is `after_main_effect` (that composite continues there
+  on its own and may read on the way).
+- **A wait after a step with no stored end.** When a step would wait and
+  the record already holds a step with no stored end (`started`), the run
+  after that approval could only stop at that step. So MEHO asks no person
+  and stops at once with `composite_resume_step_outcome_unknown`. Not for an
+  `after_main_effect` step: its run after the approval continues at that
+  step and does not reach the earlier one. A step that reads, writes or
+  makes a credential has no stored end too, so a later step of the same
+  run that needs approval stops the run this way.
+- **A second wait.** A step that needs its own approval during a resume
+  waits again. Its request stores the whole record so far: the replayed
+  steps, the approved step and the steps after it. Two, three or more
+  waits in one run each send every change once.
+- **A rejected approval** runs nothing: no resume starts.
+- **No re-run.** A request of a step of a multi-step operation
+  (`resume_parent` set) never runs again through
+  `POST /api/v1/approvals/{id}/rerun`: it is refused with
+  `multi_step_run`, and the requester starts a new run of the operation.
+
+What a composite author does: run each change of a composite that can go on
+after an approval through `run_governed_subop`, and use the `value` it
+gives back (it is the stored result on a resume). A composite that keeps
+`enforce_subop_policy` plus its own call still never sends a step twice,
+but a later step of it that needs approval stops the run at once, with no
+approval request.
+
+The same holds on every resume path: the person's approval in the console,
+REST, MCP or CLI, the agent that waited (`agent/approval_wait.py`), and a
+scheduled run (its request is approved and run on the person's path). Tests:
+`test_operations_composite_steps_resume.py` (through the real dispatcher,
+counting each change that reached the target).
 
 #### Continuing where it stopped (#4217)
 
@@ -4834,12 +4902,9 @@ second VM). So these steps tell the seam two things:
 - `after_main_effect=True`: this step runs after the main change. The row
   stores `resume_parent["after_main_effect"] = true`.
 
-**The safety-check change (the relaxed guard).** The multi-gate guard above
-does not apply to an `after_main_effect` step. Such a step may wait for
-approval even during a re-run, because its own re-run continues at that
-step and repeats no earlier write. `enforce_subop_policy` checks
-`if resume_scope is not None and not after_main_effect`. Steps without the
-mark still fail closed (`test_vm_create_multi_gate_resume_fails_closed_no_double_execute`).
+**Waiting again.** Such a step may wait for approval during a re-run, like
+any other step (see "How a multi-step run goes on after an approval"). Its
+own re-run continues at that step.
 
 **Who the new request belongs to.** A step that waits again during a
 re-run gets a new approval request. That request names the requester of
@@ -4857,16 +4922,16 @@ Two checks in `enforce_subop_policy` stop a composite that gets this wrong:
 - `after_main_effect=True` without `resume_state` is refused
   (`composite_resume_state_missing`), in every run, before the policy
   check. Without state the re-run could only start from the beginning.
-- During the re-run of an `after_main_effect` park, until the approved
-  sub-op has cleared, any other governed write that is not itself
+- During a re-run, until the approved sub-op has cleared, any other
+  governed step that is not a stored step of the earlier run and not itself
   `after_main_effect` is refused before it runs, whatever the policy
-  verdict (`composite_resume_repeats_write`). That is a write the first run
-  already did.
+  verdict (`composite_resume_repeats_write`).
 
-What is left: a composite can still repeat an earlier step that is itself
-marked `after_main_effect` (for example a second removal in the same
-cleanup), so only mark steps that are safe to run again. Ungoverned reads
-are not checked.
+An earlier step that is itself marked `after_main_effect` (for example a
+second removal in the same cleanup) and is in the stored record is not sent
+again. One that is not in the record may run, so only mark steps that are
+safe to run again. Reads a composite makes on its own connector session are
+not checked.
 
 Steps that use the switch today: in `vm.deploy_from_library` the rename,
 the power-on, the cleanup VM delete and the vApp destroy; in `vm.create`
@@ -4989,10 +5054,8 @@ What the agent waiter does:
 One difference stays on purpose: the agent waiter re-enters the composite
 as the **agent**, not as the reviewer. So every other governed sub-op is
 checked against the agent's own grants. If one would need its own approval,
-the multi-gate guard above fails closed
-(`composite_resume_multi_gate_unsupported`) on the agent path too, unless
-that step is marked `after_main_effect` (#4217): then it waits for its own
-approval. If the agent has no grant for it, that sub-op is denied.
+it waits for it, with the steps already done stored on the new request. If
+the agent has no grant for it, that sub-op is denied.
 
 Note: every shipped governed composite is `requires_approval=True` at the
 top level, so an agent's first call makes the composite itself wait for

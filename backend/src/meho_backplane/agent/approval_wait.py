@@ -463,8 +463,8 @@ async def _resume_approved_or_already_resumed(
     sub-op gate again and parked a new request, so nothing executed. The
     re-entry runs as the agent principal (the operator surface runs as the
     reviewer); any other governed sub-op is checked against the agent's own
-    grants, and one that would need a second approval fails closed
-    (``composite_resume_multi_gate_unsupported``). A direct park
+    grants, and one that would need a second approval waits for it, with the
+    steps already done stored on the new request. A direct park
     (``resume_parent IS NULL``) re-dispatches the agent's original
     *call_arguments*, with ``connector_id`` taken from the row (see
     :func:`_redispatch_approved`).

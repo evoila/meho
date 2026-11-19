@@ -24,6 +24,8 @@ Covered:
 * the step record itself: a result with a secret-named value (also a
   number) is not kept, the result of a credential step is not kept under any
   field name, and a step is matched only on its own target.
+
+Credential steps before a wait: ``test_operations_composite_credential_steps_resume.py``.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ from meho_backplane.operations.approval_rerun import (
 )
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
+    STEP_DONE_NO_RESULT,
     STEP_STARTED,
     StepJournal,
 )
@@ -451,15 +454,21 @@ def test_result_with_a_secret_value_is_not_kept() -> None:
 
 
 @pytest.mark.parametrize(
-    "op_id", ["vault.kv.read", "vault.kv.put", "vault.token.create"], ids=["read", "write", "make"]
+    ("op_id", "status"),
+    [
+        ("vault.kv.read", STEP_STARTED),
+        ("vault.kv.put", STEP_DONE_NO_RESULT),
+        ("vault.token.create", STEP_DONE_NO_RESULT),
+    ],
+    ids=["read", "write", "make"],
 )
-def test_result_of_a_credential_step_is_not_kept(op_id: str) -> None:
+def test_result_of_a_credential_step_is_not_kept(op_id: str, status: str) -> None:
     """A credential step's result is not kept, also when the value is under a neutral name."""
     journal = StepJournal(composite_op_id="vault.composite.x")
     entry = journal.start("vault-1.x", op_id, None, {"path": "app"})
     journal.finish(entry, {"data": {"value": "made-up-value"}})
 
-    assert entry["status"] == STEP_STARTED
+    assert entry["status"] == status
     assert "result" not in entry
     assert "made-up-value" not in str(journal.stored())
 

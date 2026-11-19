@@ -886,7 +886,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -997,7 +997,7 @@ jobs:
         # stay hidden on main. Same pinned action and Helm version as
         # chart.yml and the helm-lint-template job below. Every shard
         # needs it: the file split can put a chart test file in any shard.
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
         with:
           version: v3.16.4
 
@@ -1425,7 +1425,7 @@ jobs:
         # The tests/test_chart_*.py files render the chart with helm. Same pin
         # as the unit shards; MEHO_REQUIRE_HELM=1 below makes them fail, not
         # skip, when helm is missing.
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
         with:
           version: v3.16.4
 
@@ -1949,7 +1949,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -2608,7 +2608,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -2746,7 +2746,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -2920,7 +2920,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -3231,7 +3231,7 @@ jobs:
         # the central CI check exercises the same Helm binary the
         # publish pipeline uses. >=3.8 ships OCI helm push (irrelevant
         # here — this job never pushes — but kept aligned).
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
         with:
           version: v3.16.4
 

@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<pfsense>
+	<version>23.3</version>
+	<lastchange></lastchange>
+	<system>
+		<optimization>normal</optimization>
+		<hostname>fw-example</hostname>
+		<domain>home.arpa</domain>
+		<dnsserver>192.0.2.53</dnsserver>
+		<group>
+			<name>admins</name>
+			<description><![CDATA[System Administrators]]></description>
+			<scope>system</scope>
+			<gid>1999</gid>
+			<member>0</member>
+			<priv>page-all</priv>
+		</group>
+		<user>
+			<name>admin</name>
+			<descr><![CDATA[System Administrator]]></descr>
+			<scope>system</scope>
+			<groupname>admins</groupname>
+			<bcrypt-hash>$2y$10$ccccccccccccccccccccccDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD</bcrypt-hash>
+			<uid>0</uid>
+			<priv>user-shell-access</priv>
+		</user>
+		<nextuid>2000</nextuid>
+		<nextgid>2000</nextgid>
+		<timezone>Etc/UTC</timezone>
+	</system>
+	<interfaces>
+		<wan>
+			<enable></enable>
+			<if>vtnet0</if>
+			<ipaddr>dhcp</ipaddr>
+			<descr><![CDATA[WAN]]></descr>
+		</wan>
+		<lan>
+			<enable></enable>
+			<if>vtnet1</if>
+			<ipaddr>192.0.2.1</ipaddr>
+			<subnet>24</subnet>
+			<descr><![CDATA[LAN]]></descr>
+		</lan>
+	</interfaces>
+	<filter>
+		<rule>
+			<id></id>
+			<tracker>1700000100</tracker>
+			<type>pass</type>
+			<interface>lan</interface>
+			<ipprotocol>inet</ipprotocol>
+			<tag></tag>
+			<tagged></tagged>
+			<max></max>
+			<protocol>tcp</protocol>
+			<source>
+				<network>lan</network>
+			</source>
+			<destination>
+				<any></any>
+				<port>443</port>
+			</destination>
+			<descr><![CDATA[Allow web]]></descr>
+		</rule>
+		<rule>
+			<id></id>
+			<tracker>1700000101</tracker>
+			<type>pass</type>
+			<interface>lan</interface>
+			<ipprotocol>inet</ipprotocol>
+			<tag></tag>
+			<tagged></tagged>
+			<max></max>
+			<protocol>tcp</protocol>
+			<source>
+				<network>lan</network>
+			</source>
+			<destination>
+				<any></any>
+				<port>53</port>
+			</destination>
+			<descr><![CDATA[Allow DNS]]></descr>
+		</rule>
+		<separator>
+			<lan></lan>
+		</separator>
+	</filter>
+	<revision>
+		<time>1762090000</time>
+		<description>admin@198.51.100.20 (Local Database): Firewall: Rules - saved/edited a firewall rule.</description>
+		<username><![CDATA[admin@198.51.100.20 (Local Database)]]></username>
+	</revision>
+	<gateways></gateways>
+</pfsense>

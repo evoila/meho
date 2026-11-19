@@ -6,9 +6,12 @@
 ``keycloak.group.member.add``, ``keycloak.role_mapping.assign``,
 ``keycloak.role_mapping.client.assign`` and
 ``keycloak.group.update_attributes`` change what a login may do in MEHO.
-``keycloak.user.update`` (a new email or user name) and
+``keycloak.user.update`` (a new email or user name),
 ``keycloak.user.credential.delete`` (a passkey or one-time code removed)
-change how a login signs in, so they count as a change of rights too.
+and ``keycloak.user.reset_password`` (a new password) change how a login
+signs in, so they count as a change of rights too. In the login realm they
+count as "gives platform admin" when the login has platform admin rights
+(:func:`~.ops_write_platform_reach.login_has_platform_admin`).
 When one of them waits for approval, :func:`with_grant_facts` adds a
 ``grant`` block to its preview:
 
@@ -62,6 +65,11 @@ from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
     attributes_set_platform_admin,
     group_gives_platform_admin,
 )
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    REASON_LOGIN,
+    login_has_platform_admin,
+    platform_fields,
+)
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
@@ -78,6 +86,8 @@ __all__ = [
     "CREDENTIALS_CHANGED",
     "GRANT_OPS",
     "MEMBER_CAP",
+    "is_login_realm",
+    "is_login_realm_name",
     "register_grant_ops",
     "with_grant_facts",
 ]
@@ -97,6 +107,7 @@ GRANT_OPS: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {
     "keycloak.role_mapping.client.assign": (("id",), None, None),
     "keycloak.user.update": (("id",), None, None),
     "keycloak.user.credential.delete": (("id",), None, None),
+    "keycloak.user.reset_password": (("id",), None, None),
     "keycloak.group.update_attributes": ((), "id", "name"),
 }
 
@@ -117,6 +128,17 @@ _BOUND_IDS: dict[str, tuple[str, str]] = {
 _CLIENT_ASSIGN: Final[str] = "keycloak.role_mapping.client.assign"
 _ROLE_OPS: Final[frozenset[str]] = frozenset({"keycloak.role_mapping.assign", _CLIENT_ASSIGN})
 _ATTRS: Final[str] = "keycloak.group.update_attributes"
+
+#: The ops that change how one login signs in: they need a platform admin when
+#: the login has platform admin rights.
+_LOGIN_OPS: Final[frozenset[str]] = frozenset(
+    {"keycloak.user.update", "keycloak.user.credential.delete", "keycloak.user.reset_password"}
+)
+
+#: Why a group or role change needs a platform admin.
+REASON_GROUP_OR_ROLE: Final[str] = (
+    "The group or role gives platform admin rights, or lets a login manage the realm."
+)
 
 
 def register_grant_ops() -> None:
@@ -144,7 +166,13 @@ def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
     return connector
 
 
-async def _login_realm(ctx: PreviewContext) -> bool:
+def is_login_realm_name(realm: str) -> bool:
+    """True when *realm* names a realm of MEHO's own login (letter case and spaces ignored)."""
+    own = {name.strip().casefold() for name in _backplane_login_realms()}
+    return realm.strip().casefold() in own
+
+
+async def is_login_realm(ctx: PreviewContext) -> bool:
     """True when the target manages a realm of MEHO's own login, or that cannot be read.
 
     The name is the one Keycloak answers with for the target's realm
@@ -165,8 +193,7 @@ async def _login_realm(ctx: PreviewContext) -> bool:
         name = _text(answer.get("realm")) if isinstance(answer, dict) else None
         if name is None:
             return True
-        own = {realm.strip().casefold() for realm in _backplane_login_realms()}
-        return name.casefold() in own or stored.casefold() in own
+        return is_login_realm_name(name) or is_login_realm_name(stored)
     except Exception:
         return True
 
@@ -303,6 +330,18 @@ async def _with_effective_roles(
     return platform
 
 
+async def _login_platform(ctx: PreviewContext, user_id: str | None) -> bool | None:
+    """Whether the login of a sign-in change has platform admin rights; ``None`` when unknown."""
+    connector = _live_connector(ctx)
+    if user_id is None or connector is None:
+        return None
+    try:
+        realm = resolve_realm_config(ctx.target).managed_realm
+    except Exception:
+        return None
+    return await login_has_platform_admin(connector, ctx, realm, user_id)
+
+
 def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
     """Wrap *builder* so its preview carries the ``grant`` block."""
     user_params, group_id_param, group_name_param = GRANT_OPS[op_id]
@@ -311,10 +350,17 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
         preview = await builder(ctx)
         if preview is None:
             return None
-        login_realm = await _login_realm(ctx)
+        login_realm = await is_login_realm(ctx)
+        user_id = await _user_id(ctx, user_params)
         group_id: str | None = None
-        if op_id == _CLIENT_ASSIGN and is_realm_management(ctx.params):
-            platform: bool | None = True
+        reason = REASON_GROUP_OR_ROLE
+        if op_id in _LOGIN_OPS:
+            platform: bool | None = _roles_include_platform_admin(ctx)
+            if platform is False and login_realm:
+                platform = await _login_platform(ctx, user_id)
+                reason = REASON_LOGIN
+        elif op_id == _CLIENT_ASSIGN and is_realm_management(ctx.params):
+            platform = True
         elif group_id_param is None or group_name_param is None:
             platform = _roles_include_platform_admin(ctx)
         else:
@@ -325,10 +371,10 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
                 op_id, ctx, preview, platform, login_realm=login_realm
             )
         grant: dict[str, Any] = {
-            "user_id": await _user_id(ctx, user_params),
+            "user_id": user_id,
             "group_id": group_id,
             "login_realm": login_realm,
-            "platform_admin": platform,
+            **platform_fields(platform, reason),
         }
         if not user_params:
             grant["members"] = (

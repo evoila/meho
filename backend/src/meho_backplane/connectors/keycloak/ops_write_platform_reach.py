@@ -1,0 +1,522 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Which Keycloak writes in MEHO's own login realm reach platform admin rights.
+
+MEHO gives a person platform admin rights from their login token: the
+``platform_admin`` claim (or the claim in ``JWT_PLATFORM_ADMIN_CLAIM_NAME``)
+or the realm role in ``JWT_PLATFORM_ADMIN_ROLE_NAME``. In MEHO's own login
+realm, a write that can put either into a token, or that acts on the login
+of a person who has these rights, needs a platform admin as approver. This
+module decides it for each such write and puts the answer on the approval
+card, in the ``grant`` block that
+:mod:`meho_backplane.operations.grant_approval` reads:
+
+* ``keycloak.user.create``: the new user's attributes set the platform
+  admin flag, one of its ``groups`` gives platform admin rights
+  (:func:`~.ops_write_grant_platform.group_gives_platform_admin`), or it
+  names realm or client roles. MEHO does not read what a named role gives,
+  so named roles count as the strict case.
+* ``keycloak.user.reset_password``, ``keycloak.user.update``,
+  ``keycloak.user.credential.delete`` and a ``secret.move`` that sets a
+  Keycloak user's password: the login has platform admin rights
+  (:func:`login_has_platform_admin`): the flag on the user, a group that
+  gives the rights, or the platform admin realm role among all its realm
+  roles. The first three are in ``GRANT_OPS`` of :mod:`.ops_write_grant`.
+* ``keycloak.protocol_mapper.create``,
+  ``keycloak.client_scope.protocol_mapper.update``,
+  ``keycloak.client.create``, ``keycloak.client.update`` and
+  ``keycloak.client_scope.create``: a protocol mapper that can put the
+  platform admin claim or role into a token (:func:`mapper_sets_platform_admin`).
+* ``keycloak.realm.update``: new default groups that give platform admin
+  rights, a new default role, or realm parts (users, groups, roles,
+  clients, client scopes) that MEHO does not read here.
+
+Each answer is ``True`` (it does), ``False`` (it does not) or ``None``
+(MEHO could not read what it needs). The approval treats ``None`` as the
+strict case: a platform admin must approve. The card also says why, in
+``platform_admin_reason``. The same builder runs again right before the
+approved change runs; when the change now needs a stricter approval, the
+run is refused (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+
+Outside the login realm none of this applies, and MEHO reads nothing for it.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Final, cast
+
+from meho_backplane.connectors.keycloak._paths import (
+    _USER_GROUPS_PATH,
+    _USER_PATH,
+    _USER_REALM_COMPOSITE_PATH,
+    fill_path,
+)
+from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
+from meho_backplane.connectors.keycloak.ops_write_effective_roles import platform_role_names
+from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
+    attributes_set_platform_admin,
+    group_gives_platform_admin,
+    has_platform_flag,
+    platform_claim_names,
+    under_platform_group,
+)
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.operations.grant_approval import register_grant_op
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+    from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
+    from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
+
+__all__ = [
+    "GROUP_CAP",
+    "PLATFORM_OPS",
+    "REASON_LOGIN",
+    "REASON_MAPPER",
+    "REASON_NEW_USER",
+    "REASON_REALM_DEFAULTS",
+    "REASON_UNREAD",
+    "group_paths_give_platform_admin",
+    "login_has_platform_admin",
+    "mapper_sets_platform_admin",
+    "platform_fields",
+    "secret_move_grant",
+    "with_platform_facts",
+]
+
+#: The most groups MEHO reads for one login. More counts as unknown.
+GROUP_CAP: Final[int] = 100
+
+REASON_NEW_USER: Final[str] = (
+    "The new login gets an attribute, a group or a role that gives platform admin rights."
+)
+REASON_LOGIN: Final[str] = (
+    "This login has platform admin rights. The change sets how it signs in, so it "
+    "can hand that login, and its rights, to someone else."
+)
+REASON_MAPPER: Final[str] = (
+    "A protocol mapper in this change can put the platform admin claim or role into login tokens."
+)
+REASON_REALM_DEFAULTS: Final[str] = (
+    "The change sets default groups or roles of the realm, or other realm parts, that can "
+    "give platform admin rights to logins."
+)
+REASON_UNREAD: Final[str] = (
+    "MEHO could not read whether this change gives platform admin rights, so it counts "
+    "as a change that does."
+)
+
+#: Whether a write can give platform admin rights, from its call and the realm it changes.
+PlatformFact = Callable[["PreviewContext", str], Awaitable[bool | None]]
+
+#: The realm parts of a realm update that MEHO does not read here.
+_REALM_PARTS: Final[tuple[str, ...]] = ("users", "groups", "roles", "clients", "clientScopes")
+
+_REALM_UPDATE: Final[str] = "keycloak.realm.update"
+
+
+def _text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _any(facts: list[bool | None]) -> bool | None:
+    """``True`` when one fact is ``True``; else ``None`` when one is unknown; else ``False``."""
+    if any(fact is True for fact in facts):
+        return True
+    return None if any(fact is None for fact in facts) else False
+
+
+def platform_fields(platform: bool | None, reason: str) -> dict[str, Any]:
+    """The ``platform_admin`` fact for the ``grant`` block, with a reason unless it is ``False``."""
+    fields: dict[str, Any] = {"platform_admin": platform}
+    if platform is not False:
+        fields["platform_admin_reason"] = reason if platform else REASON_UNREAD
+    return fields
+
+
+# ---------------------------------------------------------------------------
+# What one object gives
+# ---------------------------------------------------------------------------
+
+
+def mapper_sets_platform_admin(mapper: Any) -> bool | None:
+    """Whether the protocol *mapper* can put the platform admin claim or role into a token.
+
+    True for a mapper whose claim name is the platform admin claim, a
+    script mapper (its script can set any claim), and, when
+    ``JWT_PLATFORM_ADMIN_ROLE_NAME`` is set, a mapper that writes the realm
+    roles claim (``realm_access``) or names that role (``role`` or
+    ``new.role.name``). ``None`` when the settings cannot be read.
+    """
+    if not isinstance(mapper, dict):
+        return False
+    roles = platform_role_names()
+    if roles is None:
+        return None
+    kind = (_text(mapper.get("protocolMapper")) or "").casefold()
+    if kind.startswith("script-"):
+        return True
+    raw = mapper.get("config")
+    config: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    claim = (_text(config.get("claim.name")) or "").casefold()
+    if claim in platform_claim_names():
+        return True
+    if not roles:
+        return False
+    named = {_text(config.get(key)) for key in ("role", "new.role.name")}
+    return claim.startswith("realm_access") or bool(named & roles)
+
+
+def _mappers_set_platform_admin(mappers: Any) -> bool | None:
+    if mappers is None:
+        return False
+    if not isinstance(mappers, list):
+        return None
+    return _any([mapper_sets_platform_admin(mapper) for mapper in mappers])
+
+
+async def _group_id_by_path(
+    connector: KeycloakConnector, ctx: PreviewContext, realm: str, path: str
+) -> str | None:
+    """The id of the group at *path* (``/top/child``), level by level; ``None`` when not found."""
+    names = [name for name in path.split("/") if name]
+    parent: str | None = None
+    for name in names:
+        row = await connector._find_group(ctx.target, realm, name, parent, operator=ctx.operator)
+        parent = _text(row.get("id")) if isinstance(row, dict) else None
+        if parent is None:
+            return None
+    return parent
+
+
+async def _path_gives_platform_admin(
+    connector: KeycloakConnector, ctx: PreviewContext, realm: str, raw: Any
+) -> bool | None:
+    path = _text(raw)
+    if path is None:
+        return None
+    if under_platform_group({"path": "/" + path.lstrip("/")}):
+        return True
+    try:
+        group_id = await _group_id_by_path(connector, ctx, realm, path)
+    except Exception:
+        return None
+    if group_id is None:
+        return None
+    return await group_gives_platform_admin(connector, ctx, group_id, realm=realm)
+
+
+async def group_paths_give_platform_admin(
+    connector: KeycloakConnector, ctx: PreviewContext, realm: str, paths: Any
+) -> bool | None:
+    """Whether one of the group *paths* gives platform admin rights; ``None`` when unknown."""
+    if paths is None:
+        return False
+    if not isinstance(paths, list) or len(paths) > GROUP_CAP:
+        return None
+    facts: list[bool | None] = []
+    for raw in paths:
+        fact = await _path_gives_platform_admin(connector, ctx, realm, raw)
+        if fact:
+            return True
+        facts.append(fact)
+    return _any(facts)
+
+
+async def _groups_give_platform_admin(
+    connector: KeycloakConnector, ctx: PreviewContext, realm: str, rows: list[Any]
+) -> bool | None:
+    facts: list[bool | None] = []
+    for row in rows:
+        group_id = _text(row.get("id")) if isinstance(row, dict) else None
+        if group_id is None:
+            return None
+        if under_platform_group(row):
+            return True
+        fact = await group_gives_platform_admin(connector, ctx, group_id, realm=realm)
+        if fact:
+            return True
+        facts.append(fact)
+    return _any(facts)
+
+
+async def _has_platform_role(
+    connector: KeycloakConnector, ctx: PreviewContext, realm: str, user_id: str, roles: set[str]
+) -> bool | None:
+    rows = await connector._get_admin_list(
+        ctx.target,
+        fill_path(_USER_REALM_COMPOSITE_PATH, {"realm": realm, "user-id": user_id}),
+        operator=ctx.operator,
+        strict=True,
+    )
+    names = {_text(row.get("name")) if isinstance(row, dict) else None for row in rows}
+    if None in names:
+        return None
+    return bool(names & roles)
+
+
+async def login_has_platform_admin(
+    connector: KeycloakConnector, ctx: PreviewContext, realm: str, user_id: str
+) -> bool | None:
+    """Whether the login *user_id* has platform admin rights; ``None`` when unknown.
+
+    Reads the user (the platform admin attribute), its groups (each with
+    :func:`~.ops_write_grant_platform.group_gives_platform_admin`, up to
+    :data:`GROUP_CAP`) and, when ``JWT_PLATFORM_ADMIN_ROLE_NAME`` is set,
+    every realm role it has (``role-mappings/realm/composite``: direct, from
+    groups and the parts of composites).
+    """
+    try:
+        roles = platform_role_names()
+        if roles is None:
+            return None
+        user = await get_or_none(
+            connector,
+            ctx.target,
+            fill_path(_USER_PATH, {"realm": realm, "user-id": user_id}),
+            ctx.operator,
+        )
+        if user is None:
+            return None
+        if has_platform_flag(user):
+            return True
+        groups = await connector._get_admin_list(
+            ctx.target,
+            fill_path(_USER_GROUPS_PATH, {"realm": realm, "user-id": user_id}),
+            operator=ctx.operator,
+            params={"first": "0", "max": str(GROUP_CAP + 1), "briefRepresentation": "true"},
+            strict=True,
+        )
+        if len(groups) > GROUP_CAP:
+            return None
+        in_groups = await _groups_give_platform_admin(connector, ctx, realm, groups)
+        if in_groups is not False or not roles:
+            return in_groups
+        return await _has_platform_role(connector, ctx, realm, user_id, roles)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# The facts of each write
+# ---------------------------------------------------------------------------
+
+
+def _representation(ctx: PreviewContext) -> dict[str, Any]:
+    representation = ctx.params.get("representation")
+    return representation if isinstance(representation, dict) else {}
+
+
+def _connector(ctx: PreviewContext) -> KeycloakConnector | None:
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+    connector = ctx.connector_instance
+    if ctx.target is None or not isinstance(connector, KeycloakConnector):
+        return None
+    return connector
+
+
+async def _new_user(ctx: PreviewContext, realm: str) -> bool | None:
+    representation = _representation(ctx)
+    if attributes_set_platform_admin(representation.get("attributes")):
+        return True
+    if representation.get("realmRoles") or representation.get("clientRoles"):
+        return None
+    if not representation.get("groups"):
+        return False
+    connector = _connector(ctx)
+    if connector is None:
+        return None
+    return await group_paths_give_platform_admin(
+        connector, ctx, realm, representation.get("groups")
+    )
+
+
+async def _new_mapper(ctx: PreviewContext, realm: str) -> bool | None:
+    return mapper_sets_platform_admin(_representation(ctx))
+
+
+async def _client_mappers(ctx: PreviewContext, realm: str) -> bool | None:
+    return _mappers_set_platform_admin(_representation(ctx).get("protocolMappers"))
+
+
+async def _realm_defaults(ctx: PreviewContext, realm: str) -> bool | None:
+    representation = _representation(ctx)
+    if any(key in representation for key in ("defaultRole", "defaultRoles", *_REALM_PARTS)):
+        return True
+    if representation.get("defaultGroups") is None:
+        return False
+    connector = _connector(ctx)
+    if connector is None:
+        return None
+    return await group_paths_give_platform_admin(
+        connector, ctx, realm, representation.get("defaultGroups")
+    )
+
+
+#: op_id -> (what decides whether the write can give platform admin rights, the reason).
+PLATFORM_OPS: Final[dict[str, tuple[PlatformFact, str]]] = {
+    "keycloak.user.create": (_new_user, REASON_NEW_USER),
+    "keycloak.protocol_mapper.create": (_new_mapper, REASON_MAPPER),
+    "keycloak.client.create": (_client_mappers, REASON_MAPPER),
+    "keycloak.client.update": (_client_mappers, REASON_MAPPER),
+    "keycloak.client_scope.create": (_client_mappers, REASON_MAPPER),
+    _REALM_UPDATE: (_realm_defaults, REASON_REALM_DEFAULTS),
+}
+
+
+async def _realm_of(op_id: str, ctx: PreviewContext) -> tuple[bool, str | None]:
+    """Whether the write changes a realm of MEHO's own login, and that realm's name.
+
+    The realm is the target's managed realm; for ``keycloak.realm.update``
+    the ``realm`` param names it when it is given. The name is ``None`` when
+    it cannot be read; the realm then counts as MEHO's own.
+    """
+    from meho_backplane.connectors.keycloak.ops_write_grant import (
+        is_login_realm,
+        is_login_realm_name,
+    )
+
+    explicit = _text(ctx.params.get("realm")) if op_id == _REALM_UPDATE else None
+    if explicit is not None:
+        return is_login_realm_name(explicit), explicit
+    try:
+        realm: str | None = resolve_realm_config(ctx.target).managed_realm
+    except Exception:
+        realm = None
+    return await is_login_realm(ctx), realm
+
+
+def with_platform_facts(
+    op_id: str,
+    builder: PreviewBuilder,
+    fact: tuple[PlatformFact, str] | None = None,
+    *,
+    agent_switch: Callable[[], bool] | None = None,
+) -> PreviewBuilder:
+    """Wrap *builder* so the approval card carries the ``grant`` block of *op_id*.
+
+    *fact* is what decides whether the write can give platform admin rights,
+    with the reason the card shows; it defaults to the one in
+    :data:`PLATFORM_OPS`. It runs only in MEHO's own login realm. The
+    agent's own ``preview_operation`` gets the block only while
+    *agent_switch* is on; without a switch it never does, so it makes no
+    extra Keycloak read.
+    """
+    decide, reason = PLATFORM_OPS[op_id] if fact is None else fact
+
+    async def _wrapped(ctx: PreviewContext) -> dict[str, Any] | None:
+        preview = await builder(ctx)
+        if preview is None or (ctx.agent_preview and not (agent_switch and agent_switch())):
+            return preview
+        login_realm, realm = await _realm_of(op_id, ctx)
+        platform: bool | None = False
+        if login_realm:
+            try:
+                platform = None if realm is None else await decide(ctx, realm)
+            except Exception:
+                platform = None
+        preview["grant"] = {
+            "user_id": None,
+            "group_id": None,
+            "login_realm": login_realm,
+            **platform_fields(platform, reason),
+        }
+        return preview
+
+    return _wrapped
+
+
+# ---------------------------------------------------------------------------
+# secret.move with a Keycloak side
+# ---------------------------------------------------------------------------
+
+
+def _keycloak_sides(params: dict[str, Any]) -> tuple[tuple[str, str, str] | None, str | None]:
+    """The user-password sink ``(target, realm, username)``, and the realm of a client source."""
+    from meho_backplane.connectors.keycloak.secret_endpoint import (
+        _parse_keycloak_client_ref,
+        _parse_keycloak_ref,
+    )
+    from meho_backplane.connectors.secret.endpoints import parse_secret_ref
+
+    sink: tuple[str, str, str] | None = None
+    source_realm: str | None = None
+    for key in ("from", "to"):
+        raw = params.get(key)
+        try:
+            spec = parse_secret_ref(raw) if isinstance(raw, str) else None
+            if spec is None or spec.kind != "keycloak":
+                continue
+            if "/clients/" in spec.ref:
+                source_realm = _parse_keycloak_client_ref(spec.ref)[1]
+            else:
+                sink = _parse_keycloak_ref(spec.ref)
+        except ValueError:
+            continue
+    return sink, source_realm
+
+
+async def _sink_login_platform(ctx: PreviewContext, sink: tuple[str, str, str]) -> dict[str, Any]:
+    """The login of the sink and whether it has platform admin rights."""
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+    from meho_backplane.targets.resolver import resolve_target
+
+    target_name, realm, username = sink
+    try:
+        connector = get_or_create_connector_instance(KeycloakConnector)
+        if not isinstance(connector, KeycloakConnector):
+            return {"user_id": None, "platform_admin": None}
+        async with get_sessionmaker()() as session:
+            row = cast(
+                "KeycloakTargetLike",
+                await resolve_target(session, ctx.operator.tenant_id, target_name),
+            )
+        user_id = await connector._find_user_uuid(row, realm, username, operator=ctx.operator)
+    except Exception:
+        return {"user_id": None, "platform_admin": None}
+    if user_id is None:
+        return {"user_id": None, "platform_admin": None}
+    login_ctx = dataclasses.replace(ctx, target=row, connector_instance=connector)
+    platform = await login_has_platform_admin(connector, login_ctx, realm, user_id)
+    return {"user_id": user_id, "platform_admin": platform}
+
+
+async def secret_move_grant(ctx: PreviewContext) -> dict[str, Any] | None:
+    """The ``grant`` block of a ``secret.move`` with a Keycloak side; ``None`` without one.
+
+    The login realm is the realm of the user-password sink, else the realm
+    of the client-secret source. A sink in the login realm needs a platform
+    admin when the user has platform admin rights or MEHO cannot read it.
+    """
+    from meho_backplane.connectors.keycloak.ops_write_grant import is_login_realm_name
+
+    sink, source_realm = _keycloak_sides(ctx.params)
+    realm = sink[1] if sink is not None else source_realm
+    if realm is None:
+        return None
+    grant: dict[str, Any] = {
+        "user_id": None,
+        "group_id": None,
+        "login_realm": is_login_realm_name(realm),
+        "platform_admin": False,
+    }
+    if sink is None or not grant["login_realm"]:
+        return grant
+    found = await _sink_login_platform(ctx, sink)
+    grant["user_id"] = found["user_id"]
+    grant.update(platform_fields(found["platform_admin"], REASON_LOGIN))
+    return grant
+
+
+def _register() -> None:
+    for op_id in (*PLATFORM_OPS, "keycloak.client_scope.protocol_mapper.update"):
+        register_grant_op(op_id)
+
+
+_register()

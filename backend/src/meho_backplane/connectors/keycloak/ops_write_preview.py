@@ -146,6 +146,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     find_user,
 )
 from meho_backplane.connectors.keycloak.ops_write_grant import register_grant_ops, with_grant_facts
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import with_platform_facts
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     check_realm_guards,
     realm_blast_radius,
@@ -603,7 +604,9 @@ def _register_keycloak_preview_builders() -> None:
     attribute keys (values scrubbed).
     """
     register_preview_builder("keycloak.realm.create", _realm_create_preview)
-    register_preview_builder("keycloak.user.create", _user_create_preview)
+    register_preview_builder(
+        "keycloak.user.create", with_platform_facts("keycloak.user.create", _user_create_preview)
+    )
     register_grant_ops()
     register_park_check(
         "keycloak.role_mapping.assign", refuse_other_user_check("keycloak.role_mapping.assign")
@@ -615,8 +618,15 @@ def _register_keycloak_preview_builders() -> None:
             with_stored_user(with_current_roles()(_role_mapping_assign_preview)),
         ),
     )
-    register_user_write(
-        "keycloak.user.reset_password", with_current_user(_user_reset_password_preview)
+    register_park_check(
+        "keycloak.user.reset_password", refuse_other_user_check("keycloak.user.reset_password")
+    )
+    register_preview_builder(
+        "keycloak.user.reset_password",
+        with_grant_facts(
+            "keycloak.user.reset_password",
+            with_stored_user(with_current_user(_user_reset_password_preview)),
+        ),
     )
     register_user_write("keycloak.user.disable", _user_enabled_preview(False))
     register_user_write("keycloak.user.enable", with_current_user(_user_enabled_preview(True)))

@@ -42,7 +42,7 @@ from meho_backplane.operations.approval_queue import (
     pending_chain_positions,
     result_state_of_envelope,
 )
-from meho_backplane.operations.grant_approval import is_rights_change
+from meho_backplane.operations.grant_approval import is_rights_change, platform_admin_reason
 from meho_backplane.policy.routing import routing_enabled, who_can_approve
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
@@ -222,7 +222,7 @@ def project_request_to_view(
     request that is not expired.
 
     ``policy_rule`` and ``policy_version`` (#6044): see
-    :func:`_project_policy_rule`.
+    :func:`_project_policy_rule`. The approver keys: :func:`_project_rights`.
 
     ``who_can_approve`` names the login groups that may approve the
     request, when approver routing stored them
@@ -233,7 +233,6 @@ def project_request_to_view(
     ``outcome_check`` (#5026): see :func:`_project_outcome_check`.
     """
     result_state = approval_result_state(row)
-    expired_reason = approval_expired_reason(row)
     return {
         "id": str(row.id),
         "op_id": row.op_id,
@@ -244,8 +243,6 @@ def project_request_to_view(
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),
-        "rights_change": is_rights_change(row),
-        "who_can_approve": who_can_approve(row.approver_roles) if routing_enabled() else None,
         "status": row.status,
         "reviewed_by": row.reviewed_by,
         "work_ref": row.work_ref,
@@ -258,12 +255,35 @@ def project_request_to_view(
         "result_state": result_state.value if result_state is not None else None,
         "outcome": project_outcome(resume_outcome(row)),
         "chain": _project_chain(chain),
-        "expired_reason": expired_reason.value if expired_reason else None,
-        "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
-        "release_id": row.release_id,
+        **_project_expiry(row),
+        **_project_rights(row),
         **_project_policy_rule(row),
         **_project_target_and_run_start(row, target_name),
         **_project_outcome_check(row),
+    }
+
+
+def _project_expiry(row: ApprovalRequest) -> dict[str, Any]:
+    """Why an ``expired`` request expired, and the release it was made under."""
+    expired_reason = approval_expired_reason(row)
+    return {
+        "expired_reason": expired_reason.value if expired_reason else None,
+        "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        "release_id": row.release_id,
+    }
+
+
+def _project_rights(row: ApprovalRequest) -> dict[str, Any]:
+    """Who may approve: a change of rights, why only a platform admin may, the routed groups.
+
+    ``platform_admin_reason`` is ``None`` unless the request is a change in
+    MEHO's own login realm that can give platform admin rights
+    (:func:`~meho_backplane.operations.grant_approval.platform_admin_reason`).
+    """
+    return {
+        "rights_change": is_rights_change(row),
+        "platform_admin_reason": platform_admin_reason(row),
+        "who_can_approve": who_can_approve(row.approver_roles) if routing_enabled() else None,
     }
 
 

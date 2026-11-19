@@ -297,6 +297,16 @@ group has more rules:
   gives, not its name: the attribute `platform_admin=true` on the group or
   a parent group, a place under `/MEHO-Platform-Admins/`, or the realm role
   in `JWT_PLATFORM_ADMIN_ROLE_NAME`. A group MEHO cannot read counts too.
+- The same holds for other Keycloak writes in MEHO's own login realm. A
+  platform admin must approve a new user with platform admin content
+  (attribute, group or roles), a new password, user change or credential
+  delete for a login that has platform admin rights (also by
+  `secret.move`), a protocol mapper or client that can put the platform
+  admin claim or role into tokens, and a realm change of default groups or
+  roles. When MEHO cannot read what decides, a platform admin must approve
+  too. The approval card says why, in the row "Platform admin must
+  approve". A tenant admin, also an admin who may change other rights
+  alone, cannot approve these.
 
 The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group

@@ -73,6 +73,14 @@ with :func:`has_keycloak_side`). The requester never approves it, and
 another admin (a tenant admin or a platform admin) must. A move between
 two Vault places is not a change of rights.
 
+In MEHO's own login realm a move that sets the password of a login with
+platform admin rights needs a platform admin as approver, and so does a
+move whose login MEHO cannot read. The card says it in its ``grant``
+block (:func:`~meho_backplane.connectors.keycloak.ops_write_platform_reach.secret_move_grant`,
+registered with
+:func:`~meho_backplane.operations.grant_approval.register_grant_op`). The
+check runs again right before the approved move runs.
+
 What a caller reads about a ``linux`` side is behind the switch
 ``SECRET_MOVE_LINUX_TARGET_CARD`` (``Settings.secret_move_linux_target_card``,
 off by default). On, ``preview_operation`` adds the target name as typed,
@@ -120,6 +128,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import secret_move_grant
 from meho_backplane.connectors.keycloak.secret_move_target import keycloak_side_card
 from meho_backplane.connectors.linux.secret_endpoint import (
     LinuxSecretRefError,
@@ -144,7 +153,10 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
-from meho_backplane.operations.grant_approval import register_rights_change_check
+from meho_backplane.operations.grant_approval import (
+    register_grant_op,
+    register_rights_change_check,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 
@@ -374,6 +386,9 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         summary["source"] = await _ref_summary(source, ctx.operator)
         summary["sink"] = await _ref_summary(sink, ctx.operator)
         summary["sink"].update(await _sink_state(sink, ctx.operator, ctx.params, merge=merge))
+        grant = await secret_move_grant(ctx)
+        if grant is not None:
+            summary["grant"] = grant
     summary["merge"] = merge
     reason = ctx.params.get("reason")
     if isinstance(reason, str) and reason:
@@ -388,6 +403,7 @@ def _register_secret_move_preview_builder() -> None:
     register_params_check("secret.move", check_secret_move_sink)
     register_agent_preview_filter("secret.move", _hide_target_cards)
     register_rights_change_check("secret.move", has_keycloak_side)
+    register_grant_op("secret.move", applies=has_keycloak_side)
 
 
 _register_secret_move_preview_builder()

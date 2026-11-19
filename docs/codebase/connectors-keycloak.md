@@ -556,6 +556,35 @@ decides. When MEHO cannot read the group, a parent group or its roles, the
 fact is unknown and a platform admin must approve. The run reads the group
 again with the same rule (`ops_write_grant_platform.py`).
 
+**Other writes in the login realm that reach platform admin rights.**
+`ops_write_platform_reach.py` gives more writes the same `grant` block, so
+in MEHO's own login realm a platform admin must approve them when they can
+give platform admin rights, or act on the login of a person who has them:
+
+| Write | Needs a platform admin when |
+|---|---|
+| `user.create` | the new user's attributes set `platform_admin`, one of its `groups` gives platform admin rights (same group rule as above, the path is looked up level by level), or it names realm or client roles |
+| `user.reset_password`, `user.update`, `user.credential.delete`, `secret.move` to a Keycloak user | the login has platform admin rights: the attribute on the user, a group that gives them, or the platform admin realm role among all its realm roles (`users/{id}/role-mappings/realm/composite`) |
+| `protocol_mapper.create`, `client.create`, `client.update`, `client_scope.create` | a mapper in the request has the claim name `platform_admin` (or `JWT_PLATFORM_ADMIN_CLAIM_NAME`), is a script mapper, or, with `JWT_PLATFORM_ADMIN_ROLE_NAME` set, writes `realm_access` or names that role |
+| `client_scope.protocol_mapper.update` | the same, for the mapper now or after the change |
+| `realm.update` | new `defaultGroups` give platform admin rights, or the request sets `defaultRole`, `defaultRoles`, `users`, `groups`, `roles`, `clients` or `clientScopes`. The `realm` param names the realm that is checked |
+
+When MEHO cannot read what decides, a platform admin must approve. The
+card says why in `platform_admin_reason`, and the console shows it in the
+row "Platform admin must approve". The approved run builds the card again
+and is refused when the write now needs a platform admin and did not get
+one. The agent's own `preview_operation` gets the `grant` block of
+these writes only while `KEYCLOAK_RIGHTS_CHANGE_CARDS` is on (never for
+`user.create`, `client_scope.protocol_mapper.update` and `secret.move`).
+
+The other Keycloak writes do not give platform admin rights: the writes in
+`NOT_RIGHTS_CHANGE_OPS` only take away; `realm.create` makes a new realm,
+not MEHO's own; `group.create` makes a group with no members;
+`user.enable` and `user.required_actions.update` give nobody a way to sign
+in as the login; the three `authflow` writes add only MEHO's own fixed
+steps and mappers. `role_mapping.assign`, `role_mapping.client.assign`,
+`group.member.add` and `group.update_attributes` follow the rules above.
+
 **The approval card.** `connectors/keycloak/ops_write_rights_card.py`
 shows the object as it is now next to the new values:
 

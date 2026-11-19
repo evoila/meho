@@ -1,0 +1,5 @@
+## Note
+In MEHO's own login realm, more Keycloak writes need a platform admin as approver when they can give platform admin rights or act on the login of a person who has them: `keycloak.user.create` (attribute, group or roles of the new user), `keycloak.user.reset_password`, `keycloak.user.update`, `keycloak.user.credential.delete` and `secret.move` to a Keycloak user (for a login with platform admin rights), `keycloak.protocol_mapper.create`, `keycloak.client_scope.protocol_mapper.update`, `keycloak.client.create`, `keycloak.client.update` and `keycloak.client_scope.create` (a mapper that can put the platform admin claim or role into tokens), and `keycloak.realm.update` (default groups or roles). When MEHO cannot read what decides, a platform admin must approve too. The approval card says why. Right before an approved write runs, MEHO checks it again.
+
+## Action
+Some of these approvals now need a platform admin, where a tenant admin was enough. Make sure a platform admin can approve them. A request of these writes that waited from before the update may need to be sent again. No schema action.

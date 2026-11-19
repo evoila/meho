@@ -656,9 +656,12 @@ def _clean(*ids: str) -> list[dict[str, Any]]:
 
 
 def _mount_user_lookup(mock: respx.MockRouter) -> None:
+    """The user name lookup, and a user with no platform admin rights."""
     mock.get(f"/admin/realms/{_REALM}/users").respond(
         200, json=[{"id": _USER_UUID, "username": "jane.example"}]
     )
+    mock.get(_USER_PATH).respond(200, json={"id": _USER_UUID, "username": "jane.example"})
+    mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
 
 
 async def test_delete_by_type_removes_every_match_and_lists_removed_and_remaining(

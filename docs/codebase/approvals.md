@@ -1186,7 +1186,15 @@ The group rule (`_check_approver_group`, used by `approve_request` and
 - in the login realm, when the approver is not a platform admin and the
   change can give platform admin rights (a group or role that gives them;
   see "How MEHO decides that a group change gives platform admin rights"
+  and "Other writes in the login realm that reach platform admin rights"
   in [connectors-keycloak.md](connectors-keycloak.md)).
+
+`register_grant_op` takes `applies`, a check of the params: only a request
+that passes it counts (`secret.move` with a Keycloak side). Such an op does
+not count in `is_rights_change_op`. `platform_admin_reason(request)` gives
+the reason a platform admin must approve (from `platform_admin_reason` in
+the `grant` block), or `None`; the refusal text and the console card show
+it.
 
 A request without the `grant` block, or with a group MEHO could not read,
 gets the strict rule. The decision audit row carries `grant_user_id`,

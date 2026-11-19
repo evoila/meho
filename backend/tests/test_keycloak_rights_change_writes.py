@@ -35,7 +35,6 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
     KeycloakConnector,
 )
-from meho_backplane.connectors.keycloak.ops_write_grant import GRANT_OPS
 from meho_backplane.connectors.keycloak.rights_changes import (
     NOT_RIGHTS_CHANGE_OPS,
     RIGHTS_CHANGE_OPS,
@@ -89,7 +88,9 @@ from tests.test_api_v1_approvals_fresh_sign_in import (
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _RIGHTS = tuple(sorted(RIGHTS_CHANGE_OPS))
-_RIGHTS_NOT_GRANT = tuple(op for op in _RIGHTS if op not in GRANT_OPS)
+#: The changes of rights with no approval card facts: neither one login or
+#: group (``GRANT_OPS``) nor a write that can give platform admin rights.
+_RIGHTS_NOT_GRANT = tuple(op for op in _RIGHTS if op not in grant_approval._GRANT_OPS)
 #: A ``caution`` write that is not a change of rights: a grant or a run
 #: approval still covers it, so the tests show that the wait comes from
 #: the mark and not from a grant that does not match.
@@ -494,7 +495,8 @@ async def test_an_older_override_with_approval_off_does_not_let_the_call_run() -
 def test_every_registered_change_of_rights_keeps_approval() -> None:
     import meho_backplane.connectors.policy  # noqa: F401 -- registers its changes of rights
 
-    registered = set(grant_approval._GRANT_OPS) | set(grant_approval._RIGHTS_CHANGE_OPS)
+    always = {op for op, grant in grant_approval._GRANT_OPS.items() if grant.applies is None}
+    registered = always | set(grant_approval._RIGHTS_CHANGE_OPS)
     assert set(RIGHTS_CHANGE_OPS) <= registered
     assert len(registered) > len(RIGHTS_CHANGE_OPS)
     off = EffectivePolicy(safety_level="safe", requires_approval=False)

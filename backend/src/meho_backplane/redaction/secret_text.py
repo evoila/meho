@@ -169,7 +169,10 @@ def _hide_yaml(text: str, depth: int) -> str:
         return text
     finder = _Finder(text, depth)
     try:
-        for document in yaml.compose_all(text, Loader=_LOADER):
+        # Keep every document alive while walking: the walk marks nodes by
+        # id(), and a freed document lets a later node reuse an id.
+        documents = list(yaml.compose_all(text, Loader=_LOADER))
+        for document in documents:
             if document is not None:
                 finder.walk(document)
     except yaml.YAMLError:

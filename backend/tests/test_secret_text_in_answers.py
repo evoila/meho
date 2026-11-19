@@ -220,6 +220,20 @@ def test_yaml_number_under_a_secret_name_is_hidden() -> None:
     assert hide_secret_text("password: 12345678\n") == f'password: "{_MARKER}"\n'
 
 
+def test_yaml_text_with_many_documents_hides_the_field_in_each_document() -> None:
+    fakes = [f"{_FAKE_YAML}-{index}" for index in range(20)]
+    text = "".join(
+        f"---\nkind: Secret\nmetadata:\n  name: app-{index}\nstringData:\n  password: {fake}\n"
+        for index, fake in enumerate(fakes)
+    )
+    shown = hide_secret_text(text)
+    assert not [fake for fake in fakes if fake in shown]
+    assert shown.count(f'password: "{_MARKER}"') == len(fakes)
+    assert "name: app-19" in shown
+    view = hide_secret_values("other.read", {"data": {"all.yaml": text}})
+    assert not [fake for fake in fakes if fake in view["data"]["all.yaml"]]
+
+
 @pytest.mark.parametrize(
     "text",
     [

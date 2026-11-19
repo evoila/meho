@@ -131,6 +131,7 @@ from meho_backplane.connectors.keycloak._paths import (
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
+from meho_backplane.connectors.keycloak.secret_move_target import check_approved_keycloak_target
 from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
@@ -293,11 +294,24 @@ class KeycloakCredentialSecretEndpoint:
         confirm the structural match across the ORM's mutable column types
         (the ``AuthModel`` enum vs the Protocol's ``str | None``), so the
         narrow is made explicit at this single reuse site.
+
+        During the approved run of a ``secret.move``, the target, its host and
+        its secret reference must be the ones on the approval card
+        (:func:`~meho_backplane.connectors.keycloak.secret_move_target.check_approved_keycloak_target`),
+        before any Keycloak login.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
+        check_approved_keycloak_target("sink", self._target_name, row)
         return cast(KeycloakTargetLike, row)
+
+    async def check_target(self, operator: Operator) -> None:
+        """Find the named target and check it against the approval card. No Keycloak call.
+
+        ``secret.move`` calls this before it reads the source.
+        """
+        await self._resolve_target(operator)
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:
         """Unsupported — keycloak credentials are write-only.
@@ -390,10 +404,15 @@ class KeycloakClientSecretSourceEndpoint:
         extras) — the same row the dispatcher hands the keycloak read ops
         at runtime — but mypy cannot confirm the structural match across
         the ORM's mutable column types, so the narrow is explicit here.
+
+        During the approved run of a ``secret.move``, the target, its host and
+        its secret reference must be the ones on the approval card, before
+        any Keycloak login (the same check as the sink's).
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
+        check_approved_keycloak_target("source", self._target_name, row)
         return cast(KeycloakTargetLike, row)
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:

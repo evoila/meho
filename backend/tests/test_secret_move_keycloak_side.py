@@ -465,6 +465,21 @@ async def test_a_new_tls_setting_on_the_same_target_refuses_the_run(
 
 
 @_MOVES
+async def test_a_new_tls_server_name_refuses_the_run_also_without_a_certificate_check(
+    params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    await _update("kc-a", verify_tls=False)
+    row = await _ask(params)
+    await _update("kc-a", tls_server_name="other.test.invalid")
+
+    result = await _approve_and_run(row.id)
+
+    _assert_refused(result, "the TLS check of the", fake, keycloak)
+    assert "not checked, server name other.test.invalid" in _message(result)
+
+
+@_MOVES
 async def test_an_alias_moved_to_another_keycloak_target_refuses_the_run(
     params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
 ) -> None:

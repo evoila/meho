@@ -237,7 +237,9 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   (`secret_ref`). The `port` is the one MEHO dials: the target's own port,
   or 443 for https and 80 for http. `tls` says whether MEHO checks the
   certificate, and names a pinned CA (by a short SHA-256 digest) and a TLS
-  server name when the target sets them. The approved run compares the
+  server name when the target sets them. The server name shows also when
+  MEHO does not check the certificate, because MEHO still sends it in the
+  TLS handshake. The approved run compares the
   id, these connection fields and the secret reference with the target it
   finds (`connectors/keycloak/secret_move_target.py`, called where the
   Keycloak store finds its target). Another target, a new host, port,

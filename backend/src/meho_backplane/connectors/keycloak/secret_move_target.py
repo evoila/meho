@@ -78,12 +78,12 @@ def _tls_check(row: TargetORM) -> str:
     """The TLS check MEHO makes when it connects to *row*, in a few words.
 
     Names the pinned CA by a short SHA-256 digest of its PEM, and the TLS
-    server name when the target sets one.
+    server name when the target sets one. The server name shows also when
+    the certificate is not checked: MEHO still sends it in the TLS
+    handshake, and it picks the service at the address.
     """
-    if not row.verify_tls:
-        return "not checked"
-    text = "checked"
-    if row.tls_ca_pin:
+    text = "checked" if row.verify_tls else "not checked"
+    if row.verify_tls and row.tls_ca_pin:
         digest = hashlib.sha256(row.tls_ca_pin.encode("utf-8")).hexdigest()[:16]
         text += f", pinned CA {digest}"
     if row.tls_server_name:

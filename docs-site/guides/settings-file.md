@@ -48,8 +48,11 @@ with a token waits for approval. When you send such a file with a token
 - The preview still works with a token. It shows the target changes.
 - A file that changes no target still applies with a token. A target in
   the file that is the same as the stored one is no change.
-- Policies and conventions have no such rule. Their own API writes at
-  once with a token too.
+- Two policies also change only in the web console:
+  `run_approval_target_kinds` turned on and `announce_gate_enabled`
+  turned off. See
+  [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
+  The other policies and the conventions apply with a token.
 
 The web console does not have the settings file yet. Until it does, add
 or change each target with `meho targets` or the target API (with a

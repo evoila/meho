@@ -328,10 +328,13 @@ file yet.
   routes (a call with a token waits for approval there), then import the
   file: its target entries then match and are no change. The preview
   works with a token, and so does a file that changes no target (a target
-  entry equal to the stored one is no change). The other parts of the file
-  have no such rule, because their REST routes write at once for a token
-  too: tenants, policies (`/api/v1/tenants/...`) and conventions
-  (`/api/v1/conventions`). Tests:
+  entry equal to the stored one is no change). Two policies also change
+  only in the web console: `run_approval_target_kinds` turned on and
+  `announce_gate_enabled` turned off (see
+  [Policies that change only in the web console](#policies-that-change-only-in-the-web-console)).
+  The other parts of the file apply with a token, because their REST
+  routes write at once for a token too: tenants, the other policies
+  (`/api/v1/tenants/...`) and conventions (`/api/v1/conventions`). Tests:
   `tests/test_settings_import_target_writes.py`.
 
 ## Endpoints

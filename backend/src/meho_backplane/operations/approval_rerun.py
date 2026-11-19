@@ -37,6 +37,10 @@ writes one too. The run itself writes its usual run row, which also carries
 the attempt. The new result replaces ``resume_result``, so ``/result`` and
 the approval views show the latest attempt.
 
+A request of a step of a multi-step operation (``resume_parent`` set) never
+runs again: a re-run would send the steps after the approved step again. The
+requester starts a new run of the operation.
+
 Credential writes keep their params only in one-time encrypted custody, which
 the first run deletes. A re-run of one must send the params again; they must
 match ``params_hash``.
@@ -119,7 +123,7 @@ class RerunRefusal(StrEnum):
     TARGET_CHANGED = "target_changed"
     PREVIEW_CHANGED = "preview_changed"
     OBJECT_CHANGED = "object_changed"
-    INPUT_NOT_KEPT = "input_not_kept"
+    MULTI_STEP_RUN = "multi_step_run"
 
 
 _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
@@ -135,8 +139,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
     RerunRefusal.OBJECT_CHANGED: (
         "the object of the call is not the one on the approval card, or could not be read"
     ),
-    RerunRefusal.INPUT_NOT_KEPT: (
-        "MEHO did not keep the input of this multi-step credential write after its first run"
+    RerunRefusal.MULTI_STEP_RUN: (
+        "it is a step of a multi-step operation, and MEHO does not run such a request "
+        "again, so that no step is sent twice; start a new run of the operation"
     ),
 }
 
@@ -216,8 +221,6 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
         return RerunRefusal.WORK_REF_CHANGED
     if not params_hash_matches(params, request.params_hash):
         return RerunRefusal.PARAMS_CHANGED
-    if request.resume_parent is not None and "params" not in request.resume_parent:
-        return RerunRefusal.INPUT_NOT_KEPT
     return None
 
 
@@ -361,6 +364,14 @@ async def _check_rerun(
             request,
             RerunNotAllowedError(request.id, state),
             code=f"state_{state}",
+            status=_CONFLICT_STATUS_CODE,
+        )
+    if request.resume_parent is not None:
+        raise await _refuse(
+            operator,
+            request,
+            RerunNeedsNewApprovalError(request.id, RerunRefusal.MULTI_STEP_RUN),
+            code=RerunRefusal.MULTI_STEP_RUN.value,
             status=_CONFLICT_STATUS_CODE,
         )
     effective, reveal_secret = _stored_call(request, params)

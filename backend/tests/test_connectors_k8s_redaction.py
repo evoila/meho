@@ -551,7 +551,11 @@ def test_custom_resource_row_helm_chart_without_kind_is_not_masked_by_name() -> 
     """Only the ``kind`` decides; a list item gets it from the envelope first."""
     row = custom_resource_row(_chart_with_saved_manifest(with_kind=False))
     assert row["kind"] is None
-    assert _CHART_VALUES_TEXT in row["spec_excerpt"]
+    spec = json.loads(row["spec_excerpt"])
+    # No chart placeholder; the secret-named field in the text is still hidden.
+    assert not spec["valuesContent"].startswith(REDACTED_PREFIX)
+    assert spec["valuesContent"] == 'adminPassword: "[REDACTED:param_name]"'
+    assert spec["set"]["image.tag"] == "1.4.0"
 
 
 @pytest.mark.asyncio

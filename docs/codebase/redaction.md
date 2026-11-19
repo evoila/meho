@@ -551,7 +551,12 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     numbers included; booleans and `None` stay. The name rule is
     `is_secret_param_name` ("One name rule for secret fields" above); the
     `value` of a name/value pair whose `name` is a secret name is hidden
-    too. The
+    too. The default view also hides secret-named fields inside text
+    values: a JSON or YAML file in a string, such as a ConfigMap entry or
+    the last-applied note of kubectl (`redaction/secret_text.py`: the
+    quoted-pair text step, then a YAML read that replaces each secret value
+    in place; a YAML file inside a JSON note is read too). The audit copy
+    then holds a fingerprint of the whole text. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.
 - **Plain fields** (`register_plain_fields(op_id, names)`, exported by

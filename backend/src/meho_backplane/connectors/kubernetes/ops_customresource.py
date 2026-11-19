@@ -64,6 +64,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_customresource_fields import (
     FIELD_PATH_PATTERN,
@@ -72,11 +73,13 @@ from meho_backplane.connectors.kubernetes.ops_customresource_fields import (
     select_fields,
 )
 from meho_backplane.connectors.kubernetes.redaction import (
-    HELM_CHART_KIND,
+    HELM_CHART_KINDS,
+    HELM_CHART_VALUE_FIELDS,
     LAST_APPLIED_ANNOTATION,
     SECRET_KIND,
     redact_kubernetes_payload,
 )
+from meho_backplane.redaction.secret_text import hide_secret_text, hide_secret_text_leaves
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -198,9 +201,27 @@ def _bounded_annotations(annotations: Any) -> tuple[dict[str, str], bool]:
     for key, value in annotations.items():
         if key == LAST_APPLIED_ANNOTATION:
             continue
-        out[key], cut = _cap_utf8(str(value), CR_ANNOTATION_VALUE_MAX_BYTES)
+        # Hide first, cut after: a cut text may lose the field name.
+        out[key], cut = _cap_utf8(hide_secret_text(str(value)), CR_ANNOTATION_VALUE_MAX_BYTES)
         truncated = truncated or cut
     return out, truncated
+
+
+def _hide_secret_fields(block: Any, *, masked: tuple[str, ...] = ()) -> Any:
+    """*block* (a ``spec`` or ``status``) with every secret-named value hidden.
+
+    The values under secret-shaped key names, numbers included, and the
+    secret-named fields inside each text value (a YAML or JSON file in a
+    string). The excerpt is a JSON string that may be cut, so this runs on
+    the data, before the excerpt is made. The top-level keys in *masked*
+    already hold the Kubernetes placeholders (the Helm values of a chart)
+    and keep them, so their fingerprints stay.
+    """
+    shown, _ = scrub_secret_named_values(block, hide_numbers=True)
+    shown = hide_secret_text_leaves(shown)
+    if isinstance(block, dict) and isinstance(shown, dict):
+        shown.update({key: block[key] for key in masked if key in block})
+    return shown
 
 
 def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) -> dict[str, Any]:
@@ -232,10 +253,18 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
     ``spec.set`` value are placeholders in the spec excerpt (``set`` keys
     kept), and its annotation values are placeholders too, because Helm
     values and the last-applied copy of the chart often hold passwords.
-    A list item gets its ``kind`` from the list envelope before it
-    reaches this function (``list_items``), so a ``HelmChartList`` item
-    is masked as well. Any other CR gets no ``data`` field and is
-    otherwise untouched by the walk.
+    A ``kind: HelmChartConfig`` object is masked the same way. A list
+    item gets its ``kind`` from the list envelope before it reaches this
+    function (``list_items``), so a ``HelmChartList`` or
+    ``HelmChartConfigList`` item is masked as well. Any other CR gets no
+    ``data`` field.
+
+    For every kind, the values under secret-shaped key names in ``spec``
+    and ``status`` (numbers included), and the secret-named fields inside
+    their text values, are hidden before ``spec_excerpt``,
+    ``status_excerpt`` and ``fields`` are built
+    (:func:`_hide_secret_fields`). So is a secret-named field inside an
+    annotation value, before the value is cut.
     ``k8s.secret.list`` / ``k8s.secret.info`` are the dedicated way to
     look at a core Secret's key names.
 
@@ -246,10 +275,21 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
     """
     kind = obj.get("kind")
     is_secret = kind == SECRET_KIND
-    if is_secret or kind == HELM_CHART_KIND:
-        # Only a Secret or a HelmChart carries values to scrub; redacting
-        # a copy (never the caller's dict) keeps the walk off every other CR.
+    is_chart = kind in HELM_CHART_KINDS
+    if is_secret or is_chart:
+        # Only a Secret or a Helm chart object carries values to scrub;
+        # redacting a copy (never the caller's dict) keeps the walk off every
+        # other CR.
         obj = redact_kubernetes_payload(obj)
+    masked = {"spec": HELM_CHART_VALUE_FIELDS} if is_chart else {}
+    obj = {
+        **obj,
+        **{
+            block: _hide_secret_fields(obj[block], masked=masked.get(block, ()))
+            for block in ("spec", "status")
+            if block in obj
+        },
+    }
     metadata = obj.get("metadata") or {}
     excerpt, truncated = _bounded_json_excerpt(obj.get("spec"))
     status_excerpt, status_truncated = _bounded_json_excerpt(obj.get("status"))

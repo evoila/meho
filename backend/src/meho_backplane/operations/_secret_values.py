@@ -11,10 +11,12 @@ redaction:
   environment read) every value is hidden and only the names stay. For any
   other operation, values under secret-shaped key names are hidden, numbers
   included, except the fields the operation declared as plain
-  (:func:`register_plain_fields`). The caller of every operation gets this
-  view unless a person or a service principal passes ``reveal_secret: true``.
-  An operation that makes a new credential is the exception: the dispatcher
-  returns it to the caller.
+  (:func:`register_plain_fields`). A secret-named field inside a text value
+  (a JSON or YAML file in a string) is hidden in the text too
+  (:func:`~meho_backplane.redaction.secret_text.hide_secret_text`). The
+  caller of every operation gets this view unless a person or a service
+  principal passes ``reveal_secret: true``. An operation that makes a new
+  credential is the exception: the dispatcher returns it to the caller.
 * :func:`reveal_hidden_values` builds the answer of a reveal: the redacted
   answer, with every value the default view hides put back as the
   connector returned it. The redaction of the other fields stays.
@@ -39,6 +41,7 @@ from typing import Any, Final
 
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.operations._validate import compute_audit_digest_hash
+from meho_backplane.redaction.secret_text import hide_secret_text_leaves
 
 __all__ = [
     "FINGERPRINT_PREFIX",
@@ -214,10 +217,9 @@ def hide_secret_values(op_id: str, answer: Any, *, raw: Any = None) -> Any:
     hide = _VALUE_HIDING_OPS.get(op_id)
     if hide is not None:
         return hide(answer, raw)
-    shown, _ = scrub_secret_named_values(
-        answer, hide_numbers=True, plain_names=plain_fields_of(op_id)
-    )
-    return shown
+    plain_names = plain_fields_of(op_id)
+    shown, _ = scrub_secret_named_values(answer, hide_numbers=True, plain_names=plain_names)
+    return hide_secret_text_leaves(shown, plain_names=plain_names)
 
 
 def reveal_hidden_values(raw: Any, redacted: Any, shown: Any) -> Any:

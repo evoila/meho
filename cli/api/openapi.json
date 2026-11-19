@@ -1891,7 +1891,7 @@
           "settings"
         ],
         "summary": "Import Settings",
-        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes.",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes. The same holds for a file\nthat turns on ``run_approval_target_kinds`` or turns off\n``announce_gate_enabled``.",
         "operationId": "import_settings_api_v1_settings_import_post",
         "parameters": [
           {
@@ -4588,7 +4588,7 @@
           "operations"
         ],
         "summary": "Cancel Operation Run",
-        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.",
+        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.\n\nA run that another login started is 403\n``operation_run_cancel_forbidden: <rule>``, and the run goes on. The\nrule says who may stop it: the login that started the run, or a person\nwith the ``tenant_admin`` role or a platform admin in the tenant. An\nagent or service login stops only its own runs.",
         "operationId": "cancel_operation_run_api_v1_operations_runs__handle__cancel_post",
         "parameters": [
           {
@@ -9766,7 +9766,7 @@
           "agents"
         ],
         "summary": "Cancel Run",
-        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.",
+        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.\n\nA run that another login started is 403\n``agent_run_cancel_forbidden: <rule>``, and the run goes on. The rule\nsays who may stop it: the login that started the run, or a person with\nthe ``tenant_admin`` role or a platform admin in the tenant. An agent or\nservice login stops only its own runs.",
         "operationId": "cancel_run_api_v1_agents_runs__handle__cancel_post",
         "parameters": [
           {
@@ -12027,7 +12027,7 @@
           "sensors"
         ],
         "summary": "Edit Sensor",
-        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\nWhen the edit changes the connector, operation, params or check, and\nthe sensor runs as another person (not the editor, not ``__sensor__``),\nthe sensor's ``identity_sub`` becomes ``__sensor__``. ``before`` and\n``after`` show that change too.\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
         "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
         "parameters": [
           {
@@ -36997,6 +36997,16 @@
             },
             "type": "array",
             "title": "Changed Fields"
+          },
+          "identity_sub_before": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub Before"
+          },
+          "identity_sub_after": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub After"
           }
         },
         "type": "object",

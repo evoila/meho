@@ -168,13 +168,14 @@ the token stays valid.
 """
 
 from enum import StrEnum
-from typing import NamedTuple
+from typing import Final, NamedTuple
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
+    "RUN_STOP_RULE",
     "GroupGrant",
     "Operator",
     "PrincipalKind",
@@ -183,6 +184,7 @@ __all__ = [
     "TenantRole",
     "group_grant",
     "is_human_principal",
+    "may_stop_run",
 ]
 
 
@@ -523,3 +525,28 @@ def is_human_principal(operator: Operator) -> bool:
     :mod:`meho_backplane.mcp.human_only` block.
     """
     return operator.principal_kind not in MACHINE_PRINCIPAL_KINDS
+
+
+#: Who may stop a hosted agent run or a background operation run. The 403
+#: text of a refused stop.
+RUN_STOP_RULE: Final[str] = (
+    "only the person or login that started this run, or a tenant admin or platform admin, "
+    "may stop it; an agent or service login may stop only its own runs"
+)
+
+
+def may_stop_run(operator: Operator, owner_sub: str) -> bool:
+    """Return ``True`` when *operator* may stop a run that *owner_sub* started.
+
+    The owner of the run (the run's ``identity_sub``) may stop it. A person
+    who is an admin in a chosen current tenant (the ``tenant_admin`` role or
+    a platform admin, and :attr:`Operator.tenant_chosen` is ``True``: the
+    same admin test as :meth:`Operator.may_approve_rights_change`) may stop
+    any run of the tenant. A machine login stops only its own runs, whatever
+    its role. A run that a login's own schedule or event trigger started
+    carries that login's ``sub``, so it is its own.
+    """
+    if operator.sub == owner_sub:
+        return True
+    is_admin = operator.tenant_role is TenantRole.TENANT_ADMIN or operator.platform_admin
+    return is_admin and operator.tenant_chosen and is_human_principal(operator)

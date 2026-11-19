@@ -167,7 +167,7 @@ from meho_backplane.api.v1._wait_for_approval import (
     dispatch_rest_write,
     runs_at_once,
 )
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.gsm_creds import (
@@ -1528,6 +1528,23 @@ async def probe_target(
     ``targets.probe`` operation calls too.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
+    if not is_human_principal(operator):
+        # Imported here: the targets connector package imports this module.
+        from meho_backplane.connectors.targets.probe import (
+            TARGETS_PROBE_OP_ID,
+            probe_policy_refusal,
+        )
+
+        refusal = await probe_policy_refusal(operator, t)
+        if refusal is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "denied",
+                    "op_id": TARGETS_PROBE_OP_ID,
+                    "message": f"{refusal}. Nothing was probed or stored.",
+                },
+            )
     try:
         fp = await probe_and_store_fingerprint(session, t, operator=operator)
     except (TargetSecretNotFoundError, TargetSecretForbiddenError) as secret_exc:

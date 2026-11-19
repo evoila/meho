@@ -465,8 +465,7 @@ class RunApprovalService:
             ):
                 raise RunApprovalValidationError(
                     "an entry names a target kind (target_product), but this tenant does not "
-                    "allow target kinds in run approvals; name each target, or ask a tenant "
-                    "admin to turn on run_approval_target_kinds in the settings file"
+                    "allow target kinds in run approvals; name each target"
                 )
             await _refuse_live_or_record_expired(session, operator, payload.work_ref, now)
             row = RunApproval(

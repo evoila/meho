@@ -23,24 +23,31 @@ Right after the install, MEHO checks the site and shows a plain list. Each
 line is green, yellow (a warning) or red with one sentence that says what to fix. The list is
 the same in every install form.
 
-The list needs a login with the `operator` role or higher. Three ways to
-read it:
+The list is for people. It needs a person's login with the admin role of
+the tenant, or a platform admin. An operator, a reader, and an agent,
+service or runner login get the answer 403. Three ways to read it:
 
 - The console page `/ui/first-start`. Sign in to the web console first.
 - `meho status --first-start` prints the list. Run `meho login <address>`
-  first. The exit code is 6 when any line is red, and 2 without a login.
+  first. The exit code is 6 when any line is red, 2 without a login, and
+  5 without the admin role.
   Add `--json` for the raw answer.
 - `GET /api/v1/first-start` on the backplane, with the token of a login.
 
 The list shows the systems of your current tenant. A platform admin sees
-the systems of all tenants. A red line names the systems that did not
+the systems of all tenants, and then the line names the tenant of each
+system, for example `esx-2 (tenant blue)`. A red line names the systems that did not
 answer. The answer holds no token, no stack trace and no internal detail.
 
 `GET /first-start` needs no login. It runs no check and contacts no system.
 It answers one fixed line that says how to sign in, and nothing about the
-install.
+install. That answer has `"ok": false` and the line is `skipped`, so a
+script that reads `ok` never sees green when no check ran.
 
-The checks run again on every call and change nothing.
+The checks change nothing. The list runs at most once at a time for each
+tenant: calls that arrive during a run get the result of that run, and a
+finished list is kept for 10 seconds. The reachability check contacts at
+most 10 systems at the same time.
 
 A line is `ok` (green), `warn` (a warning), `fail` (red) or `skipped`. A warning does not make the list red, and the install goes on. A line is skipped when the
 check cannot run or has no meaning: the certificate check waits until the DNS
@@ -93,11 +100,13 @@ a firewall, and run the checks again. The install itself is not stopped.
   to its tenant to read that login. The list uses the token of the signed-in
   person, so it checks these systems in the current tenant. For a platform
   admin who sees all tenants, the systems of other tenants whose login lives
-  in Vault are not contacted, and the line names them as not checked. An
-  agent or service login does not have these systems checked at all. That
+  in Vault are not contacted, and the line names them as not checked. That
   is not a red line. Sign in as a person to that tenant to check them, or
   run `meho targets probe <name>` there.
-- A system whose login lives in Google Secret Manager is always checked:
-  MEHO reads that login with its own Google identity.
+- A system whose login lives in Google Secret Manager is checked in every
+  tenant. MEHO reads that login in one of two ways. Without
+  `GSM_WIF_AUDIENCE`, it uses its own Google identity. With
+  `GSM_WIF_AUDIENCE` set, it uses the token of the signed-in person, which
+  Google exchanges for a short-lived one.
 
 Next: [your first day](first-day.md).

@@ -4,12 +4,15 @@
 
 `GET /api/v1/first-start` (`backend/src/meho_backplane/first_start.py`)
 returns a red/green list for a new install: DNS name, certificate, network,
-clock, reachability of the targets. It needs a login with the `operator`
-role or higher (`require_role(TenantRole.OPERATOR)`).
+clock, reachability of the targets. It is for people: it needs a person's
+login (`is_human_principal`, so not an agent, service or runner login) with
+the `tenant_admin` role or `platform_admin` (`may_see_first_start`). Every
+other login gets 403 `ADMIN_PERSON_REQUIRED` before any check runs.
 
 `GET /first-start` needs no login. It answers the fixed `SIGN_IN_ANSWER`:
-one `skipped` line named `sign-in` that says how to sign in. It runs no
-check, reads no target and contacts nothing, so a caller without a login
+one `skipped` line named `sign-in` that says how to sign in, with `ok`
+false, so a script that reads `ok` never sees green without a check. It
+runs no check, reads no target and contacts nothing, so a caller without a login
 learns nothing about the install.
 User docs: `docs-site/install/first-start-checks.md`.
 
@@ -17,6 +20,12 @@ User docs: `docs-site/install/first-start-checks.md`.
 
 - `FirstStartLine` (`name`, `status` = `ok` | `fail` | `warn` | `skipped`, `message`)
   and `FirstStartResponse` (`ok`, `checks`).
+- `first_start_list(operator)` is what both surfaces call. It runs the list
+  at most once at a time per key (the tenant whose targets are checked and
+  the caller's tenant): calls that arrive during a run wait on an
+  `asyncio.Lock` and get its result, and a finished list is kept for
+  `_RESULT_HOLD_S` (10) seconds, as `/ready` keeps its snapshot.
+  `clear_first_start_cache()` drops the kept lists (tests).
 - `run_first_start_checks(operator, tenant_id=...)` runs the five checks;
   `check_dns`, `check_certificate`, `check_network`, `check_clock`,
   `check_reachability` are one each.
@@ -50,17 +59,25 @@ User docs: `docs-site/install/first-start-checks.md`.
    `Date` header. A `Date` with the zone `-0000` is read as UTC.
 5. `check_reachability` calls `resolve_connector_or_label` and
    `connector.fingerprint(target, operator=operator)` for every live target.
-   It stores nothing (unlike `probe_and_store_fingerprint`). Both surfaces
+   It stores nothing (unlike `probe_and_store_fingerprint`). An
+   `asyncio.Semaphore` lets at most `_MAX_PROBES_AT_ONCE` (10) targets be
+   contacted at the same time. Both surfaces
    pass the signed-in person. `_login_needs_person` decides which targets
    with a `secret_ref` are left out. A login in Google Secret Manager
    (`gsm:`, or no scheme when `CREDENTIAL_BACKEND=gsm`) is read with
-   MEHO's own Google identity, so the target is always contacted. Any
+   MEHO's own Google identity, or with the caller's token when
+   `GSM_WIF_AUDIENCE` is set (Workload Identity Federation, see
+   `connectors/_shared/gsm_creds.py`). Neither depends on the tenant, so
+   the target is contacted in every tenant. Any
    other login (Vault) is read only when the caller is a person (not a
    machine login, see `is_human_principal`) signed in to the target's
    tenant: the Vault role follows the person's tenant. Otherwise its
    outcome is `needs_person`, and the line is `skipped` (or red when another system
    is down) and names such systems. The line names the systems that did
    not answer, at most `_MAX_NAMES_SHOWN` (10) and a count of the rest.
+   For the list of all tenants (`tenant_id` `None`), each name carries the
+   tenant slug (`esx-2 (tenant blue)`, read by `_tenant_slugs`; the tenant
+   id when the slug cannot be read).
 6. `check_destination` completes the DNS line after the certificate check:
    it calls `BACKPLANE_URL/first-start/destination?nonce=<random>` and
    compares the answer with `_destination_proof(nonce)`, an HMAC under a key
@@ -76,9 +93,10 @@ User docs: `docs-site/install/first-start-checks.md`.
 Surfaces: `meho status --first-start` (`cli/internal/cmd/first_start.go`)
 calls `GET /api/v1/first-start` with the login of `meho login`
 (`AuthedClient.GetFirstStart`, one refresh on a 401). Exit code 6 on a red
-line, 2 without a login (it then calls nothing), 5 below the operator
-role; `WARN` label for a warning. The console page `/ui/first-start`
-(`ui/routes/first_start.py`) shows the same list.
+line, 2 without a login (it then calls nothing), 5 without the admin role;
+`WARN` label for a warning. The console page `/ui/first-start`
+(`ui/routes/first_start.py`) shows the same list and shares its runs and
+kept lists.
 
 ## Dependencies
 
@@ -92,11 +110,10 @@ session maker, the connector resolver.
 - The destination check needs MEHO to reach its own public address from
   inside the cluster. A site where that is not possible gets a red
   certificate line first ("could not connect").
-- Every call runs the checks again; there is no kept result.
+- A list is kept for 10 seconds, so a repair shows on a call after that.
 - The install scripts (`deploy/linux-server/lib/core.sh`) do not read the
   list: they have no login. The result names where to read it after the
   first login ([linux-server-install.md](linux-server-install.md)).
-- The console page `/ui/first-start` needs the `operator` role. When the
-  role lift fails soft (`resolve_ui_operator` returns `None`), the page
-  checks the systems of the session's tenant with no person, so targets
-  with a login in Vault are not contacted.
+- The console page `/ui/first-start` passes `require_ui_operator` and then
+  `may_see_first_start` on the lifted operator. When the role lift fails
+  soft (`resolve_ui_operator` returns `None`), the page answers 403.

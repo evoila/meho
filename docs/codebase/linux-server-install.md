@@ -317,7 +317,7 @@ because the update writes RKE2's settings again from the stored answers.
 ```
 
 The install does not read the first-start list. MEHO shows the list only
-to a signed-in person with the `operator` role or higher
+to a signed-in person who is a tenant admin or a platform admin
 ([first-start.md](first-start.md)), and the install has no login. So the
 last line of the result names where to read it after the first login: the
 console page `/ui/first-start`, or `meho login` and then

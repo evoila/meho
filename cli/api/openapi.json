@@ -80,7 +80,7 @@
           "health"
         ],
         "summary": "First Start Signed In",
-        "description": "The first-start list for a signed-in person with at least the operator role.",
+        "description": "The first-start list for a person who is a tenant admin or a platform admin.",
         "operationId": "first_start_signed_in_api_v1_first_start_get",
         "parameters": [
           {

@@ -5,10 +5,12 @@
 
 Right after an install, MEHO checks its own site and returns a plain list.
 Each line is green, or red with one sentence that names the fix. The list
-needs a login with at least the ``operator`` role. ``GET /first-start``
-needs no login and answers one fixed line that says how to sign in. It runs
-no check and contacts no system, so it tells a caller nothing about the
-install. The five checks are:
+is for people: it needs a person's login (not an agent, service or runner
+login) with the admin role of the tenant, or a platform admin. Others get
+403. ``GET /first-start`` needs no login and answers one fixed line that
+says how to sign in, with ``ok`` false. It runs no check and contacts no
+system, so it tells a caller nothing about the install. The five checks
+are:
 
 * **DNS name** - the host of ``BACKPLANE_URL`` resolves, and the address it
   points at answers as this MEHO. For that, MEHO calls its own
@@ -26,14 +28,16 @@ install. The five checks are:
 * **Reachability** - every system listed in the settings (the targets)
   answers the same fingerprint call that ``meho targets probe`` uses.
   Nothing is stored. The list covers the systems of the signed-in tenant. A
-  platform admin who is a person sees the systems of all tenants. The checks
-  run with the signed-in person, so a system whose login is in Vault is
-  checked with that person's token. A system whose login is in Vault is
-  not contacted when it belongs to another tenant, or when the caller is a
-  machine login (an agent, service or runner): the line names the systems
-  that could not be checked. That is not a red line. A login in Google
-  Secret Manager is read with MEHO's own Google identity, so such a system
-  is checked for every caller.
+  platform admin sees the systems of all tenants, and then the line names
+  the tenant of each system. The checks run with the signed-in person, so
+  a system whose login is in Vault is checked with that person's token. A
+  system whose login is in Vault is not contacted when it belongs to
+  another tenant: the line names the systems that could not be checked.
+  That is not a red line. A login in Google Secret Manager is read with
+  MEHO's own Google identity, or with the person's token when
+  ``GSM_WIF_AUDIENCE`` is set, so such a system is checked in every
+  tenant. At most ``_MAX_PROBES_AT_ONCE`` systems are contacted at the same
+  time.
 * **Network** - the addresses the host of ``BACKPLANE_URL`` resolves to are
   not global internet addresses (``ipaddress`` ``is_global``). MEHO belongs
   on the management network. A global address gives a ``warn`` line, not a
@@ -41,14 +45,17 @@ install. The five checks are:
 
 The answer holds the list only: no stack trace, no token, no exception
 text. The reachability line names the systems that did not answer. The
-checks run again on every call and change nothing.
+checks change nothing. The list runs at most once at a time for each
+tenant: calls that arrive during a run share it, and the result is kept
+for ``_RESULT_HOLD_S`` seconds (as ``/ready`` keeps its result).
 
 A line has one of four states: ``ok``, ``fail``, ``warn`` or ``skipped``. A check is
 skipped when it cannot run or has no meaning (the certificate check when
 ``BACKPLANE_URL`` is plain http, or when the DNS name already failed; the
 reachability check when some systems could not be checked and none
 failed). The overall ``ok`` is true when no line is ``fail``; a ``warn`` line
-does not make it false.
+does not make it false. The fixed answer without a login has ``ok`` false,
+so a script never sees green when no check ran.
 """
 
 import asyncio
@@ -75,16 +82,20 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
-from meho_backplane.auth.rbac import require_role
-from meho_backplane.db.models import Target
+from meho_backplane.db.models import Target, Tenant
+from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "ADMIN_PERSON_REQUIRED",
     "CERT_MIN_DAYS_LEFT",
     "CLOCK_MAX_SKEW_S",
     "SIGN_IN_ANSWER",
     "FirstStartLine",
     "FirstStartResponse",
+    "clear_first_start_cache",
+    "first_start_list",
+    "may_see_first_start",
     "reachability_scope",
     "router",
     "run_first_start_checks",
@@ -100,6 +111,10 @@ CLOCK_MAX_SKEW_S: float = 60.0
 _NETWORK_TIMEOUT_S: float = 5.0
 _TARGET_TIMEOUT_S: float = 10.0
 _MAX_NAMES_SHOWN: int = 10
+#: At most this many systems are contacted at the same time.
+_MAX_PROBES_AT_ONCE: int = 10
+#: A finished list is kept this many seconds for later calls of the same tenant.
+_RESULT_HOLD_S: float = 10.0
 
 # The destination proof: a keyed hash of a random nonce under a key of this
 # install. The label keeps the key apart from every other key made from the
@@ -567,10 +582,13 @@ def _login_needs_person(target: Target, operator: Operator | None) -> bool:
     """Whether MEHO leaves *target* unchecked because of where its login is.
 
     A login in Google Secret Manager (``gsm:``, or a ref without a scheme
-    when ``CREDENTIAL_BACKEND`` is ``gsm``) is read with MEHO's own Google
-    identity, so any signed-in caller may have it checked. A login in Vault,
-    or in any other store, is read only for a person (not a machine login)
-    signed in to the target's tenant.
+    when ``CREDENTIAL_BACKEND`` is ``gsm``) is read in one of two ways:
+    with MEHO's own Google identity, or, when ``GSM_WIF_AUDIENCE`` is set,
+    with the caller's token (exchanged at Google for a short-lived one). In
+    both setups the read does not depend on the tenant, so the system is
+    checked in every tenant. A login in Vault, or in any other store, is
+    read only for a person (not a machine login) signed in to the target's
+    tenant.
     """
     from meho_backplane.connectors._shared.credential_backend import parse_credential_scheme
 
@@ -619,6 +637,26 @@ async def _live_targets(tenant_id: uuid.UUID | None = None) -> list[Target]:
         return list(rows)
 
 
+async def _tenant_slugs() -> dict[uuid.UUID, str]:
+    """The name (slug) of each tenant. Empty when the table cannot be read."""
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            rows = await session.execute(select(Tenant.id, Tenant.slug))
+            return dict(rows.tuples().all())
+    except Exception:
+        _log.warning("first_start_tenants_unreadable", exc_info=True)
+        return {}
+
+
+def _label(target: Target, slugs: dict[uuid.UUID, str] | None) -> str:
+    """The name of *target*; with *slugs* (a list of all tenants), also its tenant."""
+    if slugs is None:
+        return target.name
+    return f"{target.name} (tenant {slugs.get(target.tenant_id, str(target.tenant_id))})"
+
+
 def _systems(what: str, names: list[str]) -> str:
     """``"These systems <what>: a, b."``, with at most ``_MAX_NAMES_SHOWN`` names."""
     shown = ", ".join(names[:_MAX_NAMES_SHOWN])
@@ -653,6 +691,16 @@ def _reachability_line(total: int, down: list[str], unchecked: list[str]) -> Fir
     return _line("reachability", "ok", f"All {total} systems answered.")
 
 
+def may_see_first_start(operator: Operator) -> bool:
+    """Whether *operator* may read the first-start list.
+
+    Only a person (not an agent, service or runner login) with the admin
+    role of the tenant, or a platform admin.
+    """
+    is_admin = operator.tenant_role is TenantRole.TENANT_ADMIN or operator.platform_admin
+    return is_admin and is_human_principal(operator)
+
+
 def reachability_scope(operator: Operator) -> uuid.UUID | None:
     """The tenant whose systems the list checks; ``None`` means all tenants.
 
@@ -670,11 +718,13 @@ async def check_reachability(
     tenant_id: uuid.UUID | None = None,
     list_targets: Callable[[uuid.UUID | None], Awaitable[list[Target]]] | None = None,
     probe_one: Callable[[Target, Operator | None], Awaitable[ProbeOutcome]] | None = None,
+    tenant_slugs: Callable[[], Awaitable[dict[uuid.UUID, str]]] | None = None,
 ) -> FirstStartLine:
     """Every system of *tenant_id* answers the same call as ``meho targets probe``.
 
-    *tenant_id* ``None`` means the systems of all tenants. *operator* is the
-    signed-in person whose token reads a login from Vault.
+    *tenant_id* ``None`` means the systems of all tenants; then each name in
+    the line carries the tenant of the system. *operator* is the signed-in
+    person whose token reads a login from Vault.
     """
     try:
         targets = await (list_targets or _live_targets)(tenant_id)
@@ -690,10 +740,17 @@ async def check_reachability(
             "reachability", "ok", "No systems are added yet, so there is nothing to reach."
         )
     probe = probe_one or _probe_one
-    outcomes = await asyncio.gather(*(probe(t, operator) for t in targets))
+    limit = asyncio.Semaphore(_MAX_PROBES_AT_ONCE)
+
+    async def probe_limited(target: Target) -> ProbeOutcome:
+        async with limit:
+            return await probe(target, operator)
+
+    outcomes = await asyncio.gather(*(probe_limited(t) for t in targets))
+    slugs = await (tenant_slugs or _tenant_slugs)() if tenant_id is None else None
     paired = list(zip(targets, outcomes, strict=True))
-    down = sorted(t.name for t, outcome in paired if outcome == "down")
-    unchecked = sorted(t.name for t, outcome in paired if outcome == "needs_person")
+    down = sorted(_label(t, slugs) for t, outcome in paired if outcome == "down")
+    unchecked = sorted(_label(t, slugs) for t, outcome in paired if outcome == "needs_person")
     return _reachability_line(len(targets), down, unchecked)
 
 
@@ -721,9 +778,52 @@ async def run_first_start_checks(
     return FirstStartResponse(ok=all(line.ok for line in lines), checks=lines)
 
 
+_ListKey = tuple[uuid.UUID | None, uuid.UUID]
+
+#: Finished lists: key -> (monotonic time, list). See :func:`first_start_list`.
+_results: dict[_ListKey, tuple[float, FirstStartResponse]] = {}
+_locks: dict[_ListKey, asyncio.Lock] = {}
+
+
+def clear_first_start_cache() -> None:
+    """Drop the kept lists (for tests)."""
+    _results.clear()
+    _locks.clear()
+
+
+def _fresh(key: _ListKey) -> FirstStartResponse | None:
+    kept = _results.get(key)
+    if kept is not None and time.monotonic() - kept[0] < _RESULT_HOLD_S:
+        return kept[1]
+    return None
+
+
+async def first_start_list(operator: Operator) -> FirstStartResponse:
+    """The first-start list for *operator*, run at most once at a time per tenant.
+
+    The key is the tenant whose systems are checked and the tenant of the
+    caller (a platform admin's list of all tenants reads the Vault logins
+    of their own tenant). Calls that arrive during a run wait for it and
+    get its list; a finished list is kept for ``_RESULT_HOLD_S`` seconds.
+    """
+    scope = reachability_scope(operator)
+    key: _ListKey = (scope, operator.tenant_id)
+    kept = _fresh(key)
+    if kept is not None:
+        return kept
+    async with _locks.setdefault(key, asyncio.Lock()):
+        kept = _fresh(key)
+        if kept is not None:
+            return kept
+        result = await run_first_start_checks(operator, tenant_id=scope)
+        _results[key] = (time.monotonic(), result)
+        return result
+
+
 #: The whole answer of ``GET /first-start``: the way to sign in, nothing else.
+#: ``ok`` is false: no check ran, so a script must not read it as green.
 SIGN_IN_ANSWER = FirstStartResponse(
-    ok=True,
+    ok=False,
     checks=[
         FirstStartLine(
             name="sign-in",
@@ -734,7 +834,20 @@ SIGN_IN_ANSWER = FirstStartResponse(
     ],
 )
 
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+#: The 403 text for a login that may not read the list.
+ADMIN_PERSON_REQUIRED = (
+    "first_start_needs_admin: the first-start list needs a person's login with the "
+    "admin role of the tenant, or a platform admin"
+)
+
+
+def _require_admin_person(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    if not may_see_first_start(operator):
+        raise HTTPException(status_code=403, detail=ADMIN_PERSON_REQUIRED)
+    return operator
+
+
+_require_admin = Depends(_require_admin_person)
 
 
 @router.get("/first-start", response_model=FirstStartResponse)
@@ -744,9 +857,9 @@ async def first_start() -> FirstStartResponse:
 
 
 @router.get("/api/v1/first-start", response_model=FirstStartResponse)
-async def first_start_signed_in(operator: Operator = _require_operator) -> FirstStartResponse:
-    """The first-start list for a signed-in person with at least the operator role."""
-    return await run_first_start_checks(operator, tenant_id=reachability_scope(operator))
+async def first_start_signed_in(operator: Operator = _require_admin) -> FirstStartResponse:
+    """The first-start list for a person who is a tenant admin or a platform admin."""
+    return await first_start_list(operator)
 
 
 @router.get("/first-start/destination", response_model=DestinationProof)

@@ -25,9 +25,9 @@ const firstStartTimeout = 30 * time.Second
 
 // runFirstStart implements `meho status --first-start`. It reads the
 // list with the login stored by `meho login`: the backplane shows the
-// list only to a signed-in person with at least the operator role. With
-// --json it prints the backplane's answer as it is. A red line makes the
-// exit code 6.
+// list only to a signed-in person who is a tenant admin or a platform
+// admin. With --json it prints the backplane's answer as it is. A red
+// line makes the exit code 6.
 func runFirstStart(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), firstStartTimeout)
 	defer cancel()
@@ -62,7 +62,7 @@ func runFirstStart(cmd *cobra.Command, backplaneURL string, jsonOut bool) error 
 			"backplane rejected stored credentials; run `meho login %s`", backplaneURL)), jsonOut)
 	case http.StatusForbidden:
 		return output.RenderError(stderr, output.InsufficientRole(
-			"the first-start list needs the operator role in the current tenant"), jsonOut)
+			"the first-start list needs a person's login with the admin role of the current tenant, or a platform admin"), jsonOut)
 	}
 	if resp.JSON200 == nil {
 		return output.RenderError(stderr, output.Unexpected(fmt.Sprintf(

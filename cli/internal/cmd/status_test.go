@@ -689,7 +689,7 @@ func TestStatus_FirstStart_WithoutLoginNamesTheLogin(t *testing.T) {
 }
 
 func TestStatus_FirstStart_RoleTooLowExitsFive(t *testing.T) {
-	url, _ := firstStartServer(t, []byte(`{"detail":"insufficient_role"}`), http.StatusForbidden)
+	url, _ := firstStartServer(t, []byte(`{"detail":"first_start_needs_admin"}`), http.StatusForbidden)
 	_, _, err := runStatus(t, "--first-start", "--backplane", url)
 	var coder output.ExitCoder
 	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitInsufficientRole {

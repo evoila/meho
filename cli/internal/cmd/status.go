@@ -67,7 +67,8 @@ func newStatusCmd() *cobra.Command {
 			"the database state from /api/v1/health/live, and says that the " +
 			"other checks need the operator role.\n\n" +
 			"With --first-start the command reads /api/v1/first-start with " +
-			"the login stored by `meho login` (operator role or higher) and " +
+			"the login stored by `meho login` (a tenant admin or a platform " +
+			"admin) and " +
 			"prints one line per check: the DNS name, the certificate, the " +
 			"clock, the network and the reachability of the systems of the " +
 			"current tenant (of all tenants for a platform admin). A red " +
@@ -129,7 +130,7 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false,
 		"stream a live SSE feed of broadcast events (one line per event; Ctrl-C to exit)")
 	cmd.Flags().BoolVar(&firstStart, "first-start", false,
-		"show the first-start checks (DNS name, certificate, clock, network, reachability of the systems) as a red/green list; needs a login with the operator role")
+		"show the first-start checks (DNS name, certificate, clock, network, reachability of the systems) as a red/green list; needs a login as a tenant admin or a platform admin")
 	cmd.Flags().StringVar(&opClass, "op-class", "",
 		"filter --watch events by op_class (read, write, credential_read, audit_query)")
 	cmd.Flags().StringVar(&principal, "principal", "",

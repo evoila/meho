@@ -12211,6 +12211,71 @@
         }
       }
     },
+    "/api/v1/sensors/{sensor_id}/run": {
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Run Sensor Now",
+        "description": "Run one sensor once now.\n\n``tenant_admin`` only. The call makes the sensor due at once. The\nrunner runs it at its next tick, with its normal login and rules, and\nthe result shows in the sensor's results. The call never runs the\noperation itself. A paused sensor is 409 ``sensor_paused``: resume it\nfirst. A cross-tenant / absent id is 404 ``sensor_not_found``. A sensor\nthat is already due is fine: the call answers 202 and changes nothing.",
+        "operationId": "run_sensor_now_api_v1_sensors__sensor_id__run_post",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRunAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sensors/{sensor_id}/acknowledgement": {
       "post": {
         "tags": [
@@ -43400,6 +43465,27 @@
         ],
         "title": "SensorResultRead",
         "description": "Response shape for one ``sensor_results`` evidence row (#2756).\n\nMirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the\nwire types the JSON renderer serialises: the raw ``(evaluated_at, state,\nvalue, evidence, reason)`` the runner computed, plus the owning\n``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after\nreturning it."
+      },
+      "SensorRunAccepted": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Next Fire At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "next_fire_at"
+        ],
+        "title": "SensorRunAccepted",
+        "description": "Answer of the run route: the Sensor and when it is due."
       },
       "SensorRunnerStatus": {
         "properties": {

@@ -46,7 +46,9 @@ CONNECTOR_ID = "vault-1.x"
 # composite: the approval request stores this connector id, and the resume
 # re-dispatches the parent composite under it.
 STEP_CONNECTOR_ID = CONNECTOR_ID
-CHILD_OP_ID = "vault.kv.list"
+# A plain read. MEHO stores no result of a credential read (such as
+# ``vault.kv.list``), so a later step of the run could not wait.
+CHILD_OP_ID = "vault.things.list"
 WAIT_OP_ID = "vault.composite.step_waits"
 DENY_OP_ID = "vault.composite.step_denied"
 PREFLIGHT_OP_ID = "vault.composite.step_refused_before_wait"
@@ -280,9 +282,14 @@ async def register_child(embedding: Any) -> None:
 
 
 async def register_composite(
-    session: AsyncSession, op_id: str, handler_name: str, *, safety_level: str = "safe"
+    session: AsyncSession,
+    op_id: str,
+    handler_name: str,
+    *,
+    safety_level: str = "safe",
+    module: str = "tests._composite_wait_audit_helpers",
 ) -> None:
-    """Insert one ``source_kind='composite'`` descriptor pointing at a handler here."""
+    """Insert one ``source_kind='composite'`` descriptor pointing at a handler in *module*."""
     session.add(
         EndpointDescriptor(
             id=uuid.uuid4(),
@@ -294,7 +301,7 @@ async def register_composite(
             source_kind="composite",
             method=None,
             path=None,
-            handler_ref=f"tests._composite_wait_audit_helpers.{handler_name}",
+            handler_ref=f"{module}.{handler_name}",
             summary=f"Composite {op_id}.",
             description=f"Composite {op_id}.",
             tags=[],

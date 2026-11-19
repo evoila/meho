@@ -270,7 +270,7 @@ async def test_the_approval_of_the_run_does_not_cover_a_step_with_the_override_f
 
 
 @pytest.mark.asyncio
-async def test_a_resume_ends_at_a_step_with_the_override_flag(embedding: AsyncMock) -> None:
+async def test_a_resume_waits_again_at_a_step_with_the_override_flag(embedding: AsyncMock) -> None:
     await _register(embedding)
     await _override("install", requires_approval=True)
 
@@ -291,8 +291,8 @@ async def test_a_resume_ends_at_a_step_with_the_override_flag(embedding: AsyncMo
         composite_dispatch_var.reset(dispatch_token)
 
     assert result is not None
-    assert result.extras["error_code"] == "composite_resume_multi_gate_unsupported"
-    assert await _requests() == []
+    assert result.status == "awaiting_approval", result.error
+    assert len(await _requests()) == 1
 
 
 # ---------------------------------------------------------------------------

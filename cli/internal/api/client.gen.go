@@ -11117,6 +11117,12 @@ type SensorResultRead struct {
 // SensorResultReadState defines model for SensorResultRead.State.
 type SensorResultReadState string
 
+// SensorRunAccepted Answer of the run route: the Sensor and when it is due.
+type SensorRunAccepted struct {
+	NextFireAt time.Time          `json:"next_fire_at"`
+	SensorId   openapi_types.UUID `json:"sensor_id"`
+}
+
 // SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
 //
 // The queryable half of the checks-runner watchdog: an external prober
@@ -14209,6 +14215,12 @@ type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
 
 // ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
 type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
+
+// RunSensorNowApiV1SensorsSensorIdRunPostParams defines parameters for RunSensorNowApiV1SensorsSensorIdRunPost.
+type RunSensorNowApiV1SensorsSensorIdRunPostParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
 
 // ListGrantsApiV1ServicePrincipalsGrantsGetParams defines parameters for ListGrantsApiV1ServicePrincipalsGrantsGet.
 type ListGrantsApiV1ServicePrincipalsGrantsGetParams struct {
@@ -18108,6 +18120,9 @@ type ClientInterface interface {
 
 	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
 	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunSensorNowApiV1SensorsSensorIdRunPost request
+	RunSensorNowApiV1SensorsSensorIdRunPost(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListGrantsApiV1ServicePrincipalsGrantsGet request
 	ListGrantsApiV1ServicePrincipalsGrantsGet(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22198,6 +22213,18 @@ func (c *Client) AcknowledgeSensorFindingApiV1SensorsSensorIdAcknowledgementPost
 
 func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(c.Server, sensorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunSensorNowApiV1SensorsSensorIdRunPost(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunSensorNowApiV1SensorsSensorIdRunPostRequest(c.Server, sensorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -39287,6 +39314,77 @@ func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, se
 	return req, nil
 }
 
+// NewRunSensorNowApiV1SensorsSensorIdRunPostRequest generates requests for RunSensorNowApiV1SensorsSensorIdRunPost
+func NewRunSensorNowApiV1SensorsSensorIdRunPostRequest(server string, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/run", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListGrantsApiV1ServicePrincipalsGrantsGetRequest generates requests for ListGrantsApiV1ServicePrincipalsGrantsGet
 func NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(server string, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams) (*http.Request, error) {
 	var err error
@@ -55262,6 +55360,9 @@ type ClientWithResponsesInterface interface {
 	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
 	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
 
+	// RunSensorNowApiV1SensorsSensorIdRunPostWithResponse request
+	RunSensorNowApiV1SensorsSensorIdRunPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error)
+
 	// ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse request
 	ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error)
 
@@ -60454,6 +60555,29 @@ func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) Status() string
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunSensorNowApiV1SensorsSensorIdRunPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *SensorRunAccepted
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunSensorNowApiV1SensorsSensorIdRunPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunSensorNowApiV1SensorsSensorIdRunPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69126,6 +69250,15 @@ func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWit
 		return nil, err
 	}
 	return ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp)
+}
+
+// RunSensorNowApiV1SensorsSensorIdRunPostWithResponse request returning *RunSensorNowApiV1SensorsSensorIdRunPostResponse
+func (c *ClientWithResponses) RunSensorNowApiV1SensorsSensorIdRunPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error) {
+	rsp, err := c.RunSensorNowApiV1SensorsSensorIdRunPost(ctx, sensorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse(rsp)
 }
 
 // ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse request returning *ListGrantsApiV1ServicePrincipalsGrantsGetResponse
@@ -78581,6 +78714,39 @@ func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Resp
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse parses an HTTP response from a RunSensorNowApiV1SensorsSensorIdRunPostWithResponse call
+func ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse(rsp *http.Response) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunSensorNowApiV1SensorsSensorIdRunPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest SensorRunAccepted
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

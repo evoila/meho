@@ -422,6 +422,7 @@ async def _park(params_hash: str, *, idempotency_key: str | None = None) -> Appr
             params=dict(_PARAMS),
             params_hash=params_hash,
             idempotency_key=idempotency_key,
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request

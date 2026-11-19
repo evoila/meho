@@ -321,11 +321,13 @@ async def shadow_call(
 def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk:
     """The :class:`ApprovalAsk` of *request*, as *operator* would see it."""
     from meho_backplane.db.models import ApprovalRequestStatus
-    from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
+    from meho_backplane.operations.approval_queue import (
+        ApprovalRoleFloorError,
+        approval_risk_level,
+    )
     from meho_backplane.operations.grant_approval import check_grant_approval, is_rights_change
 
     effect = request.proposed_effect or {}
-    level = effect.get("safety_level")
     waits_because = effect.get("waits_because")
     grant_refusal: str | None = None
     try:
@@ -335,7 +337,7 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
     return ApprovalAsk(
         requester_sub=request.principal_sub,
         op_id=request.op_id,
-        risk=level if isinstance(level, str) else None,
+        risk=approval_risk_level(request),
         pending=request.status == ApprovalRequestStatus.PENDING.value,
         waits_because=waits_because if isinstance(waits_because, str) else None,
         rights_change=is_rights_change(request),

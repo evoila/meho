@@ -299,6 +299,7 @@ async def _park_pending() -> uuid.UUID:
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
         await s.commit()
         return request.id

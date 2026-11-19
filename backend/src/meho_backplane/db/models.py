@@ -7245,11 +7245,11 @@ class ApprovalRequest(Base):
       instead of the un-executable raw key. The resume runs under the
       approving reviewer, who auto-executes every governed sub-op (all
       ``dangerous`` + ``requires_approval=False``), so the composite completes
-      in that single pass; a composite that would open a *second* governed gate
-      is unsupported and fails closed
-      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1), unless that gate is an ``after_main_effect`` step with saved
-      state (#4217). NULL for every non-composite (direct-op) park — those keep
+      in that single pass; a later step that needs its own approval waits
+      again. The optional key ``"steps"`` lists the steps the composite's run
+      already went through, with their results, so a re-entry does not send
+      them again (:mod:`~meho_backplane.operations.composite_steps`). NULL for
+      every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -9334,8 +9334,9 @@ class Sensor(Base):
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
-    # when the state changes so #2506's ``for:`` hysteresis can read how
-    # long the current state has held.
+    # when the state changes (or the first result confirms the initial
+    # ``unknown``) so the ``for:`` hysteresis can read how long the
+    # current state has held.
     last_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,

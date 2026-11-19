@@ -21,9 +21,10 @@ For these, MEHO checks when a person approves:
   approves it, and the request cannot be approved when MEHO could not
   read who is in the group.
 * In MEHO's own login realm, the change always needs a second person who
-  is a tenant admin (a platform admin for the platform admin group or
-  role). No self-approval rule covers it, also not the one of the
-  MEHO-SA-Operators group.
+  is a tenant admin. It needs a platform admin when the change can give
+  platform admin rights: the connector decides this from what the group or
+  role gives (``platform_admin``), not from its name. No self-approval rule
+  covers it, also not the one of the MEHO-SA-Operators group.
 
 The connector describes each parked request in
 ``proposed_effect["preview"]["grant"]``: ``user_id`` (the login the change
@@ -47,8 +48,8 @@ they also bind the run:
   who is in the group. A person can join the group after the request was
   made, so the list saved with the request is not enough.
 * The change does not run when it now needs a stricter approval than the
-  one it got: the realm became a login realm, the group became the platform
-  admin group, or MEHO cannot read which case it is.
+  one it got: the realm became a login realm, the group now gives platform
+  admin rights, or MEHO cannot read which case it is.
 * A change that acts on a list of objects shown on the card (for example
   the credentials a credential delete removes, registered with
   ``bound_ids``) does not run when the live card lists other ids.
@@ -338,14 +339,14 @@ def _check_who_the_change_is_for(
 def _check_login_realm_approver(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
-    """In the login realm: a tenant admin, or a platform admin for the platform admin group."""
+    """In the login realm: a tenant admin; a platform admin when it gives platform admin."""
     if facts.platform_admin:
         if not operator.platform_admin:
             raise _refusal(
                 request,
                 operator,
                 "it changes who has rights in MEHO's own login realm "
-                "(the platform admin group or role, or a group MEHO could not read). "
+                "(a group or role that gives platform admin rights, or one MEHO could not read). "
                 "A second person who is a platform admin must approve it",
             )
     elif operator.tenant_role != TenantRole.TENANT_ADMIN:

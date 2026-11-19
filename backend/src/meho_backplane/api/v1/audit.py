@@ -246,8 +246,9 @@ async def _dispatch(
     service login reads only the rows of its own calls
     (:func:`~meho_backplane.audit_query.own_rows_sub`); a person reads
     every row of the tenant. ``own_rows_only=False`` reads every row of the
-    tenant for any caller; only :func:`trace` uses it, and it checks the
-    row's owner itself. Maps the substrate's operator-
+    tenant for any caller and binds no ``audit_row_count``; only
+    :func:`trace` uses it, and it checks the row's owner and binds the
+    count itself. Maps the substrate's operator-
     facing validation errors (:class:`InvalidCursorError`,
     :class:`UnsupportedFilterError`) to 400 — other exceptions
     propagate and the chassis turns them into 500.
@@ -268,7 +269,8 @@ async def _dispatch(
     # via ``audit_row_count`` (per ``broadcast/events.py::_maybe_row_count``),
     # giving SSE / Slack subscribers an aggregate signal without
     # revealing the request filter or the matched audit rows.
-    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    if own_rows_only:
+        structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
     return result
 
 
@@ -572,6 +574,10 @@ async def trace(
         operator=operator,
         own_rows_only=False,
     )
+    # The stored row count is bound only after the owner check, so a row of
+    # another login and a missing row leave the same count (0) in the
+    # caller's own audit row.
+    structlog.contextvars.bind_contextvars(audit_row_count=0)
     if not audit.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
     owner_sub = own_rows_sub(operator)
@@ -585,6 +591,7 @@ async def trace(
         )
     ):
         raise HTTPException(status_code=404, detail="audit row not found")
+    structlog.contextvars.bind_contextvars(audit_row_count=1)
 
     event_class = row.event_class
     view = None

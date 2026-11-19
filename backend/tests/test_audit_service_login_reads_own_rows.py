@@ -23,14 +23,18 @@ from uuid import UUID
 
 import pytest
 import respx
+import sqlalchemy as sa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from meho_backplane.api.v1.audit import router as audit_router
 from meho_backplane.api.v1.audit_counts import router as audit_counts_router
+from meho_backplane.audit import AuditMiddleware
 from meho_backplane.audit_query import own_rows_sub
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -74,6 +78,16 @@ def client() -> Iterator[TestClient]:
     app.add_middleware(RequestContextMiddleware)
     app.include_router(audit_router)
     app.include_router(audit_counts_router)
+    yield TestClient(app)
+
+
+@pytest.fixture
+def audited_client() -> Iterator[TestClient]:
+    """Like :func:`client`, and each request also writes its own audit row."""
+    app = FastAPI()
+    app.add_middleware(AuditMiddleware)
+    app.add_middleware(RequestContextMiddleware)
+    app.include_router(audit_router)
     yield TestClient(app)
 
 
@@ -217,6 +231,32 @@ async def test_show_and_trace_of_another_login_answer_like_a_missing_row(
 
         own = _call(client, "GET", path.format(seeded.service.traced), login=login)
         assert own.status_code == 200, own.text
+
+
+async def _stored_payloads(path: str) -> list[dict[str, Any]]:
+    """The payloads of the audit rows that the requests to *path* wrote."""
+    async with get_sessionmaker()() as session:
+        result = await session.execute(sa.select(AuditLog.payload).where(AuditLog.path == path))
+        return [dict(p) for p in result.scalars().all()]
+
+
+@pytest.mark.parametrize("login", _LOGINS)
+async def test_trace_of_another_login_stores_the_same_request_row_as_a_missing_row(
+    audited_client: TestClient, seeded: Seeded, login: str
+) -> None:
+    """The caller's own request row says nothing about a row of another login."""
+    foreign_path = f"/api/v1/audit/{seeded.person.traced}/trace"
+    missing_path = f"/api/v1/audit/{uuid.uuid4()}/trace"
+    own_path = f"/api/v1/audit/{seeded.service.traced}/trace"
+    for path in (foreign_path, missing_path, own_path):
+        _call(audited_client, "GET", path, login=login)
+
+    (foreign,) = await _stored_payloads(foreign_path)
+    (missing,) = await _stored_payloads(missing_path)
+    assert foreign == missing
+    assert foreign["row_count"] == 0
+    (own,) = await _stored_payloads(own_path)
+    assert own["row_count"] == 1
 
 
 #: An agent acts with at most the operator role, so it never reaches replay.

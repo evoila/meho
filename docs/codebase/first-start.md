@@ -51,10 +51,14 @@ User docs: `docs-site/install/first-start-checks.md`.
 5. `check_reachability` calls `resolve_connector_or_label` and
    `connector.fingerprint(target, operator=operator)` for every live target.
    It stores nothing (unlike `probe_and_store_fingerprint`). Both surfaces
-   pass the signed-in person. A target with a `secret_ref` (login in Vault)
-   is contacted only when the person is signed in to the target's tenant:
-   the Vault role follows the person's tenant. Otherwise its outcome is
-   `needs_person`, and the line is `skipped` (or red when another system
+   pass the signed-in person. `_login_needs_person` decides which targets
+   with a `secret_ref` are left out. A login in Google Secret Manager
+   (`gsm:`, or no scheme when `CREDENTIAL_BACKEND=gsm`) is read with
+   MEHO's own Google identity, so the target is always contacted. Any
+   other login (Vault) is read only when the caller is a person (not a
+   machine login, see `is_human_principal`) signed in to the target's
+   tenant: the Vault role follows the person's tenant. Otherwise its
+   outcome is `needs_person`, and the line is `skipped` (or red when another system
    is down) and names such systems. The line names the systems that did
    not answer, at most `_MAX_NAMES_SHOWN` (10) and a count of the rest.
 6. `check_destination` completes the DNS line after the certificate check:

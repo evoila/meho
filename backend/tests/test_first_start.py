@@ -964,11 +964,73 @@ async def test_login_in_vault_of_another_tenant_is_not_read(
     )
     assert line.status == "skipped"
     assert "2 of 3 systems answered" in line.message
-    assert (
-        "login is in Vault and MEHO reads it only for a person signed in to their tenant: k8s-9."
-        in line.message
-    )
+    assert f"{_VAULT_NOTE}: k8s-9." in line.message
     assert _Fingerprint.seen == [platform_admin, platform_admin]  # k8s-1 and esx-9
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE])
+async def test_machine_login_leaves_systems_with_login_in_vault_unchecked(
+    monkeypatch: pytest.MonkeyPatch, kind: PrincipalKind
+) -> None:
+    _use_fake_connector(monkeypatch)
+    machine = _operator(kind=kind, platform_admin=True)
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [
+            _target("k8s-1", secret_ref="secret/k8s-1"),
+            _target("k8s-2", secret_ref="vault:secret/k8s-2"),
+            _target("esx-1"),
+        ]
+
+    line = await first_start.check_reachability(operator=machine, list_targets=targets)
+    assert line.status == "skipped"
+    assert "1 of 3 systems answered" in line.message
+    assert f"{_VAULT_NOTE}: k8s-1, k8s-2." in line.message
+    assert _Fingerprint.seen == [machine]  # only esx-1 was contacted
+
+
+async def test_login_in_google_secret_manager_is_checked_in_every_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_fake_connector(monkeypatch)
+    platform_admin = _operator(platform_admin=True)
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [
+            _target("gke-9", secret_ref="gsm:proj-9/gke-9", tenant_id=_OTHER_TENANT),
+            _target("k8s-9", secret_ref="secret/k8s-9", tenant_id=_OTHER_TENANT),
+        ]
+
+    line = await first_start.check_reachability(
+        operator=platform_admin, tenant_id=None, list_targets=targets
+    )
+    assert line.status == "skipped"
+    assert "1 of 2 systems answered" in line.message
+    assert f"{_VAULT_NOTE}: k8s-9." in line.message
+    assert "gke-9" not in line.message
+    assert _Fingerprint.seen == [platform_admin]  # gke-9 only
+
+
+async def test_ref_without_scheme_follows_the_default_credential_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    get_settings.cache_clear()
+    _use_fake_connector(monkeypatch)
+    platform_admin = _operator(platform_admin=True)
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [
+            _target("gke-9", secret_ref="proj-9/gke-9", tenant_id=_OTHER_TENANT),
+            _target("k8s-9", secret_ref="vault:secret/k8s-9", tenant_id=_OTHER_TENANT),
+        ]
+
+    line = await first_start.check_reachability(
+        operator=platform_admin, tenant_id=None, list_targets=targets
+    )
+    assert line.status == "skipped"
+    assert f"{_VAULT_NOTE}: k8s-9." in line.message
+    assert _Fingerprint.seen == [platform_admin]  # gke-9 only
 
 
 async def test_unchecked_systems_are_told_apart_from_systems_that_did_not_answer() -> None:
@@ -983,10 +1045,7 @@ async def test_unchecked_systems_are_told_apart_from_systems_that_did_not_answer
     line = await first_start.check_reachability(list_targets=targets, probe_one=probe)
     assert line.status == "fail"
     assert "These systems did not answer: esx-2." in line.message
-    assert (
-        "login is in Vault and MEHO reads it only for a person signed in to their tenant: k8s-1."
-        in line.message
-    )
+    assert f"{_VAULT_NOTE}: k8s-1." in line.message
 
 
 async def test_many_names_are_cut_short() -> None:

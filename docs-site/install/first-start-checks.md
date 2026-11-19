@@ -93,8 +93,11 @@ a firewall, and run the checks again. The install itself is not stopped.
   to its tenant to read that login. The list uses the token of the signed-in
   person, so it checks these systems in the current tenant. For a platform
   admin who sees all tenants, the systems of other tenants whose login lives
-  in Vault are not contacted, and the line names them as not checked. That
-  is not a red line. Sign in to that tenant to check them, or run
-  `meho targets probe <name>` there.
+  in Vault are not contacted, and the line names them as not checked. An
+  agent or service login does not have these systems checked at all. That
+  is not a red line. Sign in as a person to that tenant to check them, or
+  run `meho targets probe <name>` there.
+- A system whose login lives in Google Secret Manager is always checked:
+  MEHO reads that login with its own Google identity.
 
 Next: [your first day](first-day.md).

@@ -28,9 +28,12 @@ install. The five checks are:
   Nothing is stored. The list covers the systems of the signed-in tenant. A
   platform admin who is a person sees the systems of all tenants. The checks
   run with the signed-in person, so a system whose login is in Vault is
-  checked with that person's token. A system whose login is in Vault and
-  that belongs to another tenant is not contacted: the line says how many
-  systems could not be checked. That is not a red line.
+  checked with that person's token. A system whose login is in Vault is
+  not contacted when it belongs to another tenant, or when the caller is a
+  machine login (an agent, service or runner): the line names the systems
+  that could not be checked. That is not a red line. A login in Google
+  Secret Manager is read with MEHO's own Google identity, so such a system
+  is checked for every caller.
 * **Network** - the addresses the host of ``BACKPLANE_URL`` resolves to are
   not global internet addresses (``ipaddress`` ``is_global``). MEHO belongs
   on the management network. A global address gives a ``warn`` line, not a
@@ -560,16 +563,36 @@ async def check_clock(
 # --- Reachability -----------------------------------------------------------
 
 
+def _login_needs_person(target: Target, operator: Operator | None) -> bool:
+    """Whether MEHO leaves *target* unchecked because of where its login is.
+
+    A login in Google Secret Manager (``gsm:``, or a ref without a scheme
+    when ``CREDENTIAL_BACKEND`` is ``gsm``) is read with MEHO's own Google
+    identity, so any signed-in caller may have it checked. A login in Vault,
+    or in any other store, is read only for a person (not a machine login)
+    signed in to the target's tenant.
+    """
+    from meho_backplane.connectors._shared.credential_backend import parse_credential_scheme
+
+    ref = (target.secret_ref or "").strip()
+    if not ref:
+        return False
+    if operator is None:
+        return True
+    if (parse_credential_scheme(ref) or get_settings().credential_backend) == "gsm":
+        return False
+    return not is_human_principal(operator) or target.tenant_id != operator.tenant_id
+
+
 async def _probe_one(target: Target, operator: Operator | None) -> ProbeOutcome:
     """Whether the target answers the fingerprint call. Nothing is stored.
 
-    A target whose login is in Vault (``secret_ref``) needs the token of a
-    person signed in to its tenant to read it. Without such a person it is
-    not contacted: the outcome is ``needs_person``, not ``down``.
+    A target whose login MEHO may not read for *operator* is not contacted:
+    the outcome is ``needs_person``, not ``down`` (see :func:`_login_needs_person`).
     """
     from meho_backplane.connectors.resolver import resolve_connector_or_label
 
-    if target.secret_ref and (operator is None or target.tenant_id != operator.tenant_id):
+    if _login_needs_person(target, operator):
         return "needs_person"
     cls, label, _message = resolve_connector_or_label(target, for_probe=True)
     if label is not None or cls is None:

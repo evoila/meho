@@ -729,7 +729,7 @@ async def enforce_subop_policy(
     )
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
-        _build_proposed_effect,
+        _build_park_effect,
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
@@ -903,7 +903,8 @@ async def enforce_subop_policy(
             # ``_build_proposed_effect`` keeps one stamping path rather than
             # diverging; it is fail-soft (returns ``None`` only when connector /
             # preview resolution raises, exactly as the dispatcher park path).
-            proposed_effect = await _build_proposed_effect(
+            # When it raises, the row still stores the catalog risk level.
+            proposed_effect = await _build_park_effect(
                 op_id=op_id,
                 connector_id=connector_id,
                 descriptor=descriptor,

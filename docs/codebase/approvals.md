@@ -898,8 +898,21 @@ model, or resume endpoint):
      `UnauthorizedApprovalError`; REST answers 403
      `approval_group_required: <text>`).
    - Another person's lower-risk change keeps the reviewer rule
-     (operator-or-higher, or the `approver` flag). A request without a
-     stamped `safety_level` counts as lower-risk.
+     (operator-or-higher, or the `approver` flag).
+   - A request without a stamped `safety_level` counts as `destructive`
+     (`approval_risk_level`): only a MEHO-SA-Operator or a tenant admin
+     may approve it, and break-glass never covers it.
+
+   **When the preview fails.** At park time the dispatcher builds the
+   approval card with `_build_proposed_effect`. When that build raises,
+   `_build_park_effect` stores `_preview_failed_effect` instead: the op
+   identity, the catalog `op_class` and `safety_level`,
+   `preview_populated: false` and `preview_failed: true`. So the request
+   keeps the risk level of the operation, and the approval rules above
+   read it. The approval card says "MEHO could not build the preview of
+   this change." A `destructive` operation still refuses to park without
+   its preview binding and blast radius. The multi-step park
+   (`composite.py`) uses the same helper.
 
    **How to audit a self-approval.** The `approval.decision` audit row
    carries `reviewed_by` (the approver's `sub`), `self_approved` (true

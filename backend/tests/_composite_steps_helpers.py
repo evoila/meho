@@ -36,6 +36,7 @@ GATED_THEN_WAIT_OP_ID = "vault.composite.gated_change_then_wait"
 STEP_THEN_CREDENTIAL_OP_ID = "vault.composite.change_then_credential"
 TWO_WAITS_OP_ID = "vault.composite.change_wait_change_wait"
 LOST_END_OP_ID = "vault.composite.change_without_end_then_wait"
+POP_RESULT_OP_ID = "vault.composite.change_pop_result_wait_wait"
 
 
 async def change_child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -205,3 +206,20 @@ async def change_without_end_then_wait_composite(
             return made.stopped
     waited = await _waiting_step(operator, target, CREDENTIAL_STEP, {"path": "app"})
     return waited.stopped if waited.stopped is not None else {"done": True}
+
+
+async def change_pop_result_wait_wait_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """A change whose result the handler changes (``pop``), then two steps that wait."""
+    made = await _change_step(operator, target, CHANGE_STEP, {"name": "thing-1"}, {"id": "t-1"})
+    if made.stopped is not None:
+        return made.stopped
+    thing_id = made.value.pop("id")
+    first = await _waiting_step(operator, target, CREDENTIAL_STEP, {"path": thing_id})
+    if first.stopped is not None:
+        return first.stopped
+    second = await _waiting_step(operator, target, SECOND_WAIT_STEP, {"id": thing_id})
+    if second.stopped is not None:
+        return second.stopped
+    return {"done": True, "id": thing_id}

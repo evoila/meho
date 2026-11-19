@@ -497,13 +497,20 @@ def get_dispatch_child(
             parent_op_id=parent_op_id,
             child_op_id=op_id,
         )
+        effective_target = parent_target if target is None else target
         journal = current_step_journal()
         entry: dict[str, Any] | None = None
         if journal is not None:
-            stop = _replayed_child(journal, connector_id=connector_id, op_id=op_id, params=params)
+            stop = _replayed_child(
+                journal,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=effective_target,
+                params=params,
+            )
             if stop is not None:
                 return stop
-            entry = journal.start(connector_id, op_id, params)
+            entry = journal.start(connector_id, op_id, effective_target, params)
         # Bind the audit-tree + depth + op-id chain contextvars for
         # the duration of the recursive dispatch. Tokens make resets
         # exception-safe -- ``finally`` restores siblings' clean state.
@@ -513,7 +520,6 @@ def get_dispatch_child(
             (*_composite_op_id_chain_var.get(), parent_op_id),
         )
         try:
-            effective_target = parent_target if target is None else target
             result = await dispatch(
                 operator=parent_operator,
                 connector_id=connector_id,
@@ -533,7 +539,12 @@ def get_dispatch_child(
 
 
 def _replayed_child(
-    journal: StepJournal, *, connector_id: str, op_id: str, params: dict[str, Any]
+    journal: StepJournal,
+    *,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
 ) -> OperationResult | None:
     """What a ``dispatch_child`` step returns without running, during a resume.
 
@@ -548,7 +559,7 @@ def _replayed_child(
         result_composite_resume_step_outcome_unknown,
     )
 
-    replayed = journal.take(connector_id, op_id, params)
+    replayed = journal.take(connector_id, op_id, target, params)
     if replayed is not None:
         if replayed.get("status") == STEP_DONE:
             _log.info(
@@ -764,7 +775,7 @@ async def enforce_subop_policy(
     from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
 
     journal = current_step_journal()
-    if journal is not None and journal.take(connector_id, op_id, params) is not None:
+    if journal is not None and journal.take(connector_id, op_id, target, params) is not None:
         _log.error(
             "composite_resume_step_outcome_unknown",
             composite_op_id=journal.composite_op_id,
@@ -785,7 +796,7 @@ async def enforce_subop_policy(
         after_main_effect=after_main_effect,
     )
     if gated is None and journal is not None:
-        journal.start(connector_id, op_id, params)
+        journal.start(connector_id, op_id, target, params)
     return gated
 
 
@@ -835,7 +846,7 @@ async def run_governed_subop(
 
     journal = current_step_journal()
     if journal is not None:
-        replayed = journal.take(connector_id, op_id, params)
+        replayed = journal.take(connector_id, op_id, target, params)
         if replayed is not None:
             if replayed.get("status") == STEP_DONE:
                 _log.info(
@@ -865,7 +876,7 @@ async def run_governed_subop(
     )
     if gated is not None:
         return SubopStep(stopped=gated)
-    entry = journal.start(connector_id, op_id, params) if journal is not None else None
+    entry = journal.start(connector_id, op_id, target, params) if journal is not None else None
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)

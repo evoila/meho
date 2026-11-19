@@ -19,13 +19,17 @@ step. This module makes sure no step that already ran is sent again.
   is not sent again: a ``done`` step returns its stored result, and a step
   with no stored end stops the run (its outcome is unknown).
 
-An entry is matched on the connector, the op id and the params hash, in
-the order of the first run. A result is kept only when it is JSON and holds
-no secret-named value; otherwise the entry stays ``started``.
+An entry is matched on the connector, the op id, the target and the params
+hash, in the order of the first run. A result is kept only when it is JSON
+and holds no secret-named value (also no number under a secret name);
+otherwise the entry stays ``started``. A replayed result is a copy, so a
+handler that changes it does not change what a later wait stores.
 """
 
 from __future__ import annotations
 
+import copy
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -45,6 +49,7 @@ __all__ = [
     "composite_resume_steps",
     "composite_step_journal",
     "current_step_journal",
+    "step_target_key",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -53,6 +58,21 @@ _log = structlog.get_logger(__name__)
 STEP_DONE = "done"
 #: The step was started; MEHO has no stored end for it.
 STEP_STARTED = "started"
+
+
+def step_target_key(target: Any) -> str | None:
+    """The stable identity of a step's target: its id, else its name, else ``None``."""
+    if target is None:
+        return None
+    if isinstance(target, str):
+        return f"name:{target}"
+    raw_id = getattr(target, "id", None)
+    if isinstance(raw_id, uuid.UUID):
+        return f"id:{raw_id}"
+    name = getattr(target, "name", None)
+    if isinstance(name, str):
+        return f"name:{name}"
+    return f"repr:{target!r}"
 
 
 @dataclass
@@ -65,29 +85,38 @@ class StepJournal:
     #: Entries of the earlier run that this run has not reached yet.
     replay: list[dict[str, Any]] = field(default_factory=list)
 
-    def take(self, connector_id: str, op_id: str, params: dict[str, Any]) -> dict[str, Any] | None:
-        """The earlier run's entry for this step, or ``None`` when the earlier run had none.
+    def take(
+        self, connector_id: str, op_id: str, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """A copy of the earlier run's entry for this step, or ``None`` when it had none.
 
         The first matching entry is taken, so a step that ran twice with the
-        same params is matched twice, in order. A taken entry stays on the
-        journal, so a later wait stores it again.
+        same target and params is matched twice, in order. A taken entry
+        stays on the journal, so a later wait stores it again. The caller
+        gets a deep copy: changing the returned result does not change the
+        stored one.
         """
+        target_key = step_target_key(target)
         for index, entry in enumerate(self.replay):
             if (
                 entry.get("connector_id") == connector_id
                 and entry.get("op_id") == op_id
+                and entry.get("target") == target_key
                 and params_hash_matches(params, str(entry.get("params_hash", "")))
             ):
                 del self.replay[index]
                 self.entries.append(entry)
-                return entry
+                return copy.deepcopy(entry)
         return None
 
-    def start(self, connector_id: str, op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    def start(
+        self, connector_id: str, op_id: str, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Add a ``started`` entry for a step that is about to run."""
         entry: dict[str, Any] = {
             "connector_id": connector_id,
             "op_id": op_id,
+            "target": step_target_key(target),
             "params_hash": compute_params_hash(params),
             "status": STEP_STARTED,
         }
@@ -97,16 +126,17 @@ class StepJournal:
     def finish(self, entry: dict[str, Any], value: Any) -> None:
         """Mark *entry* ``done`` with *value*, when *value* can be kept.
 
-        A value that is not JSON, or that holds a secret-named value, is not
-        stored. The entry then stays ``started``: a later run cannot replay
-        the step and stops instead of sending it again.
+        A value that is not JSON, or that holds a secret-named value (a
+        number under a secret name too), is not stored. The entry then stays
+        ``started``: a later run cannot replay the step and stops instead of
+        sending it again.
         """
         try:
             result = to_jsonable_python(value)
         except PydanticSerializationError:
             _log.warning("composite_step_result_not_kept", op_id=entry["op_id"], reason="not_json")
             return
-        if scrub_secret_fields(result) != result:
+        if scrub_secret_fields(result, hide_numbers=True) != result:
             _log.warning("composite_step_result_not_kept", op_id=entry["op_id"], reason="secret")
             return
         entry["status"] = STEP_DONE
@@ -114,7 +144,7 @@ class StepJournal:
 
     def stored(self) -> list[dict[str, Any]]:
         """Every entry to store on an approval request: this run's, then the ones not reached."""
-        return [dict(entry) for entry in (*self.entries, *self.replay)]
+        return [copy.deepcopy(entry) for entry in (*self.entries, *self.replay)]
 
 
 @dataclass

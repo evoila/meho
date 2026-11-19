@@ -4748,7 +4748,9 @@ of the steps each run went through (`operations/composite_steps.py`):
 
 - **Recording.** `dispatch_composite` binds one `StepJournal` for each run
   of a composite handler (`composite_step_journal`). Each step gets an
-  entry with its connector, op id and params hash:
+  entry with its connector, op id, target and params hash. The target is
+  kept as its id (`step_target_key`), or its name when it has no id.
+  Its status:
   - a `dispatch_child` call: `started` before it runs, then `done` with
     the `OperationResult` the composite got back;
   - a `run_governed_subop(..., call=...)` call: `started` after the gate
@@ -4756,8 +4758,9 @@ of the steps each run went through (`operations/composite_steps.py`):
   - a step that only `enforce_subop_policy` checks: `started`. The seam
     does not see the handler's own call, so this step never has a stored
     end.
-  A result is kept only when it is JSON and holds no secret-named value
-  (`scrub_secret_fields`); otherwise the entry stays `started`. A `call`
+  A result is kept only when it is JSON and holds no secret-named value,
+  also no number under a secret name (`scrub_secret_fields` with
+  `hide_numbers=True`); otherwise the entry stays `started`. A `call`
   that raises leaves its entry `started` too.
 - **Storing.** When a step waits, the record goes on the new request as
   `resume_parent["steps"]` (left out when it is empty). Like the rest of
@@ -4765,8 +4768,10 @@ of the steps each run went through (`operations/composite_steps.py`):
   it is inside the encrypted copy of the run input.
 - **Replaying.** `composite_resume_binding` hands the stored steps to the
   first run of that composite (`composite_resume_steps`). A step that
-  matches the next stored entry with the same connector, op id and params
-  hash is not sent again:
+  matches the next stored entry with the same connector, op id, target and
+  params hash is not sent again. The step gets a copy of the stored entry,
+  so a handler that changes the result does not change what a later wait
+  stores:
   - `done`: it returns the stored result (`run_governed_subop` gives
     `SubopStep(value=<stored>, replayed=True)`, `dispatch_child` gives the
     stored `OperationResult`);

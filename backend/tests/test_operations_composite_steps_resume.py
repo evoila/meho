@@ -16,14 +16,18 @@ Covered:
   the run after the approval stops with
   ``composite_resume_step_outcome_unknown`` and sends nothing again;
 * a rejected approval: nothing more runs;
-* the step record itself: a result with a secret-named value is not kept.
+* a handler that changes a replayed result: the next wait still stores the
+  result as the step returned it;
+* the step record itself: a result with a secret-named value (also a
+  number) is not kept, and a step is matched only on its own target.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -251,6 +255,29 @@ async def test_two_waiting_steps_in_one_run_send_each_change_once(
     ]
 
 
+async def test_handler_that_changes_a_replayed_result_keeps_the_stored_result(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """The handler pops ``id`` from the change's result on every run; the third run still has it."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        s.POP_RESULT_OP_ID,
+        "change_pop_result_wait_wait_composite",
+    )
+
+    first = await h.run(s.POP_RESULT_OP_ID)
+    second = await _approve_and_resume(first)
+    assert second.status == "awaiting_approval", second.error
+    third = await _approve_and_resume(second)
+
+    assert third.status == "ok", third.error
+    assert third.result == {"done": True, "id": "t-1"}
+    assert s.sent == [s.CHANGE_STEP, s.CREDENTIAL_STEP, s.SECOND_WAIT_STEP]
+    steps = ((await _requests())[1].resume_parent or {}).get("steps")
+    assert steps[0]["result"] == {"id": "t-1"}
+
+
 # ---------------------------------------------------------------------------
 # A step with no stored end stops the run
 # ---------------------------------------------------------------------------
@@ -327,11 +354,11 @@ async def test_rejected_approval_runs_nothing_more(
 def test_result_with_a_secret_value_is_not_kept() -> None:
     """A result with a secret-named value stays "started", so it is never replayed."""
     journal = StepJournal(composite_op_id="vault.composite.x")
-    kept = journal.start("vault-1.x", "POST:/a", {"name": "a"})
+    kept = journal.start("vault-1.x", "POST:/a", None, {"name": "a"})
     journal.finish(kept, {"id": "a-1"})
-    secret = journal.start("vault-1.x", "POST:/b", {"name": "b"})
+    secret = journal.start("vault-1.x", "POST:/b", None, {"name": "b"})
     journal.finish(secret, {"id": "b-1", "token": "s.made-up-value"})
-    not_json = journal.start("vault-1.x", "POST:/c", {"name": "c"})
+    not_json = journal.start("vault-1.x", "POST:/c", None, {"name": "c"})
     journal.finish(not_json, object())
 
     assert (kept["status"], kept["result"]) == (STEP_DONE, {"id": "a-1"})
@@ -341,18 +368,60 @@ def test_result_with_a_secret_value_is_not_kept() -> None:
     assert "made-up-value" not in str(journal.stored())
 
 
+@pytest.mark.parametrize("value", [123456, 12.5], ids=["int", "float"])
+def test_result_with_a_numeric_secret_value_is_not_kept(value: float) -> None:
+    """A number under a secret name is a secret too: the step stays "started"."""
+    journal = StepJournal(composite_op_id="vault.composite.x")
+    entry = journal.start("vault-1.x", "POST:/a", None, {"name": "a"})
+    journal.finish(entry, {"id": "a-1", "password": value})
+
+    assert entry["status"] == STEP_STARTED
+    assert "result" not in entry
+    assert str(value) not in str(journal.stored())
+
+
+def test_step_is_matched_only_on_its_own_target() -> None:
+    """The same step with the same params on another target does not get this target's result."""
+    target_a = SimpleNamespace(id=uuid4(), name="target-a")
+    target_b = SimpleNamespace(id=uuid4(), name="target-b")
+    first_run = StepJournal(composite_op_id="vault.composite.x")
+    entry = first_run.start("vault-1.x", "POST:/a", target_a, {"name": "a"})
+    first_run.finish(entry, {"id": "on-a"})
+    resume = StepJournal(composite_op_id="vault.composite.x", replay=first_run.stored())
+
+    assert resume.take("vault-1.x", "POST:/a", target_b, {"name": "a"}) is None
+    assert resume.take("vault-1.x", "POST:/a", "target-a", {"name": "a"}) is None
+    taken = resume.take("vault-1.x", "POST:/a", target_a, {"name": "a"})
+    assert taken is not None and taken["result"] == {"id": "on-a"}
+
+
+def test_taken_entry_is_a_copy_of_the_stored_one() -> None:
+    """Changing a replayed result does not change what the next wait stores."""
+    first_run = StepJournal(composite_op_id="vault.composite.x")
+    entry = first_run.start("vault-1.x", "POST:/a", None, {"name": "a"})
+    first_run.finish(entry, {"id": "a-1", "tags": ["x"]})
+    resume = StepJournal(composite_op_id="vault.composite.x", replay=first_run.stored())
+
+    taken = resume.take("vault-1.x", "POST:/a", None, {"name": "a"})
+    assert taken is not None
+    taken["result"].pop("id")
+    taken["result"]["tags"].append("y")
+
+    assert resume.stored()[0]["result"] == {"id": "a-1", "tags": ["x"]}
+
+
 def test_same_step_twice_is_matched_in_order() -> None:
     """Two runs of one step with the same params are matched once each, in order."""
     first_run = StepJournal(composite_op_id="vault.composite.x")
     for value in ({"n": 1}, {"n": 2}):
-        entry = first_run.start("vault-1.x", "POST:/a", {"name": "a"})
+        entry = first_run.start("vault-1.x", "POST:/a", None, {"name": "a"})
         first_run.finish(entry, value)
     resume = StepJournal(composite_op_id="vault.composite.x", replay=first_run.stored())
 
-    one = resume.take("vault-1.x", "POST:/a", {"name": "a"})
-    two = resume.take("vault-1.x", "POST:/a", {"name": "a"})
-    three = resume.take("vault-1.x", "POST:/a", {"name": "a"})
-    other = resume.take("vault-1.x", "POST:/a", {"name": "other"})
+    one = resume.take("vault-1.x", "POST:/a", None, {"name": "a"})
+    two = resume.take("vault-1.x", "POST:/a", None, {"name": "a"})
+    three = resume.take("vault-1.x", "POST:/a", None, {"name": "a"})
+    other = resume.take("vault-1.x", "POST:/a", None, {"name": "other"})
 
     assert one is not None and one["result"] == {"n": 1}
     assert two is not None and two["result"] == {"n": 2}

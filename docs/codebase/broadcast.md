@@ -60,7 +60,10 @@ was closed as not planned).
 
    **A stream ends when its login ends.** `/api/v1/feed` ends the
    stream at the token's `exp` plus the JWT leeway, and after
-   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest.
+   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. This end
+   also stops an archive read that is still running (a slow Valkey or
+   database call), and a read error after the end sends no
+   `feed_error` frame.
    `/ui/broadcast/stream` checks its session again (the same check as
    `require_ui_operator`) at most every
    `UI_SESSION_READ_REVALIDATION_SECONDS`, before a frame, a heartbeat

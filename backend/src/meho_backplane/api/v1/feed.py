@@ -66,7 +66,9 @@ A stream ends when the login that opened it ends. The caller passes a
 :class:`StreamLiveness`; the generator asks it before each frame, each
 heartbeat and each wait. ``/api/v1/feed`` ends the stream at the token's
 ``exp`` plus the JWT leeway, and after ``feed_stream_max_seconds`` at
-the latest (:func:`token_liveness`). The console bridge checks its
+the latest (:func:`token_liveness`). That end also stops an archive
+read that is still running, so a slow Valkey or database call does not
+keep the stream open. The console bridge checks its
 session again (``ui/routes/broadcast/stream.py``). The client opens a
 new stream with a fresh login and ``Last-Event-Id``, so it misses no
 announcement.
@@ -95,6 +97,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -182,7 +185,7 @@ class StreamLiveness:
 
     async def alive(self) -> bool:
         """``True`` while the stream may send another frame."""
-        if time.monotonic() >= self.ends_at:
+        if self.ended():
             return False
         return self.still_valid is None or await self.still_valid()
 
@@ -190,6 +193,41 @@ class StreamLiveness:
         """The next archive wait: at most :data:`_WAIT_MS`, never past ``ends_at``."""
         left_ms = (self.ends_at - time.monotonic()) * 1000
         return max(1, int(min(float(_WAIT_MS), left_ms)))
+
+    def seconds_left(self) -> float | None:
+        """Seconds until ``ends_at`` (``0`` when past it), or ``None`` for no fixed end."""
+        if math.isinf(self.ends_at):
+            return None
+        return max(0.0, self.ends_at - time.monotonic())
+
+    def ended(self) -> bool:
+        """``True`` once ``ends_at`` has passed."""
+        return time.monotonic() >= self.ends_at
+
+
+class _StreamEndedError(Exception):
+    """An archive read was stopped because the stream reached ``ends_at``."""
+
+
+async def _read_until_end[T](liveness: StreamLiveness, read: Awaitable[T]) -> T:
+    """Await *read*, but stop it at ``liveness.ends_at``.
+
+    A Valkey or database call that hangs does not keep the stream open
+    past the end of its login: the read is cancelled at ``ends_at`` and
+    :class:`_StreamEndedError` is raised. A read error once ``ends_at``
+    has passed raises :class:`_StreamEndedError` too.
+    """
+    timeout = asyncio.timeout(liveness.seconds_left())
+    try:
+        async with timeout:
+            return await read
+    except (SQLAlchemyError, OSError):
+        # TimeoutError is an OSError. A read that fails once the end has
+        # passed (also one that turns the cancel into its own error) ends
+        # the stream too, without an error frame.
+        if timeout.expired() or liveness.ended():
+            raise _StreamEndedError from None
+        raise
 
 
 def token_liveness(operator: Operator) -> StreamLiveness:
@@ -296,6 +334,16 @@ async def _start_position(
     return [_format_event(operator, item) for item in latest.events], latest.watermark
 
 
+async def _next_batch(
+    operator: Operator, after: int, flt: AnnouncementFilter, timeout_ms: int
+) -> tuple[list[str], int]:
+    """Wait for new announcements; return their frames and the sequence number to resume after."""
+    found = await watch_announcement_rows(operator, after=after, flt=flt, timeout_ms=timeout_ms)
+    batch = [_format_gap(found.gap)] if found.gap is not None else []
+    batch.extend(_format_event(operator, item) for item in found.events)
+    return batch, found.after
+
+
 async def announcement_feed_frames(
     operator: Operator,
     *,
@@ -308,11 +356,13 @@ async def announcement_feed_frames(
 
     *surface* names the caller (``api`` / ``ui``) on the log lines. The
     stream ends when *liveness* says the login ended: it is asked before
-    each frame, each heartbeat and each wait.
+    each frame, each heartbeat and each wait. Each archive read stops at
+    ``liveness.ends_at``; a read error after that time ends the stream
+    without an ``event: feed_error`` frame.
     """
     last_out = time.monotonic()
     try:
-        batch, after = await _start_position(operator, start, flt)
+        batch, after = await _read_until_end(liveness, _start_position(operator, start, flt))
         while True:
             for frame in batch:
                 if not await liveness.alive():
@@ -324,14 +374,13 @@ async def announcement_feed_frames(
             if not await liveness.alive():
                 _log_login_ended(surface, operator)
                 return
-            found = await watch_announcement_rows(
-                operator, after=after, flt=flt, timeout_ms=liveness.wait_ms()
+            batch, after = await _read_until_end(
+                liveness, _next_batch(operator, after, flt, liveness.wait_ms())
             )
-            after = found.after
-            batch = [_format_gap(found.gap)] if found.gap is not None else []
-            batch.extend(_format_event(operator, item) for item in found.events)
             if not batch and time.monotonic() - last_out >= _HEARTBEAT_INTERVAL_SECONDS:
                 batch = [": heartbeat\n\n"]
+    except _StreamEndedError:
+        _log_login_ended(surface, operator)
     except asyncio.CancelledError:
         _log.info("feed_subscriber_disconnected", surface=surface, operator_sub=operator.sub)
         raise

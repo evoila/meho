@@ -365,3 +365,123 @@ def test_stream_ends_at_the_earlier_of_expiry_and_longest_time() -> None:
     left = token_liveness(operator).ends_at - time.monotonic()
     # 60 s to expiry plus the default 30 s leeway, far below the hour.
     assert 85 <= left <= 91
+
+
+# ---------------------------------------------------------------------------
+# A slow archive read stops at the end of the login
+# ---------------------------------------------------------------------------
+
+
+def _short_liveness(seconds: float) -> Any:
+    from meho_backplane.api.v1.feed import StreamLiveness
+
+    return StreamLiveness(ends_at=time.monotonic() + seconds)
+
+
+def _reader() -> Operator:
+    return Operator(
+        sub=_SUB, raw_jwt="<test-raw-jwt>", tenant_id=_TENANT, tenant_role=TenantRole.OPERATOR
+    )
+
+
+async def _collect(frames: Any) -> list[str]:
+    async with asyncio.timeout(_END_TIMEOUT_S):
+        return [frame async for frame in frames]
+
+
+async def _hang(*_args: object, **_kwargs: object) -> Any:
+    await asyncio.Event().wait()
+
+
+async def test_stalled_first_read_ends_the_stream_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backlog read hangs: the stream ends at the deadline and sends nothing."""
+    from meho_backplane.api.v1 import feed as feed_module
+
+    monkeypatch.setattr(feed_module, "latest_announcements", _hang)
+    started = time.monotonic()
+    frames = await _collect(
+        announcement_feed_frames(
+            _reader(),
+            start=FeedStart(),
+            flt=AnnouncementFilter(),
+            surface="api",
+            liveness=_short_liveness(0.3),
+        )
+    )
+    assert frames == []
+    assert time.monotonic() - started < 2.0
+
+
+async def test_stalled_live_read_ends_the_stream_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live wait hangs past its own timeout: the stream still ends at the deadline."""
+    from meho_backplane.api.v1 import feed as feed_module
+
+    monkeypatch.setattr(feed_module, "watch_announcement_rows", _hang)
+    started = time.monotonic()
+    frames = await _collect(
+        announcement_feed_frames(
+            _reader(),
+            start=FeedStart(after=0),
+            flt=AnnouncementFilter(),
+            surface="api",
+            liveness=_short_liveness(0.3),
+        )
+    )
+    assert frames == []
+    assert time.monotonic() - started < 2.0
+
+
+async def test_read_error_after_the_deadline_sends_no_error_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read that fails only after the deadline ends the stream without ``feed_error``."""
+    from sqlalchemy.exc import OperationalError
+
+    from meho_backplane.api.v1 import feed as feed_module
+
+    async def _late_error(*_args: object, **_kwargs: object) -> Any:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # The read turns the cancel into a database error, as a driver can.
+            raise OperationalError("SELECT 1", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(feed_module, "watch_announcement_rows", _late_error)
+    frames = await _collect(
+        announcement_feed_frames(
+            _reader(),
+            start=FeedStart(after=0),
+            flt=AnnouncementFilter(),
+            surface="api",
+            liveness=_short_liveness(0.3),
+        )
+    )
+    assert frames == []
+
+
+async def test_read_error_before_the_deadline_still_sends_an_error_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    from meho_backplane.api.v1 import feed as feed_module
+
+    async def _error(*_args: object, **_kwargs: object) -> Any:
+        raise OperationalError("SELECT 1", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(feed_module, "watch_announcement_rows", _error)
+    frames = await _collect(
+        announcement_feed_frames(
+            _reader(),
+            start=FeedStart(after=0),
+            flt=AnnouncementFilter(),
+            surface="api",
+            liveness=_short_liveness(30.0),
+        )
+    )
+    assert len(frames) == 1
+    assert frames[0].startswith("event: feed_error")

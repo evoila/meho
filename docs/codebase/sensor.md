@@ -169,9 +169,9 @@ accepted call, and commits `last_state`/`state_since` through the
   recovery, because the observed flap's second nuisance mail was a
   flapping all-clear); `unknown` participates like any state.
 
-The gate lives in the repository function — not the runner task — so
-runner-local and satellite-gateway batch-posted results are confirmed
-identically. Returns `True` iff the *committed* state changed. A
+The gate lives in the repository function — not the runner task. Only
+the central check loop calls it today; results from a remote runner are
+stored apart and are not counted (not built yet). Returns `True` iff the *committed* state changed. A
 monotonicity guard ignores a result whose `evaluated_at` is not strictly
 newer than the row's last (a stale / reordered / duplicate persist),
 leaving the projection untouched. Downstream, `state_since` marks the

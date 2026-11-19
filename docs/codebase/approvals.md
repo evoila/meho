@@ -2219,6 +2219,13 @@ Now the parker owns it:
 - Every spill in the run follows the binding, including the child ops of a
   resumed multi-step (composite) op.
 
+The same function also binds a hosted agent's connector list again. The
+request stores it when the call starts to wait (`allowed_connectors`, JSON,
+migration `0175`, NULL for a caller without a list). The run and each step
+of a multi-step operation then stay on targets of those connectors
+(`operations/_target_connector_limit.py`), also when a person approves
+after the agent stopped waiting.
+
 What this means:
 
 - One owner per handle. The parker can page and query it with

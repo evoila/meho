@@ -96,16 +96,16 @@ func getExactOp(ctx context.Context, client operationsAPI, opts searchOptions) (
 }
 
 func printContract(w io.Writer, c *Contract) {
-	fmt.Fprintf(w, "%s  (connector %s)\n", c.OpID, c.ConnectorID)
+	fmt.Fprintf(w, "%s  (connector %s)\n", output.SafeText(c.OpID), output.SafeText(c.ConnectorID))
 	if s := strDeref(c.Summary); s != "" {
-		fmt.Fprintf(w, "summary:  %s\n", s)
+		fmt.Fprintf(w, "summary:  %s\n", output.SafeText(s))
 	}
 	approval := "no"
 	if c.RequiresApproval {
 		approval = "yes"
 	}
-	fmt.Fprintf(w, "safety:   %s   needs approval: %s\n", c.SafetyLevel, approval)
-	fmt.Fprintf(w, "target:   %s\n", c.Target.Guidance)
+	fmt.Fprintf(w, "safety:   %s   needs approval: %s\n", output.SafeText(c.SafetyLevel), approval)
+	fmt.Fprintf(w, "target:   %s\n", output.SafeText(c.Target.Guidance))
 	fmt.Fprintln(w, "\nparameter_schema:")
 	fmt.Fprintln(w, indentJSON(c.ParameterSchema))
 	if len(c.Examples) > 0 {
@@ -115,17 +115,17 @@ func printContract(w io.Writer, c *Contract) {
 			if name == "" {
 				name = "(whole call)"
 			}
-			fmt.Fprintf(w, "  %s: %s\n", name, string(ex.Value))
+			fmt.Fprintf(w, "  %s: %s\n", output.SafeText(name), output.SafeText(string(ex.Value)))
 		}
 	}
 	if len(c.PaginationHint) > 0 && string(c.PaginationHint) != "null" {
-		fmt.Fprintf(w, "\npagination hint: %s\n", string(c.PaginationHint))
+		fmt.Fprintf(w, "\npagination hint: %s\n", output.SafeText(string(c.PaginationHint)))
 	}
-	fmt.Fprintf(w, "\nresult: %s\n", c.ResultShape.Guidance)
+	fmt.Fprintf(w, "\nresult: %s\n", output.SafeText(c.ResultShape.Guidance))
 	if len(c.Recovery) > 0 {
 		fmt.Fprintln(w, "\nif the call fails:")
 		for _, rule := range c.Recovery {
-			fmt.Fprintf(w, "  - %s\n", rule)
+			fmt.Fprintf(w, "  - %s\n", output.SafeText(rule))
 		}
 	}
 }

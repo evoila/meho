@@ -1052,6 +1052,17 @@ lines (indented JSON, an error message) and keeps the line breaks.
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control
   characters.
+- The commands that print text from an API description, a target system
+  or an uploaded session pass every server string through them too:
+  `meho operation search` (the hit table and the `--op-id` contract),
+  `meho operation groups`, `meho operation preview`, the failure text of
+  `meho operation call` and of every vendor verb (`dispatch.WriteErrorTrailer`,
+  `dispatch.RenderPreviewFailure`, the approval note of `WriteParkedHint`),
+  the `meho audit trace` list, `meho targets describe`, and
+  `meho sessions show` and `list`. The escape runs before a column is cut
+  to its width. The `server_text_escape_test.go` file of each package
+  lists these renderers and checks that ESC and BEL show as `\x1b` and
+  `\x07`.
 
 ### Sensitive-data discipline
 

@@ -3974,6 +3974,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>MEHO now refuses Keycloak writes that would lock it out of a Keycloak target. When the user the target signs in with (by its user name or its email, or the service-account user of its client) is the user of <code>keycloak.user.disable</code>, <code>keycloak.user.required_actions.update</code>, <code>keycloak.user.reset_password</code>, <code>keycloak.user.credential.delete</code>, <code>keycloak.group.member.remove</code>, <code>keycloak.role_mapping.client.remove</code>, <code>keycloak.user.update</code> of the user name or email, or a <code>secret.move</code> into its password, MEHO refuses the call before it waits for approval and again when an approved request runs. A request that waits for approval from before the upgrade is refused when it runs. Nothing is written. The answer of <code>keycloak.user.required_actions.update</code> now gives <code>required_actions</code> as read back from Keycloak after the write, and <code>null</code> when MEHO does not know it.</td>
+<td>To change the user a target signs in with, first give the target another admin login, or make the change in the Keycloak admin console. A tool that reads <code>required_actions</code> from <code>keycloak.user.required_actions.update</code> must accept <code>null</code>. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>linux.script.run refuses a script over 1,048,576 bytes (1 MiB) before it waits for approval. The approver reads a longer script page by page.</td>
 <td>Keep scripts at or under 1 MiB, for example copy a large file to the host first. Requests that wait at upgrade time show no page links in the console; read their pages with <code>meho approvals show &lt;id&gt; --script-page N</code>. A request with a script over 1 MiB that waits at upgrade time is refused when it is approved. Send it again with a shorter script.</td>
 </tr>

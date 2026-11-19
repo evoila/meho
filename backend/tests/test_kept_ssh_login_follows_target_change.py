@@ -9,7 +9,9 @@ These tests pin what the next dispatch in the same process does:
 * when the target's host and secret reference changed since the refresh
   (a newer change version), the dispatch dials the new host with the new
   secret;
-* with no change, the dispatch reuses the login the refresh keeps.
+* with no change, the dispatch reuses the login the refresh keeps;
+* a discover seeded from a changed target dials the new host with the new
+  secret.
 """
 
 from __future__ import annotations
@@ -23,10 +25,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from meho_backplane.api.v1 import targets as targets_api
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.registry import register_connector_v2
-from meho_backplane.connectors.schemas import TopologyHints
+from meho_backplane.connectors.schemas import CandidateHint, TopologyHints
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.topology import refresh as refresh_module
@@ -93,6 +96,13 @@ class _FollowSsh(SshConnector):
     async def discover_topology(self, target: Any, *, operator: Any = None) -> TopologyHints:  # type: ignore[override]
         await self._connect(target, operator)
         return TopologyHints(discovered_at=datetime.now(UTC))
+
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
+        if seed_target is not None:
+            await self._connect(seed_target, operator)
+        return []
 
 
 async def _login_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -206,3 +216,42 @@ async def test_a_dispatch_after_a_refresh_reuses_the_login_when_nothing_changed(
     assert await _dispatch(target) == "ok"
 
     assert dials == [("old-host.test.invalid", "old-login-value")]
+
+
+@pytest.mark.asyncio
+async def test_a_discover_seeded_from_a_changed_target_dials_the_new_host_with_the_new_secret(
+    dials: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    register_connector_v2(product="sshfollow", version="", impl_id="", cls=_FollowSsh)
+    seed: dict[str, _Target] = {"row": _Target()}
+
+    async def _resolve(_session: Any, _tenant_id: Any, _name: str) -> _Target:
+        return seed["row"]
+
+    monkeypatch.setattr(targets_api, "resolve_target", _resolve)
+
+    async def _discover() -> None:
+        await targets_api.discover_targets(
+            product="sshfollow",
+            seed_target="ssh-a",
+            operator=_operator(),
+            session=AsyncMock(),
+        )
+
+    await _discover()
+    assert dials == [("old-host.test.invalid", "old-login-value")]
+
+    seed["row"] = replace(
+        seed["row"],
+        host="new-host.test.invalid",
+        secret_ref=_NEW_REF,
+        connection_changed_at=_T1,
+        updated_at=_T1,
+    )
+    await _discover()
+
+    assert dials == [
+        ("old-host.test.invalid", "old-login-value"),
+        ("new-host.test.invalid", "new-login-value"),
+    ]

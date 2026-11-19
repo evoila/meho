@@ -186,8 +186,9 @@ Limits:
   target calls `forget_target_if_changed` with the target it just read.
   These are the dispatcher, the runner executor, the topology refresh,
   scope repair, the dispatch preview of an ingested operation, the
-  Kubernetes token store of the Vault connector, and the Keycloak and
-  Linux secret stores. It keeps,
+  Kubernetes token store of the Vault connector, the Keycloak and
+  Linux secret stores, and `meho targets discover` with a seed target
+  (`GET /api/v1/targets/discover`). It keeps,
   per process, a change version for each target: the time a person last
   changed it (`connection_changed_at`), the connector class that
   serves it now (the class itself, not its name), and the product the last

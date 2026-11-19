@@ -285,3 +285,17 @@ def test_a_machine_login_with_the_platform_admin_flag_stops_only_its_own_runs() 
 
     assert not may_stop_run(service_login, _PERSON)
     assert may_stop_run(service_login, "service-login")
+
+
+def test_an_admin_without_a_chosen_tenant_stops_only_their_own_runs() -> None:
+    """The admin test needs a chosen current tenant, as for approving a change of rights."""
+    admin = Operator(
+        sub="tenant-admin",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        tenant_chosen=False,
+    )
+
+    assert not may_stop_run(admin, _PERSON)
+    assert may_stop_run(admin, "tenant-admin")

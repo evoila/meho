@@ -245,10 +245,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "secrets that someone typed in. To check local users or static "
         "routes, do not read the whole file: call ``pfsense.user.list`` or "
         "``pfsense.route.static.list``, which return only a short list of "
-        "fields and never read secret fields. To find out who changed the "
-        "configuration, when, and what changed, call "
-        "``pfsense.config.history``: it lists the kept revisions and shows "
-        "the diff of one revision."
+        "fields and never read secret fields."
     ),
     "dhcp": (
         "Use for pfSense DHCP lease-state operations: reading the live "

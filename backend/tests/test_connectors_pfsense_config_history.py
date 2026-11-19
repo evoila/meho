@@ -436,7 +436,24 @@ def test_op_is_a_safe_typed_read_in_the_config_group() -> None:
     assert (op.safety_level, op.requires_approval, op.group_key) == ("safe", False, "config")
     assert op.parameter_schema["additionalProperties"] is False
     assert op.llm_instructions["when_to_use"]
-    assert "pfsense.config.history" in _WHEN_TO_USE_BY_GROUP["config"]
+    assert "pfsense.config.history" not in _WHEN_TO_USE_BY_GROUP["config"]
+
+
+def test_op_text_says_what_the_secret_removal_does_not_cover() -> None:
+    op = _op()
+    for text in (op.description, op.llm_instructions["output_shape"]):
+        assert "free text" in text or "free-text fields" in text
+        assert "typed in" in text
+        assert "removed from the live" in text
+        assert "source address" in text
+
+
+@pytest.mark.asyncio
+async def test_the_diff_note_says_free_text_can_still_hold_a_secret() -> None:
+    note = (await _call({"revision": _T_NEW}))["note"]
+    assert "Free-text fields" in note
+    assert "typed in" in note
+    assert "removed from the live file" in note
 
 
 def test_listing_and_diff_answers_match_the_response_schema() -> None:

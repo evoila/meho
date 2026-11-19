@@ -639,6 +639,13 @@ live file, so it has no older revisions to compare with.
   `cat` is one the listing printed and matches a fixed pattern. A failed read,
   a file that cannot be parsed, and a failed secret removal raise an error
   with fixed text that never quotes the file.
+- **The limit.** Only known secret fields and known secret shapes are
+  removed, the same as in `pfsense.config.show`. Free-text fields
+  (descriptions, notes, cron or shell commands, custom config text) can
+  still hold a secret that someone typed in. An older revision can still
+  hold such text after it was removed from the live file. `user` holds the
+  admin's name and source address (`admin@<address> (Local Database)`).
+  The op text, its `output_shape` and the `note` of a diff say this too.
 - **Not covered.** The created and updated stamps of single rules belong in a
   rule-list read. There is no named CLI verb yet; call it through `call_operation`.
 

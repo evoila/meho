@@ -529,8 +529,11 @@ def _diff_answer(
     diff_text = "\n".join(entry["diff"] for entry in changed if entry["diff"])
     omitted = len(diff_text) > MAX_DIFF_CHARS
     note = (
-        "Known secret values are removed before the comparison, so a changed secret "
-        "does not show in the diff."
+        "Known secret fields and known secret shapes are removed before the "
+        "comparison, so a changed secret of that kind does not show in the diff. "
+        "Free-text fields (descriptions, notes, cron or shell commands, custom config "
+        "text) can still hold a secret that someone typed in, and an older revision "
+        "can still hold such text after it was removed from the live file."
     )
     if omitted:
         note += (

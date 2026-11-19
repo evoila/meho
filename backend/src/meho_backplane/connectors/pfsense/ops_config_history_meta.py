@@ -63,9 +63,11 @@ CONFIG_HISTORY_OPS: tuple[PfSenseOp, ...] = (
         handler_attr="config_history",
         summary="List the pfSense configuration change history, or show what one revision changed.",
         description=(
-            "Reads the configuration revisions pfSense keeps over SSH. Without "
-            "``revision``: the list, newest first. With ``revision``: what that "
-            "revision changed against the one before it, secrets removed."
+            "Lists the kept config revisions, or with ``revision`` shows what one "
+            "changed. Known secrets are removed as in ``pfsense.config.show``; free "
+            "text can still hold a secret someone typed in, also in older revisions "
+            "after it was removed from the live file. ``user`` holds the admin's "
+            "source address."
         ),
         parameter_schema={
             "type": "object",
@@ -144,8 +146,14 @@ CONFIG_HISTORY_OPS: tuple[PfSenseOp, ...] = (
                 "only_hidden_values_changed}], changed_total, diff, diff_omitted, note}``. "
                 "``diff`` is a unified diff of the changed sections, or ``null`` when it is "
                 "too long (``diff_omitted: true``): ask again with ``section``. "
-                "``user`` and ``description`` are the text pfSense stored; a value with a "
-                f"known secret shape is replaced with ``{REDACTED}``. A failed read or a "
+                "``user`` and ``description`` are the text pfSense stored; ``user`` holds "
+                "the admin's name and source address (for example "
+                "``admin@<address> (Local Database)``). A value with a known secret shape "
+                f"is replaced with ``{REDACTED}``. In ``diff``, known secret fields and "
+                "known secret shapes are removed; free-text fields (descriptions, notes, "
+                "cron or shell commands, custom config text) can still hold a secret that "
+                "someone typed in, also in older revisions after it was removed from the "
+                "live file, so treat the output as sensitive. A failed read or a "
                 "file that cannot be parsed fails the call with an error that holds no file "
                 "content. A long list comes back as a JSONFlux handle; read more with "
                 "``result_query``."

@@ -4652,9 +4652,12 @@ approval row (`run_approval_gate`) name only the caller, in
 `payload.principal_sub` is the requester, while `payload.principal_name`
 is the person who acted. The audit log is append-only, so these rows stay
 as they are. The readers show them through
-`audit_query/approval_payload.py:approval_payload_view`: the requester's
-id moves to `requester_sub`, and `principal_sub` shows the row's
-`operator_sub`. Two readers use it: `audit_query/query.py:_build_audit_entry`
+`audit_query/approval_payload.py:approval_payload_view`: every such row
+with an `approval_request_id` shows the requester's id in
+`requester_sub`, and `principal_sub` shows the row's `operator_sub`. This
+holds also when the requester acted on the row (a request, withdraw or
+result row, or a self-approval), so every reader finds the requester in
+`requester_sub`. Two readers use it: `audit_query/query.py:_build_audit_entry`
 (the audit REST API, `meho audit query` / `show` / `replay`, the MCP audit
 tools and the session replay) and the console's audit row drawer
 (`ui/routes/audit/routes.py:_build_drawer_context`).

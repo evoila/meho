@@ -17,9 +17,12 @@ Rows in the older form have no ``requester_sub``. Their
 ``payload['principal_sub']`` names the requester, while
 ``payload['principal_name']`` names the person who acted. The audit log
 is append-only, so those rows stay as they are. Each reader shows them
-through :func:`approval_payload_view`: the requester's id moves to
+through :func:`approval_payload_view`: the requester's id is shown in
 ``requester_sub``, and ``principal_sub`` shows the row's
-``operator_sub``, the person that ``principal_name`` belongs to.
+``operator_sub``, the person that ``principal_name`` belongs to. This
+holds for every such row of an approval request (it has an
+``approval_request_id``), also when the requester acted on the row
+themselves, so every reader finds the requester in ``requester_sub``.
 """
 
 from __future__ import annotations
@@ -36,14 +39,14 @@ def approval_payload_view(
     """The payload of one audit row as a reader shows it.
 
     A copy of *payload*. Only an approval row in the older form changes:
-    its ``principal_sub`` differs from *operator_sub* and it has no
+    it has an ``approval_request_id``, a string ``principal_sub`` and no
     ``requester_sub``. Every other row comes back unchanged.
     """
     view = dict(payload)
-    if method != "APPROVAL" or "requester_sub" in view:
+    if method != "APPROVAL" or "requester_sub" in view or "approval_request_id" not in view:
         return view
     stored_sub = view.get("principal_sub")
-    if not isinstance(stored_sub, str) or stored_sub == operator_sub:
+    if not isinstance(stored_sub, str):
         return view
     view["requester_sub"] = stored_sub
     view["principal_sub"] = operator_sub

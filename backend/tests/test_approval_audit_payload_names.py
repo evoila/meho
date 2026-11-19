@@ -279,6 +279,41 @@ def test_view_moves_the_requester_of_an_old_form_row() -> None:
     assert view["requester_sub"] == _REQUESTER_SUB
 
 
+@pytest.mark.parametrize("result_status", ["request", "withdraw", "result"])
+def test_view_names_the_requester_of_an_old_form_row_of_the_requester(
+    result_status: str,
+) -> None:
+    payload = {
+        "approval_request_id": str(uuid.uuid4()),
+        "op_id": "vault.kv.write",
+        "connector_id": "vault-1.x",
+        "principal_sub": _REQUESTER_SUB,
+        "principal_name": _REQUESTER_NAME,
+        "result_status": result_status,
+    }
+
+    view = approval_payload_view(method="APPROVAL", operator_sub=_REQUESTER_SUB, payload=payload)
+
+    assert view["principal_sub"] == _REQUESTER_SUB
+    assert view["principal_name"] == _REQUESTER_NAME
+    assert view["requester_sub"] == _REQUESTER_SUB
+
+
+def test_view_names_the_requester_of_an_old_form_self_approval() -> None:
+    payload = {
+        **_old_form_payload(),
+        "principal_name": _REQUESTER_NAME,
+        "reviewed_by": _REQUESTER_SUB,
+    }
+
+    view = approval_payload_view(method="APPROVAL", operator_sub=_REQUESTER_SUB, payload=payload)
+
+    assert view["principal_sub"] == _REQUESTER_SUB
+    assert view["principal_name"] == _REQUESTER_NAME
+    assert view["requester_sub"] == _REQUESTER_SUB
+    assert view["reviewed_by"] == _REQUESTER_SUB
+
+
 @pytest.mark.parametrize(
     ("method", "payload"),
     [
@@ -289,11 +324,11 @@ def test_view_moves_the_requester_of_an_old_form_row() -> None:
             "APPROVAL",
             {"principal_sub": _REVIEWER_SUB, "requester_sub": _REQUESTER_SUB},
         ),
-        # An old-form row of one person: nothing is mixed.
+        # A row of no approval request (a standing grant or a run approval).
         ("APPROVAL", {"principal_sub": _REVIEWER_SUB, "principal_name": _REVIEWER_NAME}),
         # No id, or an id that is not a string.
-        ("APPROVAL", {"principal_name": _REVIEWER_NAME}),
-        ("APPROVAL", {"principal_sub": None}),
+        ("APPROVAL", {"approval_request_id": "r", "principal_name": _REVIEWER_NAME}),
+        ("APPROVAL", {"approval_request_id": "r", "principal_sub": None}),
         ("APPROVAL", {}),
     ],
 )

@@ -625,6 +625,7 @@ async def test_script_run_preview_shows_script_and_env_values_never_argument_val
             "use_sudo": True,
         },
         target=types.SimpleNamespace(name="linux-1"),
+        agent_preview=False,
     )
     preview = await _linux_script_run_preview(ctx)  # type: ignore[arg-type]
     assert preview == {

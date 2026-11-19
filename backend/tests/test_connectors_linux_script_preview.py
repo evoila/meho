@@ -67,7 +67,9 @@ def _sha(text: str) -> str:
 
 
 def _ctx(params: dict[str, Any]) -> Any:
-    return types.SimpleNamespace(params=params, target=types.SimpleNamespace(name="linux-1"))
+    return types.SimpleNamespace(
+        params=params, target=types.SimpleNamespace(name="linux-1"), agent_preview=False
+    )
 
 
 @pytest.mark.asyncio

@@ -674,9 +674,18 @@ value, and so does `meho approvals show` with a person's sign-in. The MCP
 approval tools (`meho_approvals_get`, `meho_approvals_list`) read the
 stored request through `proposed_effect_for_agent`, which drops these two
 keys: an agent gets `env_var_names` only, also for a request another
-principal sent. The REST approval list and detail follow the same rule:
-a person's login gets the values, and a read by an agent or a token (an
-agent, service or runner login) shows the names only.
+principal sent. The REST approval list and detail follow the same rule
+for `linux.script.run`: a person's login gets the values, and a read by an
+agent or a token (an agent, service or runner login) shows the names only.
+The agent's own `preview_operation` answer (with `PREVIEW_TYPED_WRITES` on)
+has `env_var_names` only too: the builder adds `env` and `env_note` only
+when `ctx.agent_preview` is false.
+
+**The script gets the card's value.** The wrapper
+(`build_script_run_wrapper`) decodes each `env` value with a command
+substitution, which drops line breaks at the end. It adds an `x` after the
+value and takes it off again, so the script gets each value byte for byte as
+the card shows it, also a value that ends in line breaks or is empty.
 
 **No secret in `env`.** The card shows every `env` value, so the op's check
 before the wait for approval (`_refuse_secret_in_env`, registered with

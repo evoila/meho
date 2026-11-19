@@ -693,15 +693,23 @@ def _execution_outcome(dispatch_result: Any) -> str | None:
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
+#: The ops whose REST card hides person-only fields from a caller that is not
+#: a person. Every other op's card comes back as stored, for every caller.
+_PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"linux.script.run"})
+
+
 def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
     """The ``proposed_effect`` of *row* as *operator* may read it.
 
-    A person reads the full card, as in the console. An agent, service or
-    runner login reads what the MCP approval tools return
-    (:func:`proposed_effect_for_agent`), so person-only card fields such as
-    the ``env`` values of ``linux.script.run`` stay out.
+    Only for the ops in :data:`_PERSON_ONLY_REST_CARD_OPS`: a person reads
+    the full card, as in the console, and an agent, service or runner login
+    reads what the MCP approval tools return (:func:`proposed_effect_for_agent`),
+    so the ``env`` values of ``linux.script.run`` stay out. Every other card
+    is the stored one.
     """
-    if is_human_principal(operator) and not is_agent_caller(operator):
+    if row.op_id not in _PERSON_ONLY_REST_CARD_OPS or (
+        is_human_principal(operator) and not is_agent_caller(operator)
+    ):
         return row.proposed_effect
     shown = proposed_effect_for_agent(
         row.op_id,

@@ -48,12 +48,14 @@ Two layers, one source of truth:
   records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
   paired add-on that asked (#3027); the audit log records every step; the
   agent waiter, the bell badge and the console read the stored row.
-- **Who reads the full card.** The REST list and detail
-  (`GET /api/v1/approvals`, `GET /api/v1/approvals/{id}`) give a person's
-  login the whole stored `proposed_effect`. An agent, service or runner
-  login gets it through `proposed_effect_for_agent`, the same as the MCP
-  read tools: without the person-only card fields, and as
-  `preview_operation` gives a card whose switch is off.
+- **Who reads the `env` values of `linux.script.run`.** The REST list and
+  detail (`GET /api/v1/approvals`, `GET /api/v1/approvals/{id}`) give a
+  person's login the whole stored `proposed_effect` of a `linux.script.run`
+  request. An agent, service or runner login gets it through
+  `proposed_effect_for_agent`, the same as the MCP read tools: with the `env`
+  names, without the `env` values (`_PERSON_ONLY_REST_CARD_OPS` in
+  `api/v1/approvals.py`). The REST answer for every other op is the stored
+  `proposed_effect`, for every caller.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).

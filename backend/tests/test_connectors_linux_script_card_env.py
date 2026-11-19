@@ -13,12 +13,20 @@
   values. An agent or service login gets the ``env`` names only.
 * The params hash binds the ``env`` values: an approval with another value
   is refused.
+* The script gets each ``env`` value byte for byte as the card shows it,
+  also with line breaks at the end.
+* The agent's own ``preview_operation`` answer has the ``env`` names only.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
+import subprocess
+import sys
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -26,7 +34,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.linux import LinuxSshConnector
-from meho_backplane.connectors.linux.ops_write import ENV_NOTE
+from meho_backplane.connectors.linux.ops_write import ENV_NOTE, build_script_run_wrapper
 from meho_backplane.operations._preview import proposed_effect_for_agent
 from tests.test_connectors_linux_write import (
     _CONNECTOR_ID,
@@ -262,3 +270,77 @@ async def test_rest_approval_read_by_a_person_gets_the_env_values(
     for effect in await _rest_reads(_rest_reader(PrincipalKind.USER), request_id):
         assert effect["preview"]["env"] == {"TAR_OPTIONS": "env-card-value"}
         assert effect["preview"]["env_note"] == ENV_NOTE
+
+
+_PRINT_ENV_SCRIPT = "import json, os, sys\nsys.stdout.write(json.dumps(os.environ['APP_CONFIG']))\n"
+
+
+def _value_the_script_gets(env: dict[str, str]) -> str:
+    """Run the real wrapper with bash; the script prints the ``APP_CONFIG`` it got."""
+    wrapper = build_script_run_wrapper(
+        sys.executable, _PRINT_ENV_SCRIPT, arguments=None, working_directory=None, env=env
+    )
+    proc = subprocess.run(
+        ["bash", "-c", wrapper], capture_output=True, text=True, timeout=30, check=True
+    )
+    value = json.loads(proc.stdout)
+    assert isinstance(value, str)
+    return value
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        "line one\nline two\n",
+        "line one\n\n\n",
+        "\n",
+        "\n\n\n",
+        "",
+        "line one\nline two",
+        "ends in x",
+        "ends in x\n",
+    ],
+    ids=[
+        "one-break-at-end",
+        "several-breaks-at-end",
+        "only-one-break",
+        "only-breaks",
+        "empty",
+        "break-in-middle",
+        "ends-in-x",
+        "ends-in-x-and-break",
+    ],
+)
+async def test_the_script_gets_the_env_value_on_the_card_byte_for_byte(
+    linux_write_registered: None,  # noqa: F811 -- fixture
+    value: str,
+) -> None:
+    env = {"APP_CONFIG": value}
+    request_id = await _park({"script": _SCRIPT, "env": env})
+    card_value = (await _proposed_effect(request_id))["preview"]["env"]["APP_CONFIG"]
+    assert card_value == value
+    assert await asyncio.to_thread(_value_the_script_gets, env) == card_value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_preview", [True, False], ids=["agent", "person"])
+async def test_agent_preview_has_the_env_names_only(agent_preview: bool) -> None:
+    from meho_backplane.connectors.linux.ops_write import _linux_script_run_preview
+
+    ctx = SimpleNamespace(
+        params={"script": _SCRIPT, "env": {"TAR_OPTIONS": "env-card-value"}},
+        target=SimpleNamespace(name="linux-1"),
+        agent_preview=agent_preview,
+    )
+    preview = await _linux_script_run_preview(ctx)  # type: ignore[arg-type]
+    assert preview is not None
+    assert preview["env_var_names"] == ["TAR_OPTIONS"]
+    if agent_preview:
+        assert "env" not in preview
+        assert "env_note" not in preview
+        assert "env-card-value" not in repr(preview)
+    else:
+        assert preview["env"] == {"TAR_OPTIONS": "env-card-value"}
+        assert preview["env_note"] == ENV_NOTE

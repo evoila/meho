@@ -826,8 +826,12 @@ def build_script_run_wrapper(
         'chmod 0700 "$tmp"',
     ]
     for name, value in env.items():
+        # Command substitution drops trailing line breaks. The ``x`` after the
+        # value keeps them, and the second line takes it off again, so the
+        # script gets the value byte for byte as the approval card shows it.
         q_val = shlex.quote(_b64(value))
-        lines.append(f'export {name}="$(printf %s {q_val} | base64 -d)"')
+        lines.append(f'{name}="$(printf %s {q_val} | base64 -d; printf x)"')
+        lines.append(f'export {name}="${{{name}%x}}"')
     if working_directory is not None:
         q_wd = shlex.quote(working_directory)
         lines.append(f'cd {q_wd} || {{ echo "===MEHO_RUN_ERR:chdir===" >&2; exit 4; }}')
@@ -1169,6 +1173,9 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     env = ctx.params.get("env")
     if isinstance(env, dict) and env:
         preview["env_var_names"] = sorted(str(name) for name in env)
+    if isinstance(env, dict) and env and not ctx.agent_preview:
+        # The values are for the person only: the agent's own
+        # preview_operation answer keeps the names, as before.
         preview["env"] = {
             str(name): str(value) for name, value in sorted(env.items(), key=lambda kv: str(kv[0]))
         }

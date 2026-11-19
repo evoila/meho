@@ -526,8 +526,8 @@ def is_human_principal(operator: Operator) -> bool:
 #: Who may stop a hosted agent run or a background operation run. The 403
 #: text of a refused stop.
 RUN_STOP_RULE: Final[str] = (
-    "only the person or login that started this run, or a tenant admin, may stop it; "
-    "an agent or service login may stop only its own runs"
+    "only the person or login that started this run, or a tenant admin or platform admin, "
+    "may stop it; an agent or service login may stop only its own runs"
 )
 
 
@@ -535,11 +535,13 @@ def may_stop_run(operator: Operator, owner_sub: str) -> bool:
     """Return ``True`` when *operator* may stop a run that *owner_sub* started.
 
     The owner of the run (the run's ``identity_sub``) may stop it. A person
-    with the ``tenant_admin`` role (also a platform admin acting in the
-    tenant) may stop any run of the tenant. A machine login stops only its
-    own runs, whatever its role. A run that a login's own schedule or
-    event trigger started carries that login's ``sub``, so it is its own.
+    who is an admin in the tenant (the ``tenant_admin`` role or a platform
+    admin, the same admin test as :meth:`Operator.may_approve_rights_change`)
+    may stop any run of the tenant. A machine login stops only its own
+    runs, whatever its role. A run that a login's own schedule or event
+    trigger started carries that login's ``sub``, so it is its own.
     """
     if operator.sub == owner_sub:
         return True
-    return is_human_principal(operator) and operator.tenant_role is TenantRole.TENANT_ADMIN
+    is_admin = operator.tenant_role is TenantRole.TENANT_ADMIN or operator.platform_admin
+    return is_admin and is_human_principal(operator)

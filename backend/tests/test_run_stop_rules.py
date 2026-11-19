@@ -7,7 +7,8 @@ The rule (:func:`meho_backplane.auth.operator.may_stop_run`):
 
 * The owner of the run (its ``identity_sub``) may stop it. A run that a
   login's own schedule started carries that login's ``sub``.
-* A person with the ``tenant_admin`` role may stop any run of the tenant.
+* A person with the ``tenant_admin`` role, or a platform admin, may stop any
+  run of the tenant.
 * Anyone else gets 403 with a text that says who may stop the run, and the
   run goes on. An agent or service login stops only its own runs, whatever
   its role.
@@ -31,7 +32,13 @@ from pydantic_ai.models.function import FunctionModel
 from meho_backplane.agent.invocation import AgentInvoker, reset_agent_invoker_for_testing
 from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import RUN_STOP_RULE, Operator, TenantRole, may_stop_run
+from meho_backplane.auth.operator import (
+    RUN_STOP_RULE,
+    Operator,
+    PrincipalKind,
+    TenantRole,
+    may_stop_run,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentRun,
@@ -251,3 +258,30 @@ def test_a_platform_admin_in_the_tenant_may_stop_any_run() -> None:
     )
 
     assert may_stop_run(platform_admin, _PERSON)
+
+
+def test_a_platform_admin_with_the_operator_role_may_stop_any_run() -> None:
+    """A platform admin counts as an admin also when its tenant role is ``operator``."""
+    platform_admin = Operator(
+        sub="platform-admin",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        platform_admin=True,
+    )
+
+    assert may_stop_run(platform_admin, _PERSON)
+
+
+def test_a_machine_login_with_the_platform_admin_flag_stops_only_its_own_runs() -> None:
+    service_login = Operator(
+        sub="service-login",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+        principal_kind=PrincipalKind.SERVICE,
+    )
+
+    assert not may_stop_run(service_login, _PERSON)
+    assert may_stop_run(service_login, "service-login")

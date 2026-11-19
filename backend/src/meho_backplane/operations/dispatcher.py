@@ -487,6 +487,7 @@ from meho_backplane.operations.composite import (
     DispatchChild,
     approved_run_var,
     composite_depth_var,
+    credential_step_waits_after_approval,
     get_dispatch_child,
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
@@ -4451,6 +4452,18 @@ async def _dispatch_now(
             ):
                 _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                 verdict = PermissionVerdict.AUTO_EXECUTE
+            # A child call that reads, writes or makes a credential waits for
+            # its own approval in a run that goes on after an approval, also
+            # when the approving person's own rights would let it run.
+            if (
+                verdict is PermissionVerdict.AUTO_EXECUTE
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and credential_step_waits_after_approval(
+                    descriptor.op_id, getattr(descriptor, "op_class", None)
+                )
+            ):
+                _log.info("composite_credential_child_waits_after_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):

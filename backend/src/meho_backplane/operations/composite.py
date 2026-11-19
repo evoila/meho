@@ -128,6 +128,7 @@ __all__ = [
     "composite_resume_state",
     "composite_resume_state_var",
     "composite_resume_var",
+    "credential_step_waits_after_approval",
     "enforce_subop_policy",
     "get_dispatch_child",
     "run_governed_subop",
@@ -639,7 +640,27 @@ def _covered_by_approved_run(
         return False
     if credential_call_waits(op_id, stored_op_class):
         return False
+    return _runs_after_approval()
+
+
+def _runs_after_approval() -> bool:
+    """True while a run goes on after a person's approval (:data:`approved_run_var`, a resume)."""
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
+
+
+def credential_step_waits_after_approval(op_id: str, stored_op_class: str | None = None) -> bool:
+    """True when a step or child call of a run after an approval needs its own approval.
+
+    Such a run is checked with the rights of the person who approved it. A
+    step or child call that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    still waits for its own approval, whatever rights that person has and
+    whatever level the step declares. The approved step itself is cleared
+    before this check (:func:`_subop_resume_cleared`).
+    """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
+    return _runs_after_approval() and credential_call_waits(op_id, stored_op_class)
 
 
 def _resume_parent_for_current_composite(
@@ -1058,7 +1079,10 @@ async def _gate_subop(
     )
     step_rule = take_rule()
     if verdict is PermissionVerdict.AUTO_EXECUTE:
-        return None
+        if not credential_step_waits_after_approval(op_id):
+            return None
+        _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
+        verdict = PermissionVerdict.NEEDS_APPROVAL
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(

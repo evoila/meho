@@ -12,14 +12,18 @@ Covered:
   change runs through ``dispatch_child`` or through ``run_governed_subop``;
 * two steps of one run wait: the run waits at the second one too, and each
   change is sent once over the three runs;
-* a step with no stored end (checked only by the gate, or its call failed):
-  the run after the approval stops with
-  ``composite_resume_step_outcome_unknown`` and sends nothing again;
+* a step with no stored end (checked only by the gate, or its call failed),
+  then a step that would wait: MEHO asks for no approval and stops at once
+  with ``composite_resume_step_outcome_unknown``;
 * a rejected approval: nothing more runs;
+* a re-run of the approved request after its run failed is refused, so no
+  step is sent again;
+* a credential write that waits: the change before it is sent once;
 * a handler that changes a replayed result: the next wait still stores the
   result as the step returned it;
 * the step record itself: a result with a secret-named value (also a
-  number) is not kept, and a step is matched only on its own target.
+  number) is not kept, the result of a credential step is not kept under any
+  field name, and a step is matched only on its own target.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,10 +45,15 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import _preview, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
+)
+from meho_backplane.operations.approval_rerun import (
+    RerunNeedsNewApprovalError,
+    RerunRefusal,
+    rerun_failed_request,
 )
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
@@ -298,19 +308,91 @@ async def test_step_without_a_stored_end_stops_the_run_and_is_not_sent_again(
     handler: str,
     blocked: str,
 ) -> None:
-    """MEHO does not know if the earlier step made its change, so it stops and says so."""
+    """A later step would wait, but its approval could only stop the run: MEHO stops at once.
+
+    MEHO does not know if the earlier step made its change, so a run after an
+    approval would stop there. So no person is asked, and nothing is sent again.
+    """
     await _setup(stub_embedding_service, session, op_id, handler)
 
     first = await h.run(op_id)
+
+    assert first.status == "error"
+    assert first.extras["error_code"] == "composite_resume_step_outcome_unknown"
+    assert first.extras["blocked_op_id"] == blocked
+    assert first.extras["execution_outcome"] == "uncertain"
+    assert s.CREDENTIAL_STEP in (first.error or "")
+    assert await _requests() == [], "no approval request is made"
+    assert s.sent == [s.CHANGE_STEP], "the step that would wait is not sent"
+
+
+# ---------------------------------------------------------------------------
+# A re-run of the approved request after its run failed
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_of_a_failed_multi_step_run_is_refused(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """Change, wait, change, a failing step; approve; re-run: refused, each change sent once."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        s.FAILS_AFTER_WAIT_OP_ID,
+        "change_wait_change_fail_composite",
+    )
+    first = await h.run(s.FAILS_AFTER_WAIT_OP_ID)
+    second = await _approve_and_resume(first)
+    assert second.status == "error", second
+    sent_once = [s.CHANGE_STEP, s.CREDENTIAL_STEP, s.SECOND_CHANGE_STEP, s.FAILING_STEP]
+    assert s.sent == sent_once
+
+    with pytest.raises(RerunNeedsNewApprovalError, match="start a new run") as refused:
+        await rerun_failed_request(
+            operator=h.operator(), request_id=UUID(first.extras["approval_request_id"])
+        )
+
+    assert refused.value.reason is RerunRefusal.MULTI_STEP_RUN
+    assert s.sent == sent_once, "the re-run sends no step again"
+
+
+# ---------------------------------------------------------------------------
+# A credential write that waits
+# ---------------------------------------------------------------------------
+
+
+async def test_change_before_a_waiting_credential_write_is_sent_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``credential_write`` step waits; its request keeps the run input encrypted.
+
+    The run after the approval reads the stored steps from the encrypted
+    copy, so the change before the wait is not sent again.
+    """
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    # No Vault here: skip the step's Vault permission check before the wait.
+    monkeypatch.delitem(_preview._PERMISSION_PREFLIGHTS, s.CREDENTIAL_WRITE_STEP, raising=False)
+    await _setup(
+        stub_embedding_service,
+        session,
+        s.CREDENTIAL_WRITE_WAIT_OP_ID,
+        "change_then_credential_write_composite",
+    )
+
+    first = await h.run(s.CREDENTIAL_WRITE_WAIT_OP_ID)
+    assert first.status == "awaiting_approval", first.error
     assert s.sent == [s.CHANGE_STEP]
+    (waiting,) = await _requests()
+    assert waiting.op_id == s.CREDENTIAL_WRITE_STEP
+    assert waiting.execution_handle is not None
+    assert waiting.resume_parent == {"op_id": s.CREDENTIAL_WRITE_WAIT_OP_ID}
 
     second = await _approve_and_resume(first)
 
-    assert second.status == "error"
-    assert second.extras["error_code"] == "composite_resume_step_outcome_unknown"
-    assert second.extras["blocked_op_id"] == blocked
-    assert second.extras["execution_outcome"] == "uncertain"
-    assert s.sent == [s.CHANGE_STEP], "nothing is sent again, and the run stops"
+    assert second.status == "ok", second.error
+    assert second.result == {"done": True, "id": "t-1"}
+    assert s.sent == [s.CHANGE_STEP, s.CREDENTIAL_WRITE_STEP]
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +447,20 @@ def test_result_with_a_secret_value_is_not_kept() -> None:
     assert secret["status"] == STEP_STARTED
     assert "result" not in secret
     assert not_json["status"] == STEP_STARTED
+    assert "made-up-value" not in str(journal.stored())
+
+
+@pytest.mark.parametrize(
+    "op_id", ["vault.kv.read", "vault.kv.put", "vault.token.create"], ids=["read", "write", "make"]
+)
+def test_result_of_a_credential_step_is_not_kept(op_id: str) -> None:
+    """A credential step's result is not kept, also when the value is under a neutral name."""
+    journal = StepJournal(composite_op_id="vault.composite.x")
+    entry = journal.start("vault-1.x", op_id, None, {"path": "app"})
+    journal.finish(entry, {"data": {"value": "made-up-value"}})
+
+    assert entry["status"] == STEP_STARTED
+    assert "result" not in entry
     assert "made-up-value" not in str(journal.stored())
 
 

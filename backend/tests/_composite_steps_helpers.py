@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors import OperationResult
 from meho_backplane.operations import DispatchChild, register_typed_operation
 from meho_backplane.operations.composite import enforce_subop_policy, run_governed_subop
 
@@ -30,6 +31,10 @@ CHANGE_STEP = "POST:/v1/sys/things"
 SECOND_CHANGE_STEP = "PUT:/v1/sys/things/{id}"
 CREDENTIAL_STEP = "POST:/v1/sys/credentials"
 SECOND_WAIT_STEP = "POST:/v1/sys/things/{id}/seal"
+#: A step whose class is ``credential_write``: its approval keeps the run input
+#: in the encrypted copy.
+CREDENTIAL_WRITE_STEP = "vault.kv.put"
+FAILING_STEP = "POST:/v1/sys/things/{id}/publish"
 
 CHILD_THEN_WAIT_OP_ID = "vault.composite.child_change_then_wait"
 GATED_THEN_WAIT_OP_ID = "vault.composite.gated_change_then_wait"
@@ -37,6 +42,8 @@ STEP_THEN_CREDENTIAL_OP_ID = "vault.composite.change_then_credential"
 TWO_WAITS_OP_ID = "vault.composite.change_wait_change_wait"
 LOST_END_OP_ID = "vault.composite.change_without_end_then_wait"
 POP_RESULT_OP_ID = "vault.composite.change_pop_result_wait_wait"
+FAILS_AFTER_WAIT_OP_ID = "vault.composite.change_wait_change_fail"
+CREDENTIAL_WRITE_WAIT_OP_ID = "vault.composite.change_then_credential_write"
 
 
 async def change_child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -223,3 +230,43 @@ async def change_pop_result_wait_wait_composite(
     if second.stopped is not None:
         return second.stopped
     return {"done": True, "id": thing_id}
+
+
+async def change_wait_change_fail_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """Change, wait, change, then a step that fails: the run after the approval fails."""
+    made = await _change_step(operator, target, CHANGE_STEP, {"name": "thing-1"}, {"id": "t-1"})
+    if made.stopped is not None:
+        return made.stopped
+    thing = {"id": made.value["id"]}
+    waited = await _waiting_step(operator, target, CREDENTIAL_STEP, {"path": thing["id"]})
+    if waited.stopped is not None:
+        return waited.stopped
+    changed = await _change_step(operator, target, SECOND_CHANGE_STEP, thing, {"changed": True})
+    if changed.stopped is not None:
+        return changed.stopped
+    failed = await _change_step(operator, target, FAILING_STEP, thing, {"published": False})
+    if failed.stopped is not None:
+        return failed.stopped
+    return OperationResult(
+        status="error",
+        op_id=FAILS_AFTER_WAIT_OP_ID,
+        error="publish_failed: the target did not publish the thing",
+        duration_ms=0.0,
+    )
+
+
+async def change_then_credential_write_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """A change, then a ``credential_write`` step that waits for a person."""
+    made = await _change_step(operator, target, CHANGE_STEP, {"name": "thing-1"}, {"id": "t-1"})
+    if made.stopped is not None:
+        return made.stopped
+    written = await _waiting_step(
+        operator, target, CREDENTIAL_WRITE_STEP, {"path": made.value["id"], "data": {"k": "v"}}
+    )
+    if written.stopped is not None:
+        return written.stopped
+    return {"done": True, "id": made.value["id"]}

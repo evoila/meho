@@ -20,9 +20,11 @@ step. This module makes sure no step that already ran is sent again.
   with no stored end stops the run (its outcome is unknown).
 
 An entry is matched on the connector, the op id, the target and the params
-hash, in the order of the first run. A result is kept only when it is JSON
-and holds no secret-named value (also no number under a secret name);
-otherwise the entry stays ``started``. A replayed result is a copy, so a
+hash, in the order of the first run. A result is kept only when it is JSON,
+the step's operation does not read, write or make a credential (its class,
+:func:`~meho_backplane.broadcast.events.classify_op`, or an operation whose
+answer hides its values), and it holds no secret-named value (also no number
+under a secret name); otherwise the entry stays ``started``. A replayed result is a copy, so a
 handler that changes it does not change what a later wait stores.
 """
 
@@ -39,6 +41,8 @@ from typing import Any
 import structlog
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
+from meho_backplane.broadcast.events import classify_op
+from meho_backplane.operations._secret_values import hides_secret_values
 from meho_backplane.operations._validate import compute_params_hash, params_hash_matches
 from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
@@ -58,6 +62,15 @@ _log = structlog.get_logger(__name__)
 STEP_DONE = "done"
 #: The step was started; MEHO has no stored end for it.
 STEP_STARTED = "started"
+
+#: Classes of an operation whose result MEHO never stores: it may hold a secret
+#: under any field name.
+_CREDENTIAL_CLASSES = frozenset({"credential_read", "credential_mint", "credential_write"})
+
+
+def _is_credential_step(op_id: str) -> bool:
+    """True when *op_id* reads, writes or makes a credential, so its result is not kept."""
+    return classify_op(op_id) in _CREDENTIAL_CLASSES or hides_secret_values(op_id)
 
 
 def step_target_key(target: Any) -> str | None:
@@ -126,11 +139,18 @@ class StepJournal:
     def finish(self, entry: dict[str, Any], value: Any) -> None:
         """Mark *entry* ``done`` with *value*, when *value* can be kept.
 
-        A value that is not JSON, or that holds a secret-named value (a
-        number under a secret name too), is not stored. The entry then stays
+        The result of a step that reads, writes or makes a credential is not
+        stored, whatever its field names. A value that is not JSON, or that
+        holds a secret-named value (a number under a secret name too), is not
+        stored either. The entry then stays
         ``started``: a later run cannot replay the step and stops instead of
         sending it again.
         """
+        if _is_credential_step(entry["op_id"]):
+            _log.warning(
+                "composite_step_result_not_kept", op_id=entry["op_id"], reason="credential"
+            )
+            return
         try:
             result = to_jsonable_python(value)
         except PydanticSerializationError:
@@ -141,6 +161,13 @@ class StepJournal:
             return
         entry["status"] = STEP_DONE
         entry["result"] = result
+
+    def first_unfinished(self) -> str | None:
+        """The op id of the first stored step with no stored end, or ``None``."""
+        for entry in (*self.entries, *self.replay):
+            if entry.get("status") != STEP_DONE:
+                return str(entry.get("op_id"))
+        return None
 
     def stored(self) -> list[dict[str, Any]]:
         """Every entry to store on an approval request: this run's, then the ones not reached."""

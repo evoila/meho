@@ -960,6 +960,7 @@ def result_composite_resume_step_outcome_unknown(
     composite_op_id: str,
     step_op_id: str,
     duration_ms: float,
+    waiting_op_id: str | None = None,
 ) -> OperationResult:
     """Stop of a composite's run after an approval at a step whose end is not known.
 
@@ -970,15 +971,29 @@ def result_composite_resume_step_outcome_unknown(
     whose own call MEHO does not see, a step that raised, or a step whose
     result could not be kept. MEHO does not know if the step's change
     happened, so it does not send it again and the run stops here.
+
+    With *waiting_op_id*, the step *waiting_op_id* was about to wait for
+    approval while the step *step_op_id* of the same run has no stored end.
+    The run after that approval could only stop at *step_op_id*, so MEHO asks
+    no person and stops at once.
     """
-    return OperationResult(
-        status="error",
-        op_id=composite_op_id,
-        error=(
+    if waiting_op_id is None:
+        error = (
             f"composite_resume_step_outcome_unknown: the run of {composite_op_id!r} after "
             f"the approval reached the step {step_op_id!r}, which the earlier run started; "
             "MEHO has no stored end for it, so it did not send it again and the run stopped"
-        ),
+        )
+    else:
+        error = (
+            f"composite_resume_step_outcome_unknown: the step {waiting_op_id!r} of "
+            f"{composite_op_id!r} needs approval, but MEHO has no stored end for the earlier "
+            f"step {step_op_id!r}; the run after an approval would stop there, so MEHO asked "
+            "for no approval and the run stopped"
+        )
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=error,
         duration_ms=duration_ms,
         extras={
             "error_code": "composite_resume_step_outcome_unknown",

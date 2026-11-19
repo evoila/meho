@@ -1960,12 +1960,12 @@ There is no MCP tool for it; the agent working surface is unchanged.
 |---|---|
 | The caller made the request (`sub == principal_sub`). | 403 `not_request_owner` |
 | `result_state` is `failed`. Not `executed`, not `uncertain` (MEHO does not know if the change happened, so it never runs it again), not `started` (still running), not a request that is not `approved`. | 409 `approval_rerun_not_allowed` |
+| The request is not for a step of a multi-step operation (`resume_parent` is not set). A re-run would send the steps after the approved step again, so the requester starts a new run of the operation. | 409 `approval_rerun_needs_new_approval` (`multi_step_run`) |
 | MEHO has params to run with: the caller sent them, or the request stored them. | 422 `approval_rerun_params_required` |
 | The `expires_at` deadline has not passed. | 409 `approval_rerun_needs_new_approval` (`deadline_passed`) |
 | MEHO was not updated since the request was made (same check as `refuse_resume_if_release_changed`). | same (`release_changed`) |
 | The work reference (`Meho-Work-Ref` header) is the approved one. | same (`work_ref_changed`) |
 | The params match `params_hash`. | same (`params_changed`) |
-| A multi-step credential write still has its input. MEHO keeps it only until the first run, so this one always needs a new approval. | same (`input_not_kept`) |
 | The saved target still resolves. | same (`target_gone`) |
 | The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
@@ -4817,18 +4817,23 @@ of the steps each run went through (`operations/composite_steps.py`):
   - a step that only `enforce_subop_policy` checks: `started`. The seam
     does not see the handler's own call, so this step never has a stored
     end.
-  A result is kept only when it is JSON and holds no secret-named value,
-  also no number under a secret name (`scrub_secret_fields` with
-  `hide_numbers=True`); otherwise the entry stays `started`. A `call`
+  A result is kept only when the step's operation does not read, write or
+  make a credential (its class from `classify_op` is not
+  `credential_read`, `credential_mint` or `credential_write`, and its
+  answer does not hide its values, `hides_secret_values`), and the result
+  is JSON and holds no secret-named value, also no number under a secret
+  name (`scrub_secret_fields` with `hide_numbers=True`); otherwise the
+  entry stays `started`. A `call`
   that raises leaves its entry `started` too.
 - **Storing.** When a step waits, the record goes on the new request as
   `resume_parent["steps"]` (left out when it is empty). Like the rest of
   `resume_parent` it is internal and never shown. For a credential write
   it is inside the encrypted copy of the run input.
 - **Replaying.** `composite_resume_binding` hands the stored steps to the
-  first run of that composite (`composite_resume_steps`). A step that
-  matches the next stored entry with the same connector, op id, target and
-  params hash is not sent again. The step gets a copy of the stored entry,
+  first run of that composite (`composite_resume_steps`). For each step,
+  `StepJournal.take` looks for the first entry in the rest of the record
+  with the same connector, op id, target and params hash. A step with such
+  an entry is not sent again. The step gets a copy of the stored entry,
   so a handler that changes the result does not change what a later wait
   stores:
   - `done`: it returns the stored result (`run_governed_subop` gives
@@ -4843,17 +4848,30 @@ of the steps each run went through (`operations/composite_steps.py`):
   (`composite_resume_repeats_write`). So is a `dispatch_child` step, unless
   the approved step is `after_main_effect` (that composite continues there
   on its own and may read on the way).
+- **A wait after a step with no stored end.** When a step would wait and
+  the record already holds a step with no stored end (`started`), the run
+  after that approval could only stop at that step. So MEHO asks no person
+  and stops at once with `composite_resume_step_outcome_unknown`. Not for an
+  `after_main_effect` step: its run after the approval continues at that
+  step and does not reach the earlier one. A step that reads, writes or
+  makes a credential has no stored end too, so a later step of the same
+  run that needs approval stops the run this way.
 - **A second wait.** A step that needs its own approval during a resume
   waits again. Its request stores the whole record so far: the replayed
   steps, the approved step and the steps after it. Two, three or more
   waits in one run each send every change once.
 - **A rejected approval** runs nothing: no resume starts.
+- **No re-run.** A request of a step of a multi-step operation
+  (`resume_parent` set) never runs again through
+  `POST /api/v1/approvals/{id}/rerun`: it is refused with
+  `multi_step_run`, and the requester starts a new run of the operation.
 
 What a composite author does: run each change of a composite that can go on
 after an approval through `run_governed_subop`, and use the `value` it
 gives back (it is the stored result on a resume). A composite that keeps
 `enforce_subop_policy` plus its own call still never sends a step twice,
-but its resume stops at the first such step that ran before the wait.
+but a later step of it that needs approval stops the run at once, with no
+approval request.
 
 The same holds on every resume path: the person's approval in the console,
 REST, MCP or CLI, the agent that waited (`agent/approval_wait.py`), and a

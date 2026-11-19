@@ -671,6 +671,38 @@ def _resume_parent_for_current_composite(
     return resume_parent
 
 
+def _unfinished_step_before_wait(op_id: str, duration_ms: float) -> OperationResult | None:
+    """Stop a step that would wait when an earlier step of the run has no stored end.
+
+    The run after the approval would stop at that earlier step with
+    ``composite_resume_step_outcome_unknown``, so MEHO does not ask a person
+    for the approval and stops now with that error. ``None``: the step may wait.
+    The caller skips this check for an ``after_main_effect`` step: its run
+    after the approval continues at that step and does not reach the earlier one.
+    """
+    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
+
+    ctx = composite_dispatch_var.get()
+    journal = current_step_journal()
+    if ctx is None or journal is None or journal.composite_op_id != ctx[0]:
+        return None
+    unfinished = journal.first_unfinished()
+    if unfinished is None:
+        return None
+    _log.error(
+        "composite_resume_step_outcome_unknown",
+        composite_op_id=journal.composite_op_id,
+        blocked_op_id=unfinished,
+        waiting_op_id=op_id,
+    )
+    return result_composite_resume_step_outcome_unknown(
+        composite_op_id=journal.composite_op_id,
+        step_op_id=unfinished,
+        duration_ms=duration_ms,
+        waiting_op_id=op_id,
+    )
+
+
 def _warn_if_step_not_declared(step_op_id: str) -> None:
     """Log one warning when a composite checks a step its list does not have (#6298).
 
@@ -1131,6 +1163,12 @@ async def _gate_subop(
                     params_hash=params_hash,
                     duration_ms=duration_ms,
                 )
+
+            unfinished = (
+                None if after_main_effect else _unfinished_step_before_wait(op_id, duration_ms)
+            )
+            if unfinished is not None:
+                return unfinished
 
             run_id = current_agent_run_id_var.get()
             sessionmaker = get_sessionmaker()

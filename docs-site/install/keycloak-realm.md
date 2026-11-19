@@ -590,7 +590,7 @@ rejected on every call. Add these eight mappers to the client:
 | `meho-mcp-audience` | Audience mapper (**Included Custom Audience** = `https://<backplane-host>/mcp`, **no trailing slash**) | adds the MCP resource URI to `aud` | Tokens work for the REST API but not for `/mcp`. |
 | `tenant-id` | User Attribute (**User Attribute** = `tenant_id`, **Claim JSON Type** `String`) | `tenant_id`, from the person's group | Rejected with `missing_tenant_claim`. |
 | `tenant-role` | User Attribute (**User Attribute** = `tenant_role`, **Claim JSON Type** `String`) | `tenant_role`, from the person's group | Rejected with `missing_tenant_role_claim`. |
-| `approver` | User Attribute (**User Attribute** = `approver`, **Claim JSON Type** `boolean`) | `approver`, only for `MEHO-Approvers` | Nobody with the `read_only` role can approve. |
+| `approver` | User Attribute (**User Attribute** = `approver`, **Claim JSON Type** `boolean`) | `approver`, only for `MEHO-Approvers` | MEHO does not read this claim for approval, so the mapper is not needed for approval. |
 | `platform-admin` | User Attribute (**User Attribute** = `platform_admin`, **Claim JSON Type** `boolean`) | `platform_admin`, only for `MEHO-Platform-Admins` | Nobody gets rights across tenants. |
 | `meho-tenants` | User Attribute (**User Attribute** = `meho_tenant`, **Token Claim Name** = `meho_tenants`, **Claim JSON Type** `String`, **Multivalued** on, **Aggregate attribute values** on) | `meho_tenants`, a list with one entry per role group of the person | The token does not list the person's tenants. One tenant still works. |
 | `groups-claim` | Group-membership mapper | `groups` | Group-gated surfaces silently return empty results. |

@@ -266,11 +266,11 @@ bindings:
   tenant list (`meho_tenants`, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
   `meho policy export` shows them.
-- A shipped binding counts only when it agrees with the token. The group
-  alone never gives or takes the right to approve: a person in the
-  shipped readers group keeps an `approver: true` claim. So a shipped
-  binding on its own gives or takes no right to approve. Approver routing by category can still make
-  the list of people who may approve a change shorter.
+- A shipped binding counts only when it agrees with the login. MEHO does
+  not read an `approver` claim, and no shipped group gives that right.
+  So a shipped binding on its own gives or takes no right to approve.
+  Approver routing by category can still make the list of people who may
+  approve a change shorter.
 - The self-approval group (the setting `JWT_SELF_APPROVER_GROUP`) can be
   a group that is not in `JWT_ROLE_GROUPS`. Then a person can be in it
   and in one role group. The old self-approval group counts as `Operators`.

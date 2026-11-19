@@ -185,10 +185,8 @@ this stage it exposes:
   cannot approve a request it parked). No new MCP tool: the
   approval-decision verbs stay human-only (console / CLI / REST), so the
   working surface and the tool inventory are untouched. See
-  [`approvals.md`](approvals.md) "Access model". The realm-side
-  provisioning recipe for the `approver` claim (group-based Keycloak
-  protocol mapper, verification, rollback) is in
-  [`../cross-repo/keycloak-tenant-claims.md`](../cross-repo/keycloak-tenant-claims.md#the-approver-approve-only-capability--group-based-recipe-3243).
+  [`approvals.md`](approvals.md) "Access model". MEHO does not read an
+  `approver` claim, so the realm needs no claim recipe for it.
 * Vault forward-auth — `VaultConnector` (`connectors/vault/connector.py`,
   Task #244 G0.2-T5, refactored under G0.6-T-Refactor-Vault #390) is
   the canonical abstraction for the Vault integration. It wraps

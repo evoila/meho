@@ -3007,7 +3007,9 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
   5. The five MEHO role groups (`roleGroups` in `bootstrap.go`):
      `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
      `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
-     `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
+     `MEHO-Approvers` (`read_only` + `approver=true`; MEHO reads this
+     group as Readers and does not read the `approver` claim, so the
+     group gives no approval right). Each carries
      `tenant_id` from `--tenant-id` (default the all-zero UUID) and
      `meho_tenant` = `<tenant-id>:<tenant-name>:<Role>` (`--tenant-name`,
      default `main`). Also `MEHO-Platform-Admins` (`platform_admin=true`)
@@ -3235,7 +3237,8 @@ The unit suite proves the orchestrator's interaction shape.
 `backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
 proves the realm semantics against a real Keycloak 26.0 in CI: a
 person in each of the five groups gets the right `tenant_id` /
-`tenant_role` (and only the `MEHO-Approvers` person gets `approver`),
+`tenant_role` (and only the `MEHO-Approvers` person gets `approver`, a
+claim that MEHO does not read for approval),
 both in the token Keycloak builds for `meho-cli` and through a real
 `meho-mcp` login checked by the backplane's JWT code; a person in no
 group gets `401 missing_tenant_claim`; and an older realm with

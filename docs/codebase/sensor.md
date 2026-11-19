@@ -468,9 +468,9 @@ and who. Code: `checks/acknowledgement.py`, table
   `SensorAcknowledgementCreate`: `expires_at` (required, with a time
   zone), `reason` (`accepted_risk` / `fix_planned` / `false_alarm`),
   `note` (1..500 characters). Gate `require_approvals_access` (role
-  `operator` or higher, or the `approver` claim, so a `read_only`
-  approver can acknowledge) and `require_human_principal`: agent,
-  service and runner tokens get 403, also with the `approver` claim.
+  `operator` or higher, or the `approver` flag of a login group, so a
+  `read_only` approver with the flag can acknowledge) and `require_human_principal`: agent,
+  service and runner tokens get 403, also with the `approver` flag.
   No MCP tool. Refusals: no or naive `expires_at` (422 at the body), an
   end time in the past or more than 90 days away (422
   `sensor_ack_invalid_end_time`), a green or never-checked Sensor (422

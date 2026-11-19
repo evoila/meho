@@ -11,10 +11,10 @@ last sign-in (migration ``0161``). MEHO reads the groups
 ``MEHO-Approvers`` and ``MEHO-SA-Operators`` as Readers and Operators,
 so no default group sets the ``approver`` or ``self_approver`` flag.
 
-This migration sets both flags to false on every row. A person whose
-login still carries an ``approver`` claim gets the flag back at the
-next sign-in, when MEHO reads the login facts again. The other facts
-stay as they are.
+This migration sets both flags to false on every row. At the next
+sign-in MEHO reads the login facts again and stores the flags of the
+person's login group. The ``approver`` claim of the token gives none.
+The other facts stay as they are.
 
 The migration only changes data. It is safe to run twice.
 ``downgrade()`` changes nothing: the old flags are not restored.

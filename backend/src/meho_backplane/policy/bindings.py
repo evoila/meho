@@ -56,12 +56,11 @@ The rules (:func:`bind`):
   another shipped group it does not count for the kind: that group's kind
   stays, as with the switch off.
 * A shipped binding counts only when its kind gives the same ``approver``
-  and ``self_approver`` flags as the token gives today. Else it is left
-  out and logged. So a person in the shipped approver group whose token
-  has no ``approver`` claim gets no approve right, and a person with
-  ``approver: true`` in the shipped readers group keeps it, as with the
-  switch off. A stored binding is the tenant's own choice: there the
-  group alone gives the flags of its kind.
+  and ``self_approver`` flags as the login has today. Else it is left
+  out and logged. MEHO does not read an ``approver`` claim of the token,
+  and no shipped group gives the flag, so a shipped group alone never
+  gives or takes a right to approve. A stored binding is the tenant's
+  own choice: there the group alone gives the flags of its kind.
 * A ``groups`` claim that is not a list of texts matches no binding.
 
 The import refuses a binding of an agent or a service to a kind that may

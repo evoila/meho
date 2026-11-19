@@ -3721,8 +3721,8 @@ before #3898. Ops that do not opt in never read the binding.
 row below except `/result` is gated by `require_approvals_access`
 (`auth/rbac.py`), which admits a principal that is **either**
 `operator`-or-higher on the linear tenant-role lattice **or** carries the
-orthogonal `approver` capability (`Operator.approver`, lifted from the
-optional fail-closed `approver` JWT claim). This lets a dedicated approver
+orthogonal `approver` capability (`Operator.approver`, set only by a login group whose grant gives it;
+MEHO does not read an `approver` claim). This lets a dedicated approver
 be provisioned as `read_only` role + `approver=true`: it can clear a
 four-eyes gate here yet is denied `POST /api/v1/operations/call` (still
 `require_role(TenantRole.OPERATOR)`, and `read_only` ranks below
@@ -3893,18 +3893,15 @@ CLI) the token must prove it:
   `one_time_code_acr_values`). `GET /api/v1/auth-config` names the
   approval client as `cli_approve_client_id`.
 
-The realm-side provisioning path for the `approver` claim — a group-based
-Keycloak protocol-mapper recipe (`kcadm.sh` primary, Admin Console
-secondary), claim-name alignment with `JWT_APPROVER_CLAIM_NAME`,
-token-decode + live decouple verification, and a rollback note — lives in
-[`../cross-repo/keycloak-tenant-claims.md`](../cross-repo/keycloak-tenant-claims.md#the-approver-approve-only-capability--group-based-recipe-3243).
+MEHO does not read an `approver` claim from the token, so the realm needs
+no claim recipe for approval.
 
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. Optional `order=oldest\|newest` (default `newest`, #3596): `oldest` lists `created_at ASC`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and no self-approval rule allows it: a MEHO-SA-Operator may approve their own change at every risk level, break-glass covers only `safe` and `caution` (G11.7-T1, #3328); 403 `approval_group_required` for another person's `dangerous` or `destructive` change when the approver is neither a MEHO-SA-Operator nor a tenant admin; 403 `human_principal_required` for a machine `principal_kind`. |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and no self-approval rule allows it: only an Admin may approve their own change at every risk level, break-glass covers only `safe` and `caution` (G11.7-T1, #3328); 403 `approval_group_required` for another person's `dangerous` or `destructive` change when the approver is not an Admin; 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver; **fresh sign-in** for `approved` | Decide (`approved` / `rejected`) by id alone. `approved` needs a fresh approval sign-in like `/approve` (#3979, #5515). On every approval it runs the op with the **stored** params (#1503) and returns the outcome in `dispatch_*`. This is the same for a direct op and an agent-run request (#2293): `claim_resume` lets only one caller run it, so when the waiting agent ran it first, `dispatch_status` is `already_resumed`. 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
@@ -4058,19 +4055,21 @@ those). Every read + decision derives `tenant_id` from the validated
 `UISessionContext` only, and calls the `approval_queue` service
 in-process (same in-process-audit binding the REST routes get).
 
-**Access model — operator-or-approver, parity with REST (#3243 / #3270 /
+**Access model — operator-or-approver flag, parity with REST (#3243 / #3270 /
 #3282).** The console decide path carries the **same** access model the
 Bearer REST plane adopted in #3243/#3270, reached through the *same*
 shared service gate rather than a console-local role check. The BFF
 reconstructs the full `Operator` via `_resolve_operator` →
 `verify_access_token_with_refresh` → `_operator_from_claims` (which lifts
-the orthogonal `approver` claim, `Operator.approver`), then calls
+the orthogonal `approver` flag, `Operator.approver`; MEHO does not read an
+`approver` claim, and no default login group gives the flag), then calls
 `approve_request` / `reject_request`; their `_check_reviewer_role` admits
 a principal that is `operator`-or-higher **or** carries `approver`, and
 refuses only a `read_only` principal *without* the flag (403, re-rendered
 in the modal banner naming both levers). So a dedicated approver
-provisioned as `read_only` role + `approver=true` can clear a four-eyes
-gate through the console exactly as it can over REST/CLI. The read
+given the flag by a login group (a customer role) as `read_only` role +
+`approver=true` can clear a four-eyes gate through the console exactly as
+it can over REST/CLI. The read
 surfaces (badge / panel / history / detail) stay gated on the BFF session
 alone — any authenticated console session may glance the tenant-scoped
 queue, unchanged. Two invariants are preserved and pinned in

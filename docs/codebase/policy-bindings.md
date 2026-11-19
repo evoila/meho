@@ -93,8 +93,8 @@ another case.
    kind, exactly as with the switch off.
 5. `bind` matches the login:
    - No binding matches: the login keeps the kind MEHO works out today
-     (from the token's `tenant_role`, `approver` and the self-approval
-     group).
+     (from the token's `tenant_role`, the login group and the
+     self-approval group).
    - The bindings that match give two kinds (for example `Operators` and
      `Admins`, or `Operators` and `Readers`): the login is refused
      with `401 multiple_bound_kinds`. A login gets one kind per tenant, as
@@ -110,14 +110,13 @@ another case.
      for an `operator` token), it is left out and logged as
      `policy_binding_other_base_level`. The login keeps today's kind.
    - A shipped binding counts only when its kind gives the same
-     `approver` and `self_approver` flags as the token. Else it is left
+     `approver` and `self_approver` flags as the login has. Else it is left
      out and logged as `policy_shipped_binding_other_flags` (at debug
      level: it comes on every request of such a person), and the login
-     keeps today's kind. So a shipped group alone never gives or takes the
-     right to approve: a person in `/MEHO-Approvers` without the
-     `approver` claim (or with `approver: false`) gets no approve right,
-     and a person with `approver: true` in `/MEHO-Readers` keeps it, as
-     with the switch off. A stored binding is the tenant's own choice:
+     keeps today's kind. MEHO does not read an `approver` claim of the token,
+     and no shipped group gives the flag. So a shipped group alone never
+     gives or takes the right to approve: a person in `/MEHO-Approvers`
+     is read as a Reader and gets no approve right. A stored binding is the tenant's own choice:
      there the group alone gives the flags of its kind.
    - Else the login gets the `approver` and `self_approver` flags of that
      kind (`group_grant` in `auth/operator.py`), `bound_kind` and the

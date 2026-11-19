@@ -555,7 +555,11 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     values: a JSON or YAML file in a string, such as a ConfigMap entry or
     the last-applied note of kubectl (`redaction/secret_text.py`: the
     quoted-pair text step, then a YAML read that replaces each secret value
-    in place; a YAML file inside a JSON note is read too). The audit copy
+    in place; a YAML file inside a JSON note is read too). The YAML read
+    uses the same rules as the key-name walk: a bare `community` in an SNMP
+    place, and the `value` of a secret-named pair also when it is a list
+    or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one
+    line and keeps its anchor, so the text still reads as YAML. The audit copy
     then holds a fingerprint of the whole text. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.

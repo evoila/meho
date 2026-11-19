@@ -8,7 +8,9 @@
   ``value`` of an env entry whose ``name`` is a secret name.
 * The audit copy of the answer holds a fingerprint in place of such a text.
 * A field an operation declares as plain stays whole.
-* A person who asks with ``reveal_secret: true`` gets the raw text back.
+* A person who asks with ``reveal_secret: true`` gets the raw text back,
+  also from the excerpt of a custom resource.
+* The text keeps reading as YAML after a value is hidden.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+import yaml
 from kubernetes_asyncio.client.models import V1ConfigMap, V1ObjectMeta
 from sqlalchemy import select
 
@@ -27,6 +30,10 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.kubernetes.ops_config import configmap_info
+from meho_backplane.connectors.kubernetes.ops_customresource import (
+    CR_SPEC_EXCERPT_MAX_BYTES,
+    custom_resource_row,
+)
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -36,6 +43,7 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations._audit import reveal_secret_var
 from meho_backplane.operations._secret_values import hide_secret_values
 from meho_backplane.redaction.secret_text import hide_secret_text, hide_secret_text_leaves
 from meho_backplane.settings import get_settings
@@ -44,6 +52,9 @@ from meho_backplane.settings import get_settings
 _FAKE = "FAKE" + "-made-up-7731"
 _FAKE_ENV = "FAKE" + "-made-up-env-4410"
 _FAKE_YAML = "FAKE" + "-made-up-yaml-2209"
+_FAKE_SNMP = "FAKE" + "-made-up-snmp-3318"
+_FAKE_LIST = "FAKE" + "-made-up-list-5527"
+_FAKE_MAP = "FAKE" + "-made-up-map-6636"
 _MARKER = "[REDACTED:param_name]"
 _FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
@@ -51,8 +62,20 @@ _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 _CONFIG_JSON = json.dumps({"db": {"host": "db", "password": _FAKE}})
 _APP_YAML = f"db:\n  port: 5432\n  dbPassword: {_FAKE_YAML}\n"
 _ENV_YAML = f"env:\n- name: DB_USER\n  value: app\n- name: DB_PASSWORD\n  value: {_FAKE_ENV}\n"
-_DATA = {"config.json": _CONFIG_JSON, "app.yaml": _APP_YAML, "env.yaml": _ENV_YAML}
-_FAKES = (_FAKE, _FAKE_ENV, _FAKE_YAML)
+_SNMP_YAML = f"snmp:\n  version: 2c\n  community: {_FAKE_SNMP}\n"
+_PAIRS_YAML = (
+    f"- name: DB_PASSWORD\n  value: [{_FAKE_LIST}]\n"
+    f"- name: API_TOKEN\n  value:\n    current: {_FAKE_MAP}\n"
+    "- name: LOG_LEVEL\n  value: [info]\n"
+)
+_DATA = {
+    "config.json": _CONFIG_JSON,
+    "app.yaml": _APP_YAML,
+    "env.yaml": _ENV_YAML,
+    "snmp.yaml": _SNMP_YAML,
+    "pairs.yaml": _PAIRS_YAML,
+}
+_FAKES = (_FAKE, _FAKE_ENV, _FAKE_YAML, _FAKE_SNMP, _FAKE_LIST, _FAKE_MAP)
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +162,29 @@ async def _applied_config_map(
     return configmap_info(_config_map(with_last_applied=True))
 
 
-async def _register(handler: Any, embedding_service: AsyncMock) -> None:
+def _custom_resource(*, padding: int = 0) -> dict[str, Any]:
+    return {
+        "apiVersion": "db.example.test/v1",
+        "kind": "Database",
+        "metadata": {"name": "app", "namespace": "team-a"},
+        "spec": {
+            "engine": "postgres",
+            "password": _FAKE,
+            "config": _APP_YAML,
+            "notes": "x" * padding,
+        },
+    }
+
+
+async def _custom_resource_info(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    return custom_resource_row(_custom_resource(), ["spec.password", "spec.config"])
+
+
+async def _register(
+    handler: Any, embedding_service: AsyncMock, op_id: str = "k8s.configmap.info"
+) -> None:
     register_connector_v2(
         product="kubernetes", version="", impl_id="", cls=_NoOpKubernetesConnector
     )
@@ -147,7 +192,7 @@ async def _register(handler: Any, embedding_service: AsyncMock) -> None:
         product="kubernetes",
         version="1.x",
         impl_id="kubernetes",
-        op_id="k8s.configmap.info",
+        op_id=op_id,
         handler=handler,
         summary="Read one ConfigMap.",
         description="Read one ConfigMap.",
@@ -159,22 +204,22 @@ async def _register(handler: Any, embedding_service: AsyncMock) -> None:
     )
 
 
-async def _read(operator: Operator, *, reveal: bool) -> Any:
+async def _read(operator: Operator, *, reveal: bool, op_id: str = "k8s.configmap.info") -> Any:
     params: dict[str, Any] = {"name": "app"}
     if reveal:
         params["reveal_secret"] = True
     return await dispatch(
         operator=operator,
         connector_id="kubernetes-1.x",
-        op_id="k8s.configmap.info",
+        op_id=op_id,
         target=None,
         params=params,
     )
 
 
-async def _audit_row() -> AuditLog:
+async def _audit_row(op_id: str = "k8s.configmap.info") -> AuditLog:
     async with get_sessionmaker()() as fresh:
-        result = await fresh.execute(select(AuditLog).where(AuditLog.path == "k8s.configmap.info"))
+        result = await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))
         rows = list(result.scalars().all())
     assert len(rows) == 1
     return rows[0]
@@ -206,9 +251,7 @@ def test_yaml_env_list_hides_the_value_of_a_secret_named_entry() -> None:
 
 def test_yaml_block_value_and_nested_map_are_hidden_whole() -> None:
     text = f"password: |\n  {_FAKE}\n  second line\ncredentials:\n  pass: {_FAKE_ENV}\nport: 1\n"
-    assert hide_secret_text(text) == (
-        f'password: "{_MARKER}"\ncredentials:\n  "{_MARKER}"\nport: 1\n'
-    )
+    assert hide_secret_text(text) == (f'password: "{_MARKER}"\ncredentials: "{_MARKER}"\nport: 1\n')
 
 
 def test_yaml_flags_empty_values_and_masked_values_stay() -> None:
@@ -218,6 +261,61 @@ def test_yaml_flags_empty_values_and_masked_values_stay() -> None:
 
 def test_yaml_number_under_a_secret_name_is_hidden() -> None:
     assert hide_secret_text("password: 12345678\n") == f'password: "{_MARKER}"\n'
+
+
+def test_yaml_snmp_community_is_hidden_in_an_snmp_place_only() -> None:
+    assert hide_secret_text(_SNMP_YAML) == f'snmp:\n  version: 2c\n  community: "{_MARKER}"\n'
+    flat = f"snmp_version: 2\ncommunity: {_FAKE_SNMP}\n"
+    assert _FAKE_SNMP not in hide_secret_text(flat)
+    listed = f"snmpCommunities:\n- community: {_FAKE_SNMP}\n  access: ro\n"
+    assert _FAKE_SNMP not in hide_secret_text(listed)
+    other = "team:\n  community: platform\n"
+    assert hide_secret_text(other) == other
+
+
+def test_yaml_pair_value_that_is_a_list_or_a_map_is_hidden() -> None:
+    shown = hide_secret_text(_PAIRS_YAML)
+    assert _FAKE_LIST not in shown
+    assert _FAKE_MAP not in shown
+    assert yaml.safe_load(shown) == [
+        {"name": "DB_PASSWORD", "value": _MARKER},
+        {"name": "API_TOKEN", "value": _MARKER},
+        {"name": "LOG_LEVEL", "value": ["info"]},
+    ]
+
+
+def test_yaml_nested_map_before_an_indented_field_still_reads() -> None:
+    text = f"db:\n  credentials:\n    user: app\n    pass: {_FAKE}\n  port: 5432\nname: app\n"
+    shown = hide_secret_text(text)
+    assert _FAKE not in shown
+    assert yaml.safe_load(shown) == {
+        "db": {"credentials": _MARKER, "port": 5432},
+        "name": "app",
+    }
+
+
+def test_yaml_block_list_under_a_secret_name_still_reads() -> None:
+    text = f"passwords:\n- {_FAKE}\n- {_FAKE_ENV}\nport: 1\n"
+    shown = hide_secret_text(text)
+    assert yaml.safe_load(shown) == {"passwords": _MARKER, "port": 1}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"password: &pw {_FAKE}\nother: *pw\n",
+        f"password: !!str &pw {_FAKE}\nother: *pw\n",
+        f"password: &pw\n  user: app\n  value: {_FAKE}\nother: *pw\n",
+        f"shared: &pw {_FAKE}\npassword: *pw\n",
+        f'notes: &n "password: {_FAKE}"\ncopy: *n\n',
+    ],
+)
+def test_yaml_anchor_of_a_hidden_value_stays_for_its_alias(text: str) -> None:
+    shown = hide_secret_text(text)
+    assert _FAKE not in shown
+    loaded = yaml.safe_load(shown)
+    assert _FAKE not in json.dumps(loaded)
+    assert len(set(map(json.dumps, loaded.values()))) == 1
 
 
 def test_yaml_text_with_many_documents_hides_the_field_in_each_document() -> None:
@@ -330,3 +428,51 @@ async def test_configmap_info_reveal_by_a_person_returns_the_raw_text(
     assert note["data"] == _DATA
     row = await _audit_row()
     assert _shown_fakes(json.dumps(row.raw_payload)) == []
+
+
+# ---------------------------------------------------------------------------
+# k8s.cr.info through the dispatcher
+# ---------------------------------------------------------------------------
+
+
+async def test_cr_info_hides_spec_secrets_in_the_view_and_the_audit_copy(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(_custom_resource_info, stub_embedding_service, op_id="k8s.cr.info")
+
+    result = await _read(_operator(PrincipalKind.AGENT), reveal=False, op_id="k8s.cr.info")
+
+    assert result.status == "ok", result.error
+    assert _shown_fakes(result.model_dump_json()) == []
+    spec = json.loads(result.result["spec_excerpt"])
+    assert spec["password"] == _MARKER
+    assert spec["engine"] == "postgres"
+    row = await _audit_row("k8s.cr.info")
+    assert _shown_fakes(json.dumps(row.raw_payload)) == []
+
+
+async def test_cr_info_reveal_by_a_person_returns_the_raw_excerpt_and_fields(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(_custom_resource_info, stub_embedding_service, op_id="k8s.cr.info")
+
+    result = await _read(_operator(PrincipalKind.USER), reveal=True, op_id="k8s.cr.info")
+
+    assert result.status == "ok", result.error
+    spec = json.loads(result.result["spec_excerpt"])
+    assert spec["password"] == _FAKE
+    assert spec["config"] == _APP_YAML
+    assert result.result["fields"] == {"spec.password": _FAKE, "spec.config": _APP_YAML}
+    row = await _audit_row("k8s.cr.info")
+    assert _shown_fakes(json.dumps(row.raw_payload)) == []
+
+
+def test_cr_excerpt_that_is_cut_stays_hidden_on_a_reveal() -> None:
+    token = reveal_secret_var.set(True)
+    try:
+        row = custom_resource_row(_custom_resource(padding=CR_SPEC_EXCERPT_MAX_BYTES))
+    finally:
+        reveal_secret_var.reset(token)
+    assert row["spec_truncated"] is True
+    assert _FAKE not in row["spec_excerpt"]
+    assert _FAKE_YAML not in row["spec_excerpt"]

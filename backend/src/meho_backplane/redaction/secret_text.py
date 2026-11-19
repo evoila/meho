@@ -20,7 +20,11 @@ default view does not see it. This module hides it in the text.
    so is the ``value`` of a name/value pair whose ``name`` is a secret name
    (``- name: DB_PASSWORD`` / ``value: ...``, the env list of a container).
    This covers keys without quotes (``dbPassword: ...``) and block values
-   (``password: |``). A string value inside the YAML is read again as text,
+   (``password: |``). Like the key-name walk, a bare ``community`` in an
+   SNMP place is hidden, and the ``value`` of a pair is hidden whatever its
+   type. A hidden value is written as ``key: "<marker>"`` on one line, with
+   its anchor and the white space after it kept, so the text still reads
+   as YAML. A string value inside the YAML is read again as text,
    so a YAML file inside a JSON note is covered too; such a value is written
    back as a JSON string. Text that is not YAML keeps what step 1 made of it.
 
@@ -74,6 +78,9 @@ _MAX_TEXT_DEPTH: Final[int] = 3
 
 _QUOTED_MARKER: Final[str] = f'"{SECRET_FIELD_MARKER}"'
 
+#: The anchor and tag in front of a node's text (``&name !!str``).
+_NODE_PROPERTIES: Final[re.Pattern[str]] = re.compile(r"(?:[&!]\S*\s+)+")
+
 
 def _is_secret_name(name: str) -> bool:
     # Imported here: the broadcast package imports the redaction package.
@@ -86,6 +93,18 @@ def _is_secret_pair(node: Mapping[str, Any]) -> bool:
     from meho_backplane.broadcast.events import is_secret_name_value_pair
 
     return is_secret_name_value_pair(node)
+
+
+def _is_snmp_community(names: list[str], name: str, *, in_snmp: bool) -> bool:
+    from meho_backplane.broadcast.events import is_snmp_community_key
+
+    return is_snmp_community_key(dict.fromkeys(names), name, in_snmp=in_snmp)
+
+
+def _has_snmp_word(name: str) -> bool:
+    from meho_backplane.broadcast.events import has_snmp_word
+
+    return has_snmp_word(name)
 
 
 def _key_name(node: Any) -> str | None:
@@ -101,6 +120,18 @@ def _nothing_to_hide(node: Any) -> bool:
     return True
 
 
+def _anchors(span: str) -> str:
+    """The anchors (``&name``) at the start of a node's text, each with a space.
+
+    A replaced node keeps its anchor, so an alias (``*name``) elsewhere in
+    the text still points at it. A tag (``!!binary``) is dropped: the
+    marker would not fit it.
+    """
+    properties = _NODE_PROPERTIES.match(span)
+    names = properties.group(0).split() if properties else []
+    return "".join(f"{name} " for name in names if name.startswith("&"))
+
+
 class _Finder:
     """Collect the text spans of a YAML document that are to be replaced."""
 
@@ -110,45 +141,59 @@ class _Finder:
         self.spans: list[tuple[int, int, str]] = []
         self.seen: set[int] = set()
 
-    def _replace(self, node: Any, new: str) -> None:
+    def _replace(self, node: Any, new: str, *, key: Any = None) -> None:
+        """Replace the text of *node* by *new*.
+
+        The anchors of the node and the white space after it stay: a block
+        value ends with the line breaks and the indent of the next line. The
+        value of a mapping entry is replaced from the end of its key on, so
+        a block value on the next lines becomes ``key: "<marker>"`` on one
+        line. A value that an alias names (its text stands before the key)
+        is replaced where its anchor is.
+        """
         start, end = node.start_mark.index, node.end_mark.index
         span = self.text[start:end]
-        # A block value ends with its line breaks; keep them.
-        trailing = span[len(span.rstrip("\r\n")) :]
-        self.spans.append((start, end, new + trailing))
+        new = _anchors(span) + new + span[len(span.rstrip()) :]
+        if key is not None and key.end_mark.index <= start:
+            start, new = key.end_mark.index, ": " + new
+        self.spans.append((start, end, new))
 
-    def _hide(self, node: Any) -> None:
-        if not _nothing_to_hide(node):
-            self._replace(node, _QUOTED_MARKER)
-
-    def walk(self, node: Any) -> None:
+    def walk(self, node: Any, *, in_snmp: bool = False) -> None:
         if id(node) in self.seen:
             return
         self.seen.add(id(node))
         if isinstance(node, yaml.MappingNode):
-            self._walk_mapping(node)
+            self._walk_mapping(node, in_snmp=in_snmp)
         elif isinstance(node, yaml.SequenceNode):
             for item in node.value:
-                self.walk(item)
+                self.walk(item, in_snmp=in_snmp)
         elif isinstance(node, yaml.ScalarNode) and node.tag == "tag:yaml.org,2002:str":
             inner = _hide_text(node.value, self.depth + 1)
             if inner != node.value:
                 self._replace(node, json.dumps(inner, ensure_ascii=False))
 
-    def _walk_mapping(self, node: Any) -> None:
-        names = {
-            name: value
+    def _walk_mapping(self, node: Any, *, in_snmp: bool) -> None:
+        # The ``value`` of a pair is checked whatever its type: a list or a
+        # map under a secret ``name`` is hidden whole.
+        entries = {
+            name: value.value if isinstance(value, yaml.ScalarNode) else value
             for key, value in node.value
-            if (name := _key_name(key)) is not None and isinstance(value, yaml.ScalarNode)
+            if (name := _key_name(key)) is not None
         }
-        pair = _is_secret_pair({name: value.value for name, value in names.items()})
+        pair = _is_secret_pair(entries)
+        names = list(entries)
         for key, value in node.value:
             name = _key_name(key)
-            if name is not None and (_is_secret_name(name) or (pair and name == "value")):
+            if name is not None and (
+                _is_secret_name(name)
+                or _is_snmp_community(names, name, in_snmp=in_snmp)
+                or (pair and name == "value")
+            ):
                 self.seen.add(id(value))
-                self._hide(value)
+                if not _nothing_to_hide(value):
+                    self._replace(value, _QUOTED_MARKER, key=key)
             else:
-                self.walk(value)
+                self.walk(value, in_snmp=in_snmp or (name is not None and _has_snmp_word(name)))
 
 
 def _apply(text: str, spans: list[tuple[int, int, str]]) -> str:

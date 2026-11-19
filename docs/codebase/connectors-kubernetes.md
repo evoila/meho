@@ -1357,7 +1357,11 @@ items. For every kind, `custom_resource_row` also hides the values under
 secret-shaped key names in `spec` and `status` (numbers included) and the
 secret-named fields inside their text values, before it builds
 `spec_excerpt`, `status_excerpt` and `fields`. It hides a secret-named
-field inside an annotation value before it cuts the value. The dedicated way
+field inside an annotation value before it cuts the value. On a
+`reveal_secret: true` call by a person, an excerpt or an annotation value
+that is not cut, and `fields`, keep the raw values: the dispatcher hides
+them in the default view and the audit copy and gives them back on the
+reveal. A cut excerpt stays hidden, also on a reveal. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 

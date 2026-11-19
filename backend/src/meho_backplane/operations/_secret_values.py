@@ -40,6 +40,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from meho_backplane.broadcast.events import scrub_secret_named_values
+from meho_backplane.operations._audit import reveal_secret_var
 from meho_backplane.operations._validate import compute_audit_digest_hash
 from meho_backplane.redaction.secret_text import hide_secret_text_leaves
 
@@ -57,6 +58,7 @@ __all__ = [
     "plain_fields_of",
     "register_plain_fields",
     "reveal_hidden_values",
+    "reveal_requested",
     "split_reveal_secret",
     "with_reveal_secret",
 ]
@@ -177,6 +179,18 @@ def split_reveal_secret(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 def asks_reveal(params: object) -> bool:
     """True when *params* (the ``params`` of a call) set ``reveal_secret`` to a true value."""
     return isinstance(params, Mapping) and bool(params.get(REVEAL_SECRET_PARAM))
+
+
+def reveal_requested() -> bool:
+    """True inside a call whose caller asked for the hidden values.
+
+    The dispatcher sets this only for a ``reveal_secret: true`` call that it
+    lets run: an agent's is refused before the connector is called. A
+    connector that must hide a value before it cuts a text reads this to
+    keep the value whole when the text is not cut, so the reveal can give
+    it back.
+    """
+    return reveal_secret_var.get() is True
 
 
 def with_reveal_secret(params: dict[str, Any]) -> dict[str, Any]:

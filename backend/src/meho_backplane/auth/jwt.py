@@ -1643,6 +1643,18 @@ def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | 
     )
 
 
+def _extract_exp(claims: Any) -> int | None:
+    """Read the ``exp`` claim as whole seconds; ``None`` when it is not a number.
+
+    The decode step already requires ``exp`` and checks it. A bool is not
+    a time, even though Python counts it as an ``int``.
+    """
+    raw = claims.get("exp")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return int(raw)
+
+
 def _extract_azp(claims: Any) -> str | None:
     """Read the ``azp`` claim: the client the token was made for (#5515).
 
@@ -1850,6 +1862,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             old_group=_old_group(claims, settings, principal_kind, tenants),
             tenants_claim_malformed=tenants_claim_malformed,
             auth_time=auth_time,
+            token_exp=_extract_exp(claims),
             acr=acr,
             sid=sid,
             azp=_extract_azp(claims),

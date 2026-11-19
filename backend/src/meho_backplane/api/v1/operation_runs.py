@@ -49,6 +49,7 @@ from meho_backplane.db.models import OperationRun, OperationRunStatus
 from meho_backplane.operations.operation_run import (
     IllegalOperationRunTransitionError,
     OperationRunNotFoundError,
+    OperationRunNotOwnedCancellationError,
     UnauthorizedOperationRunCancellationError,
 )
 from meho_backplane.operations.operation_run_service import (
@@ -260,6 +261,11 @@ async def cancel_operation_run(
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="operation_run_not_found",
+        ) from exc
+    except OperationRunNotOwnedCancellationError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"operation_run_cancel_forbidden: {exc}",
         ) from exc
     except UnauthorizedOperationRunCancellationError as exc:
         raise HTTPException(

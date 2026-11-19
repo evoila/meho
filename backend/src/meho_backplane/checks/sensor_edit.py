@@ -14,6 +14,13 @@ at once, so the runner checks it on its next tick.
 
 The function returns the before and after values of each changed field.
 The route writes them into the audit row of the request.
+
+A Sensor runs under its ``identity_sub``. When an edit changes what the
+Sensor runs (its connector, operation, params or check) and that identity
+is another person, not the editor and not the Sensor's own identity
+``__sensor__``, MEHO sets it to ``__sensor__``. The before and after
+values show this change too. So a Sensor never runs under a person who did
+not choose its operation.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from meho_backplane.checks.schemas import (
 )
 from meho_backplane.checks.sensor_pause import set_sensor_status
 from meho_backplane.checks.service import (
+    SENSOR_IDENTITY_SENTINEL,
     SensorNameConflictError,
     SensorOperationNotFoundError,
     _is_unique_violation,
@@ -68,6 +76,10 @@ _EDITABLE_FIELDS: tuple[str, ...] = (
     "timezone",
     "severity",
 )
+
+#: The fields that decide what a Sensor runs. Changing one of them resets an
+#: identity that belongs to another person (:func:`_identity_after_edit`).
+_RUN_FIELDS: frozenset[str] = frozenset({"connector_id", "op_id", "params", "assertion"})
 
 
 class SensorUpdate(BaseModel):
@@ -200,6 +212,21 @@ def _changed_fields(row: Sensor, merged: SensorCreate) -> tuple[dict[str, Any], 
     return before, after
 
 
+def _identity_after_edit(row: Sensor, editor_sub: str, changed: dict[str, Any]) -> str:
+    """The ``identity_sub`` the Sensor runs as after an edit that changes *changed*.
+
+    ``__sensor__`` when the edit changes a field of :data:`_RUN_FIELDS` and
+    the identity is neither ``__sensor__`` nor *editor_sub*. Else the
+    identity stays.
+    """
+    if _RUN_FIELDS.isdisjoint(changed) or row.identity_sub in (
+        SENSOR_IDENTITY_SENTINEL,
+        editor_sub,
+    ):
+        return row.identity_sub
+    return SENSOR_IDENTITY_SENTINEL
+
+
 async def _require_safe_read(tenant_id: uuid.UUID, merged: SensorCreate) -> None:
     """Refuse an operation that is unknown, not safe, or a write."""
     product, version, impl_id = parse_connector_id(merged.connector_id)
@@ -247,9 +274,15 @@ async def edit_sensor(
     sensor_id: uuid.UUID,
     patch: SensorUpdate,
     *,
+    editor_sub: str,
     now: datetime | None = None,
 ) -> SensorEditResult | None:
     """Change the fields in *patch* on one Sensor of *tenant_id*.
+
+    *editor_sub* is the ``sub`` of the person who sends the edit. When the
+    edit changes what the Sensor runs and the Sensor's ``identity_sub`` is
+    another person, the identity becomes ``__sensor__``
+    (:func:`_identity_after_edit`).
 
     Returns ``None`` when the Sensor does not exist in the tenant (the
     boundary answers 404). When nothing changes, the row is not written and
@@ -283,7 +316,12 @@ async def edit_sensor(
             return SensorEditResult(SensorRead.model_validate(row, from_attributes=True), {}, {})
         await _require_safe_read(tenant_id, merged)
         await _lock_and_require_operation(session, tenant_id, merged)
+        identity_sub = _identity_after_edit(row, editor_sub, after)
+        if identity_sub != row.identity_sub:
+            before["identity_sub"] = row.identity_sub
+            after["identity_sub"] = identity_sub
         _apply(row, merged, now)
+        row.identity_sub = identity_sub
         try:
             await session.commit()
         except IntegrityError as exc:

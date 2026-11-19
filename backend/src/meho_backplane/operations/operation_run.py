@@ -55,7 +55,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import RUN_STOP_RULE, Operator, TenantRole, may_stop_run
 from meho_backplane.db.models import (
     OperationRun,
     OperationRunOrigin,
@@ -69,6 +69,7 @@ __all__ = [
     "OperationRunError",
     "OperationRunLeaseLostError",
     "OperationRunNotFoundError",
+    "OperationRunNotOwnedCancellationError",
     "UnauthorizedOperationRunCancellationError",
     "cancel_run",
     "claim_lease",
@@ -189,6 +190,21 @@ class UnauthorizedOperationRunCancellationError(OperationRunError):
             f"operator {operator_sub!r} with role {role.value!r} may not cancel an "
             f"operation run (requires at least {_MIN_CANCEL_ROLE.value!r})"
         )
+
+
+class OperationRunNotOwnedCancellationError(OperationRunError):
+    """The caller may not stop a run that another principal started.
+
+    Raised by :func:`cancel_run` when
+    :func:`~meho_backplane.auth.operator.may_stop_run` refuses. The message
+    is :data:`~meho_backplane.auth.operator.RUN_STOP_RULE`, which the
+    boundary shows in its 403.
+    """
+
+    def __init__(self, *, operator_sub: str, role: TenantRole) -> None:
+        self.operator_sub = operator_sub
+        self.role = role
+        super().__init__(RUN_STOP_RULE)
 
 
 class OperationRunLeaseLostError(OperationRunError):
@@ -525,7 +541,9 @@ async def cancel_run(
     """Cancel a running (or pending) run for an authorized operator.
 
     Loads the run by id, checks the operator holds at least
-    :data:`_MIN_CANCEL_ROLE`, then transitions it to ``cancelled`` via the
+    :data:`_MIN_CANCEL_ROLE` and may stop this run
+    (:func:`~meho_backplane.auth.operator.may_stop_run`: the run's owner,
+    or a person with the ``tenant_admin`` role), then transitions it to ``cancelled`` via the
     same :func:`transition` guard every other status change uses -- so a
     cancel against an already-terminal run surfaces as
     :class:`IllegalOperationRunTransitionError` (409), not a silent no-op.
@@ -539,6 +557,8 @@ async def cancel_run(
         OperationRunNotFoundError: No row for *run_id*.
         UnauthorizedOperationRunCancellationError: The operator's role
             ranks below :data:`_MIN_CANCEL_ROLE`.
+        OperationRunNotOwnedCancellationError: The operator may not stop a
+            run another principal started.
         IllegalOperationRunTransitionError: The run is already terminal.
     """
     if _ROLE_RANK.index(operator.tenant_role) < _ROLE_RANK.index(_MIN_CANCEL_ROLE):
@@ -550,5 +570,9 @@ async def cancel_run(
     row = await session.get(OperationRun, run_id)
     if row is None:
         raise OperationRunNotFoundError(run_id)
+    if not may_stop_run(operator, row.identity_sub):
+        raise OperationRunNotOwnedCancellationError(
+            operator_sub=operator.sub, role=operator.tenant_role
+        )
 
     return await transition(session, row, OperationRunStatus.CANCELLED)

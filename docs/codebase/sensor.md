@@ -443,7 +443,11 @@ Dashboard memberships stay:
    values.
 
 `identity_sub`, `target`, `for_seconds` and the retry knobs are not
-editable.
+editable. When an edit changes `connector_id`, `op_id`, `params` or
+`assertion`, and `identity_sub` is another person (not the editor, not
+`__sensor__`), MEHO sets `identity_sub` to `__sensor__` and adds the change
+to `before` / `after`. So a Sensor never runs as a person who did not choose
+its operation.
 
 A Dashboard has the same edit (`PATCH /api/v1/checks/dashboards/{id}` →
 `checks/dashboard_edit.edit_dashboard`, `meho dashboard edit <id>`):

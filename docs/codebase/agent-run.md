@@ -259,6 +259,10 @@ one transaction):
   operator-authorized cancellation path. Requires at least
   `TenantRole.OPERATOR` (cancelling in-flight work is a control action,
   not a read); a `read_only` operator gets `UnauthorizedCancellationError`.
+  Only the run's owner (`identity_sub`) or a person with the `tenant_admin`
+  role may stop it (`auth.operator.may_stop_run`); anyone else gets
+  `RunNotOwnedCancellationError` (403 with the rule in the detail), so an
+  agent or service login stops only its own runs.
   Cancelling an already-terminal run surfaces as `IllegalTransitionError`
   (not a silent no-op). The function records the **durable intent**
   (`status='cancelled'` + `ended_at`). `AgentInvoker.cancel` then

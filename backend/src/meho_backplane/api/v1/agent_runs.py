@@ -84,6 +84,7 @@ from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
+    RunNotOwnedCancellationError,
     UnauthorizedCancellationError,
 )
 from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
@@ -547,6 +548,11 @@ async def cancel_run(
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="agent_run_not_found",
+        ) from exc
+    except RunNotOwnedCancellationError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"agent_run_cancel_forbidden: {exc}",
         ) from exc
     except UnauthorizedCancellationError as exc:
         raise HTTPException(

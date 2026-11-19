@@ -126,6 +126,10 @@ State machine (`pending → running → succeeded | failed | uncertain`, plus
   A dead run that resumes an approved request is always `uncertain`. Any
   other run is `uncertain` unless its operation has `safety_level` `safe`;
   an operation that cannot be found counts as a change.
+- Only the run's owner (`identity_sub`) or a person with the `tenant_admin`
+  role may cancel a run (`auth.operator.may_stop_run`); anyone else gets 403
+  `operation_run_cancel_forbidden` with the rule in the detail, and the run
+  goes on. An agent or service login cancels only its own runs.
 - `cancelled` is best-effort: the durable intent is recorded; an in-flight
   task loses its lease on the next heartbeat and its result is discarded
   when it finalises against the now-terminal row (the dispatch's own

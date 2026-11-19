@@ -192,7 +192,9 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
        the registry;
     2a. checks, before any store is asked: the sink path is inside the
        tenant, and each ``vault-target`` side names a Vault target with
-       its own role that the caller may use for that read or write;
+       its own role that the caller may use for that read or write, and
+       a ``linux:`` sink names a Linux target (on an approved run: the
+       target, host and port on the approval card);
     3. ``read_secret`` from the source (the value enters memory only as
        a :class:`~.endpoints.SecretMaterial`);
     4. ``write_secret`` to the sink — entirely server-side.
@@ -224,6 +226,11 @@ async def secret_move(operator: Operator, target: Any, params: dict[str, Any]) -
     if check_write_allowed is not None:
         check_write_allowed(operator)
     await check_vault_target_refs(operator, params)
+    # A sink on a MEHO target (``linux:``) checks that target, and on an
+    # approved run that it is the target, host and port on the card.
+    check_target = getattr(sink, "check_target", None)
+    if check_target is not None:
+        await check_target(operator)
 
     # Server-side read → write. The value lives only inside ``material``
     # for the duration of this call; it never crosses back to the caller.

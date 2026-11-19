@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_rights import approve_right
+from meho_backplane.policy.routing_floor import InstallFloor
 
 __all__ = ["WaitingFirstPager"]
 
@@ -41,9 +42,16 @@ class WaitingFirstPager:
     """
 
     def __init__(
-        self, operator: Operator, *, offset: int, size: int, only_waiting: bool = False
+        self,
+        operator: Operator,
+        *,
+        offset: int,
+        size: int,
+        only_waiting: bool = False,
+        floor: InstallFloor | None = None,
     ) -> None:
         self._operator = operator
+        self._floor = floor
         self._only_waiting = only_waiting
         self._offset = offset
         self._size = size
@@ -54,7 +62,7 @@ class WaitingFirstPager:
     def add(self, rows: Sequence[ApprovalRequest]) -> None:
         """Split one batch of *rows* into the two groups."""
         for row in rows:
-            waiting = approve_right(self._operator, row).may_approve
+            waiting = approve_right(self._operator, row, floor=self._floor).may_approve
             if not waiting and self._only_waiting:
                 continue
             group = self._waiting if waiting else self._others

@@ -1027,7 +1027,10 @@ def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
         before searching for a specific operation to call.
         """
         with connector_errors_reach_model():
-            return await list_operation_groups(ctx.deps, {"connector_id": connector_id})
+            # No paging input here, so no operation lines either (#4713).
+            return await list_operation_groups(
+                ctx.deps, {"connector_id": connector_id}, list_operations=False
+            )
 
 
 def _coerce_output(value: Any) -> Any:

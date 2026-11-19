@@ -1349,6 +1349,22 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_events_config_get(self, operator, target, params)
 
+    async def events_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.events.list``."""
+        from meho_backplane.connectors.keycloak.ops_events import keycloak_events_list
+
+        return await keycloak_events_list(self, operator, target, params)
+
+    async def admin_events_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.admin_events.list``."""
+        from meho_backplane.connectors.keycloak.ops_events import keycloak_admin_events_list
+
+        return await keycloak_admin_events_list(self, operator, target, params)
+
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1405,6 +1421,10 @@ class KeycloakConnector(HttpConnector):
             PASSKEY_CODE_SKIP_OPS,
         )
         from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
+        from meho_backplane.connectors.keycloak.ops_events import (
+            EVENT_OPS,
+            WHEN_TO_USE_EVENTS_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_flow_reads import (
             FLOW_READ_OPS,
             WHEN_TO_USE_FLOW_READ_BY_GROUP,
@@ -1442,6 +1462,7 @@ class KeycloakConnector(HttpConnector):
             **WHEN_TO_USE_AUTHFLOW_BY_GROUP,
             **WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
             **WHEN_TO_USE_FLOW_READ_BY_GROUP,
+            **WHEN_TO_USE_EVENTS_BY_GROUP,
         }
 
         bindings: list[tuple[Any, Any]] = []
@@ -1457,6 +1478,7 @@ class KeycloakConnector(HttpConnector):
             *USER_STATE_OPS,
             *LOCK_STATUS_OPS,
             *FLOW_READ_OPS,
+            *EVENT_OPS,
         ):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:

@@ -135,6 +135,7 @@ to make the binding visible in ``pyproject.toml``.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -154,6 +155,7 @@ __all__ = [
     "connector_serves_target",
     "resolve_connector",
     "resolve_connector_or_label",
+    "stale_openbao_probe_hint",
 ]
 
 #: Labels surfaced by :func:`resolve_connector_or_label` so callers
@@ -638,6 +640,30 @@ def _probed_product(target: Any) -> str | None:
         return None
     value = fp.get("product") if isinstance(fp, Mapping) else getattr(fp, "product", None)
     return value if isinstance(value, str) and value else None
+
+
+def stale_openbao_probe_hint(target: Any) -> str | None:
+    """A fix to name when a ``vault`` target may be an OpenBao server probed before 0.47.
+
+    Before 0.47 a probe of OpenBao stored the product ``vault``. Since 0.47
+    the OpenBao connector serves only a target whose stored product is
+    ``openbao``, and the Vault connector serves only 1.x. So such a target
+    matches no connector until it is probed again.
+    """
+    if getattr(target, "product", None) != "vault" or _probed_product(target) != "vault":
+        return None
+    version = resolve_target_version(target)
+    try:
+        if version is None or Version(version).major < 2:
+            return None
+    except InvalidVersion:
+        return None
+    name = getattr(target, "name", None)
+    quoted = shlex.quote(name) if isinstance(name, str) and name else "<target-name>"
+    return (
+        "this may be an OpenBao server that was probed before 0.47; "
+        f"run `meho targets probe -- {quoted}` to detect it again"
+    )
 
 
 def _fingerprint_product_fits(cls: type[Connector], probed_product: str | None) -> bool:

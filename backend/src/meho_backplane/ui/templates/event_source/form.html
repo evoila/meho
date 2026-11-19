@@ -114,9 +114,10 @@
         Auth secret
         <span class="opacity-60 font-normal">{% if mode == "edit" %}(leave blank to keep the current secret){% else %}(optional){% endif %}</span>
       </span>
-      <input type="password" name="secret" autocomplete="off" class="input input-bordered input-sm w-full"
+      <input type="password" name="secret" autocomplete="off" class="input input-bordered input-sm w-full{{ error_class('secret', 'input-error') }}"
              placeholder="written to Vault; never displayed" />
-      <span class="text-xs opacity-60">Custodied in Vault — never stored in the database or shown again.</span>
+      <span class="text-xs opacity-60">Custodied in Vault — never stored in the database or shown again. A secret of only spaces is refused.</span>
+      {{ error_for('secret') }}
     </label>
 
     <div class="flex gap-2 pt-2">

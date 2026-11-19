@@ -47,6 +47,7 @@ from typing import Any
 from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
+    "PASSWORD_POLICY_FIELD",
     "REDACTED",
     "redact_preview_fields",
     "redact_secret_fields",
@@ -135,6 +136,16 @@ def redact_secret_fields(value: Any) -> Any:
     return _redact(value, _SECRET_FIELDS, shared=False)
 
 
+#: The one field a realm card shows on purpose: the text of the realm's
+#: password rules (for example ``length(8) and digits(1)``), at the top
+#: level of the realm. It holds no password, but the shared name rule
+#: hides it because it has "password" in its name. The realm cards put
+#: it back after the scrub (``show_password_policy`` in
+#: ``ops_write_realm_smtp``), so the approver can read the rules the
+#: realm will get. The same name deeper in the realm stays hidden.
+PASSWORD_POLICY_FIELD = "passwordPolicy"
+
+
 def redact_preview_fields(value: Any) -> Any:
     """Return *value* with secrets masked for an approval preview.
 
@@ -151,8 +162,10 @@ def redact_preview_fields(value: Any) -> Any:
 #: operation that reads them leaves them out of its result, but the trace
 #: stores the whole vendor answer, so the mask must hide them there too.
 #: ``lastIPFailure`` is the IP address of a user's last failed sign-in
-#: (``GET /attack-detection/brute-force/users/{id}``).
-_TRACE_ONLY_FIELDS: frozenset[str] = frozenset({"lastipfailure"})
+#: (``GET /attack-detection/brute-force/users/{id}``). ``representation`` is
+#: the JSON text of what an admin event changed; it can hold a password
+#: (``GET /admin-events``).
+_TRACE_ONLY_FIELDS: frozenset[str] = frozenset({"lastipfailure", "representation"})
 
 
 def redact_trace_fields(value: Any) -> Any:

@@ -150,3 +150,110 @@ func TestPrintEffectWithoutScriptIsUnchanged(t *testing.T) {
 		t.Errorf("unexpected effect output:\n%s", out)
 	}
 }
+
+func TestPrintDetailNamesTheFlagWhenTheScriptHasMorePages(t *testing.T) {
+	d := scriptRunView(t, map[string]interface{}{
+		"script":           "uname -a\n",
+		"script_bytes":     float64(70000),
+		"script_sha256":    testScriptSHA,
+		"script_truncated": true,
+		"script_pages":     float64(2),
+	})
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	want := "The script has 2 pages. Read page N with: meho approvals show " + d.Id.String() + " --script-page N\n"
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("printDetail output misses %q in:\n%s", want, stdout.String())
+	}
+
+	one := scriptRunView(t, map[string]interface{}{
+		"script":       "uname -a\n",
+		"script_bytes": float64(9),
+		"script_pages": float64(1),
+	})
+	cmd, stdout, _ = newCapturingCmd(t)
+	printDetail(cmd, &one)
+	if strings.Contains(stdout.String(), "--script-page") {
+		t.Errorf("a one-page script names the flag:\n%s", stdout.String())
+	}
+}
+
+func TestWithScriptPagePrintsPageNOfM(t *testing.T) {
+	d := scriptRunView(t, map[string]interface{}{
+		"interpreter":      "/bin/bash",
+		"script":           "page one\n",
+		"script_bytes":     float64(70000),
+		"script_sha256":    testScriptSHA,
+		"script_truncated": true,
+		"script_pages":     float64(2),
+		"script_ref":       "app-repo@abc123:check.sh",
+	})
+	text := "page two\n"
+	sha := testScriptSHA
+	page := &api.ApprovalScriptPageView{
+		Page: 2, Pages: 2, Script: &text, ScriptBytes: 70000, ScriptSha256: &sha,
+	}
+	shown := withScriptPage(d.ProposedEffect, page)
+	var buf bytes.Buffer
+	printScript(&buf, "", shown)
+	out := buf.String()
+	for _, want := range []string{
+		"  Page:             2 of 2\n",
+		"  SHA-256:          " + testScriptSHA + "\n",
+		"  Reviewed copy:    app-repo@abc123:check.sh\n",
+		"  | page two\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printScript output misses %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "page one") || strings.Contains(out, "longer than the text") {
+		t.Errorf("page 2 shows page 1 or the cut note:\n%s", out)
+	}
+	// The caller's effect is not changed, and the flag hint is not printed for a page.
+	if d.ProposedEffect["preview"].(map[string]interface{})["script"] != "page one\n" {
+		t.Errorf("withScriptPage changed the proposed effect")
+	}
+	var hint bytes.Buffer
+	printScriptPagesHint(&hint, "id", shown)
+	if hint.Len() != 0 {
+		t.Errorf("hint printed for a page: %q", hint.String())
+	}
+}
+
+func TestWithScriptPageHiddenValuesShowNoChecksum(t *testing.T) {
+	d := scriptRunView(t, map[string]interface{}{
+		"script":       "page one\n",
+		"script_bytes": float64(70000),
+		"script_pages": float64(2),
+	})
+	text := "export DB_[REDACTED:api_key]\n"
+	hidden := true
+	page := &api.ApprovalScriptPageView{
+		Page: 2, Pages: 2, Script: &text, ScriptBytes: 70000, ScriptValuesHidden: &hidden,
+	}
+	var buf bytes.Buffer
+	printScript(&buf, "", withScriptPage(d.ProposedEffect, page))
+	out := buf.String()
+	if strings.Contains(out, "SHA-256:  ") || !strings.Contains(out, "MEHO shows no SHA-256") {
+		t.Errorf("hidden values must show no checksum:\n%s", out)
+	}
+}
+
+func TestRenderScriptPageErrorPrintsTheSentence(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   string
+	}{
+		{410, `{"detail":"MEHO no longer keeps this script. It keeps the script only while the request waits for approval."}`, "MEHO no longer keeps this script"},
+		{404, `{"detail":"The script has 2 page(s). Page 3 does not exist."}`, "Page 3 does not exist"},
+		{404, `{"detail":"approval_request_not_found"}`, "approval_request_not_found"},
+	} {
+		cmd, _, stderr := newCapturingCmd(t)
+		err := renderScriptPageError(cmd, "https://meho.example", &httpResponseError{statusCode: tc.status, body: []byte(tc.body)}, false)
+		if err == nil || !strings.Contains(stderr.String(), tc.want) {
+			t.Errorf("status %d: err=%v stderr=%q, want %q", tc.status, err, stderr.String(), tc.want)
+		}
+	}
+}

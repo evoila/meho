@@ -81,6 +81,7 @@ authenticated client.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -93,6 +94,7 @@ from unittest.mock import AsyncMock
 import hvac
 import pytest
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -107,6 +109,7 @@ from meho_backplane.connectors.vault import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.approval_object_check import live_card
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.test_operations_dispatcher import _make_operator
@@ -2212,6 +2215,99 @@ async def test_userpass_generated_password_is_only_in_kv_and_works_once(
     again = root.secrets.kv.v2.read_secret_version(path="labs/gen-user", mount_point="secret")
     assert again["data"]["metadata"]["version"] == 1
     assert again["data"]["data"]["password"] == stored
+
+
+@pytest.mark.asyncio
+async def test_kv_generate_stores_a_value_that_meets_the_rules_and_shows_it_nowhere(
+    vault_e2e: tuple[_VaultTarget, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``vault.kv.generate``: the value is in KV only, a repeat changes nothing, rotate adds one.
+
+    The value is not in the result, the audit row, the approval preview or
+    any log line (structlog events and standard logging records).
+    """
+    caplog.set_level(logging.DEBUG)
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    root.secrets.kv.v2.create_or_update_secret(
+        path="labs/generated", secret={"username": "svc-user"}, mount_point=_KV_MOUNT
+    )
+    params = {
+        "path": "labs/generated",
+        "length": 20,
+        "min_special": 1,
+        "special_chars": "!#-_",
+        "max_repeat": 2,
+    }
+
+    with capture_logs() as first_logs:
+        first = await _dispatch_approved(target, "vault.kv.generate", params, "op-kvgen-1")
+    assert first.status == "ok", first.error
+    assert first.result == {
+        "mount": _KV_MOUNT,
+        "path": "labs/generated",
+        "field": "password",
+        "version": 2,
+        "generated": True,
+    }
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="labs/generated", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    value = stored["password"]
+    assert stored["username"] == "svc-user"
+    assert len(value) == 20
+    assert any(c in "!#-_" for c in value)
+    assert all(not (a == b == c) for a, b, c in zip(value, value[1:], value[2:], strict=False))
+    assert value not in json.dumps(first.result)
+    row = await _assert_audited(
+        "vault.kv.generate", operator_sub="op-kvgen-1", expected_op_class="write"
+    )
+    assert value not in json.dumps(row.payload, default=str)
+    assert first_logs, "the run logged nothing, so the log check would prove nothing"
+    assert value not in repr(first_logs)
+
+    # The approval preview, built the way the approval step builds it.
+    card = await live_card(
+        _make_operator(sub="op-kvgen-1"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.generate",
+        target=target,
+        params=params,
+    )
+    assert card is not None
+    assert card["preview"]["path"] == "labs/generated"
+    assert value not in json.dumps(card, default=str)
+
+    # A second run changes nothing: same version, same value.
+    with capture_logs() as second_logs:
+        second = await _dispatch_approved(target, "vault.kv.generate", params, "op-kvgen-2")
+    assert second.status == "ok", second.error
+    assert second.result["generated"] is False
+    assert second.result["version"] == 2
+    again = root.secrets.kv.v2.read_secret_version(path="labs/generated", mount_point=_KV_MOUNT)
+    assert again["data"]["metadata"]["version"] == 2
+    assert again["data"]["data"]["password"] == value
+
+    # rotate writes a new version with a new value and keeps the other field.
+    with capture_logs() as rotate_logs:
+        rotated = await _dispatch_approved(
+            target, "vault.kv.generate", {**params, "rotate": True}, "op-kvgen-3"
+        )
+    assert rotated.status == "ok", rotated.error
+    assert rotated.result["version"] == 3
+    assert rotated.result["generated"] is True
+    latest = root.secrets.kv.v2.read_secret_version(path="labs/generated", mount_point=_KV_MOUNT)
+    new_value = latest["data"]["data"]["password"]
+    assert new_value != value
+    assert latest["data"]["data"]["username"] == "svc-user"
+    assert value not in repr(second_logs)
+    assert new_value not in repr(rotate_logs)
+    assert new_value not in json.dumps(rotated.result)
+    for record in caplog.records:
+        line = record.getMessage() + repr(record.__dict__)
+        assert value not in line
+        assert new_value not in line
 
 
 @pytest.mark.asyncio

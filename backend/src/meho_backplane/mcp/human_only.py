@@ -58,7 +58,12 @@ and revoke siblings stay open to machine logins with the role:
 ``meho_agents_grant_create`` and ``meho_agent_principals_register``. Only
 a person creates an agent grant or registers an agent principal, the same
 as on REST. Their handlers call :func:`ensure_human_mcp_caller` first, so
-a service login with ``tenant_admin`` and ``mcp:admin`` is refused. The
+a service login with ``tenant_admin`` and ``mcp:admin`` is refused.
+``meho_agents_grant_revoke`` stays open to a machine login for an
+``auto-execute`` grant only, which narrows the agent. A ``deny`` or
+``needs-approval`` grant limits the agent, and removing it can let a
+broader grant apply again, so its handler calls
+:func:`ensure_human_mcp_caller` for those rows. The
 login kind comes from the token, also when MEHO infers it (a
 client-credentials token without a ``principal_kind`` claim is a service
 login).

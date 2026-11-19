@@ -28,10 +28,10 @@ are three outcomes:
 
 - `safe` operations (reads) run. This is the default, and the only kind
   that can be in a recurring assignment.
-- `caution` operations (low-risk writes) run only through the write gate:
-  a person's approval, a signature from the central instance, and an
-  allowlist entry at the center and on the runner. If one part is
-  missing, the operation is refused.
+- `caution` operations (low-risk writes) are screened by the write gate in
+  the code: a person's approval, a signature from the central instance, and
+  an allowlist entry at the center and on the runner. Nothing sends a
+  `caution` item to a runner yet (not built yet), so none runs there.
 - `dangerous` and `destructive` operations never run on a runner.
 
 See "Satellite-mint tier ladder" below for the details.

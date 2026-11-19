@@ -3492,10 +3492,6 @@ async def _build_proposed_effect(
         return None
 
 
-#: The plain sentence an approval card shows when MEHO could not build its preview.
-PREVIEW_FAILED_TEXT = "MEHO could not build the preview of this change."
-
-
 def _preview_failed_effect(
     *,
     op_id: str,

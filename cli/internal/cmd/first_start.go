@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,53 +14,62 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// firstStartTimeout bounds the GET /first-start call. The backplane runs
-// its own checks (each with a short limit) before it answers.
+// firstStartTimeout bounds the GET /api/v1/first-start call. The
+// backplane runs its own checks (each with a short limit) before it
+// answers.
 const firstStartTimeout = 30 * time.Second
 
-// firstStartLine is one line of the backplane's first-start list.
-type firstStartLine struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
-
-// firstStartList is the answer of GET /first-start.
-type firstStartList struct {
-	OK     bool             `json:"ok"`
-	Checks []firstStartLine `json:"checks"`
-}
-
-// runFirstStart implements `meho status --first-start`. The route needs
-// no login, so a plain HTTP client works. With --json it prints the
-// backplane's answer as it is. A red line makes the exit code 6.
+// runFirstStart implements `meho status --first-start`. It reads the
+// list with the login stored by `meho login`: the backplane shows the
+// list only to a signed-in person with at least the operator role. With
+// --json it prints the backplane's answer as it is. A red line makes the
+// exit code 6.
 func runFirstStart(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), firstStartTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, backplaneURL+"/first-start", http.NoBody)
+	stderr := cmd.ErrOrStderr()
+	client, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
+		if api.IsTokenNotFound(err) {
+			return output.RenderError(stderr, output.AuthExpired(fmt.Sprintf(
+				"the first-start list needs a login; run `meho login %s`, then run this command again, or open %s/ui/first-start in the console",
+				backplaneURL, backplaneURL)), jsonOut)
+		}
+		return output.RenderError(stderr, output.Unexpected(fmt.Sprintf("build authed client: %v", err)), jsonOut)
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.GetFirstStart(ctx)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(),
+		if api.IsRefreshRejected(err) || api.IsNoRefreshToken(err) {
+			return output.RenderError(stderr, output.AuthExpired(fmt.Sprintf(
+				"session expired; run `meho login %s`", backplaneURL)), jsonOut)
+		}
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+			return output.RenderError(stderr,
+				output.Unexpected(fmt.Sprintf("decode %s/api/v1/first-start: %v", backplaneURL, err)), jsonOut)
+		}
+		return output.RenderError(stderr,
 			output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, redactedError(err))), jsonOut)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("HTTP %d from %s/first-start (an older backplane has no first-start checks)", resp.StatusCode, backplaneURL)),
-			jsonOut)
+	switch resp.StatusCode() {
+	case 401: // the stored login was refused
+		return output.RenderError(stderr, output.AuthExpired(fmt.Sprintf(
+			"backplane rejected stored credentials; run `meho login %s`", backplaneURL)), jsonOut)
+	case http.StatusForbidden:
+		return output.RenderError(stderr, output.InsufficientRole(
+			"the first-start list needs the operator role in the current tenant"), jsonOut)
 	}
-	var list firstStartList
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&list); err != nil {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("decode /first-start: %v", err)), jsonOut)
+	if resp.JSON200 == nil {
+		return output.RenderError(stderr, output.Unexpected(fmt.Sprintf(
+			"HTTP %d from %s/api/v1/first-start (an older backplane has no first-start checks behind a login)",
+			resp.StatusCode(), backplaneURL)), jsonOut)
 	}
+	list := resp.JSON200
 	if jsonOut {
 		if err := output.PrintJSON(cmd.OutOrStdout(), list); err != nil {
 			return err
@@ -67,8 +77,8 @@ func runFirstStart(cmd *cobra.Command, backplaneURL string, jsonOut bool) error 
 	} else {
 		printFirstStart(cmd.OutOrStdout(), list)
 	}
-	if !list.OK {
-		return output.RenderError(cmd.ErrOrStderr(), &output.StructuredError{
+	if !list.Ok {
+		return output.RenderError(stderr, &output.StructuredError{
 			Code:   output.ErrCodeFirstStartFailed,
 			Detail: "at least one first-start check is red",
 			Exit:   output.ExitFirstStartFailed,
@@ -79,7 +89,7 @@ func runFirstStart(cmd *cobra.Command, backplaneURL string, jsonOut bool) error 
 
 // printFirstStart writes one line per check: GREEN, RED, WARN or SKIPPED, the
 // check name and its sentence.
-func printFirstStart(w io.Writer, list firstStartList) {
+func printFirstStart(w io.Writer, list *api.FirstStartResponse) {
 	for _, line := range list.Checks {
 		label := "GREEN"
 		switch line.Status {

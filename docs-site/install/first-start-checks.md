@@ -13,8 +13,9 @@ Check that MEHO is healthy before you use it.
    fails. It only reports and changes nothing. On a Linux server
    install, run `sudo meho doctor` on the server too. See
    [Troubleshooting](../clients/troubleshooting.md#start-with-meho-doctor).
-4. **Read the first-start list.** MEHO checks the site and shows a plain
-   list of five checks. The rest of this page explains it.
+4. **Sign in and read the first-start list.** MEHO checks the site and
+   shows a plain list of five checks. The list needs a login. The rest of
+   this page explains it.
 
 ## The first-start list
 
@@ -22,26 +23,29 @@ Right after the install, MEHO checks the site and shows a plain list. Each
 line is green, yellow (a warning) or red with one sentence that says what to fix. The list is
 the same in every install form.
 
-Three ways to read it:
+The list needs a login with the `operator` role or higher. Three ways to
+read it:
 
-- `meho status --first-start` prints the list. It needs no login. The exit
-  code is 6 when any line is red. Add `--json` for the raw answer.
-- The console page `/ui/first-start` shows the same list.
-- `GET /first-start` on the backplane. It needs no login. It returns the
-  lines only: no token, no stack trace, no internal detail. A red line names
-  only the host from `BACKPLANE_URL`. The reachability line shows how many
-  systems did not answer, not their names. The console page shows the names.
+- The console page `/ui/first-start`. Sign in to the web console first.
+- `meho status --first-start` prints the list. Run `meho login <address>`
+  first. The exit code is 6 when any line is red, and 2 without a login.
+  Add `--json` for the raw answer.
+- `GET /api/v1/first-start` on the backplane, with the token of a login.
 
-Calls that arrive while a run is in progress get the result of that run.
-After a run ends, `GET /first-start` and `meho status --first-start` show
-its result for 30 seconds, and then the next call runs the checks again.
-So after you fix a problem, wait 30 seconds before you look again. The
-console page runs the checks on every load. The checks change nothing.
+The list shows the systems of your current tenant. A platform admin sees
+the systems of all tenants. A red line names the systems that did not
+answer. The answer holds no token, no stack trace and no internal detail.
+
+`GET /first-start` needs no login. It runs no check and contacts no system.
+It answers one fixed line that says how to sign in, and nothing about the
+install.
+
+The checks run again on every call and change nothing.
 
 A line is `ok` (green), `warn` (a warning), `fail` (red) or `skipped`. A warning does not make the list red, and the install goes on. A line is skipped when the
 check cannot run or has no meaning: the certificate check waits until the DNS
 name is green, and it is skipped when `BACKPLANE_URL` uses plain `http`. The
-reachability line is skipped when some systems need a signed-in person (see
+reachability line is skipped when some systems could not be checked (see
 the notes) and none of the others failed.
 
 ## The five checks
@@ -52,7 +56,7 @@ the notes) and none of the others failed.
 | `certificate` | MEHO opens a TLS connection to `BACKPLANE_URL`. The chain is trusted, the name matches, and more than 30 days are left. | Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix `BACKPLANE_URL`. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address. |
 | `network` | The host of `BACKPLANE_URL` points at a private, shared or local address. | Warning, not red: "points at a public internet address". See [MEHO stays on the management network](#meho-stays-on-the-management-network). |
 | `clock` | The clock of MEHO is within 60 seconds of the time PostgreSQL reports, and of the time Keycloak reports when Keycloak sends one (see the notes). | The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. No answer from Keycloak, or an error answer: check that Keycloak is running and that MEHO can reach the address in `KEYCLOAK_DISCOVERY_URL` (or `KEYCLOAK_ISSUER_URL` when that is not set). The time of PostgreSQL cannot be read: check that MEHO can reach it. |
-| `reachability` | Every system in the settings answers the same call that `meho targets probe` uses. With no systems added, the line is green. | "2 of 5 systems did not answer." (the console page names them). Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right. |
+| `reachability` | Every system in the settings answers the same call that `meho targets probe` uses. With no systems added, the line is green. | "These systems did not answer: esx-2, esx-5." Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right. |
 
 ## MEHO stays on the management network
 
@@ -85,11 +89,12 @@ a firewall, and run the checks again. The install itself is not stopped.
   proxy, so the line compares with the clock of the proxy.
 - The reachability check does not store anything. `meho targets probe` also
   stores the detected product and version; this check only asks.
-- A system whose login lives in Vault needs a person's token to read that
-  login. The console page uses the token of the signed-in person, so it checks
-  these systems too. The public list and `meho status --first-start` have no
-  person: they do not contact these systems, and the line says how many
-  systems could not be checked. That is not a red line. Sign in to the console
-  to check them, or run `meho targets probe <name>`.
+- A system whose login lives in Vault needs the token of a person signed in
+  to its tenant to read that login. The list uses the token of the signed-in
+  person, so it checks these systems in the current tenant. For a platform
+  admin who sees all tenants, the systems of other tenants whose login lives
+  in Vault are not contacted, and the line names them as not checked. That
+  is not a red line. Sign in to that tenant to check them, or run
+  `meho targets probe <name>` there.
 
 Next: [your first day](first-day.md).

@@ -171,16 +171,17 @@ your site uses, and give them with `--cluster-cidr` and
    `/etc/meho/install.json`. The record holds no secret. From v0.47.0, it
    also writes the CA of the console certificate to
    `/var/lib/meho/console-ca.crt` (see
-   [The console certificate](#the-console-certificate)), and it reads the
-   [first-start list](first-start-checks.md). A red line in the list does
-   not stop the install.
+   [The console certificate](#the-console-certificate)). From v0.49.0,
+   the last line of the result names where to read the
+   [first-start list](first-start-checks.md) after the first login. MEHO
+   shows the list only to a signed-in person.
 
 When a later step fails, its `[FAIL]` line says what to do. After RKE2
 has started, a second run finds a machine that is only partly installed,
 and it stops. Then run `sudo meho-host support-bundle` and send the file
 to evoila support (see [Get help from support](#get-help-from-support)).
 
-At the end, the script prints the result. From v0.47.0 it looks like
+At the end, the script prints the result. From v0.49.0 it looks like
 this:
 
 ```text
@@ -189,21 +190,14 @@ install.sh: MEHO <version> is installed on meho.example.com.
   Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
   First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
   Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
-  First-start list:      a red line; each red line says what to fix
-    GREEN   dns           The host name meho.example.com resolves. Where it points is checked once the certificate check is green.
-    RED     certificate   The certificate of meho.example.com is not trusted. Install the full chain, and add your own CA to the trust bundle of MEHO.
-    ...
+  First-start list:      after the first login, open https://meho.example.com/ui/first-start, or run "meho login https://meho.example.com" and then "meho status --first-start"
 ```
 
-With the install's own certificate, the `certificate` line is red. That
-is expected (see [The console certificate](#the-console-certificate)).
-Each other red line says what to fix. When the script cannot read the
-list, for example behind address translation (`--public-address`), the
-line says `not read`. Then open the first-start page in the console after
-the first login ([Step 4](#step-4-first-login)).
+Read the list after the first login ([Step 4](#step-4-first-login)).
 
-Before v0.47.0, the result has no `Console CA` line, and the last line
-says `First-start list: not in this version yet`.
+In v0.47.0 and v0.48.0, the script reads the list itself and shows its
+lines under the last line. Before v0.47.0, the result has no `Console CA`
+line, and the last line says `First-start list: not in this version yet`.
 
 ## Step 4: First login
 
@@ -414,7 +408,8 @@ the same machine. There is no other update command.
 The update keeps the answers of the install, the firewall with your SSH
 range, your certificate, the data, the passwords and the keys. It does not
 write the two first-login files again. From v0.47.0, it writes the CA file
-again and shows the first-start list at the end, as the install does.
+again and, as the install does, names where to read the first-start list
+at the end.
 
 **One minor version at a time.** RKE2 moves only one minor version at a
 time, for example from v1.37 to v1.38, but not from v1.37 to v1.39. When

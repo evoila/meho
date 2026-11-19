@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the first-start checks (``GET /first-start``).
+"""Tests for the first-start checks (``GET /api/v1/first-start``, ``GET /first-start``).
 
 Covers the four fault injections (wrong host name, expired certificate, a
 clock five minutes off, an unreachable target), a name that resolves to the
-wrong server, the clean list, the missing login, and that no secret or
-exception text reaches the answer. The certificate tests do a real TLS
-handshake against a local server.
+wrong server, the clean list, the answer without a login (a fixed line, no
+check, no system contacted), the tenant scope of the systems, and that no
+secret or exception text reaches the answer. The certificate tests do a real
+TLS handshake against a local server.
 """
 
 import asyncio
@@ -36,7 +37,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from meho_backplane import first_start
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.main import app
+from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import require_ui_operator
 from meho_backplane.ui.routes import first_start as first_start_page
@@ -53,14 +56,34 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
     monkeypatch.setenv("PARAMS_HASH_KEY", "made-up-test-key-of-this-install")
     get_settings.cache_clear()
-    first_start.reset_public_run_for_testing()
     yield
     get_settings.cache_clear()
-    first_start.reset_public_run_for_testing()
+    app.dependency_overrides.pop(verify_jwt_and_bind, None)
 
 
-def _target(name: str, secret_ref: str | None = None) -> Any:
-    return SimpleNamespace(name=name, secret_ref=secret_ref)
+_TENANT = uuid.UUID("00000000-0000-4000-8000-000000000001")
+_OTHER_TENANT = uuid.UUID("00000000-0000-4000-8000-000000000002")
+
+
+def _operator(
+    *,
+    tenant_id: uuid.UUID = _TENANT,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    platform_admin: bool = False,
+    kind: PrincipalKind = PrincipalKind.USER,
+) -> Operator:
+    return Operator(
+        sub="admin-sub",
+        raw_jwt="not-a-real-token",
+        tenant_id=tenant_id,
+        tenant_role=role,
+        platform_admin=platform_admin,
+        principal_kind=kind,
+    )
+
+
+def _target(name: str, secret_ref: str | None = None, tenant_id: uuid.UUID = _TENANT) -> Any:
+    return SimpleNamespace(name=name, secret_ref=secret_ref, tenant_id=tenant_id)
 
 
 def _patch_green(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,8 +117,11 @@ def _patch_green(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(first_start, "_probe_one", probe)
 
 
-def _get() -> dict[str, Any]:
-    response = TestClient(app).get("/first-start")
+def _get(operator: Operator | None = None) -> dict[str, Any]:
+    """The list as a signed-in person sees it (a tenant admin by default)."""
+    signed_in = operator or _operator()
+    app.dependency_overrides[verify_jwt_and_bind] = lambda: signed_in
+    response = TestClient(app).get("/api/v1/first-start")
     assert response.status_code == 200
     return cast("dict[str, Any]", response.json())
 
@@ -267,14 +293,12 @@ def test_unreachable_target_gives_one_red_line(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(first_start, "_probe_one", probe)
     red = _red(_get())
     assert [c["name"] for c in red] == ["reachability"]
-    assert "1 of 2 systems did not answer" in red[0]["message"]
+    assert "These systems did not answer: esx-2." in red[0]["message"]
     assert "esx-1" not in red[0]["message"]
-    assert "esx-2" not in red[0]["message"]
 
 
-def test_public_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
-    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
     up = {"esx-2": False}
 
     async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
@@ -286,86 +310,61 @@ def test_public_answer_runs_fresh_after_a_repair(monkeypatch: pytest.MonkeyPatch
     assert _get()["ok"] is True
 
 
-async def test_overlapping_public_calls_share_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_green(monkeypatch)
-    calls = 0
-
-    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0.05)
-        return "up"
-
-    monkeypatch.setattr(first_start, "_probe_one", probe)
-    first, second = await asyncio.gather(
-        first_start.run_public_first_start_checks(),
-        first_start.run_public_first_start_checks(),
-    )
-    assert first is second
-    assert calls == 2  # two systems, one run
-
-
-async def test_repeated_public_calls_in_the_hold_time_start_one_run(
+async def test_admin_sees_only_the_systems_of_their_tenant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_green(monkeypatch)
-    calls = 0
-
-    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
-        nonlocal calls
-        calls += 1
-        return "up"
-
-    monkeypatch.setattr(first_start, "_probe_one", probe)
-    first = await first_start.run_public_first_start_checks()
-    for _ in range(5):
-        assert await first_start.run_public_first_start_checks() is first
-    assert calls == 2  # two systems, one run
-    monkeypatch.setattr(first_start, "_PUBLIC_RESULT_HOLD_S", 0.0)
-    assert await first_start.run_public_first_start_checks() is not first
-    assert calls == 4  # after the hold time, the next call runs again
-
-
-async def test_public_run_that_fails_is_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_green(monkeypatch)
-    runs = 0
-
-    async def failing_once() -> first_start.FirstStartResponse:
-        nonlocal runs
-        runs += 1
-        if runs == 1:
-            raise RuntimeError("first run failed")
-        return first_start.FirstStartResponse(ok=True, checks=[])
-
-    monkeypatch.setattr(first_start, "run_first_start_checks", failing_once)
-    with pytest.raises(RuntimeError):
-        await first_start.run_public_first_start_checks()
-    result = await first_start.run_public_first_start_checks()
-    assert result.ok is True
-    assert runs == 2
-
-
-async def test_names_show_only_when_asked_and_only_for_the_tenant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_green(monkeypatch)
+    systems = {
+        _TENANT: [_target("esx-1"), _target("esx-2")],
+        _OTHER_TENANT: [_target("other-1", tenant_id=_OTHER_TENANT)],
+    }
     seen: list[Any] = []
-    tenant = uuid.uuid4()
+    probed: list[str] = []
 
     async def targets(tenant_id: Any = None) -> list[Any]:
         seen.append(tenant_id)
-        return [_target("esx-1"), _target("esx-2")]
+        if tenant_id is None:
+            return [t for group in systems.values() for t in group]
+        return systems[tenant_id]
 
     async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
-        return "up" if target.name != "esx-2" else "down"
+        probed.append(target.name)
+        return "down"
 
     monkeypatch.setattr(first_start, "_live_targets", targets)
     monkeypatch.setattr(first_start, "_probe_one", probe)
-    named = await first_start.run_first_start_checks(tenant_id=tenant, show_names=True)
-    assert "esx-2" in named.checks[4].message
-    assert seen == [tenant]
-    plain = await first_start.run_first_start_checks()
-    assert "esx-2" not in plain.checks[4].message
+    line = _get(_operator())["checks"][4]
+    assert seen == [_TENANT]
+    assert sorted(probed) == ["esx-1", "esx-2"]
+    assert "These systems did not answer: esx-1, esx-2." in line["message"]
+    assert "other-1" not in line["message"]
+
+
+@pytest.mark.parametrize(
+    ("operator", "scope"),
+    [
+        (_operator(), _TENANT),
+        (_operator(role=TenantRole.OPERATOR), _TENANT),
+        (_operator(platform_admin=True), None),
+        (_operator(platform_admin=True, kind=PrincipalKind.AGENT), _TENANT),
+    ],
+    ids=["tenant-admin", "operator", "platform-admin", "platform-admin-machine-login"],
+)
+def test_platform_admin_person_sees_all_tenants(operator: Operator, scope: Any) -> None:
+    assert first_start.reachability_scope(operator) == scope
+
+
+def test_platform_admin_list_covers_all_tenants(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_green(monkeypatch)
+    seen: list[Any] = []
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        seen.append(tenant_id)
+        return [_target("esx-1"), _target("other-1", tenant_id=_OTHER_TENANT)]
+
+    monkeypatch.setattr(first_start, "_live_targets", targets)
+    assert _get(_operator(platform_admin=True))["checks"][4]["status"] == "ok"
+    assert seen == [None]
 
 
 def test_no_targets_is_green(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -390,20 +389,56 @@ def test_unreadable_target_list_is_red_not_green(monkeypatch: pytest.MonkeyPatch
     assert "hunter2" not in str(body)
 
 
-def test_answer_needs_no_login_and_holds_no_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_answer_holds_no_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_green(monkeypatch)
 
     async def raising(host: str, port: int) -> dict[str, object]:
         raise ssl.SSLError("Traceback s3cret-value")
 
     monkeypatch.setattr(first_start, "_fetch_peer_certificate", raising)
-    response = TestClient(app).get("/first-start")  # no Authorization header
-    assert response.status_code == 200
-    text = response.text
+    body = _get()
+    text = str(body)
     assert "s3cret-value" not in text
     assert "Traceback" not in text
-    assert "Bearer" not in text
-    assert set(response.json()) == {"ok", "checks"}
+    assert "not-a-real-token" not in text
+    assert set(body) == {"ok", "checks"}
+
+
+def test_without_login_the_answer_is_one_fixed_line_and_no_system_is_contacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_fake_connector(monkeypatch)
+    calls: list[str] = []
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        calls.append("targets")
+        return [_target("esx-1"), _target("esx-2", tenant_id=_OTHER_TENANT)]
+
+    async def count(*args: Any) -> Any:
+        calls.append("site")
+        raise AssertionError("no check runs without a login")
+
+    monkeypatch.setattr(first_start, "_live_targets", targets)
+    for name in ("_resolve_host", "_fetch_peer_certificate", "_keycloak_time", "_database_time"):
+        monkeypatch.setattr(first_start, name, count)
+    for _ in range(3):
+        response = TestClient(app).get("/first-start")  # no Authorization header
+        assert response.status_code == 200
+        assert response.json() == first_start.SIGN_IN_ANSWER.model_dump()
+    assert calls == []
+    assert _Fingerprint.seen == []  # the fake target was never contacted
+    text = response.text
+    assert "system" not in text
+    assert "meho.example.com" not in text
+
+
+def test_signed_in_list_needs_a_login_and_the_operator_role() -> None:
+    assert TestClient(app).get("/api/v1/first-start").status_code == 401
+    reader = _operator(role=TenantRole.READ_ONLY)
+    app.dependency_overrides[verify_jwt_and_bind] = lambda: reader
+    response = TestClient(app).get("/api/v1/first-start")
+    assert response.status_code == 403
+    assert "checks" not in response.text
 
 
 # --- real TLS handshakes ----------------------------------------------------
@@ -549,7 +584,7 @@ def test_console_page_shows_the_same_list(monkeypatch: pytest.MonkeyPatch) -> No
         return datetime.now(UTC) + timedelta(minutes=5)
 
     monkeypatch.setattr(first_start, "_database_time", late)
-    person = object()
+    person = _operator()
     operators_seen: list[Any] = []
 
     async def lift(session_ctx: Any) -> Any:
@@ -563,18 +598,42 @@ def test_console_page_shows_the_same_list(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(first_start, "_probe_one", probe)
     page_app = FastAPI()
     page_app.include_router(build_first_start_router())
-    page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(tenant_id=None)
+    page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(tenant_id=_TENANT)
     page = TestClient(page_app).get("/ui/first-start")
     assert page.status_code == 200
-    # The console passes the signed-in person to every probe; the public list passes none.
+    # The console and the API pass the signed-in person to every probe.
     assert operators_seen == [person, person]
     operators_seen.clear()
-    api = _get()
-    assert operators_seen == [None, None]
+    api = _get(person)
+    assert operators_seen == [person, person]
     for line in api["checks"]:
         marker = f'data-check="{line["name"]}" data-status="{line["status"]}"'
         assert marker in page.text
         assert line["message"] in page.text
+
+
+def test_console_page_checks_the_session_tenant_when_the_role_lift_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_green(monkeypatch)
+    seen: list[Any] = []
+
+    async def no_lift(session_ctx: Any) -> Any:
+        return None
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        seen.append(tenant_id)
+        return []
+
+    monkeypatch.setattr(first_start_page, "resolve_ui_operator", no_lift)
+    monkeypatch.setattr(first_start, "_live_targets", targets)
+    page_app = FastAPI()
+    page_app.include_router(build_first_start_router())
+    page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(
+        tenant_id=_OTHER_TENANT
+    )
+    assert TestClient(page_app).get("/ui/first-start").status_code == 200
+    assert seen == [_OTHER_TENANT]
 
 
 # --- the destination of the DNS name ----------------------------------------
@@ -854,18 +913,19 @@ def _use_fake_connector(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+_VAULT_NOTE = "login is in Vault and MEHO reads it only for a person signed in to their tenant"
+
+
 async def test_signed_in_person_is_passed_to_a_system_with_login_in_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _use_fake_connector(monkeypatch)
-    person = cast("Any", object())
+    person = _operator()
 
     async def targets(tenant_id: Any = None) -> list[Any]:
         return [_target("k8s-1", secret_ref="secret/k8s-1"), _target("esx-1")]
 
-    line = await first_start.check_reachability(
-        operator=person, show_names=True, list_targets=targets
-    )
+    line = await first_start.check_reachability(operator=person, list_targets=targets)
     assert line.status == "ok", line.message
     assert _Fingerprint.seen == [person, person]
 
@@ -881,9 +941,34 @@ async def test_system_with_login_in_vault_is_not_contacted_without_a_person(
     line = await first_start.check_reachability(operator=None, list_targets=targets)
     assert line.status == "skipped"
     assert "1 of 2 systems answered" in line.message
-    assert "1 of 2 systems could not be checked without a signed-in person" in line.message
-    assert "k8s-1" not in line.message
+    assert "These systems could not be checked, because their login is in Vault" in line.message
+    assert "k8s-1" in line.message
     assert _Fingerprint.seen == [None]  # only esx-1 was contacted
+
+
+async def test_login_in_vault_of_another_tenant_is_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_fake_connector(monkeypatch)
+    platform_admin = _operator(platform_admin=True)
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [
+            _target("k8s-1", secret_ref="secret/k8s-1"),
+            _target("k8s-9", secret_ref="secret/k8s-9", tenant_id=_OTHER_TENANT),
+            _target("esx-9", tenant_id=_OTHER_TENANT),
+        ]
+
+    line = await first_start.check_reachability(
+        operator=platform_admin, tenant_id=None, list_targets=targets
+    )
+    assert line.status == "skipped"
+    assert "2 of 3 systems answered" in line.message
+    assert (
+        "login is in Vault and MEHO reads it only for a person signed in to their tenant: k8s-9."
+        in line.message
+    )
+    assert _Fingerprint.seen == [platform_admin, platform_admin]  # k8s-1 and esx-9
 
 
 async def test_unchecked_systems_are_told_apart_from_systems_that_did_not_answer() -> None:
@@ -897,10 +982,20 @@ async def test_unchecked_systems_are_told_apart_from_systems_that_did_not_answer
 
     line = await first_start.check_reachability(list_targets=targets, probe_one=probe)
     assert line.status == "fail"
-    assert "1 of 3 systems did not answer" in line.message
-    assert "1 of 3 systems could not be checked" in line.message
-    named = await first_start.check_reachability(
-        show_names=True, list_targets=targets, probe_one=probe
+    assert "These systems did not answer: esx-2." in line.message
+    assert (
+        "login is in Vault and MEHO reads it only for a person signed in to their tenant: k8s-1."
+        in line.message
     )
-    assert "These systems did not answer: esx-2." in named.message
-    assert "login is in Vault: k8s-1." in named.message
+
+
+async def test_many_names_are_cut_short() -> None:
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [_target(f"esx-{n:02d}") for n in range(13)]
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        return "down"
+
+    line = await first_start.check_reachability(list_targets=targets, probe_one=probe)
+    assert "esx-09 and 3 more." in line.message
+    assert "esx-10" not in line.message

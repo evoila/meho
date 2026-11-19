@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""First-start checks: ``GET /first-start``.
+"""First-start checks: ``GET /api/v1/first-start`` (signed in) and ``GET /first-start``.
 
 Right after an install, MEHO checks its own site and returns a plain list.
-Each line is green, or red with one sentence that names the fix. The five
-checks are:
+Each line is green, or red with one sentence that names the fix. The list
+needs a login with at least the ``operator`` role. ``GET /first-start``
+needs no login and answers one fixed line that says how to sign in. It runs
+no check and contacts no system, so it tells a caller nothing about the
+install. The five checks are:
 
 * **DNS name** - the host of ``BACKPLANE_URL`` resolves, and the address it
   points at answers as this MEHO. For that, MEHO calls its own
@@ -22,27 +25,25 @@ checks are:
   compared, the line says so, and that alone does not make the line red.
 * **Reachability** - every system listed in the settings (the targets)
   answers the same fingerprint call that ``meho targets probe`` uses.
-  Nothing is stored. The console page passes the signed-in person, so a
-  system whose login is in Vault is checked with that person's token. The
-  public list has no person: such a system is not contacted, and the line
-  says how many systems could not be checked. That is not a red line.
+  Nothing is stored. The list covers the systems of the signed-in tenant. A
+  platform admin who is a person sees the systems of all tenants. The checks
+  run with the signed-in person, so a system whose login is in Vault is
+  checked with that person's token. A system whose login is in Vault and
+  that belongs to another tenant is not contacted: the line says how many
+  systems could not be checked. That is not a red line.
 * **Network** - the addresses the host of ``BACKPLANE_URL`` resolves to are
   not global internet addresses (``ipaddress`` ``is_global``). MEHO belongs
   on the management network. A global address gives a ``warn`` line, not a
   red one: the install goes on. Private, shared and local ranges give none.
 
-The endpoint needs no login, like the bare ``/ready`` verdict, so the answer
-holds the list only: no stack trace, no token, no exception text. A red
-line names only the host from ``BACKPLANE_URL``. The reachability line shows
-only counts of systems, never their names. The signed-in console page shows
-the names of the systems of the signed-in tenant. The checks run again on
-every call; calls that arrive while a run is in progress share that run.
-The checks change nothing.
+The answer holds the list only: no stack trace, no token, no exception
+text. The reachability line names the systems that did not answer. The
+checks run again on every call and change nothing.
 
 A line has one of four states: ``ok``, ``fail``, ``warn`` or ``skipped``. A check is
 skipped when it cannot run or has no meaning (the certificate check when
 ``BACKPLANE_URL`` is plain http, or when the DNS name already failed; the
-reachability check when some systems need a signed-in person and none
+reachability check when some systems could not be checked and none
 failed). The overall ``ok`` is true when no line is ``fail``; a ``warn`` line
 does not make it false.
 """
@@ -66,23 +67,24 @@ from urllib.parse import urlsplit
 
 import httpx
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.models import Target
 from meho_backplane.settings import get_settings
 
 __all__ = [
     "CERT_MIN_DAYS_LEFT",
     "CLOCK_MAX_SKEW_S",
+    "SIGN_IN_ANSWER",
     "FirstStartLine",
     "FirstStartResponse",
-    "reset_public_run_for_testing",
+    "reachability_scope",
     "router",
     "run_first_start_checks",
-    "run_public_first_start_checks",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -561,13 +563,13 @@ async def check_clock(
 async def _probe_one(target: Target, operator: Operator | None) -> ProbeOutcome:
     """Whether the target answers the fingerprint call. Nothing is stored.
 
-    A target whose login is in Vault (``secret_ref``) needs a person's token
-    to read it. Without *operator* it is not contacted: the outcome is
-    ``needs_person``, not ``down``.
+    A target whose login is in Vault (``secret_ref``) needs the token of a
+    person signed in to its tenant to read it. Without such a person it is
+    not contacted: the outcome is ``needs_person``, not ``down``.
     """
     from meho_backplane.connectors.resolver import resolve_connector_or_label
 
-    if operator is None and target.secret_ref:
+    if target.secret_ref and (operator is None or target.tenant_id != operator.tenant_id):
         return "needs_person"
     cls, label, _message = resolve_connector_or_label(target, for_probe=True)
     if label is not None or cls is None:
@@ -594,32 +596,26 @@ async def _live_targets(tenant_id: uuid.UUID | None = None) -> list[Target]:
         return list(rows)
 
 
-def _systems(what: str, names: list[str], total: int, *, show_names: bool) -> str:
-    """``"These systems <what>: a, b."`` with names, or ``"N of M systems <what>."``."""
-    if not show_names:
-        return f"{len(names)} of {total} systems {what}."
+def _systems(what: str, names: list[str]) -> str:
+    """``"These systems <what>: a, b."``, with at most ``_MAX_NAMES_SHOWN`` names."""
     shown = ", ".join(names[:_MAX_NAMES_SHOWN])
     more = f" and {len(names) - _MAX_NAMES_SHOWN} more" if len(names) > _MAX_NAMES_SHOWN else ""
     return f"These systems {what}: {shown}{more}."
 
 
-def _reachability_line(
-    total: int, down: list[str], unchecked: list[str], *, show_names: bool
-) -> FirstStartLine:
+def _reachability_line(total: int, down: list[str], unchecked: list[str]) -> FirstStartLine:
     """Build the reachability line from the systems that are down or unchecked."""
     unchecked_note = (
         _systems(
-            "could not be checked without a signed-in person, because their login is in Vault",
+            "could not be checked, because their login is in Vault and MEHO reads it "
+            "only for a person signed in to their tenant",
             unchecked,
-            total,
-            show_names=show_names,
         )
-        + " Sign in to the console to check them."
+        + " Sign in to that tenant to check them."
     )
     if down:
         message = (
-            _systems("did not answer", down, total, show_names=show_names)
-            + ("" if show_names else " Sign in to the console to see which ones.")
+            _systems("did not answer", down)
             + " Check that each one is switched on, that MEHO can reach its address, "
             "and that its login in MEHO is right."
         )
@@ -634,19 +630,28 @@ def _reachability_line(
     return _line("reachability", "ok", f"All {total} systems answered.")
 
 
+def reachability_scope(operator: Operator) -> uuid.UUID | None:
+    """The tenant whose systems the list checks; ``None`` means all tenants.
+
+    A platform admin who is a person sees all tenants. Everyone else,
+    machine logins too, sees the systems of their own tenant only.
+    """
+    if operator.platform_admin and is_human_principal(operator):
+        return None
+    return operator.tenant_id
+
+
 async def check_reachability(
     *,
-    tenant_id: uuid.UUID | None = None,
-    show_names: bool = False,
     operator: Operator | None = None,
+    tenant_id: uuid.UUID | None = None,
     list_targets: Callable[[uuid.UUID | None], Awaitable[list[Target]]] | None = None,
     probe_one: Callable[[Target, Operator | None], Awaitable[ProbeOutcome]] | None = None,
 ) -> FirstStartLine:
-    """Every system in the settings answers the same call as ``meho targets probe``.
+    """Every system of *tenant_id* answers the same call as ``meho targets probe``.
 
-    A red line names the systems only when *show_names* is true. *operator*
-    is the signed-in person whose token reads a login from Vault; without
-    one, such a system is not checked.
+    *tenant_id* ``None`` means the systems of all tenants. *operator* is the
+    signed-in person whose token reads a login from Vault.
     """
     try:
         targets = await (list_targets or _live_targets)(tenant_id)
@@ -666,23 +671,19 @@ async def check_reachability(
     paired = list(zip(targets, outcomes, strict=True))
     down = sorted(t.name for t, outcome in paired if outcome == "down")
     unchecked = sorted(t.name for t, outcome in paired if outcome == "needs_person")
-    return _reachability_line(len(targets), down, unchecked, show_names=show_names)
+    return _reachability_line(len(targets), down, unchecked)
 
 
 # --- The list ---------------------------------------------------------------
 
 
 async def run_first_start_checks(
-    *,
-    tenant_id: uuid.UUID | None = None,
-    show_names: bool = False,
-    operator: Operator | None = None,
+    operator: Operator | None, *, tenant_id: uuid.UUID | None
 ) -> FirstStartResponse:
     """Run the checks and return the list. Changes nothing.
 
-    The console page passes its tenant, ``show_names=True`` and the
-    signed-in person. The public endpoint passes none of them, so it shows
-    counts only, and it does not contact a system whose login is in Vault.
+    *operator* is the signed-in person; *tenant_id* is the tenant whose
+    systems are checked (``None``: all tenants, see :func:`reachability_scope`).
     """
     backplane_url = get_settings().backplane_url
     dns = await check_dns(backplane_url)
@@ -690,61 +691,39 @@ async def run_first_start_checks(
         check_certificate(backplane_url, dns_ok=dns.ok),
         check_network(backplane_url, dns_ok=dns.ok),
         check_clock(),
-        check_reachability(tenant_id=tenant_id, show_names=show_names, operator=operator),
+        check_reachability(operator=operator, tenant_id=tenant_id),
     )
     dns = await check_destination(backplane_url, dns, certificate)
     lines = [dns, certificate, network, clock, reachability]
     return FirstStartResponse(ok=all(line.ok for line in lines), checks=lines)
 
 
-#: Seconds the public list keeps the result of its last run.
-_PUBLIC_RESULT_HOLD_S: float = 30.0
-
-_public_run: asyncio.Task[FirstStartResponse] | None = None
-_public_run_ended_at: float = 0.0
-
-
-def reset_public_run_for_testing() -> None:
-    """Forget the public run and its kept result."""
-    global _public_run, _public_run_ended_at
-    _public_run = None
-    _public_run_ended_at = 0.0
-
-
-async def _public_run_once() -> FirstStartResponse:
-    global _public_run_ended_at
-    try:
-        return await run_first_start_checks()
-    finally:
-        _public_run_ended_at = time.monotonic()
-
-
-async def run_public_first_start_checks() -> FirstStartResponse:
-    """The public list: counts only, from at most one run per hold time.
-
-    Calls that arrive while a run is in progress share that run instead of
-    starting one more. After the run ends, its result is kept for
-    ``_PUBLIC_RESULT_HOLD_S`` seconds: calls in that time get it and start
-    no run. The first call after that starts a new run. A run that ended
-    with an error is not kept: the next call starts a new run.
-    """
-    global _public_run
-    if _public_run is None or (
-        _public_run.done()
-        and (
-            _public_run.cancelled()
-            or _public_run.exception() is not None
-            or time.monotonic() - _public_run_ended_at >= _PUBLIC_RESULT_HOLD_S
+#: The whole answer of ``GET /first-start``: the way to sign in, nothing else.
+SIGN_IN_ANSWER = FirstStartResponse(
+    ok=True,
+    checks=[
+        FirstStartLine(
+            name="sign-in",
+            status="skipped",
+            message="Sign in to see the first-start checks: open /ui/first-start in the console, "
+            "or run meho login and then meho status --first-start.",
         )
-    ):
-        _public_run = asyncio.create_task(_public_run_once())
-    return await asyncio.shield(_public_run)
+    ],
+)
+
+_require_operator = Depends(require_role(TenantRole.OPERATOR))
 
 
 @router.get("/first-start", response_model=FirstStartResponse)
 async def first_start() -> FirstStartResponse:
-    """The first-start list. No login: it shows the verdict lines only."""
-    return await run_public_first_start_checks()
+    """No login: one fixed line that says how to sign in. Runs no check."""
+    return SIGN_IN_ANSWER
+
+
+@router.get("/api/v1/first-start", response_model=FirstStartResponse)
+async def first_start_signed_in(operator: Operator = _require_operator) -> FirstStartResponse:
+    """The first-start list for a signed-in person with at least the operator role."""
+    return await run_first_start_checks(operator, tenant_id=reachability_scope(operator))
 
 
 @router.get("/first-start/destination", response_model=DestinationProof)

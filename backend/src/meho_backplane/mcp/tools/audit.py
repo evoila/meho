@@ -66,18 +66,21 @@ from meho_backplane.audit_query import (
     AuditQueryFilters,
     DurationParseError,
     InvalidCursorError,
+    ReplayNode,
     UnsupportedFilterError,
     count_loose_rows_in_forest,
+    own_rows_sub,
     parse_duration,
     query_audit,
     replay_session,
+    session_has_rows_of,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.server import McpInvalidParamsError
 
 __all__: list[str] = []
 
@@ -99,14 +102,6 @@ _TOOL_NAME: Final[str] = "query_audit"
 _REPLAY_MAX_ROWS: Final[int] = 10_000
 
 _REPLAY_DEFAULT_MAX_DEPTH: Final[int] = 20
-
-#: Name of the structlog contextvar the MCP transport binds the inbound
-#: ``Mcp-Session-Id`` header into (G8.2-T2 #1010, via
-#: :func:`~meho_backplane.mcp.server._bind_mcp_session_id`). The
-#: ``shape="tree"`` self-session check reads this back to prove the
-#: caller is replaying their *own* session — the same value that lands on
-#: ``audit_log.agent_session_id`` for rows this request writes.
-_MCP_SESSION_CONTEXTVAR: Final[str] = "mcp_session_id"
 
 
 _INPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -245,8 +240,11 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "(every operation plus the lineage graph between them) "
                 "and returns `{root, session_id, tenant_id, row_count}`. "
                 "`tree` is SELF-SESSION ONLY: `agent_session_id` must be "
-                "present and equal to the caller's own MCP session id; "
-                "any other value (or absence) is rejected with -32602. "
+                "present (absence is rejected with -32602), and MEHO checks "
+                "from the stored audit rows that the session holds a row "
+                "of your own calls. Any other session answers like a "
+                "session that does not exist: an empty `root`. An agent "
+                "or service login sees only its own rows in the tree. "
                 "To replay a DIFFERENT session, a tenant_admin uses the "
                 "`meho_audit_replay` tool."
             ),
@@ -288,7 +286,9 @@ _TOOL_DESCRIPTION: Final[str] = (
     "`meho.retrieval.usage`. Calling `query_audit` with no filters returns "
     "the most recent 100 rows of the operator's tenant — not unbounded.\n\n"
     "Tenant scoping is automatic — the operator's JWT determines the tenant "
-    "boundary; cross-tenant probes are impossible. Filter contents are "
+    "boundary; cross-tenant probes are impossible. A person reads every row "
+    "of the tenant; an agent or service login reads only the rows of its "
+    "own calls. Filter contents are "
     "NEVER broadcast on the SSE feed; only "
     "`{op_id, result_status, row_count}` aggregate appears.\n\n"
     "Returns `{rows: [AuditEntry, ...], next_cursor: <opaque|null>}` sorted "
@@ -325,6 +325,7 @@ async def _count_session_rows(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Count the anchor rows for one tenant-scoped session.
 
@@ -335,12 +336,15 @@ async def _count_session_rows(
     certainly over-cap, and we reject before paying for the recursive
     walk + Python tree assembly. The tenant predicate mirrors
     :func:`~meho_backplane.audit_query.replay.replay_session`'s anchor so
-    a cross-tenant session id counts zero.
+    a cross-tenant session id counts zero. ``owner_sub`` counts only the
+    rows of that login (a service login).
     """
     stmt = sa.select(sa.func.count(AuditLog.id)).where(
         AuditLog.agent_session_id == session_id,
         AuditLog.tenant_id == tenant_id,
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -348,6 +352,7 @@ async def _count_excluded_null_session_rows(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Count the tenant's ``method=MCP`` rows with a NULL ``agent_session_id``.
 
@@ -366,13 +371,16 @@ async def _count_excluded_null_session_rows(
     un-negotiated rows belong to no session. Duplicated from
     :func:`~meho_backplane.api.v1.audit._count_excluded_null_session_rows`
     (REST) rather than shared, matching the sibling :func:`_count_session_rows`
-    precedent.
+    precedent. ``owner_sub`` counts only the rows of that login (a
+    service login).
     """
     stmt = sa.select(sa.func.count(AuditLog.id)).where(
         AuditLog.tenant_id == tenant_id,
         AuditLog.method == "MCP",
         AuditLog.agent_session_id.is_(None),
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -381,6 +389,8 @@ async def _build_replay_response(
     *,
     tenant_id: uuid.UUID,
     max_depth: int,
+    owner_sub: str | None,
+    member_sub: str | None,
 ) -> dict[str, Any]:
     """Count-guard, reconstruct, and JSON-serialise one session's replay tree.
 
@@ -401,39 +411,38 @@ async def _build_replay_response(
     ``session_too_large`` before the field is ever built (matching REST's
     pre-413 behaviour). ``loose_row_count`` (#4670) is the number of nodes
     in the tree whose parent id names no row in the tenant.
+
+    ``member_sub`` set: the stored rows of the session must hold a row of
+    that login. Otherwise the answer is an empty tree, the same as for a
+    session that does not exist. ``owner_sub`` set (a service login): the
+    tree and every count hold only that login's rows.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        anchor_count = await _count_session_rows(
+        root: list[ReplayNode] = []
+        if member_sub is None or await session_has_rows_of(
             session_id,
             tenant_id=tenant_id,
+            principal_sub=member_sub,
             session=session,
-        )
-        if anchor_count > _REPLAY_MAX_ROWS:
-            _log.warning(
-                "audit_replay_session_too_large",
-                session_id=str(session_id),
-                anchor_count=anchor_count,
-                cap=_REPLAY_MAX_ROWS,
+        ):
+            root = await _replay_within_cap(
+                session_id,
+                tenant_id=tenant_id,
+                max_depth=max_depth,
+                owner_sub=owner_sub,
+                session=session,
             )
-            raise McpInvalidParamsError(
-                f"session_too_large: session has {anchor_count} audit rows, "
-                f"exceeding the {_REPLAY_MAX_ROWS}-row replay cap",
-            )
-        root = await replay_session(
-            session_id,
-            tenant_id=tenant_id,
-            session=session,
-            max_depth=max_depth,
-        )
         excluded_null_session_count = await _count_excluded_null_session_rows(
             tenant_id=tenant_id,
             session=session,
+            owner_sub=owner_sub,
         )
         loose_row_count = await count_loose_rows_in_forest(
             root,
             tenant_id=tenant_id,
             session=session,
+            owner_sub=owner_sub,
         )
 
     serialized_root = [node.model_dump(mode="json") for node in root]
@@ -447,6 +456,41 @@ async def _build_replay_response(
     }
 
 
+async def _replay_within_cap(
+    session_id: uuid.UUID,
+    *,
+    tenant_id: uuid.UUID,
+    max_depth: int,
+    owner_sub: str | None,
+    session: AsyncSession,
+) -> list[ReplayNode]:
+    """Refuse a session above :data:`_REPLAY_MAX_ROWS` rows, else build its tree."""
+    anchor_count = await _count_session_rows(
+        session_id,
+        tenant_id=tenant_id,
+        session=session,
+        owner_sub=owner_sub,
+    )
+    if anchor_count > _REPLAY_MAX_ROWS:
+        _log.warning(
+            "audit_replay_session_too_large",
+            session_id=str(session_id),
+            anchor_count=anchor_count,
+            cap=_REPLAY_MAX_ROWS,
+        )
+        raise McpInvalidParamsError(
+            f"session_too_large: session has {anchor_count} audit rows, "
+            f"exceeding the {_REPLAY_MAX_ROWS}-row replay cap",
+        )
+    return await replay_session(
+        session_id,
+        tenant_id=tenant_id,
+        session=session,
+        max_depth=max_depth,
+        owner_sub=owner_sub,
+    )
+
+
 def _count_tree_nodes(nodes: list[dict[str, Any]]) -> int:
     """Total node count across the serialised replay forest (recursive)."""
     total = 0
@@ -456,24 +500,18 @@ def _count_tree_nodes(nodes: list[dict[str, Any]]) -> int:
     return total
 
 
-def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
-    """Resolve + authorise the ``shape="tree"`` self-session contract.
+def _requested_session_id(arguments: dict[str, Any]) -> uuid.UUID:
+    """Read the ``agent_session_id`` of a ``shape="tree"`` call.
 
     The ``tree`` shape replays ONLY the caller's own session. This is
     intentionally STRICTER than ``query_audit``'s flat path, which
-    already returns other in-tenant principals' rows: cross-session
-    forensic replay is reserved for the ``tenant_admin``-gated
-    ``meho_audit_replay`` tool, so the operator-role tree path is locked
-    to "replay your own trace". Two conditions must hold:
-
-    1. ``agent_session_id`` is present in the arguments. Absence → -32602.
-    2. It equals the caller's bound MCP session id (the
-       :data:`_MCP_SESSION_CONTEXTVAR` the transport binds from the
-       inbound ``Mcp-Session-Id`` header). Any mismatch → -32602 —
-       including the case where the request carried no session header at
-       all, since the transport then leaves the contextvar unbound
-       (G0.14-T6 #1147 decoupled capture from enforcement; the bound
-       value can only ever be a value the client explicitly sent).
+    returns the other in-tenant principals' rows to a person:
+    cross-session forensic replay is reserved for the
+    ``tenant_admin``-gated ``meho_audit_replay`` tool. Absent or not a
+    UUID → -32602. Whether the session is the caller's is checked later,
+    from the stored audit rows (:func:`_build_replay_response`), never
+    from a header the client sends: the session must hold a row of the
+    caller's own calls, and a service login sees only its own rows in it.
     """
     requested = arguments.get("agent_session_id")
     if requested is None:
@@ -481,25 +519,11 @@ def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
             'shape="tree" requires agent_session_id (your own session id)',
         )
     try:
-        requested_id = uuid.UUID(str(requested))
+        return uuid.UUID(str(requested))
     except (TypeError, ValueError) as exc:
         raise McpInvalidParamsError(
             f"agent_session_id is not a valid UUID: {requested!r}",
         ) from exc
-
-    bound_raw = structlog.contextvars.get_contextvars().get(_MCP_SESSION_CONTEXTVAR)
-    bound_id: uuid.UUID | None = None
-    if isinstance(bound_raw, str):
-        try:
-            bound_id = uuid.UUID(bound_raw)
-        except ValueError:
-            bound_id = None
-    if bound_id is None or bound_id != requested_id:
-        raise McpPermissionDeniedError(
-            'shape="tree" replays only your own session: agent_session_id '
-            "must equal the caller's own MCP session id",
-        )
-    return requested_id
 
 
 async def _query_audit_handler(
@@ -531,8 +555,8 @@ async def _query_audit_handler(
 
     ``shape="tree"`` short-circuits steps 1-4: it reconstructs the
     caller's own session as a :class:`ReplayNode` forest via
-    :func:`_build_replay_response` after the self-session check in
-    :func:`_resolve_self_session_id`. ``shape`` is a tool-boundary
+    :func:`_build_replay_response`, which checks from the stored rows that
+    the session is the caller's. ``shape`` is a tool-boundary
     control, not a substrate filter, so it is stripped before
     :class:`AuditQueryFilters` is constructed on the flat path. The tree
     path uses the substrate's default depth cap — ``query_audit`` does
@@ -542,11 +566,13 @@ async def _query_audit_handler(
     materialized: dict[str, Any] = dict(arguments)
     shape = materialized.pop("shape", None)
     if shape == "tree":
-        session_id = _resolve_self_session_id(arguments)
+        session_id = _requested_session_id(arguments)
         return await _build_replay_response(
             session_id,
             tenant_id=operator.tenant_id,
             max_depth=_REPLAY_DEFAULT_MAX_DEPTH,
+            owner_sub=own_rows_sub(operator),
+            member_sub=operator.sub,
         )
 
     now = datetime.now(UTC)
@@ -572,6 +598,7 @@ async def _query_audit_handler(
                 filters,
                 tenant_id=operator.tenant_id,
                 session=session,
+                owner_sub=own_rows_sub(operator),
             )
     except (InvalidCursorError, UnsupportedFilterError) as exc:
         raise McpInvalidParamsError(str(exc)) from exc
@@ -747,7 +774,9 @@ _REPLAY_TOOL_DESCRIPTION: Final[str] = (
     "flat filtered list rather than the tree, use `query_audit`.\n\n"
     "Tenant scoping is automatic — the operator's JWT determines the "
     "tenant boundary; a session id outside the tenant yields an empty "
-    "root. A session larger than the replay cap is rejected with -32602 "
+    "root. An agent or service login replays only a session of its own "
+    "calls; any other session yields an empty root. A session larger "
+    "than the replay cap is rejected with -32602 "
     "(`session_too_large`) rather than returning a context-blowing tree. "
     "Filter/result contents are NEVER broadcast on the SSE feed — only "
     "the `{op_class, result_status, row_count}` aggregate appears.\n\n"
@@ -777,7 +806,8 @@ async def _replay_handler(
     :func:`_build_replay_response`, which applies the count-first cap and
     serialises the tree. Tenant scope is taken from the validated JWT —
     never from the arguments dict — so an admin cannot replay another
-    tenant's session.
+    tenant's session. A service login replays only a session of its own
+    calls, whatever role it carries: the same rule as the ``tree`` shape.
     """
     raw_id = arguments.get("session_id")
     if not isinstance(raw_id, str):
@@ -794,6 +824,8 @@ async def _replay_handler(
         session_id,
         tenant_id=operator.tenant_id,
         max_depth=max_depth,
+        owner_sub=own_rows_sub(operator),
+        member_sub=None,
     )
 
 

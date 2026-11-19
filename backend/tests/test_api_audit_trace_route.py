@@ -121,6 +121,7 @@ async def _seed_audit_row(
     tenant_id: UUID,
     audit_id: UUID | None = None,
     second: int = 0,
+    operator_sub: str = "op-actor",
 ) -> UUID:
     audit_id = audit_id or uuid.uuid4()
     sessionmaker = get_sessionmaker()
@@ -129,7 +130,7 @@ async def _seed_audit_row(
             AuditLog(
                 id=audit_id,
                 occurred_at=_BASE + timedelta(seconds=second),
-                operator_sub="op-actor",
+                operator_sub=operator_sub,
                 tenant_id=tenant_id,
                 method="POST",
                 path="/mcp",
@@ -456,7 +457,7 @@ def _get_trace(client: TestClient, audit_id: UUID, *, principal_kind: str | None
 @pytest.mark.asyncio
 async def test_trace_agent_gets_no_trace_when_tenant_switch_off(client: TestClient) -> None:
     await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=False)
-    audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
+    audit_id = await _seed_audit_row(tenant_id=_TENANT_A, operator_sub="agent-sub")
     await _seed_trace(audit_id=audit_id, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
 
     resp = _get_trace(client, audit_id, principal_kind="agent")
@@ -476,7 +477,7 @@ async def test_trace_agent_gets_no_trace_when_tenant_switch_off(client: TestClie
 @pytest.mark.asyncio
 async def test_trace_agent_never_gets_redaction_uncertain_trace(client: TestClient) -> None:
     await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
-    audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
+    audit_id = await _seed_audit_row(tenant_id=_TENANT_A, operator_sub="agent-sub")
     await _seed_trace(
         audit_id=audit_id,
         tenant_id=_TENANT_A,
@@ -499,7 +500,7 @@ async def test_trace_agent_never_gets_redaction_uncertain_trace(client: TestClie
 @pytest.mark.asyncio
 async def test_trace_agent_gets_trace_when_tenant_switch_on(client: TestClient) -> None:
     await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
-    audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
+    audit_id = await _seed_audit_row(tenant_id=_TENANT_A, operator_sub="agent-sub")
     await _seed_trace(audit_id=audit_id, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
 
     resp = _get_trace(client, audit_id, principal_kind="agent")

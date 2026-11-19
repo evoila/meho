@@ -174,6 +174,7 @@ async def count_loose_rows_in_forest(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Count the nodes of a replay forest whose parent row does not exist.
 
@@ -182,6 +183,10 @@ async def count_loose_rows_in_forest(
     of a chain; a root whose parent id names a row in the tenant (another
     session's row, or a parent pruned by the depth cap) is not loose. The
     remaining parent ids are checked with one tenant-scoped ``SELECT``.
+
+    ``owner_sub`` set (a service login): only the rows of that login count
+    as present, the same rows the login may read. So the count never tells
+    that a row of another login exists.
     """
     present = _collect_ids(forest)
     candidates: dict[uuid.UUID, int] = {}
@@ -196,6 +201,8 @@ async def count_loose_rows_in_forest(
         AuditLog.tenant_id == tenant_id,
         AuditLog.id.in_(list(candidates)),
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     existing = set((await session.execute(stmt)).scalars().all())
     return sum(n for parent_id, n in candidates.items() if parent_id not in existing)
 

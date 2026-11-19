@@ -774,7 +774,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
 | `GET /api/v1/audit/traces` | Finds stored traces by `request_id`, `caller` and the window `since` / `until`, without the audit row (#6452). See "Find a trace without its audit row". 200 body is `{items: [TraceView]}`. | Flight-recorder trace search. |
-| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), and never a trace marked `redaction_uncertain`. Both answer `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, and for a service login on a row of another login, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), and never a trace marked `redaction_uncertain`. Both answer `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}`; `loose_row_count` is the nodes whose parent id names no row, #4670). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped
@@ -810,12 +810,39 @@ flight-recorder trace read stays on the operator plane with **full**
 access independent of the agent gate (the agent read is a separate task);
 the console pane renders the same trace through the audit-row drawer.
 
-**Tenant-broadcast read surfaces (#2084).** Within a tenant, `query` and
-`show` are principal-agnostic by design: `POST /api/v1/audit/query` (with
+### Who may read which audit rows and traces
+
+| Caller | Audit rows (list, count, filter, `show`, `by-work-ref`, `who-touched`) | Session tree (`shape="tree"`, `meho_audit_replay`, REST replay) | Flight-recorder trace |
+|---|---|---|---|
+| A person (`principal_kind=user`) | Every row of the tenant. | `shape="tree"`: only a session whose stored rows hold a row of the person's own calls; then the whole tree. `meho_audit_replay` and REST replay (tenant_admin): any session of the tenant. | Every trace of the tenant, also one marked `redaction_uncertain`. |
+| A service login: an agent, a runner, an add-on, any client-credentials login (also one with no `principal_kind` claim, which MEHO reads as `service`) | Only the rows of its own calls (`operator_sub` equals its own `sub`), whatever role it carries. | Only its own rows of the session, on every tree path. A session of another login answers like a session that does not exist. | Only the trace of a row it may read (`GET /{audit_id}/trace`). An agent also needs the tenant switch, and never gets a `redaction_uncertain` trace. `GET /traces` has its own rules (see "Find a trace without its audit row"). |
+
+How it works: `audit_query.own_rows_sub(operator)` gives `None` for a
+person and the login's `sub` for every machine kind
+(`auth.operator.is_human_principal`). Every audit read passes it to the
+substrate as `owner_sub`: `query_audit`, `count_event_classes`,
+`replay_session` (on the anchor and on every lineage step, so a row of
+another login is left out with its subtree), `count_loose_rows_in_forest`
+(only the login's own rows count as present) and the two session counts
+of the replay routes. So no filter, also not `has_trace`, and no count or
+error text tells anything about the rows of another login. A row of
+another login answers like a row that does not exist: `show` and the
+trace route give the same 404, a list gives no row.
+
+The `shape="tree"` check reads the stored rows
+(`audit_query.session_has_rows_of`), never the `Mcp-Session-Id` header:
+the client sets that header itself. A runner never reaches these routes
+(`runner_scope_violation`), and an agent acts with at most the operator
+role, so it never reaches the tenant_admin replay paths. The rows of a
+call that a person approved and ran are the person's rows: the agent that
+asked sees its own request row, not the approver's decision and run rows.
+
+**Tenant-broadcast read surfaces for people.** Within a tenant,
+`query` and `show` are principal-agnostic for a person: `POST /api/v1/audit/query` (with
 or without a `principal` filter) and `GET /api/v1/audit/show/{audit_id}`
 return rows for **every** principal in the calling tenant. Any `operator`
-/ `tenant_admin` in the tenant reads all principals' audit rows — there
-is **no per-principal role check** on either route, and filtering
+/ `tenant_admin` person in the tenant reads all principals' audit rows —
+there is **no per-principal role check** on either route, and filtering
 `principal` on another operator's sub is a supported forensic lookup.
 Only `my-recent` stays self-scoped: it binds
 `filters.principal_sub = operator.sub` (exact match on the user id), so
@@ -929,17 +956,14 @@ the same `excluded_null_session_count` and `loose_row_count` glosses, as
 the admin tool below).
 
 The tree path is **self-session only** and intentionally stricter than
-the flat path (which already returns other in-tenant principals' rows):
-`agent_session_id` must be present **and** equal to the caller's own
-bound MCP session id — the `mcp_session_id` structlog contextvar the
-transport binds from the inbound `Mcp-Session-Id` header (G8.2-T2
-#1010). Any mismatch — a different session id, an absent
-`agent_session_id`, or no session header at all (the transport leaves
-the contextvar unbound after G0.14-T6 #1147 decoupled capture from
-enforcement — there is no synthetic uuid4 fallback for the client to
-match against) — is rejected with `-32602`. Cross-session forensic
-replay is the `tenant_admin`-gated `meho_audit_replay` tool, not this
-path.
+the flat path (which returns other in-tenant principals' rows to a
+person): `agent_session_id` must be present (absent → `-32602`), and the
+stored rows of the session must hold a row of the caller's own calls
+(`session_has_rows_of`). MEHO never reads the `Mcp-Session-Id` header
+for this check. Any other session answers with an empty tree, the same
+answer as for a session that does not exist. A service login sees only
+its own rows in the tree. Cross-session forensic replay is the
+`tenant_admin`-gated `meho_audit_replay` tool, not this path.
 
 ## `meho_audit_replay` admin tool (G8.2-T6 #1014)
 
@@ -955,7 +979,9 @@ admin replays *another* agent's session, where `query_audit`'s
   `replay_session(session_id, tenant_id=operator.tenant_id,
   session=…, max_depth=…)`. Tenant scope is the JWT's — never an
   argument — so an admin cannot replay another tenant's session (a
-  foreign session id yields an empty `root`).
+  foreign session id yields an empty `root`). A service login with
+  `tenant_admin` replays only its own rows: a session of another login
+  yields an empty `root`.
 * Returns `{root: [ReplayNode…], session_id, tenant_id, row_count,
   excluded_null_session_count, loose_row_count}` via
   `model_dump(mode="json")`; `row_count` is the total node count in the

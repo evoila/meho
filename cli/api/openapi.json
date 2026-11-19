@@ -1891,7 +1891,7 @@
           "settings"
         ],
         "summary": "Import Settings",
-        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing.",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes. The same holds for a file\nthat turns on ``run_approval_target_kinds`` or turns off\n``announce_gate_enabled``.",
         "operationId": "import_settings_api_v1_settings_import_post",
         "parameters": [
           {
@@ -4309,10 +4309,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.",
               "title": "Work Ref"
             },
-            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           {
             "name": "active_only",
@@ -4588,7 +4588,7 @@
           "operations"
         ],
         "summary": "Cancel Operation Run",
-        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.",
+        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.\n\nA run that another login started is 403\n``operation_run_cancel_forbidden: <rule>``, and the run goes on. The\nrule says who may stop it: the login that started the run, or a person\nwith the ``tenant_admin`` role or a platform admin in the tenant. An\nagent or service login stops only its own runs.",
         "operationId": "cancel_operation_run_api_v1_operations_runs__handle__cancel_post",
         "parameters": [
           {
@@ -4697,6 +4697,31 @@
               "title": "Cursor"
             },
             "description": "Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358)."
+          },
+          {
+            "name": "include_raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.",
+              "default": false,
+              "title": "Include Raw"
+            },
+            "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`."
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "description": "A `group_key`: list only this group. Used only while the backplane switch `GROUP_LISTING_OPERATIONS` is on; then each group also lists its typed and multi-step `operations`, and an answer ends early (with `next_cursor`) to stay under 12 KB.",
+              "title": "Group"
+            },
+            "description": "A `group_key`: list only this group. Used only while the backplane switch `GROUP_LISTING_OPERATIONS` is on; then each group also lists its typed and multi-step `operations`, and an answer ends early (with `next_cursor`) to stay under 12 KB."
           },
           {
             "name": "authorization",
@@ -4844,6 +4869,18 @@
               "title": "Include Scores"
             },
             "description": "Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else."
+          },
+          {
+            "name": "include_raw",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.",
+              "default": false,
+              "title": "Include Raw"
+            },
+            "description": "Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`."
           },
           {
             "name": "authorization",
@@ -7508,10 +7545,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.",
               "title": "Work Ref"
             },
-            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           {
             "name": "limit",
@@ -8330,7 +8367,7 @@
           "audit"
         ],
         "summary": "By Work Ref",
-        "description": "Audit rows authorised by the external change-ticket reference *ref*.\n\nPre-canned shortcut over :func:`query_audit` with the ``work_ref``\nfilter bound to the path param (work_ref I1-T1 #1655) \u2014 the headline\n\"show every write authorised by ticket X\" lookup. The match is\n**exact**: ``ref`` is an opaque identifier (e.g. ``gh:evoila/meho#1``),\nnot a search term, so a non-matching value returns an empty result,\nnever an error.\n\nUnlike :func:`who_touched` / :func:`my_recent`, ``since`` has **no**\ndefault window: a change-ticket lookup wants the whole governed history\nof that ref, not just the last 24h. Passing ``?since=`` narrows it when\na window is wanted.\n\nThe path converter is ``{ref:path}`` (not the default ``{ref}``) because a\nwork_ref carries embedded slashes \u2014 ``gh:evoila/meho#1`` \u2014 that the default\nconverter would refuse to match (404). The ``#`` is passed percent-encoded\n(``%23``); FastAPI decodes it. The OpenAPI path string is still\n``/api/v1/audit/by-work-ref/{ref}``.",
+        "description": "Audit rows authorised by the external change-ticket reference *ref*.\n\nPre-canned shortcut over :func:`query_audit` with the ``work_ref``\nfilter bound to the path param (work_ref I1-T1 #1655) \u2014 the headline\n\"show every write authorised by ticket X\" lookup. ``ref`` is the whole\nticket id (e.g. ``gh:evoila/meho#1``), not a search term. White space at\nboth ends is ignored. A value with control or invisible characters, or\nlonger than 256 characters, is refused with an error. A valid value that\nmatches no row returns an empty result.\n\nUnlike :func:`who_touched` / :func:`my_recent`, ``since`` has **no**\ndefault window: a change-ticket lookup wants the whole governed history\nof that ref, not just the last 24h. Passing ``?since=`` narrows it when\na window is wanted.\n\nThe path converter is ``{ref:path}`` (not the default ``{ref}``) because a\nwork_ref carries embedded slashes \u2014 ``gh:evoila/meho#1`` \u2014 that the default\nconverter would refuse to match (404). The ``#`` is passed percent-encoded\n(``%23``); FastAPI decodes it. The OpenAPI path string is still\n``/api/v1/audit/by-work-ref/{ref}``.",
         "operationId": "by_work_ref_api_v1_audit_by_work_ref__ref__get",
         "parameters": [
           {
@@ -8339,10 +8376,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.",
               "title": "Ref"
             },
-            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           {
             "name": "since",
@@ -8529,7 +8566,7 @@
           "audit"
         ],
         "summary": "Search Traces",
-        "description": "Find stored flight-recorder traces without their audit row (#6452).\n\nFilters: ``request_id`` (the id of the request that made the call),\n``caller`` (the exact login subject of the caller) and the window\n``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults\nto 24 hours). The newest traces come first. Use it when the audit row of\na call was never stored, so ``GET /{audit_id}/trace`` cannot be used.\n\nThe trace tables hold the request id and the caller since migration\n``0169``; an older trace is found by the time window only. The access\nrules are those of the single trace read: a person reads every trace of\nthe tenant; an agent login reads none unless the tenant lets agents read\ntraces, and never a trace marked ``redaction_uncertain``.",
+        "description": "Find stored flight-recorder traces without their audit row (#6452).\n\nFilters: ``request_id`` (the id of the request that made the call),\n``caller`` (the exact login subject of the caller) and the window\n``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults\nto 24 hours). The newest traces come first. Use it when the audit row of\na call was never stored, so ``GET /{audit_id}/trace`` cannot be used.\n\nThe trace tables hold the request id and the caller since migration\n``0169``; an older trace is found by the time window only. The access\nrules are those of the single trace read: a person reads every trace of\nthe tenant; an agent or service login reads only the traces of its own\ncalls (its ``caller`` value is ignored); an agent login reads none\nunless the tenant lets agents read traces, and never a trace marked\n``redaction_uncertain``.",
         "operationId": "search_traces_api_v1_audit_traces_get",
         "parameters": [
           {
@@ -8629,7 +8666,7 @@
           "audit"
         ],
         "summary": "Trace",
-        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams stored and never\nre-processes, un-redacts, or writes.\n\nA person keeps **full** access, independent of the agent gate: this serves\nredaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so\nan operator sees when a trace was withheld from agents. Paired add-ons\nconsume this same route with their operator principal \u2014 no separate add-on\nsurface.\n\nAn **agent** login gets the same rules as the agent read\n(:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the\ntenant lets agents read traces\n(:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), and\nnever a trace marked ``redaction_uncertain``. Both answer\n``trace_present=False``, like a dispatch with no trace.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the\nanswer is the same as for an id that does not exist. An audit row that\nexists but carries **no trace** is a 200 with ``trace_present=False`` \u2014\ncapture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder; any\nother class answers ``trace_present=False``.",
+        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams stored and never\nre-processes, un-redacts, or writes.\n\nA person keeps **full** access, independent of the agent gate: this serves\nredaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so\nan operator sees when a trace was withheld from agents. Paired add-ons\nuse this same route \u2014 no separate add-on surface. A paired add-on logs in\nas a service login, so it gets the traces of its own calls.\n\nAn **agent** login gets the same rules as the agent read\n(:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the\ntenant lets agents read traces\n(:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), only\nthe trace of a call the agent made itself, and never a trace marked\n``redaction_uncertain``. A **service** login gets only the trace of a\ncall it made itself. Each answers ``trace_present=False``, like a\ndispatch with no trace. A call that ran after a person approved it\nbelongs to the login that asked for it.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the\nanswer is the same as for an id that does not exist. An audit row that\nexists but carries **no trace** is a 200 with ``trace_present=False`` \u2014\ncapture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder; any\nother class answers ``trace_present=False``.",
         "operationId": "trace_api_v1_audit__audit_id__trace_get",
         "parameters": [
           {
@@ -9215,7 +9252,7 @@
           "agent-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (delete) a permission grant.\n\nReturns 204 on success; 404 when the grant is absent or belongs to\nanother tenant. The revocation is audited via the audit middleware.",
+        "description": "Revoke (delete) a permission grant.\n\nReturns 204 on success; 404 when the grant is absent or belongs to\nanother tenant. A machine login (agent / service / runner) removes\nonly an ``auto-execute`` grant; a ``deny`` or ``needs-approval``\ngrant gets 403 ``human_principal_required`` and stays. The\nrevocation is audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_agents_grants__grant_id__delete",
         "parameters": [
           {
@@ -9564,7 +9601,7 @@
           "agents"
         ],
         "summary": "List Runs",
-        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state; ``?agent_name=triage`` narrows to runs produced by\nthat agent definition (an unknown name yields an empty list). Returns\n``created_at DESC``.",
+        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (whole id, see the work_ref parameter); ``?status=running`` narrows to one\nlifecycle state; ``?agent_name=triage`` narrows to runs produced by\nthat agent definition (an unknown name yields an empty list). Returns\n``created_at DESC``.",
         "operationId": "list_runs_api_v1_agents_runs_get",
         "parameters": [
           {
@@ -9574,10 +9611,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
+              "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.",
               "title": "Work Ref"
             },
-            "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           {
             "name": "status",
@@ -9729,7 +9766,7 @@
           "agents"
         ],
         "summary": "Cancel Run",
-        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.",
+        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.\n\nA run that another login started is 403\n``agent_run_cancel_forbidden: <rule>``, and the run goes on. The rule\nsays who may stop it: the login that started the run, or a person with\nthe ``tenant_admin`` role or a platform admin in the tenant. An agent or\nservice login stops only its own runs.",
         "operationId": "cancel_run_api_v1_agents_runs__handle__cancel_post",
         "parameters": [
           {
@@ -9920,7 +9957,7 @@
           "agents"
         ],
         "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name and the starting grant pick are. A missing pick\n(while the switch is not ``off`` and the agent has no grant) or an\nunknown target name returns 422 and writes nothing. A pick that adds\ngrants is for a person only, the same rule as the grant routes: an\nagent, service or runner login gets 403 ``human_principal_required``.",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name and the starting grant pick are. A missing pick\n(while the switch is not ``off`` and the agent has no grant) or an\nunknown target name returns 422 and writes nothing. A pick that adds\ngrants is for a person only, the same rule as the grant routes: an\nagent, service or runner login gets 403 ``human_principal_required``.\nThe answer lists the live grants of the agent in ``live_grants``.",
         "operationId": "create_agent_api_v1_agents_post",
         "parameters": [
           {
@@ -9950,7 +9987,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                  "$ref": "#/components/schemas/AgentDefinitionSaved"
                 }
               }
             }
@@ -10026,7 +10063,7 @@
           "agents"
         ],
         "summary": "Edit Agent",
-        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``. A new ``identity_ref``\nthat names an agent with no grant needs ``starting_grants`` while the\nswitch is not ``off``, the same rules and errors as a create (#6389).",
+        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``. A new ``identity_ref``\nthat names an agent with no grant needs ``starting_grants`` while the\nswitch is not ``off``, the same rules and errors as a create (#6389).\nThe answer lists the live grants of the agent in ``live_grants``.",
         "operationId": "edit_agent_api_v1_agents__name__patch",
         "parameters": [
           {
@@ -10066,7 +10103,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                  "$ref": "#/components/schemas/AgentDefinitionSaved"
                 }
               }
             }
@@ -11545,7 +11582,7 @@
           "scheduler"
         ],
         "summary": "List Triggers",
-        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a *different* tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability. Passing one's own tenant\nid (or omitting the filter) is always allowed.\n\n``work_ref`` (optional, work_ref I3-T3 #1663) narrows to triggers\ncarrying that exact change-ticket reference -- the tenant-scoped\nexact-match driven by ``scheduled_trigger_tenant_work_ref_idx``.",
+        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a *different* tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability. Passing one's own tenant\nid (or omitting the filter) is always allowed.\n\n``work_ref`` (optional, work_ref I3-T3 #1663) narrows to triggers\ncarrying that ticket id (whole id, see the work_ref parameter) -- the\ntenant-scoped match driven by ``scheduled_trigger_tenant_work_ref_idx``.",
         "operationId": "list_triggers_api_v1_scheduler_triggers_get",
         "parameters": [
           {
@@ -11609,10 +11646,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
+              "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.",
               "title": "Work Ref"
             },
-            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           {
             "name": "tenant_filter",
@@ -11990,7 +12027,7 @@
           "sensors"
         ],
         "summary": "Edit Sensor",
-        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\nWhen the edit changes the connector, operation, params or check, and\nthe sensor runs as another person (not the editor, not ``__sensor__``),\nthe sensor's ``identity_sub`` becomes ``__sensor__``. ``before`` and\n``after`` show that change too.\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
         "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
         "parameters": [
           {
@@ -12157,6 +12194,71 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SensorResultListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensor_id}/run": {
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Run Sensor Now",
+        "description": "Run one sensor once now.\n\n``tenant_admin`` only. The call makes the sensor due at once. The\nrunner runs it at its next tick, with its normal login and rules, and\nthe result shows in the sensor's results. The call never runs the\noperation itself. A paused sensor is 409 ``sensor_paused``: resume it\nfirst. A cross-tenant / absent id is 404 ``sensor_not_found``. A sensor\nthat is already due is fine: the call answers 202 and changes nothing.",
+        "operationId": "run_sensor_now_api_v1_sensors__sensor_id__run_post",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRunAccepted"
                 }
               }
             }
@@ -12688,7 +12790,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``) by default; ``?order=oldest`` returns\noldest-first (``created_at ASC``, ties broken on ``id``) so a chain of\nrequests under one change ticket reads in the order it was sent\n(#3596). ``limit`` / ``offset`` page through the result; no ``limit``\nreturns every match. ``?outcome_unknown=true`` lists the approved\nrequests whose outcome MEHO does not know (#5026), the same list the\nconsole, the CLI and MCP show; ``status`` is then ignored.",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (whole id, see the work_ref parameter). Returns newest-first\n(``created_at DESC``) by default; ``?order=oldest`` returns\noldest-first (``created_at ASC``, ties broken on ``id``) so a chain of\nrequests under one change ticket reads in the order it was sent\n(#3596). ``limit`` / ``offset`` page through the result; no ``limit``\nreturns every match. ``?outcome_unknown=true`` lists the approved\nrequests whose outcome MEHO does not know (#5026), the same list the\nconsole, the CLI and MCP show; ``status`` is then ignored.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -12710,10 +12812,10 @@
             "schema": {
               "type": "string",
               "nullable": true,
-              "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.",
+              "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.",
               "title": "Work Ref"
             },
-            "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           {
             "name": "limit",
@@ -12846,6 +12948,73 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApprovalRequestView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/script": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Get Approval Script Page",
+        "description": "Read one page of the script of a ``linux.script.run`` request that waits for approval.\n\nThe pages are 64 KiB each, cut after values that look like secrets are\nhidden over the whole script. Reading a page does not delete the stored\nscript. Same access as ``GET /{id}``. Only while the request waits for\napproval: after the decision MEHO no longer keeps the script (410).\nA request that has no script, and a page that does not exist, are 404.\nA stored script that MEHO cannot read back (it cannot be decrypted) is\n409 with a plain sentence.",
+        "operationId": "get_approval_script_page_api_v1_approvals__request_id__script_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, from 1.",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, from 1."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalScriptPageView"
                 }
               }
             }
@@ -20372,6 +20541,62 @@
         }
       }
     },
+    "/ui/agents/principals/live-grants": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Live Grants",
+        "description": "``GET /ui/agents/principals/live-grants`` -- the agent's live grants as a fragment.",
+        "operationId": "ui_agents_live_grants_ui_agents_principals_live_grants_get",
+        "parameters": [
+          {
+            "name": "identity_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Identity Ref"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents": {
       "get": {
         "tags": [
@@ -23173,6 +23398,61 @@
               "type": "string",
               "format": "uuid",
               "title": "Request Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/approvals/{request_id}/script": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approval Script Page",
+        "description": "Render one page of the script block of a waiting script run.",
+        "operationId": "approval_script_page_ui_approvals__request_id__script_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
             }
           }
         ],
@@ -26861,6 +27141,102 @@
         "title": "AgentDefinitionRead",
         "description": "Row representation every accessor returns.\n\n``from_attributes=True`` lets the route / service hand back the\nSQLAlchemy ORM row directly; Pydantic serialises via this model\nrather than the ORM's ``__dict__``. The model is the single source\nof truth for which columns the REST + MCP surfaces expose, so a\nfuture column addition is opt-in (it must be declared here to leak)."
       },
+      "AgentDefinitionSaved": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "identity_ref": {
+            "type": "string",
+            "title": "Identity Ref"
+          },
+          "model_tier": {
+            "type": "string",
+            "title": "Model Tier"
+          },
+          "system_prompt": {
+            "type": "string",
+            "title": "System Prompt"
+          },
+          "toolset": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Toolset"
+          },
+          "turn_budget": {
+            "type": "integer",
+            "title": "Turn Budget"
+          },
+          "output_schema": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Output Schema"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "live_grants": {
+            "items": {
+              "$ref": "#/components/schemas/LiveGrant"
+            },
+            "type": "array",
+            "title": "Live Grants",
+            "description": "The live grants of the agent that identity_ref names, after the save."
+          },
+          "live_grants_truncated": {
+            "type": "boolean",
+            "title": "Live Grants Truncated",
+            "description": "True when the agent has more live grants than live_grants lists."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "identity_ref",
+          "model_tier",
+          "system_prompt",
+          "toolset",
+          "turn_budget",
+          "output_schema",
+          "enabled",
+          "created_by_sub",
+          "created_at",
+          "updated_at",
+          "live_grants",
+          "live_grants_truncated"
+        ],
+        "title": "AgentDefinitionSaved",
+        "description": "The answer of a create or an edit: the row and the live grants of its agent.\n\n``live_grants`` lists the grants of the agent that ``identity_ref``\nnames that are live after the save, also the ones a starting grant\npick just wrote. When MEHO asks for no pick because the agent already\nhas a live grant, these are the grants that say what the agent may do."
+      },
       "AgentDefinitionUpdate": {
         "properties": {
           "identity_ref": {
@@ -27872,6 +28248,56 @@
         "title": "ApprovalRevealResult",
         "description": "The run result of an approved reveal, for the person who asked."
       },
+      "ApprovalScriptPageView": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "pages": {
+            "type": "integer",
+            "title": "Pages"
+          },
+          "script": {
+            "type": "string",
+            "nullable": true,
+            "title": "Script"
+          },
+          "script_bytes": {
+            "type": "integer",
+            "title": "Script Bytes"
+          },
+          "script_sha256": {
+            "type": "string",
+            "nullable": true,
+            "title": "Script Sha256"
+          },
+          "script_values_hidden": {
+            "type": "boolean",
+            "title": "Script Values Hidden",
+            "default": false
+          },
+          "script_unavailable": {
+            "type": "string",
+            "nullable": true,
+            "title": "Script Unavailable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "page",
+          "pages",
+          "script_bytes"
+        ],
+        "title": "ApprovalScriptPageView",
+        "description": "One page of the script of a waiting ``linux.script.run`` request."
+      },
       "ApprovalSignInStatus": {
         "properties": {
           "state": {
@@ -27940,6 +28366,11 @@
             "type": "string",
             "nullable": true,
             "title": "Sign In Level Warning"
+          },
+          "rights_change_admins": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Rights Change Admins"
           }
         },
         "type": "object",
@@ -27949,7 +28380,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, a change of rights cannot be approved."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -28284,7 +28715,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           "full_row_lost": {
             "type": "boolean",
@@ -28470,7 +28901,7 @@
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``actor_sub`` \u2190 ``audit_log.actor_sub`` (#5773): the agent that acted\n  for the person in ``principal_sub``, in a run the person started.\n  ``None`` when nobody acted for another login.\n* ``actor_name`` \u2014 the agent's name, read from ``actor_sub``\n  (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` takes the whole id (see its field).\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``actor_sub`` \u2190 ``audit_log.actor_sub`` (#5773): the agent that acted\n  for the person in ``principal_sub``, in a run the person started.\n  ``None`` when nobody acted for another login.\n* ``actor_name`` \u2014 the agent's name, read from ``actor_sub``\n  (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -28551,7 +28982,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused."
+            "description": "Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused."
           },
           "full_row_lost": {
             "type": "boolean",
@@ -31206,7 +31637,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form)."
           },
           "run_id": {
             "type": "string",
@@ -31541,7 +31972,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form)."
           },
           "preview_hash": {
             "type": "string",
@@ -36566,6 +36997,16 @@
             },
             "type": "array",
             "title": "Changed Fields"
+          },
+          "identity_sub_before": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub Before"
+          },
+          "identity_sub_after": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub After"
           }
         },
         "type": "object",
@@ -37815,6 +38256,54 @@
         ],
         "title": "LearningMetrics",
         "description": "The four numbers that show whether stored lessons help.\n\nFor one tenant and window. Each ratio comes with its count and its\nbase, and is ``null`` when the base is 0. The median time is in\nseconds. The flat hit rate and precision count every retrieval;\n``search`` counts search hits only, and ``recall`` only the entries\nMEHO showed before an operation."
+      },
+      "LiveGrant": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op_pattern": {
+            "type": "string",
+            "title": "Op Pattern",
+            "description": "The operations the grant covers ('*' = every operation)."
+          },
+          "target_scope": {
+            "type": "string",
+            "title": "Target Scope",
+            "description": "'*' for every target, else the id of one target."
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name",
+            "description": "The name of the target; null for every target or a target MEHO cannot find."
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict",
+            "description": "auto-execute, needs-approval or deny."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At",
+            "description": "The end date; null when the grant has none."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "op_pattern",
+          "target_scope",
+          "target_name",
+          "verdict",
+          "expires_at"
+        ],
+        "title": "LiveGrant",
+        "description": "One live grant of an agent."
       },
       "LivenessResponse": {
         "properties": {
@@ -41159,7 +41648,7 @@
           "work_ref": {
             "type": "string",
             "title": "Work Ref",
-            "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "The run reference. Calls of the run send it in the Meho-Work-Ref header. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form)."
           },
           "entries": {
             "items": {
@@ -42119,7 +42608,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form)."
           }
         },
         "additionalProperties": false,
@@ -42976,6 +43465,27 @@
         ],
         "title": "SensorResultRead",
         "description": "Response shape for one ``sensor_results`` evidence row (#2756).\n\nMirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the\nwire types the JSON renderer serialises: the raw ``(evaluated_at, state,\nvalue, evidence, reason)`` the runner computed, plus the owning\n``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after\nreturning it."
+      },
+      "SensorRunAccepted": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Next Fire At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "next_fire_at"
+        ],
+        "title": "SensorRunAccepted",
+        "description": "Answer of the run route: the Sensor and when it is due."
       },
       "SensorRunnerStatus": {
         "properties": {
@@ -44037,7 +44547,7 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref",
-            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters."
+            "description": "Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form)."
           }
         },
         "type": "object",

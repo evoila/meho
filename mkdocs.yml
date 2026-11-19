@@ -133,6 +133,8 @@ nav:
   - Reference:
       - reference/index.md
       - What's new: reference/whats-new.md
+      # Written by hand, not generated.
+      - Words we use: reference/words.md
       # Generated from the connector registry + MCP tool registry by
       # backend/scripts/generate_reference_docs.py; freshness is enforced
       # by backend/tests/test_reference_docs_drift.py.

@@ -122,7 +122,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
@@ -160,8 +160,10 @@ from meho_backplane.checks.notify import (
     schedule_finding_notification,
 )
 from meho_backplane.checks.rollup import (
+    _STALE_GRACE_SECONDS,
     MemberEvaluation,
     MemberState,
+    _as_utc,
     evaluate_member,
     fold,
 )
@@ -175,12 +177,18 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
     Sensor,
+    SensorCadenceKind,
 )
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
 from meho_backplane.scheduler.credentials import (
     AgentCredentialsUnresolvedError,
     resolve_agent_credentials,
+)
+from meho_backplane.scheduler.cron import (
+    InvalidCronExpressionError,
+    InvalidTimezoneError,
+    next_fire_after,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.query import find_dependencies
@@ -538,8 +546,8 @@ async def _claim_dashboard_transition(
         ]
         claimed = False
         dashboard_edge = current != previous_memo
-        # #6008: no claim while a new Dashboard waits for members; its first ok is silent.
-        waiting = _is_waiting_first_state(previous_memo, current, evaluations)
+        # #6008: no claim while a Dashboard waits for members; a new one's first ok is silent.
+        waiting = _is_waiting_first_state(previous_memo, current, evaluations, now)
         silent_first = previous_memo is None and current == "ok"
         if dashboard_edge and not waiting:
             # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
@@ -547,11 +555,10 @@ async def _claim_dashboard_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
         changes: list[MemberChange] = []
-        if claimed or not dashboard_edge:
-            # A caller that lost the Dashboard edge leaves the member memos
-            # to the winner, which read the same rows. Moving a memo here
-            # would silence that member for good: its change belongs to a
-            # Dashboard mail this caller does not own.
+        if (claimed or not dashboard_edge) and not waiting:
+            # A caller that lost the Dashboard edge leaves the member memos to
+            # the winner: its change belongs to a mail this caller does not own.
+            # During a wait (#6711) the member memos stay too.
             changes = await _claim_member_changes(session, evaluations)
             if returned_sensor_id is not None:
                 returned = _acknowledgement_ended(evaluations, returned_sensor_id, changes)
@@ -582,21 +589,83 @@ def _is_waiting_first_state(
     previous_memo: str | None,
     current: str,
     evaluations: list[_MemberRow],
+    now: datetime,
 ) -> bool:
-    """True for a new Dashboard that is red only because members have not reported.
+    """True when the Dashboard is red only because members wait for a first result.
 
-    A Dashboard with no memo yet and a ``degraded`` / ``critical`` fold, where
-    every failing member is only waiting for its first confirmed result
-    (:func:`_awaits_first_result`), is not alerted. The memo stays ``NULL`` so
-    every later evaluation in the wait is judged the same way.
+    Holds when the fold is ``degraded`` / ``critical`` and every failing member
+    is only waiting for its first confirmed result (:func:`_awaits_first_result`).
+    No claim is made, so the stored state stays and every later evaluation in
+    the wait is judged the same way.
+
+    A new Dashboard (no memo) waits without a limit (#6008). A Dashboard that
+    already has a state (#6711, a member was added to it) waits only while no
+    waiting member's wait is over (:func:`_wait_is_over`). After that the
+    member alerts as ``degraded``, so a check that never runs, or never gets
+    a confirmed result, is still noticed.
     """
-    if previous_memo is not None or current not in ("degraded", "critical"):
+    if current not in ("degraded", "critical"):
         return False
-    return all(
-        _awaits_first_result(s, ev)
-        for _, s, ev in evaluations
-        if ev.effective_state in ("degraded", "critical")
+    failing = [
+        (s, ev) for _, s, ev in evaluations if ev.effective_state in ("degraded", "critical")
+    ]
+    if not all(_awaits_first_result(s, ev) for s, ev in failing):
+        return False
+    if previous_memo is None:
+        return True
+    return not any(_wait_is_over(s, now) for s, _ in failing)
+
+
+#: The run time limit of one check run, the same value as the runner's
+#: ``_EVAL_TIMEOUT_SECONDS`` (the runner imports this module, so it cannot be
+#: imported here; a test keeps the two equal).
+_RUN_TIME_LIMIT_SECONDS = 30
+
+#: The latest first due time the wait for a new member counts from.
+_FIRST_DUE_CAP = timedelta(days=1)
+
+
+def _wait_is_over(sensor: Sensor, now: datetime) -> bool:
+    """True when a member may no longer wait for its first confirmed result.
+
+    The wait ends at the first of two times. One is "overdue": ``next_fire_at``
+    plus the rollup's grace, for a check that does not run. The other is a
+    fixed limit that a running check cannot move (the runner moves
+    ``next_fire_at`` before each run): the first due time after
+    ``created_at``, plus a full confirmation window, plus the grace. The
+    window has ``retry_times + 1`` steps. Each step is
+    ``retry_backoff_seconds`` plus the run time limit plus one runner tick,
+    so slow runs do not end the wait before a healthy result is confirmed.
+    """
+    grace = timedelta(seconds=_STALE_GRACE_SECONDS)
+    at = _as_utc(now)
+    if sensor.next_fire_at is not None and at > _as_utc(sensor.next_fire_at) + grace:
+        return True
+    step = (
+        sensor.retry_backoff_seconds
+        + _RUN_TIME_LIMIT_SECONDS
+        + get_settings().sensor_runner_tick_interval_seconds
     )
+    window = timedelta(seconds=(sensor.retry_times + 1) * step)
+    return at > _first_due_at(sensor) + window + grace
+
+
+def _first_due_at(sensor: Sensor) -> datetime:
+    """The first due time of a Sensor after its ``created_at``, at most one day later.
+
+    The cap keeps a rare cron (for example once a year), or an edit to one,
+    from moving the end of the wait far out.
+    """
+    created = _as_utc(sensor.created_at)
+    cap = created + _FIRST_DUE_CAP
+    if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
+        try:
+            due = next_fire_after(sensor.cron_expr, created, sensor.timezone)
+        except (InvalidCronExpressionError, InvalidTimezoneError):
+            return created
+    else:
+        due = created + timedelta(seconds=sensor.interval_seconds or 0)
+    return min(due, cap)
 
 
 def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:
@@ -606,8 +675,10 @@ def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:
     confirmation (``pending_state`` set while ``last_state`` is still the
     initial ``unknown``). A Sensor that ran and has no reading in waiting
     reports a real ``unknown`` (a timeout or a run error) and counts as failing.
+    So does a Sensor that ever had a confirmed state (``state_since`` set): its
+    ``unknown`` is real, also while a confirmation window is open.
     """
-    if evaluation.raw_state != "unknown":
+    if evaluation.raw_state != "unknown" or sensor.state_since is not None:
         return False
     if sensor.last_evaluated_at is None:
         return True

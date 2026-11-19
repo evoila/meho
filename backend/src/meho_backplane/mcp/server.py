@@ -89,6 +89,7 @@ from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.audit import write_mcp_session_open_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.call_flow_guide import call_flow_guide
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
 from meho_backplane.mcp.profiles import (
     UnknownToolProfileError,
@@ -120,6 +121,10 @@ from meho_backplane.mcp.short_texts import (
     SHORT_TEXTS_VALUE,
     UnknownToolTextsError,
     parse_tool_texts,
+)
+from meho_backplane.mcp.structured_results import (
+    UnknownToolResultsError,
+    parse_tool_results,
 )
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.no_store import answer_scope, set_no_store
@@ -450,6 +455,24 @@ async def _session_preamble(operator: Operator) -> PreambleAssembly:
     )
 
 
+def _session_call_flow_guide(operator: Operator) -> str:
+    """Return the call flow guide for *operator*, or ``""`` (#4715).
+
+    Only with the ``MCP_CALL_FLOW_GUIDE`` switch on. The guide names only
+    tools on the session's tool list, read with the same filter as
+    :func:`_session_can_announce`. The guide names no add-on tools, so no
+    add-on families are passed. The ``MCP_REVEAL_FETCH`` switch picks how
+    the guide says to get the value of an approved ``reveal_secret`` call.
+    """
+    settings = get_settings()
+    if not settings.mcp_call_flow_guide:
+        return ""
+    return call_flow_guide(
+        {defn.name for defn in all_tools_for(operator)},
+        reveal_fetch=settings.mcp_reveal_fetch,
+    )
+
+
 async def _session_instructions(operator: Operator) -> str | None:
     """Assemble the ``initialize.instructions`` payload for *operator*.
 
@@ -498,6 +521,8 @@ async def _session_instructions(operator: Operator) -> str | None:
 
     #4172: the bands follow the session's tool profile; see
     :func:`_session_preamble`.
+
+    #4715: the call flow guide comes first; see :func:`_session_call_flow_guide`.
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
@@ -523,9 +548,9 @@ async def _session_instructions(operator: Operator) -> str | None:
             dropped_slugs=preamble.dropped_slugs,
         )
     memory = await memory_band(operator)
-    joined = "\n\n".join(
-        band for band in (preamble.text, memory, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND) if band
-    )
+    guide = _session_call_flow_guide(operator)
+    bands = (guide, preamble.text, memory, VENDOR_TEXT_BAND, FEATURE_MATURITY_BAND)
+    joined = "\n\n".join(band for band in bands if band)
     _log.info(
         "mcp_preamble_receipt",
         tenant_id=str(operator.tenant_id),
@@ -1393,22 +1418,44 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     """Return *operator* with the session's choices from the MCP URL, or a 400 error.
 
     Tool profile (#4172): ``?profile=<name>``. Short tool texts for this
-    session only (#6293): ``?texts=short``. An unknown value is a bad URL,
+    session only (#6293): ``?texts=short``. Each result once, in
+    ``structuredContent`` (#4716): ``?results=structured``. An unknown value is a bad URL,
     refused before the body is read, so a typo is never quietly ignored.
     The usage event of the request names the short texts choice, so it is
     on record also when no audit row is written.
+
+    Profile token (#6099): a token with the ``mcp_profile`` claim works only
+    when ``?profile=`` names the same profile. Any other URL gets 403, not
+    401, so the client does not start a new login for it.
     """
     try:
         profile = parse_tool_profile(request.query_params.getlist("profile"))
         short_texts = parse_tool_texts(request.query_params.getlist("texts"))
-    except (UnknownToolProfileError, UnknownToolTextsError) as exc:
+        structured_results = parse_tool_results(request.query_params.getlist("results"))
+    except (UnknownToolProfileError, UnknownToolTextsError, UnknownToolResultsError) as exc:
         return _error_response(None, INVALID_REQUEST, str(exc), status_code=400)
+    if operator.mcp_profile_claim is not None and profile != operator.mcp_profile_claim:
+        _log.warning(
+            "mcp_profile_token_url_mismatch",
+            operator_sub=operator.sub,
+            token_profile=operator.mcp_profile_claim,
+            url_profile=profile,
+        )
+        return _error_response(
+            None,
+            INVALID_REQUEST,
+            f"forbidden: this login is only for the {operator.mcp_profile_claim!r} "
+            f"tool profile. Connect to /mcp?profile={operator.mcp_profile_claim}.",
+            status_code=403,
+        )
     update: dict[str, Any] = {}
     if profile is not None:
         update["mcp_tool_profile"] = profile
     if short_texts:
         update["mcp_short_tool_texts"] = True
         note_request_tool_texts(SHORT_TEXTS_VALUE)
+    if structured_results:
+        update["mcp_structured_results"] = True
     return operator.model_copy(update=update) if update else operator
 
 

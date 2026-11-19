@@ -114,6 +114,7 @@ from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     TOUCH_LEVEL,
     FlowNode,
 )
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
@@ -514,12 +515,15 @@ async def _ensure_redirect(
     target: KeycloakTargetLike,
     realm: str,
     rows: list[dict[str, Any]],
+    made: list[str],
 ) -> bool:
     """Copy the company login default of the realm's browser flow onto the touch flow.
 
     A realm without a default removes the touch flow's default. The chart's
     setup step does the same at each upgrade (core/company_login.py).
-    Whether this run changed it.
+    Whether this run changed it. When this run removes the default, it puts
+    the text for that change into ``made[0]``, so a refused read back says
+    the default was removed.
     """
     realm_rep = await connector._get_admin_json(
         target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
@@ -538,6 +542,7 @@ async def _ensure_redirect(
     if wanted is None and body is not None:
         # The realm no longer goes straight to the company login: drop the
         # touch flow's old default too, as the chart's setup step does.
+        made[0] = "the flow has no company login default"
         path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": str(body["id"])})
         await connector._write_admin(
             target, "DELETE", path, operator=operator, idempotent_conflict=False
@@ -765,6 +770,10 @@ async def _ensure_flow(
     return flow_id, created, rows
 
 
+# The longest error message the dispatcher keeps whole.
+_MESSAGE_LIMIT = 256
+
+
 def _half_way_text(changed: list[str], refused: str, *, short: bool) -> str:
     """Say what the run changed before Keycloak refused a step with HTTP 403.
 
@@ -774,7 +783,12 @@ def _half_way_text(changed: list[str], refused: str, *, short: bool) -> str:
         f"{ENSURE_APPROVAL_TOUCH_OP_ID} stopped half-way: Keycloak refused (HTTP 403) to {refused}"
     )
     if short:
-        return f"{head}. See extras.remediation."
+        tail = ". See extras.remediation."
+        room = _MESSAGE_LIMIT - len(tail)
+        if len(head) > room:
+            # A long client id must not push the tail past the limit.
+            head = head[: room - 3] + "..."
+        return head + tail
     return (
         f"{head}. Before that, {'; '.join(changed)}. These changes stay; a second run "
         "after the fix keeps them."
@@ -805,25 +819,26 @@ async def keycloak_authflow_ensure_approval_touch(
     changed = [f"the flow {TOUCH_FLOW_ALIAS!r} (id {flow_id!r}, flow_created={flag}) is {state}"]
     client_path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid})
     refused = f"map {TOUCH_ACR!r} to level {TOUCH_LEVEL} in the realm"
-    made = f"the realm maps {TOUCH_ACR!r} to level {TOUCH_LEVEL}"
+    # One item, so a step can change the text before it raises.
+    made = [f"the realm maps {TOUCH_ACR!r} to level {TOUCH_LEVEL}"]
     try:
         loa_changed = await _ensure_loa_map(self, operator, target, realm)
         if loa_changed:
-            changed.append(made)
+            changed.append(made[0])
         refused = f"add or fix the 'amr' mapper of the client {client_id!r}"
-        made = f"the client {client_id!r} has the 'amr' mapper"
+        made[0] = f"the client {client_id!r} has the 'amr' mapper"
         mapper_added, mapper_fixed = await _ensure_amr_mapper(
             self, operator, target, realm, client_uuid
         )
         if mapper_added or mapper_fixed:
-            changed.append(made)
+            changed.append(made[0])
         refused = "copy the company login default to the flow"
-        made = "the flow has the company login default"
-        redirect_copied = await _ensure_redirect(self, operator, target, realm, rows)
+        made[0] = "the flow has the company login default"
+        redirect_copied = await _ensure_redirect(self, operator, target, realm, rows, made)
         if redirect_copied:
-            changed.append(made)
+            changed.append(made[0])
         refused = f"bind the flow to the client {client_id!r}"
-        made = f"the flow is bound to the client {client_id!r}"
+        made[0] = f"the flow is bound to the client {client_id!r}"
         binding = await _bind(
             self,
             operator,
@@ -837,7 +852,7 @@ async def keycloak_authflow_ensure_approval_touch(
         if exc.response.status_code != 403:
             raise
         if isinstance(exc, ReadBackRefusedError):
-            changed.append(f"{made} (MEHO could not read it back)")
+            changed.append(f"{made[0]} (MEHO could not read it back)")
         refused = read_or_write(exc, refused)
         raise await missing_rights_error(
             self,
@@ -892,4 +907,9 @@ async def _touch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-register_rights_check(ENSURE_APPROVAL_TOUCH_OP_ID, _ROLES, _touch_preview, per_object=_PER_CLIENT)
+register_rights_check(
+    ENSURE_APPROVAL_TOUCH_OP_ID,
+    _ROLES,
+    with_current_binding(client=True)(_touch_preview),
+    per_object=_PER_CLIENT,
+)

@@ -243,7 +243,11 @@ async def _stored_group_key(
 
 
 async def classify_step(
-    session: AsyncSession, *, tenant_id: UUID | None, step: EndpointDescriptor
+    session: AsyncSession,
+    *,
+    tenant_id: UUID | None,
+    step: EndpointDescriptor,
+    overrides: Sequence[OperationPolicyOverride] = (),
 ) -> Classification:
     """Return the classified values of one step of a multi-step operation.
 
@@ -251,12 +255,15 @@ async def classify_step(
     Entries for the connector and the operation match it. The group key
     comes from the step's stored row when one exists, so a group entry
     matches too; without a stored row the step still runs, and only the
-    group entries do not match.
+    group entries do not match. *overrides* are the override rows of the
+    step's operation: their ``category`` and ``labels`` count as for a
+    direct call (:func:`classify_rows`).
     """
     taxonomy, entries = await load_classification(session, tenant_id)
     group_key = await _stored_group_key(session, tenant_id, step)
-    coords = OpCoordinates(connector_id_of(step), group_key, step.op_id)
-    return classify(coords, entries, taxonomy)
+    connector_id = connector_id_of(step)
+    coords = OpCoordinates(connector_id, group_key, step.op_id)
+    return classify(coords, [*entries, *_override_entries(overrides, connector_id)], taxonomy)
 
 
 # ---------------------------------------------------------------------------

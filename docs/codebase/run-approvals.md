@@ -38,8 +38,10 @@ status. MEHO records the decision; there is no second-person step.
   never deleted. The partial unique index `run_approval_open_run_idx`
   lets one run hold at most one open row (see below).
 - `Tenant.run_approval_target_kinds_enabled` (migration `0143`, default
-  `false`): the tenant setting for target kinds. It is set with the
-  settings file (`policies.run_approval_target_kinds`).
+  `false`): the tenant setting for target kinds
+  (`policies.run_approval_target_kinds`). Only the settings file sets it;
+  turning it on applies only in the web console, which has no settings
+  page yet.
 - `operations/run_approval_schemas.py`: `RunApprovalEntry`,
   `RunApprovalCreate`, `RunApprovalRevoke`, `RunApprovalRead`
   (`status`: `pending`, `approved`, `revoked`, `ended`, `expired`).
@@ -167,6 +169,11 @@ Marked today:
   membership gives rights in the domain.
 - `secret.move`. A move writes a secret into a store or into a file on a
   host, so a person checks each place and owner.
+- Every operation registered as a change of rights
+  (`register_grant_op`, `register_rights_change_op` in
+  `operations/grant_approval.py`). The register functions set the mark
+  themselves. Examples: `policy.classify` and the Keycloak writes that
+  change what a token says or who has a role.
 
 ## Never covered: an operation that reads a credential
 

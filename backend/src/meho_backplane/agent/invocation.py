@@ -1685,6 +1685,10 @@ class AgentInvoker:
             AgentRunNotFoundError: no run for *run_id* in the tenant.
             run_lifecycle.UnauthorizedCancellationError: the operator's
                 role ranks below the cancel minimum.
+            run_lifecycle.RunNotOwnedCancellationError: the operator is
+                not the run's owner and not a person with the
+                ``tenant_admin`` role or a platform admin in the tenant.
+                The run goes on.
             run_lifecycle.IllegalTransitionError: the run is already
                 terminal (succeeded / failed / cancelled).
         """
@@ -1719,7 +1723,7 @@ class AgentInvoker:
 
         Reads the durable ``agent_run`` rows, tenant-isolated to the
         operator's tenant. ``work_ref`` (when not ``None``) narrows to
-        runs whose external change-ticket reference matches exactly;
+        runs of that external change ticket (the whole id);
         ``status`` (when not ``None``) narrows to one lifecycle state;
         ``agent_name`` (when not ``None``) narrows to runs produced by
         that agent definition. An ``agent_name`` that matches no

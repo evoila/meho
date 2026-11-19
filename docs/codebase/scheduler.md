@@ -61,7 +61,7 @@ DBOS rebase swaps only the loop module.
     a CR id) the trigger works under. Set at create time (triggers have
     no UPDATE path); inherited end-to-end by every dispatched run — see
     "work_ref inheritance" under Dispatch. Indexed
-    `(tenant_id, work_ref)` for the list `--filter-work-ref` exact-match filter.
+    `(tenant_id, work_ref)` for the list `--filter-work-ref` filter (whole ticket id).
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
   via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher
@@ -609,7 +609,9 @@ The dispatcher is the **event drain's subscription matcher**
 [events.md](events.md)). For each drained `event_outbox` row it fires
 every active `kind=event` trigger in that tenant whose `event_filter`
 the event `payload` contains (`payload @> event_filter`), through the
-same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. The
+same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. An
+external (webhook) event fires only a trigger whose filter names its
+event source by slug or id. The
 fired run's work_ref is `event:{event_id}:{trigger_id}`, which dedupes a
 redelivered event so it never double-fires.
 

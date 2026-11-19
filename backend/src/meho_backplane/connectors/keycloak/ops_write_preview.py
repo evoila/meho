@@ -127,6 +127,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.keycloak._paths import _GROUP_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_write_current_state import (
+    with_current_group,
+    with_current_roles,
+    with_current_user,
+)
 from meho_backplane.connectors.keycloak.ops_write_delete import (
     client_blast_radius,
     group_blast_radius,
@@ -146,6 +151,7 @@ from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     realm_blast_radius,
     realm_name_param,
 )
+from meho_backplane.connectors.keycloak.ops_write_realm_smtp import show_password_policy
 from meho_backplane.connectors.keycloak.ops_write_user_identity import (
     refuse_other_user_check,
     register_user_write,
@@ -216,7 +222,9 @@ async def _realm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "resource": "realm",
         "realm": realm_name or None,
-        "representation": redact_preview_fields(representation),
+        "representation": show_password_policy(
+            redact_preview_fields(representation), representation, ctx
+        ),
     }
 
 
@@ -603,12 +611,15 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder(
         "keycloak.role_mapping.assign",
         with_grant_facts(
-            "keycloak.role_mapping.assign", with_stored_user(_role_mapping_assign_preview)
+            "keycloak.role_mapping.assign",
+            with_stored_user(with_current_roles()(_role_mapping_assign_preview)),
         ),
     )
-    register_user_write("keycloak.user.reset_password", _user_reset_password_preview)
+    register_user_write(
+        "keycloak.user.reset_password", with_current_user(_user_reset_password_preview)
+    )
     register_user_write("keycloak.user.disable", _user_enabled_preview(False))
-    register_user_write("keycloak.user.enable", _user_enabled_preview(True))
+    register_user_write("keycloak.user.enable", with_current_user(_user_enabled_preview(True)))
     register_user_write("keycloak.user.logout", _user_logout_preview)
     register_preview_builder("keycloak.group.create", _group_create_preview)
     register_preview_builder(
@@ -623,7 +634,9 @@ def _register_keycloak_preview_builders() -> None:
         "keycloak.group.member.add",
         with_grant_facts(
             "keycloak.group.member.add",
-            with_stored_user(_group_membership_preview("add"), id_key="user_id"),
+            with_stored_user(
+                with_current_group(_group_membership_preview("add")), id_key="user_id"
+            ),
         ),
     )
     register_user_write(

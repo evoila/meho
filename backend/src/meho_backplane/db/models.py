@@ -2042,7 +2042,7 @@ class EndpointDescriptor(Base):
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
-    #: ``apply_step_classification`` returned. ``None``, empty and ``None``
+    #: ``apply_step_policy`` returned. ``None``, empty and ``None``
     #: otherwise. Search, the call contract and the approval request show them.
     #: Approver routing matches a ``routing`` entry's ``category`` on
     #: ``policy_category``; the install's entries match on
@@ -3577,7 +3577,7 @@ class AgentAnnouncement(Base):
       backfill (newest-first tenant scan) and the retention prune's
       bounded ``created_at < cutoff`` delete.
     * ``agent_announcement_tenant_work_ref_idx`` --
-      ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
+      ``(tenant_id, work_ref)``. Drives the ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
     * ``agent_announcement_tenant_principal_created_at_idx`` --
@@ -4573,7 +4573,7 @@ class AgentRun(Base):
       the reaper's "what leases have expired" query without
       scanning the table. T4 #825.
     * ``agent_run_tenant_work_ref_idx`` -- composite b-tree on
-      ``(tenant_id, work_ref)``. Drives the tenant-scoped exact-match
+      ``(tenant_id, work_ref)``. Drives the tenant-scoped
       ``--work-ref`` filter on the agent-run list (work_ref I3-T2 #1662).
     """
 
@@ -4706,7 +4706,7 @@ class AgentRun(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T2 #1662 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # agent-run list surfaces. Mirrors runbook_runs_tenant_work_ref_idx.
         Index(
             "agent_run_tenant_work_ref_idx",
@@ -4896,6 +4896,10 @@ class OperationRun(Base):
       lock-step by the lifecycle service.
     * ``created_at`` / ``started_at`` / ``ended_at`` -- lifecycle
       timestamps.
+    * ``mcp_profile`` -- the MCP tool profile of the session that started
+      the run, when that profile has a connector list (#6099, migration
+      ``0174``); NULL otherwise. Only a session of the same profile reads
+      the run over MCP.
     """
 
     __tablename__ = "operation_run"
@@ -4923,6 +4927,7 @@ class OperationRun(Base):
         nullable=True,
         default=None,
     )
+    mcp_profile: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -6937,7 +6942,7 @@ class ScheduledTrigger(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T3 #1663 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # scheduled-trigger list surfaces. Mirrors
         # agent_run_tenant_work_ref_idx / runbook_runs_tenant_work_ref_idx.
         Index(
@@ -7240,11 +7245,11 @@ class ApprovalRequest(Base):
       instead of the un-executable raw key. The resume runs under the
       approving reviewer, who auto-executes every governed sub-op (all
       ``dangerous`` + ``requires_approval=False``), so the composite completes
-      in that single pass; a composite that would open a *second* governed gate
-      is unsupported and fails closed
-      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1), unless that gate is an ``after_main_effect`` step with saved
-      state (#4217). NULL for every non-composite (direct-op) park — those keep
+      in that single pass; a later step that needs its own approval waits
+      again. The optional key ``"steps"`` lists the steps the composite's run
+      already went through, with their results, so a re-entry does not send
+      them again (:mod:`~meho_backplane.operations.composite_steps`). NULL for
+      every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -7319,6 +7324,14 @@ class ApprovalRequest(Base):
       approved run reads it here, also the re-run of a failed credential
       write, whose encrypted input the first run deleted. ``false`` on rows
       saved before this column. Added by migration ``0131``.
+
+    * ``allowed_connectors`` -- JSON nullable. The connector ids a hosted
+      agent with a connector list could use when its call started to wait
+      (:mod:`~meho_backplane.operations._target_connector_limit`). The run
+      after the approval binds the list again, so the call and every step
+      of a multi-step operation stay on targets of those connectors. NULL
+      for a caller without a connector list and on rows saved before this
+      column. Added by migration ``0175``.
 
     Indexes
     -------
@@ -7573,6 +7586,9 @@ class ApprovalRequest(Base):
     # migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     approver_install_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The connector list of the hosted agent that asked. See the class
+    # docstring. Added by migration ``0175``.
+    allowed_connectors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
@@ -9318,8 +9334,9 @@ class Sensor(Base):
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
-    # when the state changes so #2506's ``for:`` hysteresis can read how
-    # long the current state has held.
+    # when the state changes (or the first result confirms the initial
+    # ``unknown``) so the ``for:`` hysteresis can read how long the
+    # current state has held.
     last_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,

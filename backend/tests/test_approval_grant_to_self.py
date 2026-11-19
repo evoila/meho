@@ -22,6 +22,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -30,7 +31,6 @@ from sqlalchemy import select
 import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
-from meho_backplane.connectors.keycloak.ops_write_delete_lookup import FoundObject
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
@@ -342,17 +342,60 @@ async def test_a_request_without_facts_gets_the_strict_rule() -> None:
         await _approve(request_id, _person("person-admin"), params)
 
 
-@pytest.mark.asyncio
-async def test_a_change_for_another_login_outside_the_login_realm_keeps_the_usual_rules() -> None:
-    params = {"group_id": _GROUP, "user_id": _OTHER_USER}
-    request_id = await _park(params, _grant(login_realm=False), requester_sa=True)
+_OUTSIDE_CASES = [
+    (_ADD, {"group_id": _GROUP, "user_id": _OTHER_USER}, {"user_id": _OTHER_USER}),
+    (_ROLES, {"id": _OTHER_USER, "roles": ["example-role"]}, {"user_id": _OTHER_USER}),
+    (_ATTRS, {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}, {"members": None}),
+]
 
-    await _approve(
-        request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_an_sa_operator_cannot_approve_their_own_change_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(
+        params, _grant(login_realm=False, **facts), op_id=op_id, requester_sa=True
     )
 
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(
+            request_id, _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True), params
+        )
+
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
+    assert (await _row(request_id)).rights_change is True
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_an_sa_operator_who_is_not_an_admin_cannot_approve_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(params, _grant(login_realm=False, **facts), op_id=op_id)
+
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(
+            request_id, _person("person-sa", role=TenantRole.OPERATOR, sa_operator=True), params
+        )
+
+    assert exc.value.reason_text == RIGHTS_CHANGE_REFUSAL
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("op_id", "params", "facts"), _OUTSIDE_CASES)
+async def test_another_admin_approves_a_change_outside_the_login_realm(
+    op_id: str, params: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    request_id = await _park(params, _grant(login_realm=False, **facts), op_id=op_id)
+
+    await _approve(request_id, _person("person-admin"), params)
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     payload = await _decision_payload(request_id)
-    assert payload["approval_rule"] == ApprovalRule.SA_OPERATOR_SELF_APPROVAL.value
+    assert payload["grant_in_login_realm"] is False
     assert payload["grant_for_approver"] is False
 
 
@@ -675,16 +718,23 @@ async def _grant_block(ctx: PreviewContext) -> dict[str, Any]:
     return effect["preview"]["grant"]
 
 
-def _groups_by_id(monkeypatch: pytest.MonkeyPatch, names: dict[str, str]) -> None:
-    """Reading a group by id gives its name; an id not in *names* fails."""
+def _groups_by_id(monkeypatch: pytest.MonkeyPatch, groups: dict[str, str | dict[str, Any]]) -> None:
+    """Reading a group by id gives its data; an id not in *groups* fails.
 
-    async def _find(_c: Any, _o: Any, _t: Any, params: dict[str, Any]) -> FoundObject:
-        group_id = params["id"]
-        if group_id not in names:
+    A name alone stands for a top-level group with no attributes.
+    """
+
+    async def _read(_c: Any, _ctx: Any, _realm: str, group_id: str) -> dict[str, Any] | None:
+        if group_id not in groups:
             raise RuntimeError("read failed")
-        return FoundObject(realms=None, object_id=group_id, name=names[group_id], rep={})  # type: ignore[arg-type]
+        group = groups[group_id]
+        if isinstance(group, str):
+            return {"id": group_id, "name": group, "path": f"/{group}", "attributes": {}}
+        return {"id": group_id, **group}
 
-    monkeypatch.setattr("meho_backplane.connectors.keycloak.ops_write_grant.find_group", _find)
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.ops_write_grant_platform._read_group", _read
+    )
 
 
 def _connector_with(
@@ -693,8 +743,13 @@ def _connector_with(
     users: dict[str, str] | None = None,
     members: dict[str, list[dict[str, Any]]] | None = None,
     user_lookup_fails: bool = False,
+    realm_answer: str | None = None,
 ) -> tuple[KeycloakConnector, list[dict[str, Any]]]:
-    """A connector whose lookups answer from the given maps; records member reads."""
+    """A connector whose lookups answer from the given maps; records member reads.
+
+    A realm read answers with *realm_answer*, or else with the realm name in
+    the path.
+    """
     connector = KeycloakConnector()
     reads: list[dict[str, Any]] = []
 
@@ -725,6 +780,12 @@ def _connector_with(
         first = int(params["first"])
         return rows[first : first + int(params["max"])]
 
+    async def _get_admin_json(
+        _t: Any, path: str, *, operator: Any, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return {"realm": realm_answer or unquote(path.rsplit("/", 1)[-1])}
+
+    connector._get_admin_json = _get_admin_json  # type: ignore[method-assign]
     connector._find_group = _find_group  # type: ignore[method-assign]
     connector._find_user_uuid = _find_user  # type: ignore[method-assign]
     connector._get_admin_list = _get_admin_list  # type: ignore[method-assign]
@@ -809,6 +870,7 @@ async def test_a_group_name_alone_is_looked_up_on_its_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    _groups_by_id(monkeypatch, {_PLATFORM_GROUP: _PLATFORM_NAME})
     connector, _ = _connector_with(
         groups_by_name={_PLATFORM_NAME: _PLATFORM_GROUP}, members={_PLATFORM_GROUP: []}
     )
@@ -827,7 +889,7 @@ async def test_a_group_name_alone_is_looked_up_on_its_level(
     assert (block["group_id"], block["platform_admin"]) == (_PLATFORM_GROUP, True)
     assert (unknown["group_id"], unknown["platform_admin"], unknown["members"]) == (
         None,
-        False,
+        None,
         None,
     )
 
@@ -837,9 +899,16 @@ async def test_the_connector_marks_the_platform_admin_group_and_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    _groups_by_id(monkeypatch, {_PLATFORM_GROUP: "meho-platform-admins"})
+    lookup, _ = _connector_with(groups_by_name={"meho-platform-admins": _PLATFORM_GROUP})
 
     group = await _grant_block(
-        _ctx(_ADD, {"group_name": "meho-platform-admins", "user_id": _USER}, realm=_REALM)
+        _ctx(
+            _ADD,
+            {"group_name": "meho-platform-admins", "user_id": _USER},
+            realm=_REALM,
+            connector=lookup,
+        )
     )
     role = await _grant_block(
         _ctx(_ROLES, {"id": _USER, "roles": ["platform_admin"]}, realm=_REALM)
@@ -865,12 +934,54 @@ async def test_the_connector_says_when_the_realm_is_not_the_login_realm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with()
 
     block = await _grant_block(
-        _ctx(_ADD, {"group_name": "g", "user_id": _USER}, realm="customer-realm")
+        _ctx(
+            _ADD, {"group_name": "g", "user_id": _USER}, realm="customer-realm", connector=connector
+        )
     )
 
     assert block["login_realm"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "answer"),
+    [("customer-realm", "MEHO"), ("Meho", None), ("meho ", None), (" MEHO ", "meho")],
+    ids=["keycloak-answers-own-realm", "other-case", "space-at-end", "both"],
+)
+async def test_the_own_realm_is_found_by_the_name_keycloak_answers_with(
+    monkeypatch: pytest.MonkeyPatch, stored: str, answer: str | None
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with(realm_answer=answer)
+
+    block = await _grant_block(
+        _ctx(_ADD, {"group_name": "g", "user_id": _USER}, realm=stored, connector=connector)
+    )
+
+    assert block["login_realm"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_realm_that_cannot_be_read_counts_as_the_own_realm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    connector, _ = _connector_with()
+
+    async def _fails(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("read failed")
+
+    connector._get_admin_json = _fails  # type: ignore[method-assign]
+    params = {"group_name": "g", "user_id": _USER}
+
+    unreadable = await _grant_block(_ctx(_ADD, params, realm="customer-realm", connector=connector))
+    offline = await _grant_block(_ctx(_ADD, params, realm="customer-realm"))
+
+    assert unreadable["login_realm"] is True
+    assert offline["login_realm"] is True
 
 
 @pytest.mark.asyncio

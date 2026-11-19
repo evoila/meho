@@ -1052,6 +1052,26 @@ lines (indented JSON, an error message) and keeps the line breaks.
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control
   characters.
+- The commands that print text from an API description, a target system
+  or an uploaded session pass every server string through them too:
+  `meho operation search` (the hit table and the `--op-id` contract),
+  `meho operation groups`, `meho operation preview`, the failure text of
+  `meho operation call` and of every vendor verb (`dispatch.WriteErrorTrailer`,
+  `dispatch.RenderPreviewFailure`, the approval note and id of
+  `WriteParkedHint`, the preview step of `meho keycloak ... delete` and
+  the keycloak fallback result), the `meho audit trace` list, `meho targets describe`, and
+  `meho sessions show` and `list`. The escape runs before a column is cut
+  to its width. The `server_text_escape_test.go` file of each package
+  lists these renderers and checks that ESC and BEL show as `\x1b` and
+  `\x07`.
+- Not escaped yet (text from a target or an API description): the
+  success output of `meho operation call` and of every vendor command;
+  the `operation search` table of the vendor commands (vmware, nsx,
+  sddc-manager, vcf-automation, vcf-fleet, vcf-logs, vcf-operations,
+  harbor, hetzner-robot); `meho approvals result`; `meho operation
+  result-query` and `subops`; `meho targets probe`, `list`, `discover`
+  and `import`; `meho connector review`, `list` and `catalog`;
+  `meho topology`; `meho vcf-automation about`.
 
 ### Sensitive-data discipline
 
@@ -1139,19 +1159,31 @@ that header from one place, so every verb gets it without its own flag.
   separator. Text that is not valid UTF-8 is refused too. Like the
   backplane, the CLI counts the length after it strips white space and
   makes the text NFC, so 130 decomposed letters (260 characters as typed)
-  pass. One difference, on purpose: the CLI looks for refused characters
-  before it strips white space. So it refuses a control character or a
-  line or paragraph separator also at the start or the end of the id: a
-  tab, a line feed, a vertical tab, a form feed, a carriage return (so
-  also CR LF), U+001C to U+001F, U+0085, U+2028 and U+2029.
-  The backplane strips these at the ends and takes the value. So the CLI
-  is stricter than the backplane, never looser. Such a character in a
-  flag or variable value is most likely a mistake. A given
+  pass. The CLI also strips first and checks after, so a control
+  character or a line or paragraph separator at the start or the end of
+  the id (a tab, a line feed, U+001C to U+001F, U+0085, U+2028, U+2029) is
+  stripped and accepted, as on the backplane. A given
   flag is always checked, so `--work-ref ""` is refused. An empty
   `MEHO_WORK_REF` means "not set". A bad value stops the command before
   any request leaves the CLI. A good value is cleaned with
   `api.CleanWorkRef` (it strips like Python's `str.strip` and makes the
   text NFC) and goes on the command context (`api.WithWorkRef`).
+- One Unicode difference is left. The backplane uses Unicode 16.0. The
+  CLI uses the Unicode 15.0 tables of the Go toolchain and of
+  `golang.org/x/text` (Go 1.26 has no newer tables). Both refuse the same
+  characters. But the NFC step joins 20 letter pairs of Unicode 16.0 only
+  on the backplane. They are in the blocks Todhri (U+105D2, U+105DA),
+  Tulu-Tigalari (U+11382, U+11384, U+1138B, U+11390, U+113C2), Gurung
+  Khema (U+1611E to U+16129) and Kirat Rai (U+16D63, U+16D67, U+16D69).
+  The CLI sends such an id in the form it was typed, and the backplane
+  makes it NFC when it arrives. So the stored value is the same. The
+  value that the CLI cleans before the send differs. Accept and refuse
+  differ in one case only: near the 256-character limit. The CLI counts
+  each of these pairs as two characters, and the backplane as one. So
+  the CLI can refuse an id made of many such pairs that the backplane
+  accepts (for example 130 pairs: 260 characters for the CLI, 130 for
+  the backplane). Move the CLI to Unicode 16.0 tables when the Go
+  toolchain has them.
 - One case list, `testdata/work_ref_cases.json`, is read by the Go test
   (`TestValidWorkRef_SharedCases`) and by the Python test
   (`backend/tests/test_work_ref_rule.py`), so the two rules cannot drift.

@@ -168,13 +168,14 @@ the token stays valid.
 """
 
 from enum import StrEnum
-from typing import NamedTuple
+from typing import Final, NamedTuple
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
+    "RUN_STOP_RULE",
     "GroupGrant",
     "Operator",
     "PrincipalKind",
@@ -183,6 +184,7 @@ __all__ = [
     "TenantRole",
     "group_grant",
     "is_human_principal",
+    "may_stop_run",
 ]
 
 
@@ -382,6 +384,10 @@ class Operator(BaseModel):
     #: no such claim, which a service token never has. Read by the fresh
     #: sign-in check (:mod:`meho_backplane.auth.fresh_sign_in`).
     auth_time: int | None = None
+    #: The ``exp`` claim: when the token expires (seconds since the epoch).
+    #: ``None`` for an Operator that MEHO builds without a token. An open
+    #: ``GET /api/v1/feed`` stream ends at this time (plus the JWT leeway).
+    token_exp: int | None = None
     #: Every tenant the person is in, with the login group in each, in
     #: token order (#5236). Empty when the token has no ``meho_tenants``
     #: claim, and always empty for a machine login. The current tenant is
@@ -431,13 +437,24 @@ class Operator(BaseModel):
     web_session: bool = False
     #: The MCP tool profile the client named with ``?profile=`` (#4172),
     #: or ``None`` for the full tool list. Only the MCP route sets it, from
-    #: the URL; see :mod:`meho_backplane.mcp.profiles`. It only hides
-    #: tools. It gives no right and takes no right from the person.
+    #: the URL; see :mod:`meho_backplane.mcp.profiles`. A built-in profile
+    #: only hides tools. A profile with a connector list (#6099) also limits
+    #: the connectors and, when read-only, the changes. It never gives a
+    #: right.
     mcp_tool_profile: str | None = None
+    #: The profile named by the ``mcp_profile`` claim of the login token
+    #: (#6099), or ``None`` when the token has no such claim. Only the token
+    #: check sets it. MEHO takes such a token only at
+    #: ``/mcp?profile=<this name>``.
+    mcp_profile_claim: str | None = None
     #: The MCP client asked for the short tool texts with ``?texts=short``
     #: (#6293). Only the MCP route sets it, from the URL; see
     #: :mod:`meho_backplane.mcp.short_texts`. It changes only tool texts.
     mcp_short_tool_texts: bool = False
+    #: The MCP client asked for each result once, in ``structuredContent``,
+    #: with ``?results=structured`` (#4716). Only the MCP route sets it, from
+    #: the URL; see :mod:`meho_backplane.mcp.structured_results`.
+    mcp_structured_results: bool = False
 
     @property
     def may_self_approve(self) -> bool:
@@ -508,3 +525,28 @@ def is_human_principal(operator: Operator) -> bool:
     :mod:`meho_backplane.mcp.human_only` block.
     """
     return operator.principal_kind not in MACHINE_PRINCIPAL_KINDS
+
+
+#: Who may stop a hosted agent run or a background operation run. The 403
+#: text of a refused stop.
+RUN_STOP_RULE: Final[str] = (
+    "only the person or login that started this run, or a tenant admin or platform admin, "
+    "may stop it; an agent or service login may stop only its own runs"
+)
+
+
+def may_stop_run(operator: Operator, owner_sub: str) -> bool:
+    """Return ``True`` when *operator* may stop a run that *owner_sub* started.
+
+    The owner of the run (the run's ``identity_sub``) may stop it. A person
+    who is an admin in a chosen current tenant (the ``tenant_admin`` role or
+    a platform admin, and :attr:`Operator.tenant_chosen` is ``True``: the
+    same admin test as :meth:`Operator.may_approve_rights_change`) may stop
+    any run of the tenant. A machine login stops only its own runs, whatever
+    its role. A run that a login's own schedule or event trigger started
+    carries that login's ``sub``, so it is its own.
+    """
+    if operator.sub == owner_sub:
+        return True
+    is_admin = operator.tenant_role is TenantRole.TENANT_ADMIN or operator.platform_admin
+    return is_admin and operator.tenant_chosen and is_human_principal(operator)

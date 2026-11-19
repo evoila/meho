@@ -100,7 +100,9 @@ grant never clears its wait; `credential_read_grant_reason`), an op with a param
 gives; a grant never covers the address, so a person approves each call,
 and grant create refuses such a grant — `caller_address_grant_reason`), and an
 op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
-`msad.group.add-member`, `msad.group.remove-member` and `secret.move`): a person approves each
+`msad.group.add-member`, `msad.group.remove-member`, `secret.move` and every
+operation registered as a change of rights, such as the Keycloak writes that
+change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
@@ -182,6 +184,16 @@ The **target scope** is one of three shapes:
 - a **target selector** (#3349) — `target_product` and/or
   `target_name_pattern`, resolved at dispatch time against the target
   fingerprint (see below).
+
+**The target's connector must be the grant's connector.** The dispatcher
+picks the connector that runs a call from the target, not from the call's
+`connector_id`. So before any lookup, `consult_and_record_grant` asks which
+connector the target picks
+(`operations/_target_connector_limit.py::target_picks_other_connector`).
+When that is not the grant's `connector_id`, no grant (ordinary or delete
+grant) covers the call, and it waits for a person. A target that resolves
+no single connector is left to the `no_connector` / `ambiguous_connector`
+answers of the run step. Test: `tests/test_service_grant_target_connector.py`.
 
 ### Null-target is not a wildcard — the runtime hint (#3349)
 

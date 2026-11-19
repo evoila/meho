@@ -161,6 +161,14 @@ def connector_not_ingested_404(exc: ConnectorNotIngestedError) -> HTTPException:
     )
 
 
+#: The ``include_raw`` query parameter of ``/groups`` and ``/search`` (#4712).
+_INCLUDE_RAW_DESCRIPTION = (
+    "Also show raw operations made from the vendor API description. Used only "
+    "while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is "
+    "typed and multi-step operations only, and the answer has `raw_operations`."
+)
+
+
 @router.get("/groups")
 async def get_groups(
     connector_id: str = Query(
@@ -189,6 +197,17 @@ async def get_groups(
             "(G0.18-T5 #1358)."
         ),
     ),
+    include_raw: bool = Query(default=False, description=_INCLUDE_RAW_DESCRIPTION),
+    group: str | None = Query(
+        default=None,
+        max_length=256,
+        description=(
+            "A `group_key`: list only this group. Used only while the "
+            "backplane switch `GROUP_LISTING_OPERATIONS` is on; then each "
+            "group also lists its typed and multi-step `operations`, and an "
+            "answer ends early (with `next_cursor`) to stay under 12 KB."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """List enabled operation groups for *connector_id*.
@@ -212,7 +231,13 @@ async def get_groups(
     try:
         return await list_operation_groups(
             operator,
-            {"connector_id": connector_id, "limit": limit, "cursor": cursor},
+            {
+                "connector_id": connector_id,
+                "limit": limit,
+                "cursor": cursor,
+                "include_raw": include_raw,
+                "group": group,
+            },
         )
     except ConnectorNotIngestedError as exc:
         raise connector_not_ingested_404(exc) from exc
@@ -259,6 +284,7 @@ async def get_search(
             "tenant_admin caller; ignored for everyone else."
         ),
     ),
+    include_raw: bool = Query(default=False, description=_INCLUDE_RAW_DESCRIPTION),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.
@@ -303,6 +329,7 @@ async def get_search(
         "group": group,
         "limit": limit,
         "include_scores": include_scores,
+        "include_raw": include_raw,
     }
     try:
         return await recorded_search(

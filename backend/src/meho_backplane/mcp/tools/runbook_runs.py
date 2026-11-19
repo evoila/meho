@@ -752,8 +752,11 @@ register_mcp_tool(
                 "work_ref": {
                     "type": ["string", "null"],
                     "description": (
-                        "Optional exact-match filter on the run's external "
-                        'change-ticket reference (e.g. "gh:evoila/meho#9").'
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#9'). White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused."
                     ),
                 },
                 "limit": {

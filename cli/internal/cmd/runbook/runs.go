@@ -61,8 +61,8 @@ func newRunsCmd() *cobra.Command {
 			"matching runs as a compact 7-column table. Filters: " +
 			"--assignee (TENANT_ADMIN: any subject; OPERATOR: ignored " +
 			"server-side), --status (in_progress / completed / " +
-			"abandoned), --template-slug, --filter-work-ref (exact-match " +
-			"change-ticket reference), --limit (1..500, server " +
+			"abandoned), --template-slug, --filter-work-ref (the whole " +
+			"ticket id), --limit (1..500, server " +
 			"default 100).\n\n" +
 			"Operators see only their own runs (the backend forces " +
 			"assignee=self regardless of the filter). Tenant_admins see " +
@@ -94,7 +94,7 @@ func newRunsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&templateSlug, "template-slug", "",
 		"filter by template slug")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
-		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#9)")
+		"filter by ticket id (whole id; white space at the ends is ignored)")
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max runs per page (1..500, server default 100 when omitted)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,

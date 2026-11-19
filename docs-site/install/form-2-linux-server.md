@@ -52,6 +52,8 @@ The machine also needs:
 You also need a computer on the management network with a browser:
 Chrome 111, Safari 16.4 or Firefox 128, or newer.
 
+**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+
 MEHO runs on your management network only, never on the internet. Users
 reach it on ports 80 and 443 from the management network. MEHO holds the
 logins for your systems, so an address on the internet is a risk you do
@@ -113,7 +115,7 @@ Use your own DNS name and your own admin range.
 | `--public-address <ipv4>` | Only when address translation inside your network is in front of the machine, for example a load balancer: the address that the DNS name points to. Never an address on the internet. | None. |
 | `--first-tenant-id <uuid>` | The id of the first tenant. Give the old id when you move MEHO to another machine. | A new random id. |
 | `--admin-user <name>` | The user name of the first admin. | `admin` |
-| `--approver-user <name>` | The user name of the second person, who approves the admin's changes. | `approver` |
+| `--approver-user <name>` | The user name of the approver (in `MEHO-SA-Operators`), who approves the admin's risky changes but not a change of rights. | `approver` |
 | `--cluster-cidr <cidr>` | The address range of the pods. | `10.42.0.0/16` |
 | `--service-cidr <cidr>` | The address range of the services. | `10.43.0.0/16` |
 
@@ -205,8 +207,11 @@ says `First-start list: not in this version yet`.
 
 ## Step 4: First login
 
-The install made two users with temporary passwords: the first admin,
-and a second person who approves the admin's changes.
+The install made two users with temporary passwords: the first admin
+(in `MEHO-Admins`) and an approver (in `MEHO-SA-Operators`). The approver
+is not an admin. The approver can approve the admin's risky changes, but
+not a change of rights: a change of rights needs a second admin. See
+[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 1. On the server, read the file with the passwords:
 
@@ -467,6 +472,40 @@ The command changes only the SSH rule of the MEHO firewall. It takes one
 IPv4 range or one address. `none` closes SSH from every address, so only
 the console of the machine works. Over SSH, the command asks first when
 the new range does not hold your own address.
+
+### A person lost the one-time code app
+
+Use this only in an emergency: when a person of a local account (the
+first admin or the second person) lost the phone with the one-time code
+app and also the recovery codes, so they cannot log in any more.
+
+```bash
+sudo meho-host reset-second-factor <user>
+```
+
+`<user>` is the person's user name in MEHO's login (realm `meho`). The
+command:
+
+- removes the person's one-time code and recovery codes;
+- makes the next login of the person ask for a new password and a new
+  one-time code app, and then show twelve new recovery codes;
+- writes one row into the MEHO audit for each tenant of the person. It
+  names your Linux user (the one behind `sudo`), this server, the person's
+  user name and the time. An admin of each of these tenants finds it with
+  `meho audit query --op-id meho-host.reset-second-factor`.
+
+It prints what it removed. An unknown user name changes nothing, and the
+command ends with exit code 1. Run as another user than root, it changes
+nothing and ends with exit code 2. When the command cannot write the
+audit row, it does not report success. When Keycloak does not answer a
+change in time, the change may still have happened: the command says so,
+writes the audit row with it, and ends with exit code 1. Run it again; a
+second run is safe.
+
+Give the person a new temporary password in a safe way, for example in
+the Keycloak admin console (see [Local users](login/local-users.md)). It
+does not apply to people who log in through your company login: their
+second factor belongs to the company login.
 
 ### Get help from support
 

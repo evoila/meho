@@ -66,11 +66,11 @@ func (c Connector) RenderPreviewFailure(
 		return ErrOpError
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%s %s — preview status=%s\n", c.ID, opID, p.Status)
+	fmt.Fprintf(w, "%s %s — preview status=%s\n", c.ID, opID, output.SafeText(p.Status))
 	fmt.Fprintln(w, "  The preview failed. The call was not sent, and nothing waits for approval.")
 	switch {
 	case p.Error != nil && *p.Error != "":
-		fmt.Fprintf(w, "meho: preview %s: %s\n", p.Status, output.SafeLines(*p.Error))
+		fmt.Fprintf(w, "meho: preview %s: %s\n", output.SafeText(p.Status), output.SafeLines(*p.Error))
 	case p.Status == "ok":
 		fmt.Fprintln(w, "meho: the preview returned no preview_hash")
 	}

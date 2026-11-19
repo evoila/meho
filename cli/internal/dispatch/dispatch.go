@@ -212,7 +212,7 @@ func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	if note := parkedNote(extras); note != "" {
 		fmt.Fprintf(w, "  %s\n", output.SafeText(note))
 	}
-	if id := ParkedApprovalID(extras); id != "" {
+	if id := output.SafeText(ParkedApprovalID(extras)); id != "" {
 		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
 		fmt.Fprintf(w, "  after approval, read the output with: meho approvals result %s\n", id)
 	}

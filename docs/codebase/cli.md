@@ -1057,8 +1057,9 @@ lines (indented JSON, an error message) and keeps the line breaks.
   `meho operation search` (the hit table and the `--op-id` contract),
   `meho operation groups`, `meho operation preview`, the failure text of
   `meho operation call` and of every vendor verb (`dispatch.WriteErrorTrailer`,
-  `dispatch.RenderPreviewFailure`, the approval note of `WriteParkedHint`),
-  the `meho audit trace` list, `meho targets describe`, and
+  `dispatch.RenderPreviewFailure`, the approval note and id of
+  `WriteParkedHint`, the preview step of `meho keycloak ... delete` and
+  the keycloak fallback result), the `meho audit trace` list, `meho targets describe`, and
   `meho sessions show` and `list`. The escape runs before a column is cut
   to its width. The `server_text_escape_test.go` file of each package
   lists these renderers and checks that ESC and BEL show as `\x1b` and

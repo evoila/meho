@@ -346,6 +346,10 @@ async def edit_sensor(
     ``before`` and ``after`` with the changed fields (secret-named values
     hidden).
 
+    An edit of the connector, operation, params or assertion of a sensor
+    whose ``identity_sub`` names someone other than the editor resets the
+    identity to ``__sensor__``; ``before`` and ``after`` show it.
+
     ``status`` (``paused`` or ``active``), sent alone, pauses or resumes the
     sensor. A paused sensor is not run and keeps its id, history and
     dashboards. Pause and resume are safe to send twice.
@@ -361,7 +365,7 @@ async def edit_sensor(
         target_tenant_id=target_tenant,
     )
     try:
-        result = await apply_sensor_edit(target_tenant, sensor_id, body)
+        result = await apply_sensor_edit(target_tenant, sensor_id, body, editor_sub=operator.sub)
     except SensorEditInvalidError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,

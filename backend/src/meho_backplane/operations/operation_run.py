@@ -61,6 +61,7 @@ from meho_backplane.db.models import (
     OperationRunOrigin,
     OperationRunStatus,
 )
+from meho_backplane.operations.run_stop_rule import run_stop_refusal
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -174,21 +175,30 @@ class IllegalOperationRunTransitionError(OperationRunError):
 
 
 class UnauthorizedOperationRunCancellationError(OperationRunError):
-    """The operator lacks the role required to cancel a run.
+    """The operator may not cancel this run.
 
     Raised by :func:`cancel_run` when ``operator.tenant_role`` ranks below
-    :data:`_MIN_CANCEL_ROLE`. Distinct from
-    :class:`IllegalOperationRunTransitionError` so the caller maps
-    authorization failures to 403 and state failures to 409.
+    :data:`_MIN_CANCEL_ROLE`, or when the run acts for another principal
+    and the operator may not stop it
+    (:func:`~meho_backplane.operations.run_stop_rule.run_stop_refusal`).
+    *reason* says who may stop the run in the second case and is ``None``
+    in the first. Distinct from :class:`IllegalOperationRunTransitionError`
+    so the caller maps authorization failures to 403 and state failures to
+    409.
     """
 
-    def __init__(self, *, operator_sub: str, role: TenantRole) -> None:
+    def __init__(self, *, operator_sub: str, role: TenantRole, reason: str | None = None) -> None:
         self.operator_sub = operator_sub
         self.role = role
-        super().__init__(
-            f"operator {operator_sub!r} with role {role.value!r} may not cancel an "
-            f"operation run (requires at least {_MIN_CANCEL_ROLE.value!r})"
-        )
+        self.reason = reason
+        if reason is None:
+            message = (
+                f"operator {operator_sub!r} with role {role.value!r} may not cancel an "
+                f"operation run (requires at least {_MIN_CANCEL_ROLE.value!r})"
+            )
+        else:
+            message = f"operator {operator_sub!r} may not cancel this operation run: {reason}"
+        super().__init__(message)
 
 
 class OperationRunLeaseLostError(OperationRunError):
@@ -525,9 +535,11 @@ async def cancel_run(
     """Cancel a running (or pending) run for an authorized operator.
 
     Loads the run by id, checks the operator holds at least
-    :data:`_MIN_CANCEL_ROLE`, then transitions it to ``cancelled`` via the
-    same :func:`transition` guard every other status change uses -- so a
-    cancel against an already-terminal run surfaces as
+    :data:`_MIN_CANCEL_ROLE` and may stop this run
+    (:func:`~meho_backplane.operations.run_stop_rule.run_stop_refusal`: the
+    principal the run acts for, or a person who is an admin), then
+    transitions it to ``cancelled`` via the same :func:`transition` guard
+    every other status change uses -- so a cancel against an already-terminal run surfaces as
     :class:`IllegalOperationRunTransitionError` (409), not a silent no-op.
 
     The actual interruption of the in-flight task is best-effort in the run
@@ -538,7 +550,8 @@ async def cancel_run(
     Raises:
         OperationRunNotFoundError: No row for *run_id*.
         UnauthorizedOperationRunCancellationError: The operator's role
-            ranks below :data:`_MIN_CANCEL_ROLE`.
+            ranks below :data:`_MIN_CANCEL_ROLE`, or the run acts for
+            another principal and the operator may not stop it.
         IllegalOperationRunTransitionError: The run is already terminal.
     """
     if _ROLE_RANK.index(operator.tenant_role) < _ROLE_RANK.index(_MIN_CANCEL_ROLE):
@@ -550,5 +563,10 @@ async def cancel_run(
     row = await session.get(OperationRun, run_id)
     if row is None:
         raise OperationRunNotFoundError(run_id)
+    refusal = run_stop_refusal(operator, row.identity_sub)
+    if refusal is not None:
+        raise UnauthorizedOperationRunCancellationError(
+            operator_sub=operator.sub, role=operator.tenant_role, reason=refusal
+        )
 
     return await transition(session, row, OperationRunStatus.CANCELLED)

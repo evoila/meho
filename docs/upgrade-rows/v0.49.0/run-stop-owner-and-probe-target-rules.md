@@ -1,0 +1,5 @@
+## Note
+Stopping a hosted agent run (`POST /api/v1/agents/runs/{handle}/cancel`, `meho agent run-cancel`) or a background operation run (`POST /api/v1/operations/runs/{handle}/cancel`) now needs the login the run acts for, or a person with the `tenant_admin` role or platform admin rights. An agent or service login stops only its own runs, and an operator stops only their own runs. Anyone else gets 403 with a text that says who may stop the run, and the run goes on. `POST /api/v1/targets/{name}/probe` now checks MEHO's policy for `targets.probe` on the target for agent and service logins: a refused login gets 403 `denied`, and nothing is probed or stored. A sensor edit by another admin that changes the connector, operation, params or check sets the sensor's identity to `__sensor__` when it named someone else.
+
+## Action
+If a script stops runs that another login or person started, run it as that login, or as a tenant admin. If an agent or service login gets 403 `denied` on a probe, give it a grant for `targets.probe` on that target.

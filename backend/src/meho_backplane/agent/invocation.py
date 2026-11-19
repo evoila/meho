@@ -1670,7 +1670,9 @@ class AgentInvoker:
         :class:`~meho_backplane.operations.agent_run.IllegalTransitionError`
         for an already-terminal run (mapped to 409) and
         :class:`~meho_backplane.operations.agent_run.UnauthorizedCancellationError`
-        for a sub-operator role (mapped to 403). An ``awaiting_approval``
+        for a sub-operator role, and for a run that acts for another
+        principal when the operator is a machine login or a person who is
+        not a tenant admin (mapped to 403). An ``awaiting_approval``
         run cancels cleanly (the state machine permits the edge); its
         pending approval is left to expire / be rejected on resume rather
         than being force-decided here.
@@ -1684,7 +1686,8 @@ class AgentInvoker:
         Raises:
             AgentRunNotFoundError: no run for *run_id* in the tenant.
             run_lifecycle.UnauthorizedCancellationError: the operator's
-                role ranks below the cancel minimum.
+                role ranks below the cancel minimum, or the operator may
+                not stop a run that acts for another principal.
             run_lifecycle.IllegalTransitionError: the run is already
                 terminal (succeeded / failed / cancelled).
         """

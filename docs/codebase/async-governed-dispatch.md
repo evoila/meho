@@ -60,7 +60,11 @@ load-bearing:
   `heartbeat`, `release_lease`), and the terminal helpers `succeed_run`
   (persists the envelope) / `fail_run` (records the crash reason) /
   `cancel_run` (operator-authorized). Every mutator flushes; the caller owns
-  the commit.
+  the commit. `cancel_run` lets only the principal the run acts for
+  (`identity_sub`), or a person who is a tenant admin or a platform admin,
+  stop a run (`operations/run_stop_rule.py`); an agent or service login
+  stops only its own runs. Anyone else gets 403
+  `operation_run_cancel_forbidden: <who may stop it>` and the run goes on.
 - `operations/operation_run_service.py` — `OperationRunService`, a
   process-wide singleton holding the in-process task store. `submit_call` /
   `submit_approval_resume` create the row + claim a lease + launch the

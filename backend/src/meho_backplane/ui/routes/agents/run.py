@@ -503,7 +503,8 @@ async def cancel_run(
       error.
     * 403 (``agent_run_cancel_forbidden``) if the operator's role ranks
       below the cancel floor (defence-in-depth; the route gate already
-      rejects ``read_only``).
+      rejects ``read_only``), or, with the reason after a colon, when the
+      run acts for someone else and the operator is not a tenant admin.
     """
     del request  # tenant + identity come from the lifted operator.
     structlog.contextvars.bind_contextvars(
@@ -522,7 +523,9 @@ async def cancel_run(
     except UnauthorizedCancellationError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="agent_run_cancel_forbidden",
+            detail="agent_run_cancel_forbidden"
+            if exc.reason is None
+            else f"agent_run_cancel_forbidden: {exc.reason}",
         ) from exc
     except IllegalTransitionError as exc:
         raise HTTPException(

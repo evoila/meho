@@ -1141,7 +1141,11 @@ async def test_edit_during_evaluation_runs_new_settings_on_next_free_tick(
 
         edited_at = datetime.now(UTC).replace(microsecond=0)
         result = await edit_sensor(
-            _TENANT, sensor_id, SensorUpdate(params={"limit": 5}), now=edited_at
+            _TENANT,
+            sensor_id,
+            SensorUpdate(params={"limit": 5}),
+            editor_sub="sensor-editor",
+            now=edited_at,
         )
         assert result is not None
         assert result.after == {"params": {"limit": 5}}

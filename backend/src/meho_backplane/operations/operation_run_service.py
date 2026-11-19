@@ -566,9 +566,11 @@ class OperationRunService:
         :func:`~meho_backplane.operations.operation_run.cancel_run` service
         path. Tenant isolation is enforced here first (a cross-tenant /
         unknown handle raises ``OperationRunNotFoundError`` -> 404), matching
-        :meth:`poll`. The in-flight task is not torn down synchronously: it
-        loses its lease on the next heartbeat and its result is discarded
-        when it finalises against the now-terminal row (best-effort cancel).
+        :meth:`poll`. Only the principal the run acts for, or a person who is
+        a tenant admin, may stop it; anyone else gets 403. The in-flight task
+        is not torn down synchronously: it loses its lease on the next
+        heartbeat and its result is discarded when it finalises against the
+        now-terminal row (best-effort cancel).
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:

@@ -66,6 +66,7 @@ __all__ = [
     "TARGETS_PROBE_OP_ID",
     "TARGETS_PROBE_PARAMETER_SCHEMA",
     "TARGETS_PROBE_RESPONSE_SCHEMA",
+    "probe_target_refusal",
     "register_targets_probe_operation",
     "targets_probe",
     "targets_probe_preflight",
@@ -172,6 +173,16 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+async def probe_target_refusal(operator: Operator, row: Any) -> str | None:
+    """MEHO's policy for ``targets.probe`` on the target *row*; ``None`` = allowed.
+
+    The one check behind the ``targets.probe`` operation and
+    ``POST /api/v1/targets/{name}/probe``. Runs before the system is
+    contacted.
+    """
+    return await secondary_target_refusal(operator, _PROBE_ON_TARGET, row)
+
+
 async def targets_probe(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Detect one target's product and version and store it on the row.
 
@@ -196,7 +207,7 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
     try:
         async with sessionmaker() as session, session.begin():
             row = await resolve_route_target(session, operator.tenant_id, str(params["name"]))
-            refusal = await secondary_target_refusal(operator, _PROBE_ON_TARGET, row)
+            refusal = await probe_target_refusal(operator, row)
             if refusal is not None:
                 raise ValueError(f"{refusal}. Nothing was probed or stored.")
             fp = await probe_and_store_fingerprint(session, row, operator=operator)

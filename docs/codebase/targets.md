@@ -98,7 +98,11 @@ re-run of a failed approved call by the requester, also a service login.
 - An agent login gets 403 `insufficient_role`: MEHO caps its role at
   `operator`.
 - Reads (`GET`, `probe`) keep the `operator` role and stay open to
-  machine logins.
+  machine logins. For an agent or service login, `probe` also checks
+  MEHO's policy for `targets.probe` on the found target, the same check
+  the operation runs (`probe_target_refusal` in
+  `connectors/targets/probe.py`). A refusal is 403 `denied`; the
+  connector is not called and nothing is stored.
 
 The operations call the same functions in process, so the route check
 does not apply to them; the policy gate of the dispatcher does.

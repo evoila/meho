@@ -443,7 +443,11 @@ Dashboard memberships stay:
    values.
 
 `identity_sub`, `target`, `for_seconds` and the retry knobs are not
-editable.
+editable. One exception: when the edit changes `connector_id`, `op_id`,
+`params` or `assertion`, and `identity_sub` is neither `__sensor__` nor
+the editor's own `sub`, MEHO sets `identity_sub` to `__sensor__`. The
+`before` / `after` of the audit row show that change
+(`checks/sensor_edit._identity_after_edit`).
 
 A Dashboard has the same edit (`PATCH /api/v1/checks/dashboards/{id}` →
 `checks/dashboard_edit.edit_dashboard`, `meho dashboard edit <id>`):
@@ -616,9 +620,9 @@ A Dashboard and its Sensors can move to another site as one JSON file
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
   safe-tier floor at dispatch, so a race that lands a non-safe
   descriptor records `unknown` rather than executing.
-- **The `identity_sub` ownership guard (#2699) is create-time only.** The
-  edit route cannot change `identity_sub`, so it covers every new row, but
-  any `sensor` row
+- **The `identity_sub` ownership guard runs on create.** An edit
+  by another admin that changes what the Sensor runs resets an
+  `identity_sub` of someone else to `__sensor__`, but any `sensor` row
   persisted *before* the guard landed with a spoofed `identity_sub` keeps
   dispatching (and audit-attributing) under it — no data migration
   normalises historical rows. Deployments that ran the pre-guard build

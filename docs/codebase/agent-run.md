@@ -59,7 +59,11 @@ What is **not** in T6 or T4 (other tasks own these):
   cancel entry point (`POST /api/v1/agents/runs/{handle}/cancel` +
   `meho agent run-cancel`, #1828) also calls `cancel_run` here — it adds
   the tenant-scoping check (cross-tenant handle -> 404) on top of the
-  service's role + state-machine checks.
+  service's role + state-machine checks. `cancel_run` also checks who
+  stops the run (`operations/run_stop_rule.py`): the principal the run
+  acts for (`identity_sub`), or a person who is a tenant admin or a
+  platform admin. An agent or service login stops only its own runs.
+  Anyone else gets 403 `agent_run_cancel_forbidden: <who may stop it>`.
 - The Pydantic-AI loop seam that actually runs the agent — G11.1-T1
   (#808). The agent loop must call `heartbeat()` at ≈ `ttl_seconds/2`
   cadence so the reaper does not reclaim a healthy run; the loop must

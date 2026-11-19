@@ -535,6 +535,11 @@ async def cancel_run(
     request and the write -- is 409, not a 500. A ``read_only`` operator is
     rejected by the route's role gate; the service's own role check is a
     defence-in-depth backstop mapped to 403 should it ever fire.
+
+    Only the principal the run acts for, or a person who is a tenant admin,
+    may stop a run. An agent or service login stops only its own runs.
+    Anyone else gets 403 ``agent_run_cancel_forbidden: <who may stop it>``,
+    and the run goes on.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["cancel"],
@@ -551,7 +556,9 @@ async def cancel_run(
     except UnauthorizedCancellationError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
-            detail="agent_run_cancel_forbidden",
+            detail="agent_run_cancel_forbidden"
+            if exc.reason is None
+            else f"agent_run_cancel_forbidden: {exc.reason}",
         ) from exc
     except IllegalTransitionError as exc:
         raise HTTPException(

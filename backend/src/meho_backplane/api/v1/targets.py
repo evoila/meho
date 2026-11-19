@@ -167,7 +167,7 @@ from meho_backplane.api.v1._wait_for_approval import (
     dispatch_rest_write,
     runs_at_once,
 )
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.gsm_creds import (
@@ -1483,6 +1483,41 @@ def _raise_target_secret_error(
     raise HTTPException(status_code=422, detail=detail) from exc
 
 
+async def _raise_if_probe_refused(operator: Operator, t: TargetORM) -> None:
+    """Answer 403 when MEHO's policy for ``targets.probe`` on *t* refuses a machine login.
+
+    The same per-target check the ``targets.probe`` operation runs before it
+    contacts the system, so an agent or service login follows one rule on
+    the route and in the operation. A person passes; the route's role gate
+    applies to them.
+    """
+    if is_human_principal(operator):
+        return
+    # Imported here: connectors.targets.probe imports this module.
+    from meho_backplane.connectors.targets.probe import (
+        TARGETS_PROBE_OP_ID,
+        probe_target_refusal,
+    )
+
+    refusal = await probe_target_refusal(operator, t)
+    if refusal is None:
+        return
+    _log.info(
+        "target_probe_refused",
+        target_name=t.name,
+        tenant_id=str(operator.tenant_id),
+        operator_sub=operator.sub,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "denied",
+            "op_id": TARGETS_PROBE_OP_ID,
+            "message": f"{refusal}. Nothing was probed or stored.",
+        },
+    )
+
+
 @router.post("/{name}/probe", response_model=FingerprintResult)
 async def probe_target(
     name: str,
@@ -1521,6 +1556,11 @@ async def probe_target(
       ref from the target name (``secret_ref_derived``), and gives the
       fix in ``message``. It has no Vault text and no Vault address.
 
+    * **403** ``denied`` when the caller is an agent or service login and
+      MEHO's policy for ``targets.probe`` on the found target refuses it,
+      the same check the ``targets.probe`` operation runs. The connector is
+      not called and nothing is stored.
+
     No error branch writes to the DB row, so the column always
     reflects the *last successful* probe. The path value is a name,
     an alias or an id (:func:`resolve_route_target`); no match is 404.
@@ -1528,6 +1568,7 @@ async def probe_target(
     ``targets.probe`` operation calls too.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
+    await _raise_if_probe_refused(operator, t)
     try:
         fp = await probe_and_store_fingerprint(session, t, operator=operator)
     except (TargetSecretNotFoundError, TargetSecretForbiddenError) as secret_exc:

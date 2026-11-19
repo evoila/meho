@@ -78,12 +78,12 @@ func printDetail(cmd *cobra.Command, s *api.SessionDetail) {
 		}
 		return t.UTC().Format(time.RFC3339)
 	}
-	fmt.Fprintf(out, "session:      %s\n", s.SessionId)
-	fmt.Fprintf(out, "project:      %s\n", s.Project)
-	fmt.Fprintf(out, "app:          %s %s\n", s.App, orNone(s.AppVersion))
-	fmt.Fprintf(out, "uploaded by:  %s\n", s.UploadedBySub)
-	fmt.Fprintf(out, "state:        %s\n", s.State)
-	fmt.Fprintf(out, "outcome:      %s\n", orNone(s.Outcome))
+	fmt.Fprintf(out, "session:      %s\n", output.SafeText(s.SessionId))
+	fmt.Fprintf(out, "project:      %s\n", output.SafeText(s.Project))
+	fmt.Fprintf(out, "app:          %s %s\n", output.SafeText(s.App), output.SafeText(orNone(s.AppVersion)))
+	fmt.Fprintf(out, "uploaded by:  %s\n", output.SafeText(s.UploadedBySub))
+	fmt.Fprintf(out, "state:        %s\n", output.SafeText(string(s.State)))
+	fmt.Fprintf(out, "outcome:      %s\n", output.SafeText(orNone(s.Outcome)))
 	fmt.Fprintf(out, "started:      %s\n", when(s.StartedAt))
 	fmt.Fprintf(out, "ended:        %s\n", when(s.EndedAt))
 	fmt.Fprintf(out, "last upload:  %s\n", s.LastSeenAt.UTC().Format(time.RFC3339))
@@ -96,7 +96,7 @@ func printDetail(cmd *cobra.Command, s *api.SessionDetail) {
 	fmt.Fprintf(out, "\nfiles (%d):\n", len(paths))
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	for _, p := range paths {
-		fmt.Fprintf(tw, "  %s\t%d bytes\tsha256 %s\n", p, s.Files[p].Size, s.Files[p].Sha256)
+		fmt.Fprintf(tw, "  %s\t%d bytes\tsha256 %s\n", output.SafeText(p), s.Files[p].Size, output.SafeText(s.Files[p].Sha256))
 	}
 	_ = tw.Flush()
 

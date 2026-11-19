@@ -42,7 +42,7 @@ _REALM_FILE = (
 _TOOL_CLIENTS = ("meho-mcp-code", "meho-mcp-desktop")
 _HUMAN_CLIENTS = ("meho-cli", "meho-mcp", *_TOOL_CLIENTS, "meho-web")
 #: Every client a person signs in with, including the approval sign-in (#5515).
-_PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve")
+_PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve", "meho-web-approve")
 _PLACEHOLDERS = {
     "MEHO_REALM_PUBLIC_URL",
     "MEHO_REALM_TENANT_ID",
@@ -203,6 +203,7 @@ def test_clients(realm: dict[str, Any]) -> None:
         "meho-mcp-code",
         "meho-mcp-desktop",
         "meho-web",
+        "meho-web-approve",
         "meho-admin",
         "meho-check-runner",
     }
@@ -375,6 +376,33 @@ def test_web_client(realm: dict[str, Any]) -> None:
     )
 
 
+def test_console_approval_client(realm: dict[str, Any]) -> None:
+    """``meho-web-approve`` is the console's approval sign-in (#6282).
+
+    A confidential client with the secret of ``meho-web``, a callback of
+    its own, no refresh token, a 15-minute token, and no grant that skips
+    its login flow. Its tokens carry the claims MEHO checks, without the
+    MCP audience.
+    """
+    client = _client(realm, "meho-web-approve")
+    assert client["publicClient"] is False
+    assert client["secret"] == "${MEHO_REALM_WEB_CLIENT_SECRET}"
+    assert client["standardFlowEnabled"] is True
+    assert client["directAccessGrantsEnabled"] is False
+    assert client["implicitFlowEnabled"] is False
+    assert client["serviceAccountsEnabled"] is False
+    attributes = client["attributes"]
+    assert attributes["pkce.code.challenge.method"] == "S256"
+    assert attributes["oauth2.device.authorization.grant.enabled"] == "false"
+    assert attributes["use.refresh.tokens"] == "false"
+    assert attributes["access.token.lifespan"] == "900"
+    assert "acr.loa.map" not in attributes
+    assert client["redirectUris"] == ["${MEHO_REALM_PUBLIC_URL}/ui/auth/approval-callback"]
+    mappers = {m["name"] for m in client["protocolMappers"]}
+    assert mappers == {m["name"] for m in _client(realm, "meho-cli-approve")["protocolMappers"]}
+    assert "meho-mcp-audience" not in mappers
+
+
 def test_service_clients(realm: dict[str, Any]) -> None:
     admin = _client(realm, "meho-admin")
     assert admin["serviceAccountsEnabled"] is True
@@ -504,9 +532,13 @@ def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None
         ("conditional-user-configured", "REQUIRED"),
         ("auth-otp-form", "REQUIRED"),
     ]
-    # Only the approval client and the console have a flow of their own.
+    # Only the two approval clients and the console have a flow of their own.
     bound = [c["clientId"] for c in realm["clients"] if c.get("authenticationFlowBindingOverrides")]
-    assert bound == ["meho-cli-approve", "meho-web"]
+    assert bound == ["meho-cli-approve", "meho-web", "meho-web-approve"]
+    # The console's approval client signs in with the same flow (#6282).
+    assert _client(realm, "meho-web-approve")["authenticationFlowBindingOverrides"] == {
+        "browser": flow["id"]
+    }
 
 
 def test_approval_level_is_level_2_and_asked_for_at_every_sign_in(realm: dict[str, Any]) -> None:

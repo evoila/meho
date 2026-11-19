@@ -1005,12 +1005,15 @@ request field, header or command-line flag can set it.
 
 **How a person approves.** The web interface is the normal place.
 
-- **Web interface:** a click on **Approve**. The sign-in behind the
-  console session must be recent (`FRESH_SIGN_IN_MAX_AGE_SECONDS`,
-  default 15 minutes) and must have asked for the password or a
-  passkey. A `destructive` change needs a sign-in of its own, at most
-  `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` old (default 5 minutes). When the
-  sign-in is too old, the console offers **Sign in to approve**.
+- **Web interface:** a click on **Approve**. When the approval level is
+  required (see below), the console first sends the person to its own
+  approval sign-in (the client `meho-web-approve`, #6282). Otherwise the
+  sign-in behind the console session must be recent
+  (`FRESH_SIGN_IN_MAX_AGE_SECONDS`, default 15 minutes) and must have
+  asked for the password or a passkey. A `destructive` change needs a
+  sign-in of its own, at most `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` old
+  (default 5 minutes). When the sign-in cannot approve, the console
+  offers **Sign in to approve**.
 - **Command line:** `meho approvals approve <id>` opens a browser
   sign-in made only for approvals (the client `meho-cli-approve`, #3979,
   #5515). It asks for the password, and for the code from the person's
@@ -1105,12 +1108,75 @@ The `approval.decision` audit row records the mode in force for the
 approve in `approval_auth.level_in_force` (`off`, `observe` or
 `required`), next to the `acr` it saw.
 
-The web path (`check_fresh_web_approval_sign_in`) does not check the
-level. `/api/v1/health` shows the value in `approvals.sign_in_level`,
+**The console approval asks for the same level (#6282).** The console's
+normal login (`meho-web`) is bound to the passkey touch flow and never
+gives `meho-approve`, also right after a new login. So the console has
+its own approval client, `meho-web-approve`
+(`UI_KEYCLOAK_APPROVE_CLIENT_ID`): a confidential client with the secret
+of `meho-web`, bound to the same flow `meho approval sign-in level`, used
+only for the sign-in before an approve. Its redirect URI is
+`<public URL>/ui/auth/approval-callback`.
+
+- `GET /ui/auth/approval-sign-in?return_to=…`
+  (`ui/auth/approval_sign_in_routes.py`) needs a console session. It
+  sends the browser to Keycloak with this client, PKCE, `prompt=login`,
+  `max_age=0` and `acr_values=meho-approve`. The pending flow keeps the
+  session id, because the browser leaves out the `SameSite=Strict`
+  session cookie when a login server on another site sends it back.
+- `GET /ui/auth/approval-callback` checks `state` and the login-binding
+  cookie like the normal callback, exchanges the code with the approval
+  client, checks the token through the JWT chain, and keeps it
+  (Fernet-encrypted, `web_session.approval_token`, migration 0176) only
+  when `azp` is the approval client and `sub` is the session's person.
+  Else `403 approval_sign_in_other_person`. The normal login is
+  unchanged.
+- The approve (`ui/routes/approvals/sign_in.py`,
+  `auth/web_approval_sign_in.py:check_web_approval_sign_in`) resolves the
+  setting with `sign_in_level_in_force(…, client_id=meho-web-approve)`,
+  so `auto` reads the binding of the console's approval client. When
+  `UI_KEYCLOAK_APPROVE_CLIENT_ID` is empty, `auto` only records (the
+  console has no approval sign-in to offer); an explicit `required`
+  still refuses.
+  `required`: only the kept token approves, and only with the approval
+  level, a recent `auth_time`, `acr` not `"0"` and the same person; the
+  modal shows **Sign in to approve** with the approval sign-in link in
+  place of the button. `observe` and `off`: the console approves as
+  before on the session's own sign-in (or on a kept token that passes
+  the other checks); `observe` logs `approval_sign_in_level_missing` and
+  sets `approval_auth.level_missing`.
+- The `approval.decision` row records `channel` (`web` or `rest`),
+  `acr` and `level_in_force` on both paths.
+
+Known limit: once the console needs the level, a person who signs in
+only through a company login (no MEHO password) cannot approve in the
+console and not on the command line, until they have a MEHO password and
+a one-time code. On built-in Keycloak with the default `auto` this starts
+with the upgrade: it adds `meho-web-approve` and binds it. A company
+login started from the approval page does not run the flow's steps, so
+its token has no level and MEHO refuses it
+(`test_core_company_login_keycloak.py` proves it). What the operator can
+do: give these approvers a MEHO password and a one-time code, or set
+`APPROVAL_SIGN_IN_LEVEL=observe` for now. The approval page still shows
+the company login's button. Keycloak can set a login theme for one
+client, and such a theme could hide the button; MEHO does not ship one
+yet.
+
+`/api/v1/health` shows the value in `approvals.sign_in_level`,
 what is in force in `approvals.sign_in_level_in_force`, and
 `approvals.sign_in_level_warning` whenever the level is not required in
 practice, and its own warning when the read failed ("MEHO could not
-check the approval sign-in of the realm ..."). When MEHO has no admin
+check the approval sign-in of the realm ..."). The console's approval
+client has its own state and level in `approvals.web_sign_in` and
+`approvals.web_sign_in_level_in_force`
+(`approval_sign_in_flow.read_web_approval_sign_in`; an empty
+`UI_KEYCLOAK_APPROVE_CLIENT_ID` is `not_bound`). Under `auto` the two
+clients can differ, so the warning also says when the console does not
+require the level ("The console does not require the approval level
+...") or MEHO could not read the console's client ("MEHO could not
+check the console approval client ..."); the sentences of both clients
+are joined. A console refusal for a missing level names
+`approvals.web_sign_in` ("An admin must check approvals.web_sign_in in
+/api/v1/health."). When MEHO has no admin
 client, or the admin client may not read, the warning names that fix:
 the admin client settings, or the realm-management role `view-realm`
 (`view-clients` for `no_right_to_read_clients`). `meho doctor` shows the last two in its line `approval level`.

@@ -83,6 +83,11 @@ from meho_backplane.operations.caller_address import (
 )
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.grant_approval import is_rights_change_op
+from meho_backplane.operations.switch_params import (
+    checked_parameter_schema,
+    visible_llm_instructions,
+    visible_parameter_schema,
+)
 from meho_backplane.policy.classification import Classification
 from meho_backplane.policy.store import (
     InvalidStoredPolicyError,
@@ -438,6 +443,10 @@ async def apply_effective_policy(
     ``policy_labels`` and ``policy_rule_ref`` (not columns either) get the
     classification, so approver routing can match the category and the
     call contract and the approval request can show it.
+    ``row.parameter_schema`` gets the shown schema and
+    ``row.parameter_check_schema`` (not a column) the schema a call is
+    checked against, and ``row.llm_instructions`` loses the examples and
+    hints that name a hidden parameter (``operations/switch_params.py``).
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
@@ -446,6 +455,9 @@ async def apply_effective_policy(
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
+    row.parameter_check_schema = checked_parameter_schema(row.parameter_schema)
+    row.llm_instructions = visible_llm_instructions(row.llm_instructions, row.parameter_schema)
+    row.parameter_schema = visible_parameter_schema(row.parameter_schema)
     _set_classification(row, policy)
     return row
 

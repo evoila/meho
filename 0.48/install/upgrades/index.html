@@ -3886,6 +3886,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A hosted agent with a <code>connectors</code> list may use only targets of those connectors. MEHO checks the connector that the target picks, and refuses a call or preview on a target of another connector with <code>connector_not_allowed</code>. A call that waits for approval keeps the agent's list: the run after the approval and each of its steps use only targets of those connectors. Migration <code>0175</code> adds the nullable <code>approval_request.allowed_connectors</code> column for this. A standing grant of a service login covers only targets of the grant's own connector; a call on a target of another connector waits for a person's approval.</td>
+<td>If a hosted agent calls targets of a connector that is not in its <code>connectors</code> list, add that connector to the agent's list. If a service login's standing grant should cover targets of another connector, make a grant for that connector.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>The approval request of 8 more Keycloak changes of rights now shows the object as it is now (<code>role_mapping.assign</code>, <code>role_mapping.client.assign</code>, <code>group.member.add</code>, <code>user.reset_password</code>, <code>user.enable</code> and the three login flow writes), and MEHO reads it again right before the approved run. When it changed, or MEHO cannot read it, the run is refused. A request of these 8 operations that already waited before the upgrade has no such state, so it is refused when approved. For <code>group.member.add</code> the run compares only the group id and the roles the group gives, not the member list, so a big group still runs. The switch <code>KEYCLOAK_RIGHTS_CHANGE_CARDS</code> now also covers these 8 writes: it decides only whether <code>preview_operation</code>, <code>meho_approvals_get</code> and <code>meho_approvals_list</code> show the new card keys. The run check is always on.</td>
 <td>Send such a request again after the upgrade. No schema action.</td>
 </tr>

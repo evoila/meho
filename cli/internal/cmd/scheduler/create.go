@@ -60,7 +60,10 @@ func newCreateCmd() *cobra.Command {
 			"tenant. Exactly one of:\n" +
 			"  --cron-expr <expr>     (kind=cron, 5-field cron)\n" +
 			"  --fire-at <ISO8601>    (kind=one_off)\n" +
-			"  --event-filter <json>  (kind=event; inline JSON, @<path>, or @-)\n" +
+			"  --event-filter <json>  (kind=event; inline JSON, @<path>, or @-;\n" +
+			"                         a webhook event starts the trigger only when the\n" +
+			"                         filter names its event source, for example\n" +
+			"                         {\"source\":{\"slug\":\"<source-slug>\"}}, or source.id)\n" +
 			"  one of --on-sensor <name|id>, --on-dashboard <name|id>, " +
 			"--on-any-sensor, --on-any-dashboard (kind=event; start on a " +
 			"Sensor or Dashboard change, with no JSON; add --only-worse to " +
@@ -112,7 +115,8 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fireAt, "fire-at", "",
 		"ISO 8601 fire time (required when --kind=one_off)")
 	cmd.Flags().StringVar(&eventFilter, "event-filter", "",
-		"event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-)")
+		"event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-); "+
+			"for webhook events it must name the event source (source.slug or source.id)")
 	cmd.Flags().StringVar(&onSensor, "on-sensor", "",
 		"start on this Sensor (name or id); needs --kind=event, not with --event-filter")
 	cmd.Flags().StringVar(&onDashboard, "on-dashboard", "",

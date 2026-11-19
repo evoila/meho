@@ -16,17 +16,24 @@ API (made-up names and ids):
   user before approval and when the approved request runs, and write
   nothing;
 * ``keycloak.user.update`` of a first name, and ``keycloak.user.logout``,
-  still wait for approval: they cannot lock MEHO out.
+  still wait for approval: they cannot lock MEHO out;
+* the secret move sink for a Keycloak password refuses that user before
+  approval and when the move runs, and lets another user through;
+* a plain import of the package registers the checks before approval.
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from typing import Any
 
 import pytest
 import respx
 
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_user_login_guard import LOGIN_USER_WRITES
 from tests.test_connectors_keycloak_user_login_guard import (  # noqa: F401  (fixtures)
     _ADMIN_REALM,
     _KC_BASE_URL,
@@ -190,3 +197,24 @@ async def test_another_user_is_not_refused(kc: KeycloakConnector) -> None:  # no
             _SAME_REALM_TARGET,
         )
     assert call["status"] == "awaiting_approval", call
+
+
+def test_a_plain_import_registers_the_checks_before_approval() -> None:
+    """A new interpreter: importing the packages alone registers every check."""
+    ops = [*LOGIN_USER_WRITES, "secret.move"]
+    code = (
+        "import json\n"
+        "import meho_backplane.connectors.keycloak\n"
+        "import meho_backplane.connectors.secret\n"
+        "from meho_backplane.operations._park_check import _PARK_CHECKS\n"
+        f"ops = {ops!r}\n"
+        "print(json.dumps({op: getattr(_PARK_CHECKS.get(op), '__qualname__', None) "
+        "for op in ops}))\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=120
+    )
+    checks = json.loads(done.stdout.strip().splitlines()[-1])
+    for op_id in LOGIN_USER_WRITES:
+        assert checks[op_id] == "refuse_other_user_check.<locals>._check", (op_id, checks)
+    assert checks["secret.move"] == "refuse_sink_before_approval"

@@ -261,14 +261,16 @@ MEHO never repairs them, so an operator needs a standing check. Three
 pieces give it:
 
 - **The query.** `audit_query.find_loose_rows(*, tenant_id, session,
-  limit=200, recent_window=1 day, now=None) -> LooseRowsResult`
+  limit=200, recent_window=1 day, now=None, owner_sub=None) -> LooseRowsResult`
   (`audit_query/loose_rows.py`). Read-only: two `SELECT` statements, no
   write. It lists the tenant's loose rows newest first (`LooseRow`: id,
   time, principal, operation, event class, path, parent id), with the
   exact total `count` and `recent_count` (rows younger than the window),
   `recent_since`, and `truncated` when the list is capped (`limit` ≤
   1000). A parent "exists" when a row with that id exists in the same
-  tenant, the same rule the replay closure uses. `event_class` tells a
+  tenant, the same rule the replay closure uses. With `owner_sub` set
+  (a service login), the rows and both counts hold only that login's
+  rows, and only its own rows count as a present parent. `event_class` tells a
   step row (`operation_execution`) and an approval request
   (`policy_decision`, path `approval.request`) apart.
 - **The operation.** `audit.loose_rows` on the synthetic connector
@@ -816,7 +818,7 @@ the console pane renders the same trace through the audit-row drawer.
 
 ### Who may read which audit rows and traces
 
-| Caller | Audit rows (list, count, filter, `show`, `by-work-ref`, `who-touched`) | Session tree (`shape="tree"`, `meho_audit_replay`, REST replay) | Flight-recorder trace |
+| Caller | Audit rows (list, count, filter, `show`, `by-work-ref`, `who-touched`, the `audit.loose_rows` operation) | Session tree (`shape="tree"`, `meho_audit_replay`, REST replay) | Flight-recorder trace |
 |---|---|---|---|
 | A person (`principal_kind=user`) | Every row of the tenant. | `shape="tree"`: only a session whose stored rows hold a row of the person's own calls; then the whole tree. `meho_audit_replay` and REST replay (tenant_admin): any session of the tenant. | Every trace of the tenant, also one marked `redaction_uncertain`. |
 | A service login: an agent, a runner, an add-on, any client-credentials login (also one with no `principal_kind` claim, which MEHO reads as `service`) | Only the rows of its own calls (`operator_sub` equals its own `sub`), whatever role it carries. | Only its own rows of the session, on every tree path. A session of another login answers like a session that does not exist. | Only the trace of its own call: `GET /{audit_id}/trace` needs a row it may read, and the trace's stored caller must be its own `sub` (a trace with no stored caller is never shown); `GET /traces` filters on its own `sub`. An agent also needs the tenant switch, and never gets a `redaction_uncertain` trace. |
@@ -827,7 +829,10 @@ person and the login's `sub` for every machine kind
 substrate as `owner_sub`: `query_audit`, `count_event_classes`,
 `replay_session` (on the anchor and on every lineage step, so a row of
 another login is left out with its subtree), `count_loose_rows_in_forest`
-(only the login's own rows count as present) and the two session counts
+(only the login's own rows count as present), `find_loose_rows` (the
+`audit.loose_rows` operation: rows and counts of the login's own rows
+only; a Sensor runs it as a person, so a check still sees the whole
+tenant) and the two session counts
 of the replay routes. So no filter, also not `has_trace`, and no count or
 error text tells anything about the rows of another login. A row of
 another login answers like a row that does not exist: `show` and the

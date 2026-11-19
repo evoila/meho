@@ -18,7 +18,8 @@ This module is the read-only query that lists them. It never writes to
 ``audit_log``: the log stays append-only.
 
 * :func:`find_loose_rows` — tenant-scoped list of loose rows, newest
-  first, with the total count and the count inside a recent window. The
+  first, with the total count and the count inside a recent window (a
+  service login gets only its own rows). The
   typed op ``audit.loose_rows`` (``connectors/audit/``) wraps it so a
   Sensor can pin it.
 * :func:`count_loose_rows_in_forest` — the loose rows inside one replay
@@ -95,18 +96,29 @@ class LooseRowsResult(BaseModel):
     truncated: bool
 
 
-def _missing_parent_predicate(tenant_id: uuid.UUID) -> sa.ColumnElement[bool]:
-    """``parent_audit_id`` is set and no row in the tenant carries that id."""
+def _missing_parent_predicate(
+    tenant_id: uuid.UUID, owner_sub: str | None = None
+) -> sa.ColumnElement[bool]:
+    """``parent_audit_id`` is set and no row in the tenant carries that id.
+
+    ``owner_sub`` set (a service login): only the rows of that login are
+    listed, and only its own rows count as a present parent. That is the
+    same rule :func:`count_loose_rows_in_forest` uses.
+    """
     parent = aliased(AuditLog, name="parent")
-    parent_exists = sa.exists().where(
+    parent_where = [
         parent.id == AuditLog.parent_audit_id,
         parent.tenant_id == tenant_id,
-    )
-    return sa.and_(
+    ]
+    row_where = [
         AuditLog.tenant_id == tenant_id,
         AuditLog.parent_audit_id.is_not(None),
-        sa.not_(parent_exists),
-    )
+    ]
+    if owner_sub is not None:
+        parent_where.append(parent.operator_sub == owner_sub)
+        row_where.append(AuditLog.operator_sub == owner_sub)
+    parent_exists = sa.exists().where(*parent_where)
+    return sa.and_(*row_where, sa.not_(parent_exists))
 
 
 async def find_loose_rows(
@@ -116,16 +128,19 @@ async def find_loose_rows(
     limit: int = 200,
     recent_window: timedelta = DEFAULT_RECENT_WINDOW,
     now: datetime | None = None,
+    owner_sub: str | None = None,
 ) -> LooseRowsResult:
     """List the tenant's loose rows, newest first, with exact counts.
 
     Read-only: two ``SELECT`` statements, no write. ``tenant_id`` is a
     mandatory keyword argument, never client input. ``limit`` is clamped
-    to ``1..LOOSE_ROWS_MAX_LIMIT``.
+    to ``1..LOOSE_ROWS_MAX_LIMIT``. ``owner_sub`` set (a service login,
+    see :func:`~meho_backplane.audit_query.own_rows_sub`): the rows and
+    both counts hold only the rows of that login.
     """
     limit = max(1, min(limit, LOOSE_ROWS_MAX_LIMIT))
     recent_since = (now or datetime.now(UTC)) - recent_window
-    loose = _missing_parent_predicate(tenant_id)
+    loose = _missing_parent_predicate(tenant_id, owner_sub)
 
     counts_stmt = sa.select(
         sa.func.count(),

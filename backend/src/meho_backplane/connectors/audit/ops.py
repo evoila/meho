@@ -40,6 +40,7 @@ from meho_backplane.audit_query import (
     DEFAULT_RECENT_WINDOW,
     LOOSE_ROWS_MAX_LIMIT,
     find_loose_rows,
+    own_rows_sub,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -188,7 +189,9 @@ async def audit_loose_rows(
     Op-id: ``audit.loose_rows``. Targetless typed op; *target* is always
     ``None``. The dispatcher has validated *params* against
     :data:`AUDIT_LOOSE_ROWS_PARAMETER_SCHEMA`. ``tenant_id`` comes from
-    *operator*, never from *params*.
+    *operator*, never from *params*. A service login sees only the loose
+    rows of its own calls (``own_rows_sub``); a person, and a Sensor run
+    by the check runner, see the whole tenant.
     """
     limit = int(params.get("limit", _DEFAULT_LIMIT))
     window_seconds = params.get("recent_window_seconds")
@@ -202,6 +205,7 @@ async def audit_loose_rows(
             session=session,
             limit=limit,
             recent_window=recent_window,
+            owner_sub=own_rows_sub(operator),
         )
     return result.model_dump(mode="json")
 

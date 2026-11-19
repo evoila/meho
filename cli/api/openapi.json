@@ -9252,7 +9252,7 @@
           "agent-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (delete) a permission grant.\n\nReturns 204 on success; 404 when the grant is absent or belongs to\nanother tenant. The revocation is audited via the audit middleware.",
+        "description": "Revoke (delete) a permission grant.\n\nReturns 204 on success; 404 when the grant is absent or belongs to\nanother tenant. A machine login (agent / service / runner) removes\nonly an ``auto-execute`` grant; a ``deny`` or ``needs-approval``\ngrant gets 403 ``human_principal_required`` and stays. The\nrevocation is audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_agents_grants__grant_id__delete",
         "parameters": [
           {

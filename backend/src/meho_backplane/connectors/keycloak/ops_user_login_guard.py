@@ -14,7 +14,12 @@ fixes it by hand.
 These writes use the same check (:data:`LOGIN_USER_WRITES`):
 
 * ``keycloak.user.disable``;
-* ``keycloak.user.required_actions.update``.
+* ``keycloak.user.required_actions.update``;
+* ``keycloak.user.reset_password``;
+* ``keycloak.user.credential.delete``;
+* ``keycloak.user.update`` when ``changes`` has ``username`` or ``email``;
+* ``keycloak.group.member.remove`` (the admin rights can come from a group);
+* ``keycloak.role_mapping.client.remove``.
 
 Each check runs before the request waits for approval and again when the
 approved request runs. Nothing is written. Both use the user name that
@@ -62,6 +67,11 @@ __all__ = [
 LOGIN_USER_WRITES: Final[dict[str, str]] = {
     "keycloak.user.disable": "disabling it",
     "keycloak.user.required_actions.update": "changing its required actions",
+    "keycloak.user.reset_password": "resetting its password",
+    "keycloak.user.credential.delete": "deleting one of its credentials",
+    "keycloak.user.update": "changing its user name or email",
+    "keycloak.group.member.remove": "removing it from a group",
+    "keycloak.role_mapping.client.remove": "removing one of its roles",
 }
 
 #: ``keycloak.user.update`` fields the target can sign in with.

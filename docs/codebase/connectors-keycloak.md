@@ -129,7 +129,7 @@ fresh target with no asserted version still resolves.
 - `LOGIN_USER_WRITES` + `login_user_park_reason` + `refuse_login_user_of_write`
   + `refuse_login_user_in_realm` (`connectors/keycloak/ops_user_login_guard.py`)
   — the sign-in user check that the user writes which can lock MEHO out
-  share with `user.delete`.
+  share with `user.delete` (see "Writes that could lock MEHO out").
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -919,7 +919,8 @@ longer sign in to any app that uses this realm.
   when the approved request runs. Nothing is written. When it runs, MEHO
   reads the user once, checks that read, and writes that same read back, so
   a rename between two reads cannot get the sign-in user past the check.
-  `keycloak.user.enable` is not checked.
+  `keycloak.user.enable` is not checked. See "Writes that could lock MEHO
+  out" for the other writes with this check.
 - **Disabling does not end sessions that are already open.** To cut access at
   once, run `keycloak.user.disable`, then `keycloak.user.logout`.
 - Risk level `dangerous`, approval required, group `user_write`. On the
@@ -1123,10 +1124,48 @@ of them does not use this check.
   now reads the user once before the write.
 - The writes in `LOGIN_USER_WRITES` also refuse the user the target signs
   in with, in the same two places: the park check
-  (`refuse_other_user_check`) and the run (`read_user_for_write`). A card builder that only reads the user passes
+  (`refuse_other_user_check`) and the run (`read_user_for_write`). See the
+  next section. A card builder that only reads the user passes
   `check_login_user=False`. An op with one more check before approval
   passes it as `then=` (`user.required_actions.update` checks the names
   in `add`).
+
+### Writes that could lock MEHO out
+
+A Keycloak target signs in with a user name and a password, or with a
+client secret (then the user is the client's service-account user
+`service-account-<client>`). Some writes on that user make Keycloak refuse
+MEHO's next sign-in, or take its admin rights away. Then MEHO cannot reach
+that Keycloak until a person fixes it by hand.
+
+The check (`ops_user_login_guard.py`) compares the user name stored in
+Keycloak with the target's sign-in user (case does not count). It only
+applies when the realm of the write is the realm the target signs in to
+(`admin_realm`); otherwise it reads no admin credential. It refuses before
+the request waits for approval (a park check, with a reason that names no
+user name) and again when the approved request runs. Nothing is written.
+The error is `KeycloakDeleteRefusedError` with the reason
+`target_login_user`.
+
+| Write | Can it lock MEHO out? | What MEHO does |
+|---|---|---|
+| `user.delete` | yes | refused |
+| `user.disable` | yes: a disabled user cannot sign in | refused; the run checks and writes back one read |
+| `user.required_actions.update` | yes: an action such as `UPDATE_PASSWORD` stops a password sign-in | refused (add and remove) |
+| `user.reset_password` | yes: the target's stored password no longer works, and `temporary: true` adds `UPDATE_PASSWORD` | refused |
+| `secret.move` to `keycloak:<target>/<realm>/<user>#password` | yes, as `user.reset_password` | refused by the sink (`refuse_before_approval`, and again before the write) |
+| `user.credential.delete` | yes: it can delete the password, or a second factor the sign-in needs | refused |
+| `user.update` of `username` or `email` | yes: the target signs in with that name | refused; a first or last name is not |
+| `group.member.remove` | yes: the admin rights can come from a group | refused |
+| `role_mapping.client.remove` | yes: it can remove a `realm-management` role | refused |
+| removing a realm role | no such op | — |
+| `user.logout` | no: it ends open sessions; MEHO signs in again on its next call | not refused |
+| `user.enable`, `role_mapping.assign`, `role_mapping.client.assign`, `group.member.add` | no: they give, not take away | not refused |
+
+Writes on a realm, client or group, not on the user, are outside this
+check. `realm.delete` refuses the realm the target signs in to, and
+`client.delete` refuses the target's own client. `group.delete`,
+`client.update`, `realm.update` and the sign-in flow ops have no such check.
 
 ### One-time code set-up
 

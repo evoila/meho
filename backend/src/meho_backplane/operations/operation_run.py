@@ -543,7 +543,8 @@ async def cancel_run(
     Loads the run by id, checks the operator holds at least
     :data:`_MIN_CANCEL_ROLE` and may stop this run
     (:func:`~meho_backplane.auth.operator.may_stop_run`: the run's owner,
-    or a person with the ``tenant_admin`` role), then transitions it to ``cancelled`` via the
+    or a person with the ``tenant_admin`` role or a platform admin in the
+    tenant), then transitions it to ``cancelled`` via the
     same :func:`transition` guard every other status change uses -- so a
     cancel against an already-terminal run surfaces as
     :class:`IllegalOperationRunTransitionError` (409), not a silent no-op.

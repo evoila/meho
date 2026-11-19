@@ -7332,9 +7332,11 @@ type HealthResponse struct {
 
 // ImportedSensor What the import did, or would do, to one Sensor.
 type ImportedSensor struct {
-	Action        ImportedSensorAction `json:"action"`
-	ChangedFields *[]string            `json:"changed_fields,omitempty"`
-	Name          string               `json:"name"`
+	Action            ImportedSensorAction `json:"action"`
+	ChangedFields     *[]string            `json:"changed_fields,omitempty"`
+	IdentitySubAfter  *string              `json:"identity_sub_after"`
+	IdentitySubBefore *string              `json:"identity_sub_before"`
+	Name              string               `json:"name"`
 }
 
 // ImportedSensorAction defines model for ImportedSensor.Action.

@@ -249,6 +249,12 @@ async def cancel_operation_run(
     tenants). An already-terminal run is 409, not a 500. A ``read_only``
     operator is rejected by the route's role gate; the service's own role
     check is a defence-in-depth backstop mapped to 403.
+
+    A run that another login started is 403
+    ``operation_run_cancel_forbidden: <rule>``, and the run goes on. The
+    rule says who may stop it: the login that started the run, or a person
+    with the ``tenant_admin`` role or a platform admin in the tenant. An
+    agent or service login stops only its own runs.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["cancel"],

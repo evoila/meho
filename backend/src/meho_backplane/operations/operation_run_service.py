@@ -567,7 +567,7 @@ class OperationRunService:
         path. Tenant isolation is enforced here first (a cross-tenant /
         unknown handle raises ``OperationRunNotFoundError`` -> 404), matching
         :meth:`poll`. Only the run's owner, or a person with the
-        ``tenant_admin`` role, may stop it
+        ``tenant_admin`` role or a platform admin in the tenant, may stop it
         (``OperationRunNotOwnedCancellationError`` -> 403); the run goes on.
         The in-flight task is not torn down synchronously: it loses its
         lease on the next heartbeat and its result is discarded when it

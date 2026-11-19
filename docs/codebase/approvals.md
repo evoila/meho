@@ -1205,8 +1205,10 @@ The group rule (`_check_approver_group`, used by `approve_request` and
   it is another approver in this check;
 - for a group attribute change in the login realm, when the approver is in
   the group, or when MEHO could not read who is in the group;
-- in the login realm, when the approver is not a platform admin for the
-  platform admin group or role.
+- in the login realm, when the approver is not a platform admin and the
+  change can give platform admin rights (a group or role that gives them;
+  see "How MEHO decides that a group change gives platform admin rights"
+  in [connectors-keycloak.md](connectors-keycloak.md)).
 
 A request without the `grant` block, or with a group MEHO could not read,
 gets the strict rule. The decision audit row carries `grant_user_id`,
@@ -1493,11 +1495,11 @@ How the kinds are found:
 The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
 (`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
-`apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
+`apply_step_policy` while `POLICY_CLASSIFICATION` is on). The
 install's category is `EndpointDescriptor.policy_install_category`: the
 category from the install's classification entries and overrides alone.
 A step of a multi-step operation reads the override rows of its operation
-too (`apply_step_classification` passes them to `classify_step`), so a
+too (`apply_step_policy` passes them to `classify_step`), so a
 step and a direct call of the same operation get the same categories and
 the same approvers.
 When those entries give the operation two categories, it is the empty
@@ -3268,7 +3270,7 @@ classification (`approval_classification` in `operations/op_policy.py`):
 
 The values come from the looked-up row (`policy_category`,
 `policy_labels`, `policy_rule_ref`, set by `apply_effective_policy`, and
-by `apply_step_classification` for a step of a multi-step operation).
+by `apply_step_policy` for a step of a multi-step operation).
 So an approver sees at once what kind of change waits. The console
 modal shows the category as a badge next to the risk level, and the
 labels and rule below it (`data-testid="approval-classification"`).

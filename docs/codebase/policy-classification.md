@@ -191,7 +191,12 @@ approving that call.
 write step against a row built in memory from the step's declared risk
 level (`enforce_subop_policy` in `operations/composite.py`), and the
 preview checks the same steps (`operations/_preview_steps.py`). Both call
-`apply_step_classification` in `operations/op_policy.py` first. It
+`apply_step_policy` in `operations/op_policy.py` first. It reads the
+override rows of the step's operation (install-wide and the caller's
+tenant) like a direct call, with the switch on or off: the highest risk
+level wins, and an override that sets the approval flag makes the step
+wait. An override only makes a step stricter; one that turns approval off
+leaves the step's own flag as it is. With the switch on, it then
 classifies the step (`classify_step` in `policy/store.py`), raises its
 level and sets `policy_always_wait`. So a marked step waits for a person
 also when a standing grant or a run approval covers it, and also when a

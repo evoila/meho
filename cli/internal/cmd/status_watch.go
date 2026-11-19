@@ -37,8 +37,9 @@ type watchOptions struct {
 	// httptest.Server's Client(); production code leaves zero.
 	HTTPClient *http.Client
 	// Store overrides the default TokenStore. Tests pass an
-	// in-memory store; production code leaves nil and the resolver
-	// uses auth.NewTokenStore() (OS keyring with file fallback).
+	// in-memory store; production code leaves nil and
+	// api.NewAuthedClient uses auth.NewTokenStore() (OS keyring with
+	// file fallback).
 	Store auth.TokenStore
 	// Backoff overrides the default backoff schedule. Tests pass a
 	// fast schedule so the suite runs in tens of milliseconds, not
@@ -63,48 +64,40 @@ var defaultBackoff = []time.Duration{
 
 // runWatch opens the /api/v1/feed SSE stream and prints one rendered
 // line per broadcast event until ctx is cancelled (Ctrl-C, parent
-// cobra command lifetime). Reconnects on transport errors using
-// Last-Event-Id for replay; gives up immediately on
-// auth/role/contract failures since the operator action is required.
+// cobra command lifetime). Reconnects using Last-Event-Id for replay,
+// so no announcement is lost; gives up immediately on role/contract
+// failures since the operator action is required.
 //
 // The control flow is a single loop:
 //
-//  1. Load the bearer token from the configured store.
-//  2. Open one HTTP request to the SSE URL with the current
-//     Last-Event-Id (empty on the first attempt).
-//  3. On HTTP 401 / 403 / unexpected status, return immediately —
+//  1. Load the stored login once (an api.AuthedClient).
+//  2. Open one HTTP request to the SSE URL with the current access
+//     token and Last-Event-Id (empty on the first attempt).
+//  3. On HTTP 401, refresh the login once and reconnect at once. The
+//     server ends a stream when its token expires, so this is the
+//     normal path for a long watch. A second 401 in a row, or a failed
+//     refresh, returns auth_expired.
+//  4. On HTTP 403 / 400 / unexpected status, return immediately —
 //     none are recoverable by retry.
-//  4. On HTTP 200, stream events; update lastEventID after each one.
-//  5. On stream end (server hang-up, network error, anything that
+//  5. On HTTP 200, stream events; update lastEventID after each one.
+//  6. On stream end (server hang-up, network error, anything that
 //     isn't ctx.Err()), wait for the next backoff slot and reconnect.
-//  6. On ctx.Done() at any point, return nil (clean Ctrl-C exit).
+//     A stream the server ended cleanly starts the schedule again.
+//  7. On ctx.Done() at any point, return nil (clean Ctrl-C exit).
 //
 // Exit-code contract: any returned error already passed through
 // output.RenderError, so callers (the cobra RunE) propagate it as-is.
 func runWatch(ctx context.Context, opts watchOptions) error {
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	store := opts.Store
-	if store == nil {
-		s, err := auth.NewTokenStore()
-		if err != nil {
-			return output.RenderError(opts.Stderr,
-				output.Unexpected(fmt.Sprintf("token store: %v", err)),
-				opts.JSONOut)
-		}
-		store = s
-	}
 	backoff := opts.Backoff
 	if backoff == nil {
 		backoff = defaultBackoff
 	}
-
-	service, user := auth.KeyForContext(ctx, opts.BackplaneURL)
-	tok, err := store.Load(service, user)
+	client, err := api.NewAuthedClient(ctx, opts.BackplaneURL, api.AuthedClientOptions{
+		HTTPClient: opts.HTTPClient,
+		Store:      opts.Store,
+	})
 	if err != nil {
-		if errors.Is(err, auth.ErrTokenNotFound) {
+		if api.IsTokenNotFound(err) {
 			return output.RenderError(opts.Stderr,
 				output.AuthExpired(fmt.Sprintf("no stored credentials for %s; run `meho login %s`", opts.BackplaneURL, opts.BackplaneURL)),
 				opts.JSONOut)
@@ -113,7 +106,7 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 			output.Unexpected(fmt.Sprintf("load token: %v", err)),
 			opts.JSONOut)
 	}
-	if tok.AccessToken == "" {
+	if client.AccessToken() == "" {
 		return output.RenderError(opts.Stderr,
 			output.AuthExpired(fmt.Sprintf("stored token has no access_token; run `meho login %s`", opts.BackplaneURL)),
 			opts.JSONOut)
@@ -132,14 +125,15 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 
 	lastEventID := ""
 	attempt := 0
+	refreshed := false
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil
 		}
 		streamErr := streamOnce(ctx, streamArgs{
-			HTTPClient:  httpClient,
+			HTTPClient:  client.HTTPClient(),
 			URL:         feedURL,
-			Bearer:      tok.AccessToken,
+			Bearer:      client.AccessToken(),
 			LastEventID: lastEventID,
 			JSONOut:     opts.JSONOut,
 			Stdout:      opts.Stdout,
@@ -151,9 +145,26 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 		if streamErr == nil || errors.Is(streamErr, context.Canceled) {
 			return nil
 		}
+		if errors.Is(streamErr, errFeedTokenRefused) {
+			if refreshed {
+				return renderFeedAuthExpired(opts, nil)
+			}
+			if rerr := client.Refresh(ctx); rerr != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return renderFeedAuthExpired(opts, rerr)
+			}
+			refreshed = true
+			continue
+		}
+		refreshed = false
 		var fatal *fatalStreamError
 		if errors.As(streamErr, &fatal) {
 			return fatal.RenderedErr
+		}
+		if errors.Is(streamErr, errStreamEnded) {
+			attempt = 0
 		}
 		// Recoverable: log a one-line note to stderr (humans only —
 		// JSON mode keeps stdout clean) and sleep until the next
@@ -167,6 +178,21 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 		}
 		attempt++
 	}
+}
+
+// errFeedTokenRefused is what streamOnce returns for an HTTP 401: the
+// access token expired or was refused. runWatch refreshes the login
+// once and reconnects.
+var errFeedTokenRefused = errors.New("feed refused the access token")
+
+// renderFeedAuthExpired renders the auth_expired error of the feed: the
+// login could not be renewed, so the operator must sign in again.
+func renderFeedAuthExpired(opts watchOptions, refreshErr error) error {
+	msg := "backplane rejected stored credentials; run `meho login`"
+	if api.IsRefreshRejected(refreshErr) {
+		msg = "session expired; run `meho login`"
+	}
+	return output.RenderError(opts.Stderr, output.AuthExpired(msg), opts.JSONOut)
 }
 
 // streamArgs bundles the per-attempt parameters of streamOnce. Kept
@@ -246,10 +272,7 @@ func streamOnce(ctx context.Context, args streamArgs) error {
 	case http.StatusOK:
 		// happy path; fall through to the parser
 	case http.StatusUnauthorized:
-		rendered := output.RenderError(args.Stderr,
-			output.AuthExpired("backplane rejected stored credentials; run `meho login`"),
-			args.JSONOut)
-		return &fatalStreamError{RenderedErr: rendered, Cause: "401"}
+		return errFeedTokenRefused
 	case http.StatusForbidden:
 		rendered := output.RenderError(args.Stderr,
 			output.InsufficientRole("operator role required for the SSE feed; ask your tenant admin for an operator-role grant"),

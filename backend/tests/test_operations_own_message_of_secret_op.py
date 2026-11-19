@@ -229,6 +229,8 @@ _MARKED_TYPES = {
     "VaultTargetNotFoundError",
     # secret.move: Linux target name, id, host and port, the approved and the found ones.
     "LinuxTargetChangedError",
+    # secret.move: Keycloak target name, id and host, the approved and the found ones.
+    "KeycloakTargetChangedError",
     # secret.move: a fixed sentence with the field name at most; no Vault text.
     "SecretSinkChangedError",
     # secret.move: fixed sentences about a refused merge write; no Vault text.

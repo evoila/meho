@@ -1,4 +1,4 @@
-# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638, #4738)
+# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638, #4738, #4746)
 
 ## Overview
 
@@ -11,7 +11,7 @@ customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
 and the form-2 design, section 5, the `meho-host` table (the internal
 form-2 design note).
 
-This version has eight commands:
+This version has nine commands:
 
 - **`meho-host check [--json]`** prints a red/green list of the built-in
   Kubernetes (RKE2): the node, the pods, the disk and RKE2's certificates.
@@ -58,6 +58,11 @@ This version has eight commands:
   OpenBao and wait for the result.
 - **`meho-host unseal`** (#4738) unseals OpenBao by hand in keyholder mode
   and says `unsealed` or `sealed`.
+- **`meho-host reset-second-factor <user>`** (#4746) is the emergency way
+  back in for a person of a local account who lost the one-time code app
+  and the recovery codes. It removes both from the user in realm `meho`,
+  makes the next login ask for a new password and a new code app, and
+  writes one audit row for each tenant of the user.
 
 `keyholder` and `unseal` read the unseal key from a hidden prompt, or one
 line of standard input when it is not a terminal. The key is never an
@@ -89,6 +94,7 @@ the operating system against the CIS Linux benchmark, is not built yet
 | `tests/test_meho_host.py` | The tests of `check`, `support-bundle`, `admin-network`, `log-server` and `uninstall`, of each check line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
 | `tests/fake_cluster.py`, `tests/cluster_harness.py` | A fake `kubectl` that keeps state: the Secrets of namespace `meho` and the one OpenBao pod, with its seal state, its uid and the chart's unseal helper. `ClusterHost` is the fake machine with it. |
 | `tests/test_meho_host_certificate.py` | The tests of `certificate`. |
+| `tests/test_meho_host_second_factor.py` | The tests of `reset-second-factor`: root only (exit code 2 otherwise), the call into the core pod, and the exit codes it passes on. The reset module itself is tested in `backend/tests/test_core_reset_second_factor.py`, with saved Keycloak answers. |
 | `tests/test_meho_host_unseal.py` | The tests of `keyholder on`, `keyholder off` and `unseal`, and of the unseal key, which never appears in a command line, the output or a file. |
 | `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network`, `log-server` and `uninstall` tests start from it. |
 
@@ -244,10 +250,24 @@ too. Output that is not this JSON gives one red doctor line. See
    - The value of any variable whose name holds PASSWORD, TOKEN, SECRET or
      KEY, in any case, written as `NAME=value`, `NAME: value` (with or
      without the space) or as the JSON pair `"name": "value"` (MEHO's own
-     logs are JSON lines), becomes `[removed]`. `key` counts when it ends
+     logs are JSON lines, and a JSON line can hold JSON as a string:
+     `\"name\": \"value\"`), becomes `[removed]`. `key` counts when it ends
      the name or when a digit, `_`, `.` or `-` follows it (`api_key`,
      `apiKey`, `unseal-key`, `KEY_ID`), so `keycloak` is not a key name and
      Keycloak's addresses and image names stay readable.
+   - Three more forms, in any case:
+     - `Authorization: Bearer <token>` and `Authorization: Basic <token>`,
+       also in the JSON form `"Authorization": "Bearer <token>"`, become
+       `Authorization: Bearer [removed]`.
+     - The password in an address, `://user:password@host`, becomes
+       `://user:[removed]@host`. The user and the host stay, so support can
+       still read the address. The password runs to the last `@` before the
+       path, the query (`?`) or the fragment (`#`), so a password with an
+       `@` in it goes as a whole, and an `@` in the query stays.
+     - SQL's `PASSWORD '<value>'` and `PASSWORD "<value>"` become
+       `PASSWORD '[removed]'`. A quote mark written twice inside the value
+       (`'it''s'`) stays part of the value. The double-quoted form also
+       counts in a JSON log line, where each quote mark is `\"`.
    - Every known secret value becomes `[removed]` wherever it appears, for
      example in a log line. The values come from the core's Secrets in
      namespace `meho`: `kubectl get secrets -o go-template=...` decodes
@@ -413,6 +433,19 @@ the files of that folder in name order, so `10-` comes before Ubuntu's
      when nothing else uses it.
    - A failed `userdel` or `groupdel` is a `[WARN]` line with the command,
      and the uninstall goes on.
+   - The blackhole routes inside the pod range of the install (#6614).
+     Canal, the pod network of RKE2, adds such a route for the pod
+     addresses of the node, and RKE2's script leaves it until the machine
+     restarts. `install.sh` counts every route of the machine in its range
+     check (`machine_networks` in `lib/checks.sh`), so without this step a
+     new install stops with "The pod range ... overlaps". The command reads
+     `cluster_cidr` from `/etc/meho/install.json`, lists the routes with
+     `ip -4 route show`, and removes each `blackhole` route that lies
+     inside that range with `ip -4 route del blackhole <range>`. An
+     `[ok]` line names them. A route outside the range, a wider route, and
+     a route of another type stay. Without a range in the record, no route
+     is read. A failed `ip` call is a `[WARN]` line with the command, and
+     the uninstall goes on.
 4. Remove `/var/lib/meho` (the volumes and the one-time files) and every
    entry of `/etc/meho` except `firewall.nft`, and the drop-in
    `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf`, which
@@ -475,7 +508,15 @@ and `Nothing was changed.` when it fails:
    --patch-file=/dev/stdin` on standard input, so the key is never on a
    command line. A merge patch keeps the labels of the Secret. kubectl's
    messages are not shown, because an error text could quote the patch.
-6. Print the certificate line of `check`, which reads the Secret again
+6. Write the CA, the last certificate, to `/var/lib/meho/console-ca.crt`
+   (`write_console_ca`, mode 0644), the file that `install.sh` writes at
+   its end ([linux-server-install.md](linux-server-install.md), Step 6). So
+   the file names the CA of the new certificate without a new run of
+   `install.sh`. The file is written as `console-ca.crt.new` and then
+   moved, so nobody reads half a file. The Secret holds the new
+   certificate already, so a file that cannot be written gives only a
+   `[WARN]` line.
+7. Print the certificate line of `check`, which reads the Secret again
    with the same rule. A certificate with 30 days or less left is
    installed, and the line is a `[WARN]`.
 
@@ -574,6 +615,64 @@ unsealed.
 
 `unseal` never creates the Secret, so it does not switch the mode.
 
+### `reset-second-factor`
+
+The work runs in the core, not in bash: `meho-host` runs
+`python -m meho_backplane.core.reset_second_factor --by <linux user>
+--host <host> -- <user>` in the `backplane` container of the Deployment
+`meho` with `kubectl exec` (`backend/src/meho_backplane/core/reset_second_factor.py`).
+Why there:
+
+- The container already has the `meho-admin` login for the Keycloak Admin
+  REST API (`KEYCLOAK_ADMIN_URL`, `KEYCLOAK_ADMIN_CLIENT_ID`,
+  `KEYCLOAK_ADMIN_CLIENT_SECRET`). So the secret never leaves the cluster,
+  is in no command line and is never printed.
+- It writes the audit row with the backplane's own database access and
+  the `AuditLog` model. No other host command writes an audit row.
+
+Steps of the module:
+
+1. Log in as `meho-admin` (`client_credentials`).
+2. Find the user: `GET /admin/realms/meho/users?username=<user>&exact=true`,
+   then keep only the user whose name matches without case (Keycloak
+   ignores case in user names). None: `[FAIL]`, nothing changed.
+3. Read the user, and the user's groups: the tenants of the user are the
+   tenants that the groups' `meho_tenant` attribute names.
+4. Check that the database answers (`SELECT 1`). If not: `[FAIL]`, nothing
+   changed.
+5. `GET .../users/{id}/credentials`, and `DELETE .../credentials/{id}` for
+   each of type `otp` and `recovery-authn-codes`. A 404 means it is gone
+   already.
+6. `PUT .../users/{id}`: the user read in step 3 with `UPDATE_PASSWORD`
+   and `CONFIGURE_TOTP` added to `requiredActions` (PUT replaces the whole
+   list, so the other actions stay).
+7. Write one `audit_log` row for each tenant of the user, in one
+   transaction: class `operation_execution`, `operator_sub`
+   `system:meho-host`, method `INTERNAL`, path and `payload["op_id"]`
+   `meho-host.reset-second-factor`, and in `payload` the Linux user, the
+   host, the Keycloak user name and id, the removed credential types, the
+   required actions set, `maybe_changed` and `result`. The audit query
+   always filters on the caller's tenant, so one row per tenant lets an
+   admin of each tenant find the reset, and no tenant sees another's ids.
+   A user in no tenant gets one row without a tenant.
+
+When step 5 or 6 fails after something changed, the row is still written,
+with `result: error` and status 500, and the command fails. A write whose
+reply was lost (a timeout, no HTTP answer) may have worked: it goes into
+`maybe_changed` (`otp`, `recovery-authn-codes` or `required_actions`), the
+row is written, and the command does not say "Nothing was changed". A
+write that Keycloak refused with an HTTP answer did not happen. When the row
+cannot be written, the command fails after the lines of what changed: it
+never reports success without the row. A second run is safe: it finds no
+code to remove and the actions set already.
+
+Exit codes: the module ends with 0 (done) or 3 (failed, after a `[FAIL]`
+line). `meho-host` turns 3 into its own 1, and any other code (the pod
+does not answer, kubectl fails) into a `[FAIL]` line of its own and 1. Run
+as another user than root, `meho-host` changes nothing and exits 2. The
+Linux user is `SUDO_USER`, or `root` without sudo. kubectl's request
+timeout is 2 minutes for this call, not RKE2's usual 10 seconds.
+
 ### The unseal key stays out of sight
 
 - `read -r -s -p` reads the key. On a terminal, read prints the prompt and
@@ -643,7 +742,10 @@ and `groupdel` stubs remove their lines from the fake `/etc/passwd` and
 `userdel` stub also removes the group of the same name, and the answer
 `usergroups_enab` turns that off. The tests cover each content of the
 record (both parts, only the group, only the user, no record), a failed
-`userdel` and `groupdel`, and the last line. `InstallUpdateUninstallTests`
+`userdel` and `groupdel`, and the last line. The `ip` stub lists the
+routes of the answer `ip_route` and logs each `route del`; the tests
+cover blackhole routes inside and outside the pod range, a record
+without a range, and a failed list and a failed delete. `InstallUpdateUninstallTests`
 runs `install.sh`, then the update, then the `meho-host` that the install
 put on the machine, so it proves that the update keeps the record of the
 first install and that `uninstall` then removes the account. It also
@@ -719,8 +821,12 @@ certificate only for client logins (`usage="clientAuth"`), a certificate
 that is not yet valid, a missing intermediate, only one certificate, the
 server certificate twice, no certificate, a first block that is not a
 certificate, an encrypted key, a certificate as the key, a file that cannot
-be read, no install record, no `openssl` and a failed write. The check
-line has the client-only case too, alone and with an expired certificate.
+be read, no install record, no `openssl` and a failed write. The CA file
+of the install is replaced by the new CA (mode 0644), is written when it
+was missing, stays as it was when a check refuses the certificate, and a
+folder that cannot be written gives only a `[WARN]` (skipped as root). The
+check line has the client-only case too, alone and with an expired
+certificate.
 The unseal tests cover each step of the three commands and each way it
 fails: in `keyholder on` RKE2 down, a Secret without a key, a wrong key, a
 failed delete, a failed restart, no answer and a pod that someone already
@@ -781,10 +887,17 @@ packages later.
   certificate` (#4738) writes the same Secret. A change of
   `ingress.tls.secretName` needs a change of `CONSOLE_TLS_SECRET`.
 - **`certificate` prints the check line, not the first-start list.** The
-  first-start list of the backplane (#4042) is not built yet. Until it is,
-  `certificate` prints the certificate line of `check`, which applies the
-  same rule to the Secret it just wrote (a `shortcut:` comment in
-  `command_certificate`). When #4042 lands, `certificate` prints that list.
+  first-start list (`meho status --first-start`, which `install.sh` shows
+  at its end) fetches the certificate through the console address. Traefik
+  shows the new Secret only within a minute, so right after the patch the
+  list could still see the old certificate. The check line applies the
+  same rule to the Secret that `certificate` just wrote.
+- **The first-start list trusts only the CA store of the MEHO pod.** Its
+  `certificate` line is green only when the backplane trusts the CA of
+  the console certificate. The pod does not trust the `ca.crt` of
+  `meho-core-tls` by itself, and form 2 has no command that adds a CA to
+  its trust store. So with the install's own CA, and with a customer CA
+  that is not in the pod's store, the line stays red.
 - **The OpenBao names are fixed.** The commands use the StatefulSet
   `meho-vault`, its pod `meho-vault-0`, the container `bao` and the Secret
   `meho-core-vault-unseal`: the names of the release `meho` with the chart's
@@ -804,8 +917,8 @@ packages later.
   (#3960) are not part of them.
 - **The certificate line checks the Secret, not the connection.** It does
   not connect to port 443, so it does not prove that Traefik serves this
-  Secret. The first-start list (#4042, not built yet) is planned to fetch
-  the certificate through the console address.
+  Secret. The first-start list fetches the certificate through the console
+  address, so it shows what Traefik serves.
 
 - **The Traefik pods are found by name.** The bundle takes the `kube-system`
   pods whose name starts with `rke2-traefik-`, which is how RKE2's
@@ -815,10 +928,9 @@ packages later.
   space in it is removed only up to the space, unless it is in quotes. The
   two one-time files hold no spaces, and their values are removed as a
   whole.
-- **Text the scrub misses.** `Authorization: Bearer <token>`, a password
-  inside a database address, written as `user:password@host`, and SQL
-  `PASSWORD '<value>'` are not removed. They are rare in MEHO's logs; #5012
-  adds them.
+- **Text the scrub misses.** A secret in a shape the rules do not know is
+  not removed, for example a private key in PEM form or a session cookie.
+  Nothing in the bundle holds one today: Secret data is never read.
 - **No size limit on the logs.** A pod with a very large log makes a large
   bundle. `kubectl logs --tail` can be added when that happens.
 - **Not root is a `[FAIL]` line, not JSON.** `meho doctor` (#4740) runs

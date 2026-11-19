@@ -470,7 +470,7 @@
         "approvalAllowSelfApproval": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "Self-approval audited break-glass switch (#1401, #2669), rendered unconditionally into the `APPROVAL_ALLOW_SELF_APPROVAL` env var (`parse_bool_env` in `backend/src/meho_backplane/settings.py` reads it). Constrained to `\"true\"` / `\"false\"` so a typo fails at install rather than being silently coerced. Default `\"false\"` (fail-closed) enforces the four-eyes rule: the operator who requested a parked `requires_approval` write may not approve their own request (requester != approver). Set `\"true\"` ONLY for a genuine, audited emergency — it lifts the guard posture-wide and re-opens the single-account request+grant hole for every op, so it is NOT the single-operator answer (that is an agent-requester: park the write under a scheduled agent run whose distinct subject clears the gate with no flag). Deliberately absent from `config.required` — the safe default carries every install. Even under break-glass a self-approval is forensically visible: a decision audit row (requester == approver), a WARNING `approval_self_approval_break_glass` log, and `GET /ready` → `features.approval_queue.effective_posture: single_operator_break_glass`. See the operator guide (docs-site \"Do real work → Approvals and break-glass\") and `docs/codebase/approvals.md`."
+          "description": "Self-approval audited break-glass switch, rendered unconditionally into the `APPROVAL_ALLOW_SELF_APPROVAL` env var (`parse_bool_env` in `backend/src/meho_backplane/settings.py` reads it). Constrained to `\"true\"` / `\"false\"` so a typo fails at install rather than being silently coerced. Default `\"false\"` (fail-closed) enforces the four-eyes rule: the operator who requested a parked `requires_approval` write may not approve their own request (requester != approver). Set `\"true\"` ONLY for a genuine, audited emergency — it lifts the guard posture-wide and re-opens the single-account request+grant hole for every op, so it is NOT the single-operator answer (that is the MEHO-SA-Operators group: its members approve their own changes on purpose in the web interface). Deliberately absent from `config.required` — the safe default carries every install. Even under break-glass a self-approval is forensically visible: a decision audit row (requester == approver), a WARNING `approval_self_approval_break_glass` log, and `GET /ready` → `features.approval_queue.effective_posture: single_operator_break_glass`. See the operator guide (docs-site \"Do real work → Approvals and break-glass\") and `docs/codebase/approvals.md`."
         },
         "approvalAllowDelegatedDecision": {
           "type": "string",
@@ -524,7 +524,16 @@
         "mcpShortToolTexts": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+          "description": "Send a short text for the biggest tools on the default MCP tool list, and no output schemas. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpProfileConnectorLists": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "The profiles of `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use only the connectors of that profile. Rendered into `MCP_PROFILE_CONNECTOR_LISTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpConnectorProfiles": {
+          "type": "string",
+          "description": "Extra MCP tool profiles as one JSON object, each with a base tool list and a connector list. Rendered into `MCP_CONNECTOR_PROFILES`. Empty means none; a bad value stops the start. Read only when `mcpProfileConnectorLists` is `\"true\"`. See `docs/codebase/mcp.md`."
         },
         "mcpClientPerToolKind": {
           "type": "string",
@@ -1734,6 +1743,26 @@
           "minLength": 1,
           "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
           "description": "Namespace label value selecting the ingress controller. Must match RFC 1123 label syntax."
+        },
+        "ingressControllerEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Labels of the ingress controller Pods in ingressControllerNamespace. Empty: no rule."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The Pod port of the HTTPS entry point of the ingress controller (Traefik: 8443)."
+            }
+          },
+          "description": "An egress rule to the ingress controller Pods, so the backplane can reach its own console address (the first-start certificate check). Rendered only when podLabels is not empty."
         },
         "postgresCIDR": {
           "type": "string",

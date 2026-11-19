@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A person approves each call of the four Keycloak account writes.
+"""A person approves each call of the Keycloak writes that give rights.
 
-* The Keycloak connector marks the four writes for per-call approval when
+* The Keycloak connector marks these writes for per-call approval when
   it is imported.
 * Creating a standing grant for any of them is refused.
 * A grant row stored some other way (for example an older one) does not
@@ -39,10 +39,12 @@ _TENANT = uuid.UUID("00000000-0000-0000-0000-000000006238")
 _CONNECTOR = "keycloak-admin-26.x"
 _SERVICE_SUB = "svc:keycloak-account-writer"
 _OPS = (
+    "keycloak.role_mapping.assign",
     "keycloak.role_mapping.client.assign",
     "keycloak.role_mapping.client.remove",
     "keycloak.user.update",
     "keycloak.user.credential.delete",
+    "keycloak.group.member.add",
 )
 
 
@@ -84,7 +86,7 @@ async def test_no_new_grant_and_no_run_approval(op_id: str) -> None:
     assert refusal is not None
 
 
-@pytest.mark.parametrize("op_id", ["keycloak.role_mapping.client.assign", "keycloak.user.update"])
+@pytest.mark.parametrize("op_id", _OPS)
 async def test_an_older_grant_row_does_not_clear_a_call(op_id: str) -> None:
     await KeycloakConnector.register_operations()
     async with get_sessionmaker()() as session:

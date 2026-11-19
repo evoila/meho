@@ -385,6 +385,16 @@ egress rules to:
   on `broadcast.enabled: true` and is omitted when the broadcast subchart
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
+- The console address — only when
+  `networkPolicy.ingressControllerEgress.podLabels` is set (default
+  `{}`, #6612): `tcp/<ingressControllerEgress.port>` (default 8443) to
+  the Pods with those labels in `ingressControllerNamespace`. The
+  first-start `certificate` check connects to the backplane's own
+  address, and the host port or Service in front of the ingress sends
+  that connection to the ingress Pod before the rule is checked. This is
+  a separate key, not an `extraEgress` item, because a later values file
+  that sets `extraEgress` replaces the whole list. Install form 2 sets it
+  for RKE2's Traefik (`app.kubernetes.io/name: rke2-traefik`)
 - Operator rules — every item of `networkPolicy.extraEgress` (default
   `[]`), added after the rules above, exactly as written (#3516)
 
@@ -1506,6 +1516,7 @@ them).
 | `probes.startup.*` | `/healthz` httpGet + 15-min first-boot budget (#2393, #4102) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
+| `networkPolicy.ingressControllerEgress.podLabels` / `.port` | `{}` / `8443` | Labels and Pod port of the ingress controller, so MEHO can reach its own console address (#6612). Empty labels: no rule. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |
@@ -2076,6 +2087,26 @@ repo, #761). The set depends on the event:
 - Every other event (pull requests and the nightly run):
   `meho-runners-ci-heavy`.
 
+Measured wait for a heavy runner, 16 Nov 2026, 16:32 to 18:32 UTC
+(#6590). The data is from the Actions jobs API, one row per job:
+
+- Merge-queue runs: 42 jobs on `meho-runners-ci-heavy-queue`, none on
+  `meho-runners-ci-heavy`. Middle wait 7.3 min, longest 14.7 min. The
+  `test_no_merge_group_job_uses_the_shared_heavy_pool` test keeps it so.
+- Pull request runs: 127 jobs on `meho-runners-ci-heavy`. Middle wait
+  45 min, 90th percentile 91 min, longest 118 min. 21 of 22 runs
+  started six heavy jobs. The test map gave a narrow run for none of
+  them. Reasons seen: a migration changed (6 runs), a new source file
+  the map did not know (11, fixed by #6597 after the window), the map
+  picked 2,000 tests or more (2), a workflow or test helper changed (3).
+- No heavy job of a replaced pull request run kept a runner: no
+  cancelled job had started.
+- Pool size, from replaying the same jobs through a first-come queue
+  (the fit to the 45 min middle wait is a pool of about 11 runners):
+  +2 runners give a middle wait of about 24 min, +4 give about 19 min.
+  Under 20 min needs about 4 more runners. A pool change is for the
+  owner to decide.
+
 Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
 their shards filled the heavy runners and the merge queue's shards
@@ -2125,7 +2156,7 @@ Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=900`; 660 s until 2026-10-24, scaled
+perf-budget-guard step (`budget_s=1200` for all six shards; 900 s until 2026-11-18; 660 s until 2026-10-24, scaled
 from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
@@ -2207,7 +2238,13 @@ shape (deterministic file-level matrix + fan-in):
   morning, and the count is 6. In the run that failed on time, the
   slowest shard carried 2,568 s of test time (933 s). Fresh file times
   with five shards would still leave 2,344 s (about 850 s); with six
-  shards it is 1,965 s (about 720 s). To change the count, edit the
+  shards it is 1,965 s (about 720 s). On 2026-11-17 shard 2 ran 915 s
+  in the merge queue, with every test passing (#6662). The file times
+  were refreshed again, and all six shards got a budget of 1200 s.
+  Measured in that merge-queue run: 765, 915, 873, 850, 805 and 854 s,
+  which is 64 to 76 percent of 1200 s, so every shard stays under 80
+  percent. The gate stays on. A seventh shard was not added: it changes
+  the required check names. To change the count, edit the
   matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
@@ -2638,8 +2675,8 @@ on a secret:
   mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
-  the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the
-  token value.
+  the job-env boolean `SPEC_SHELF_READY` — `true` when the token and the
+  `SPEC_SHELF_REPOSITORY` secrets are both set; never the token value.
 
 Licensing record, signoff gate, and the full provisioning/rotation runbook:
 [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md).
@@ -2658,6 +2695,37 @@ example SonarCloud gets no coverage for the run) but never invalidates
 the test outcome, and `quality-gate.yml` already guards its own
 `actions/download-artifact` with `continue-on-error` for the same
 reason.
+
+### Internal names come from repository secrets
+
+The workflows name no internal host, repository or CA. They read four
+repository secrets instead:
+
+| Secret | Holds | Read by |
+|---|---|---|
+| `CI_IMAGE_PROXY` | `<host>/<project>` of the image proxy cache of the CI cluster | `ci.yml` (test images), `security-scan.yml` (Semgrep image), `runner-smoke.yml` |
+| `SPEC_SHELF_REPOSITORY` | `<owner>/<name>` of the vendor spec shelf | `ci.yml` (shelf checkout) |
+| `CI_PROXY_CA_NAME` | the common name of the CA that signs the proxy certificate | `runner-smoke.yml` |
+| `RKE2_OIDC_AUDIENCE` | the OIDC audience the CI cluster API server trusts | `pr-smoke.yml` |
+
+- **Why secrets, not repository variables.** The run logs of this
+  public repository can be read by everyone. GitHub prints each step's
+  `env:` and inputs in the log before the step runs, and a container
+  image before any step runs. A variable shows there in clear, before an
+  `::add-mask::` can hide it. A secret shows as `***` everywhere.
+- **No `container:` with the proxy.** `container.image` cannot read a
+  secret, so the Semgrep job runs its image with `docker run` in a step.
+- **The first step checks them.** In the jobs that need them, the step
+  "Read the CI repository secrets" (`scripts/ci/repo_secrets.sh`) fails
+  with a message that names an empty secret, so no test skips quietly.
+  It also hides the parts of a value that GitHub does not hide on its
+  own (the proxy host, the shelf name without its owner) and sets the
+  test images. In another repository (a fork that runs the workflows
+  itself) the images come from Docker Hub instead.
+- **Dependabot runs** read only the Dependabot secret store, so
+  `CI_IMAGE_PROXY` and `SPEC_SHELF_REPOSITORY` must be set there too.
+- `backend/tests/test_ci_repo_secrets.py` checks all of this, and that
+  no workflow reads these names from `vars`.
 
 ### Why no image build job
 
@@ -2919,7 +2987,7 @@ their isolation posture:
 | `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325) for pull requests; the merge-queue run uses a hosted runner (#6350) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
-| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job pulls its scan image from the internal image proxy, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
@@ -3189,8 +3257,9 @@ Steps, in order:
    `azure/setup-helm@v5.0.1` (same SHA as `chart.yml`).
 5. **Configure kubectl (OIDC mode)** — `actions/github-script@v9.0.0`
    mints an OIDC ID token via `core.getIDToken(audience)` against the
-   consumer-chosen audience (a default in the workflow, override
-   via `vars.RKE2_OIDC_AUDIENCE`). Skipped when Option A's inputs
+   consumer-chosen audience from the repository secret
+   `RKE2_OIDC_AUDIENCE`. There is no default: when the secret is empty,
+   the step fails with a message that names it. Skipped when Option A's inputs
    aren't set, so Option B's kubeconfig path takes over below.
 6. **Build kubeconfig** — assembles `$HOME/.kube/config` from either
    the OIDC token + CA cert (Option A) or the base64-decoded

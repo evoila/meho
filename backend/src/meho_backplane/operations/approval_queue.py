@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -104,6 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     classify_op,
     holds_hidden_param_values,
@@ -137,6 +138,10 @@ from meho_backplane.operations._errors import (
     result_target_gone_since_approval,
 )
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
+from meho_backplane.operations._target_connector_limit import (
+    restored_connector_limit,
+    stored_connector_limit,
+)
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     params_hash_candidates,
@@ -161,6 +166,7 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
+from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import (
     is_secret_reveal,
     result_waiting_for_requester,
@@ -180,10 +186,14 @@ from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
 from meho_backplane.policy.routing import (
     ROUTING_INVALID_RULE,
+    group_names,
     routing_enabled,
     routing_refusal,
     stamp_approver_set,
+    stored_kinds,
+    today_kinds,
 )
+from meho_backplane.policy.routing_floor import load_install_floor
 from meho_backplane.version import running_release_id
 from meho_backplane.work_ref import work_ref_filter_values
 
@@ -246,6 +256,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "rights_change_note",
     "take_approval_lock",
     "withdraw_request",
 ]
@@ -480,8 +491,9 @@ class SelfApprovalForbiddenError(ApprovalError):
     Break-glass never covers a ``dangerous`` or ``destructive`` change
     (*high_risk*). The route layer maps this to 403.
 
-    The message says who can approve instead. For a lower-risk change it
-    also names the break-glass switch.
+    The message says who can approve instead and where to ask: the groups
+    in *approver_kinds* (:func:`_approver_kinds`), on the Approvals page.
+    The text names no setting and no other way to approve the change.
 
     Reject is deliberately *not* guarded — an operator withdrawing their
     own pending request is not a privilege escalation.
@@ -492,38 +504,35 @@ class SelfApprovalForbiddenError(ApprovalError):
         request_id: uuid.UUID,
         *,
         principal_sub: str,
+        approver_kinds: Sequence[str],
         high_risk: bool = False,
         web_click_allowed: bool = False,
     ) -> None:
         self.request_id = request_id
         self.principal_sub = principal_sub
         self.high_risk = high_risk
-        if high_risk:
-            who_can = (
-                f"Ask {_HIGH_RISK_APPROVERS_TEXT} to approve this dangerous or destructive change."
-            )
-        elif web_click_allowed:
+        if web_click_allowed:
             # #3980: the change waits only because it came with a token.
             who_can = (
                 "This change waits only because it came with a token, so you may "
                 "approve it yourself with a click in the web interface."
             )
+        elif approver_kinds:
+            who_can = (
+                f"Ask another person in {group_names(approver_kinds)} to approve it. "
+                "They find it on the Approvals page of the web interface."
+            )
         else:
-            who_can = "Ask another operator, an admin or an approver to approve it."
+            who_can = "No group may approve this change, so it waits until it expires."
         #: The plain refusal text, without ids, for the web interface.
         self.reason_text = (
             "You cannot approve your own change. Only members of the "
             "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
             f"changes. {who_can}"
         )
-        break_glass = (
-            ""
-            if high_risk
-            else " (set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)"
-        )
         super().__init__(
             f"operator {principal_sub!r} may not approve approval_request "
-            f"{request_id}: {self.reason_text}{break_glass}"
+            f"{request_id}: {self.reason_text}"
         )
 
 
@@ -1555,6 +1564,8 @@ async def create_pending_request(
     reveal_secret: bool = False,
     rights_change: bool = False,
     category: str | None = None,
+    wait_reason: str | None = None,
+    install_category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1635,8 +1646,15 @@ async def create_pending_request(
             without it.
         category: The category the classification gave the operation
             (the looked-up row's ``policy_category``). Approver routing
-            matches a ``category`` entry on it
+            matches a tenant's ``category`` entry on it
             (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
+        wait_reason: Why the policy gate made the call wait. The
+            ``approval.request`` audit row keeps it as ``wait_reason``.
+        install_category: The category the install's policy alone gives
+            the operation (the looked-up row's
+            ``policy_install_category``). The install's routing entries
+            match on it, so a tenant that moves the operation to another
+            category cannot take it away from the install's routing.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1769,12 +1787,15 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        allowed_connectors=stored_connector_limit(),
         **_policy_rule_fields(),
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
     try:
-        await stamp_approver_set(session, request, category=category)
+        await stamp_approver_set(
+            session, request, category=category, install_category=install_category
+        )
     except ValueError as exc:
         await _audit_routing_refusal(operator, request, request_audit_id, str(exc))
         raise
@@ -1802,6 +1823,7 @@ async def create_pending_request(
         path="approval.request",
         status_code=_APPROVAL_STATUS_CODE,
         duration_ms=0.0,
+        extra_payload={"wait_reason": wait_reason} if wait_reason else None,
     )
 
     _log().info(
@@ -1819,6 +1841,26 @@ async def create_pending_request(
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def rights_change_note(request: ApprovalRequest) -> str | None:
+    """The note for a change of rights that no other admin could approve (#6641).
+
+    The request is stored all the same, so an admin added later can still
+    approve it. ``None`` for any other request, when another admin could
+    approve, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+
+    The note is extra help only. When reading it fails, the answer is
+    ``None`` and the request still waits for approval as stored.
+    """
+    if not is_rights_change(request):
+        return None
+    try:
+        return await only_admin_note(request.tenant_id, request.principal_sub)
+    except Exception:
+        _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
+        return None
 
 
 async def _audit_routing_refusal(
@@ -2137,6 +2179,10 @@ async def approve_request(
     }
     if reason:
         extra["reason"] = reason
+    # The install's routing entry that counted at this click (the floor).
+    floor = getattr(request, "_approver_floor", None)
+    if floor is not None:
+        extra["approver_floor"] = floor
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     extra.update(_approver_client_fields(operator, user_agent))
@@ -2895,6 +2941,9 @@ async def refuse_resume_if_preview_changed(
     preview hash: the login and the group it is for must still have the
     ids the approver saw
     (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+    A fourth check runs for an operation whose card shows the object as it is
+    now: that state must still be the one the approver saw
+    (:func:`~meho_backplane.operations.approval_state_pin.state_changed_since_request`).
     Returns ``None`` when all hold. Else the operation does not run: the
     refusal is stored as the request's run result, so every read surface
     shows the run as failed with the ``preview_changed_since_approval`` or
@@ -2921,6 +2970,8 @@ async def refuse_resume_if_preview_changed(
         reason = await object_changed_since_request(operator, request, target, params)
         if reason is None:
             reason = await grant_changed_since_request(operator, request, target, params)
+        if reason is None:
+            reason = await state_changed_since_request(operator, request, target, params)
         if reason is None:
             return None
         refusal = result_object_changed_since_approval(
@@ -3299,6 +3350,11 @@ async def _dispatch_resume_with_bound_context(
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.
 
+    A hosted agent's connector list, stored on the row, is bound again
+    (:func:`~meho_backplane.operations._target_connector_limit.restored_connector_limit`),
+    so the run and each step of a multi-step operation stay on targets of
+    the agent's connectors, also after the agent stopped waiting.
+
     *reveal_secret* is the requester's ``reveal_secret: true``, stored on
     the request row. It goes on the params of the run, so the answer holds
     the values the requester asked for; the dispatcher stamps the choice on
@@ -3321,6 +3377,7 @@ async def _dispatch_resume_with_bound_context(
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
+            restored_connector_limit(request.allowed_connectors),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,
@@ -3824,8 +3881,29 @@ def _check_self_approval(
         return ApprovalRule.BREAK_GLASS_SELF_APPROVAL
 
     raise SelfApprovalForbiddenError(
-        request.id, principal_sub=operator.sub, high_risk=high_risk, web_click_allowed=token_wait
+        request.id,
+        principal_sub=operator.sub,
+        approver_kinds=_approver_kinds(request),
+        high_risk=high_risk,
+        web_click_allowed=token_wait,
     )
+
+
+def _approver_kinds(request: ApprovalRequest) -> tuple[str, ...]:
+    """The login group kinds that may approve *request* for another person.
+
+    The same rules the approve checks: today's group rule
+    (:func:`~meho_backplane.policy.routing.today_kinds`), and with approver
+    routing on, only the kinds the request stored as well. Used for the
+    "who may approve" part of :class:`SelfApprovalForbiddenError`.
+    """
+    kinds = today_kinds(_request_safety_level(request), request.op_id)
+    if not routing_enabled():
+        return kinds
+    stored = stored_kinds(request.approver_roles)
+    if stored is None:
+        return kinds
+    return tuple(kind for kind in kinds if kind in stored)
 
 
 def _check_approver_group(
@@ -3913,6 +3991,35 @@ def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None
         )
 
 
+async def _check_install_floor(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Raise :class:`ApprovalRoutingError` when the install's current routing refuses *operator*.
+
+    The install's routing is a floor: it is checked first, with the
+    install's file as it is now, then the stored group kinds
+    (:func:`_check_routed_approver`). Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off
+    (:class:`~meho_backplane.policy.routing_floor.InstallFloor`). When an
+    install entry counted, its place is kept on *request* for the approve
+    audit row (``approver_floor``).
+    """
+    floor = await load_install_floor(session)
+    if floor is None:
+        return
+    refusal = floor.refusal(operator, request)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+    found = floor.check(request)
+    if found is not None and found.floor is not None:
+        request._approver_floor = found.floor  # type: ignore[attr-defined]
+
+
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
     """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
     from meho_backplane.policy.shadow import shadow_approval
@@ -3933,7 +4040,8 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → the stored approver group kinds
+    (:func:`_check_approver_role_floor`) → the install's current approver
+    routing (:func:`_check_install_floor`) → the stored approver group kinds
     (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
@@ -3961,6 +4069,7 @@ async def _load_pending_for_approval(
         _shadow_approval(operator, request, today=False)
         raise
     _shadow_approval(operator, request, today=True)
+    await _check_install_floor(session, operator, request)
     _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
@@ -4123,6 +4232,11 @@ async def pending_chain_positions(
     returned; a lone request has no order to show. The numbers count
     pending requests only, so step 1 is always the oldest request that
     still waits. Tenant-isolated by the WHERE clause.
+
+    With *work_ref*, every row the filter matches is one group, keyed by
+    *work_ref*. The filter matches the cleaned id and the text as typed
+    (:func:`work_ref_filter_values`), so rows of one ticket stored in two
+    forms get one numbering, the same rows the filtered list shows.
     """
     stmt = (
         select(ApprovalRequest.id, ApprovalRequest.work_ref)
@@ -4137,7 +4251,7 @@ async def pending_chain_positions(
         stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     groups: dict[str, list[uuid.UUID]] = {}
     for request_id, ref in (await session.execute(stmt)).all():
-        groups.setdefault(ref, []).append(request_id)
+        groups.setdefault(ref if work_ref is None else work_ref, []).append(request_id)
     positions: dict[uuid.UUID, ChainPosition] = {}
     for ref, ids in groups.items():
         if len(ids) < 2:

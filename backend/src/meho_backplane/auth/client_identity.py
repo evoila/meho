@@ -52,6 +52,9 @@ from meho_backplane.settings import get_settings
 #: The payload key of the block.
 CLIENT_PAYLOAD_KEY: Final[str] = "client"
 
+#: The audit payload field that names the session's MCP tool profile (#6099).
+MCP_PROFILE_PAYLOAD_KEY: Final[str] = "mcp_profile"
+
 #: How many hex characters of the SHA-256 of ``sid`` are kept.
 _SID_HASH_LENGTH: Final[int] = 16
 
@@ -122,9 +125,15 @@ def apply_client_block(payload: dict[str, Any], operator: Operator) -> None:
 
     The block always comes from the checked login, so it replaces any
     ``client`` key that came another way.
+
+    A session with an MCP tool profile (#6099) also gets the profile name in
+    the ``mcp_profile`` field, with or without the switch, so every audit
+    row of the session names it. It is never put into ``actor_sub``.
     """
     if client_identity_enabled():
         payload[CLIENT_PAYLOAD_KEY] = build_client_block(operator)
+    if operator.mcp_tool_profile is not None:
+        payload[MCP_PROFILE_PAYLOAD_KEY] = operator.mcp_tool_profile
 
 
 def bind_request_client(operator: Operator) -> None:

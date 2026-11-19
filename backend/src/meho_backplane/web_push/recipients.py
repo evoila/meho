@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_rights import approve_right_any_status
+from meho_backplane.policy.routing_floor import load_install_floor
 from meho_backplane.web_push.models import PushSubscription
 
 __all__ = [
@@ -126,11 +127,15 @@ async def subscriptions_for(
     Only rows of the request's tenant, with login facts read in the last
     :data:`FACTS_MAX_AGE`.
     """
+    floor = await load_install_floor(db)
     rows = await db.execute(_fresh_rows(request.tenant_id, now or datetime.now(UTC)))
     targets: list[PushTarget] = []
     for row in rows.scalars():
         operator = _operator_of(row)
-        if operator is not None and approve_right_any_status(operator, request).may_approve:
+        if (
+            operator is not None
+            and approve_right_any_status(operator, request, floor=floor).may_approve
+        ):
             targets.append(_target(row))
     return targets
 

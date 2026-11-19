@@ -436,7 +436,7 @@ func TestShowPathParamCarriesUUID(t *testing.T) {
 // with the operator-visible hint — no panic, no fmt-into-the-URL.
 func TestShowRejectsGarbageID(t *testing.T) {
 	cmd, _, stderr := newCapturingCmd(t)
-	err := runShow(cmd, "not-a-uuid", true, "https://meho.example")
+	err := runShow(cmd, "not-a-uuid", true, "https://meho.example", 0)
 	assertRenderedErrorCode(t, stderr, err, output.ErrCodeUnexpected, "approval-id is not a valid UUID")
 }
 
@@ -795,7 +795,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 }
 
 // TestListSendsWorkRef confirms --filter-work-ref reaches the wire as
-// work_ref, so the server does the exact-match filter the empty message
+// work_ref, so the server does the ticket id filter the empty message
 // then names.
 func TestListSendsWorkRef(t *testing.T) {
 	var seen url.Values

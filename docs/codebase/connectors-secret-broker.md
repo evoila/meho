@@ -160,13 +160,113 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   reads the secret, changes only the named field, and writes it back with
   check-and-set on the version it read (`cas=0` when the secret does not
   exist yet). If someone else changed the secret in between, Vault
-  refuses the write and the move fails. If the latest version is deleted
-  or destroyed, the move fails and writes nothing
+  refuses the write and the move fails. MEHO then reads the version again
+  and tells the caller which case it is: the secret changed
+  (`SecretMergeChangedError`, run the move again) or Vault refused for
+  another reason, for example a Vault policy that allows the read but
+  not the write (`SecretMergeRefusedError`; its message also says when
+  MEHO could not read the version again). Both messages are fixed MEHO
+  sentences, with no Vault text and no value. If the latest version is
+  deleted or destroyed, the move fails and writes nothing
   (`SecretMergeDeletedVersionError`). Without `merge`, a Vault sink
   replaces the whole secret. A sink kind without merge support makes the
   move fail before the source is read.
-- The approval preview names both targets and the merge flag. No value is
-  in the preview or in the audit row.
+- The approval preview names both sides and the merge flag. A
+  `vault-target` side shows the name as typed (`target`), the target it
+  points to (`target_id`, `target_name`), that target's Vault role
+  (`vault_role`) and its Vault login mount (`vault_mount`: the target's
+  `extras.vault_mount`, or the deployment's `VAULT_OIDC_MOUNT_PATH`). No
+  value is in the preview or in the audit row. The agent's own
+  `preview_operation` shows only the refs (`kind`, `ref` and, for a
+  `vault-target` side, `target`) and makes no lookup.
+- The sink shows whether its secret exists (`secret_exists`) and, with
+  `merge`, whether the field exists (`field_exists`). MEHO reads this
+  when the request is made, not when the move runs. The lookup uses only
+  the write right on the sink: the same tenant path rule, MEHO policy
+  check and Vault login as the write, and only when both `vault-target`
+  sides pass their checks. It needs no other right. The answer holds
+  only `"yes"`, `"no"` or `"not known"`; the read data is dropped at
+  once. Only a Vault sink can say yes or no. Every other sink kind, and
+  a failed lookup, says `"not known"`.
+- The approved run holds a Vault sink to a `"no"` on the approval
+  (`_approved_sink_expectation` in `vault_endpoint.py`):
+  - `secret_exists: "no"`, without `merge`: the write uses `cas=0`, so
+    Vault refuses it if the secret exists by then.
+  - `secret_exists: "no"`, with `merge`: a secret found by the run's read
+    refuses the write; the write uses `cas=0`, so a secret made after
+    that read is refused too.
+  - `field_exists: "no"` (with `merge`): the field found by the run's
+    read refuses the write; the check-and-set on the read version covers
+    the time up to the write.
+  - Each refusal is `SecretSinkChangedError`: the sink changed since the
+    approval, nothing was written, send a new request. The fields of a
+    sink secret that exists by then stay as they are.
+  - `"yes"` and `"not known"` bind nothing: the run writes as an ordinary
+    move does (without `merge` it replaces the secret; with `merge` it
+    keeps the other fields, guarded by check-and-set).
+  - The check is atomic: only a Vault sink says yes or no, and Vault
+    refuses the guarded write itself (check-and-set). No sink kind
+    without check-and-set gives an answer that binds the run.
+- The approved run of a move compares the target it finds for each
+  `vault-target` side with the approval (`approved_preview("secret.move")`,
+  checked in `check_access`): `target_id`, `vault_role` and `vault_mount`.
+  Another target, another Vault role or login mount, or an approval
+  without one of them, refuses the run with `VaultTargetChangedError`
+  before any Vault login. So the run acts on the targets the approver
+  saw, with the role and the mount the approver saw, even when a name or
+  alias points to another target by then. A name that finds no target
+  (or more than one) refuses the run with `VaultTargetNotFoundError`,
+  before any Vault login; nothing is read or written. An approval made
+  before MEHO showed target ids is refused too; the requester sends a new
+  request.
+- The approval binds every side that names a MEHO target. For a `linux:`
+  sink the card shows the name as typed (`target`), the Linux target it
+  points to (`target_id`, `target_name`), its `host` and its SSH `port`
+  (22 when the target names none). The approved run compares the id, the
+  host and the port with the target it finds (`check_target` of the
+  `linux:` store, in `connectors/linux/secret_sink_target.py`). Another
+  target, a new host or port on the same target, or a card without one of
+  them, refuses the run with `LinuxTargetChangedError`: "Nothing was read
+  or written. Send a new request". The check runs before the sudo password
+  lookup, before the source is read and before any SSH call. A `vault:`
+  side names no MEHO target.
+- For each `keycloak:` side (a user password sink or a client secret
+  source) the card shows the Keycloak target the name points to
+  (`target_id`, `target_name`), how MEHO connects to it (`host`, `port`,
+  `scheme` and the TLS check `tls`) and the reference of its admin login
+  (`secret_ref`). The `port` is the one MEHO dials: the target's own port,
+  or 443 for https and 80 for http. `tls` says whether MEHO checks the
+  certificate, and names a pinned CA (by a short SHA-256 digest) and a TLS
+  server name when the target sets them. The server name shows also when
+  MEHO does not check the certificate, because MEHO still sends it in the
+  TLS handshake. The approved run compares the
+  id, these connection fields and the secret reference with the target it
+  finds (`connectors/keycloak/secret_move_target.py`, called where the
+  Keycloak store finds its target). Another target, a new host, port,
+  scheme, TLS setting or secret reference on the same target, or a card
+  without one of them, refuses the run with `KeycloakTargetChangedError`:
+  "Nothing was read or written. Send a new request". The check runs before
+  any Keycloak login; for a sink it also runs before the source is read.
+  `preview_operation`, `meho_approvals_get` and `meho_approvals_list`
+  leave these fields out; only the card a person reads shows them.
+- A move with a `keycloak:` side is a change of rights, like
+  `keycloak.user.reset_password`: it sets a Keycloak user's password or
+  reads a client secret. The request carries the rights-change mark
+  (`register_rights_change_check("secret.move", has_keycloak_side)` in
+  `move_preview.py`). So the requester never approves it, and another
+  admin (a tenant admin or a platform admin) must. A move between two
+  Vault places (or to a `linux:` place) is not a change of rights.
+- Before the `linux:` store uses SSH, it drops the SSH logins this server
+  keeps for the target when a person changed the target since this server
+  last saw it (`forget_target_if_changed`). So the script goes to the host
+  and port the row holds now, also when another server made the change.
+- What a caller reads about a `linux:` side is behind the switch
+  `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
+  `preview_operation` shows only `kind` and `ref` for a `linux:` side, and
+  `meho_approvals_get` and `meho_approvals_list` leave out `target`,
+  `target_id`, `target_name`, `host` and `port`. On, they show them. The
+  card a person reads in the console and the check of the approved run do
+  not depend on the switch.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.
@@ -303,8 +403,9 @@ meho secret move \
 - `--to` writes it into the `client_secret` field of the KV-v2 secret at
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).
-- The op is `requires_approval=True`, so the move parks at
-  `awaiting_approval` and a human approves it before it runs. The response
+- The op is `requires_approval=True`, so the move waits for approval
+  before it runs. A `keycloak:` side makes it a change of rights, so
+  another admin must approve it, never the requester. The response
   is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 
@@ -425,7 +526,8 @@ owner is never `root`. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
 client id, the target names, and the paths. For a `linux:` move the approval
-card shows the path and the owner, never the content. The person who approves
+card shows the path, the owner, the target, its host and its port, never
+the content. The person who approves
 reads both: the path says where the secret goes, the owner says who can read
 it.
 
@@ -596,7 +698,8 @@ the posture and relies on the existing gate). The policy refinement
   (`move_preview.py`, registered via `register_preview_builder("secret.move", …)`)
   populates `ApprovalRequest.proposed_effect` with a ref-only summary —
   the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`,
-  never the value. `secret.move` classifies `"other"` (so the
+  never the value. A `vault-target` side and the sink add the fields of
+  the section "Vault target refs and the merge option". `secret.move` classifies `"other"` (so the
   credential-class preview suppression does not fire) and carries no
   value in its params, so the summary is value-free by construction.
 - **Time-boxed scope.** The grant is the existing `AgentPermission`

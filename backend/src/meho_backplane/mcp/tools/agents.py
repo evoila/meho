@@ -70,6 +70,7 @@ from meho_backplane.agents.service import (
     AgentDefinitionExistsError,
     AgentDefinitionService,
     AgentIdentityRefInvalidError,
+    with_live_grants,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
@@ -95,6 +96,17 @@ _AGENT_OP_IDS: Final[dict[str, str]] = {
 def _row_to_dict(entry: AgentDefinitionRead) -> dict[str, Any]:
     """Serialise an :class:`AgentDefinitionRead` to the MCP wire dict."""
     return entry.model_dump(mode="json")
+
+
+async def _saved_answer(operator: Operator, entry: AgentDefinitionRead) -> dict[str, Any]:
+    """The create and edit answer: the row, and the live grants of its agent."""
+    saved = await with_live_grants(operator.tenant_id, entry)
+    return {
+        "name": entry.name,
+        "agent": _row_to_dict(entry),
+        "live_grants": [grant.model_dump(mode="json") for grant in saved.live_grants],
+        "live_grants_truncated": saved.live_grants_truncated,
+    }
 
 
 def _require_name(arguments: dict[str, Any]) -> str:
@@ -239,7 +251,7 @@ async def _create_handler(
         raise McpInvalidParamsError("identity_ref_unknown") from exc
     except StartingGrantsError as exc:
         raise McpInvalidParamsError(str(exc)) from exc
-    return {"name": entry.name, "agent": _row_to_dict(entry)}
+    return await _saved_answer(operator, entry)
 
 
 register_mcp_tool(
@@ -318,7 +330,8 @@ register_mcp_tool(
         op_class="write",
         for_settings=with_starting_grants(
             "starting_grants picks the first grants of that agent; it is "
-            "required while the agent has no grant yet."
+            "required while the agent has no grant yet. The answer lists the "
+            "agent's live grants in live_grants."
         ),
     ),
     handler=_create_handler,
@@ -365,7 +378,7 @@ async def _edit_handler(
         raise McpInvalidParamsError(str(exc)) from exc
     if entry is None:
         raise McpInvalidParamsError("agent_not_found")
-    return {"name": entry.name, "agent": _row_to_dict(entry)}
+    return await _saved_answer(operator, entry)
 
 
 register_mcp_tool(
@@ -415,7 +428,8 @@ register_mcp_tool(
         op_class="write",
         for_settings=with_starting_grants(
             "starting_grants picks the first grants of the agent a new "
-            "identity_ref names; it is required while that agent has no grant yet."
+            "identity_ref names; it is required while that agent has no grant yet. "
+            "The answer lists the agent's live grants in live_grants."
         ),
     ),
     handler=_edit_handler,

@@ -86,12 +86,67 @@ Example URL: `https://<meho-host>/mcp?profile=investigate`.
   still runs under the person's role, and changes still wait for
   approval when the rules say so.
 
+### Profiles that limit the connectors
+
+An admin can add profiles that also limit what the session may do. They
+are set on the backplane with `MCP_CONNECTOR_PROFILES` and count only
+while `MCP_PROFILE_CONNECTOR_LISTS` is on (both off by default). Example:
+
+```json
+{"k8s": {"tools": "investigate", "connectors": ["kubernetes"]}}
+```
+
+A session at `https://<meho-host>/mcp?profile=k8s` then:
+
+- may use only the connectors of the profile. Each name counts for every
+  version of that connector. Any other `connector_id` in `call_operation`,
+  `preview_operation`, `search_operations` or `list_operation_groups` is
+  refused with "not in your profile".
+- may use only targets whose connector is in the profile. A call or a
+  preview on another target is refused, also when the `connector_id` is
+  in the profile.
+- sees only those connectors in `meho_connector_list`, and only their
+  targets in `list_targets`.
+- in a read-only profile (the default), cannot change anything: MEHO
+  refuses every operation that changes something, and the profile has
+  none of MEHO's own write tools.
+- reads back only the stored results and background runs it made
+  itself, under this profile.
+
+A connector name in a profile counts for every connector whose id starts
+with the name and a dash. Keep the names as narrow as you can: `vmware`
+counts for every `vmware-...` connector, `vmware-rest` only for the
+`vmware-rest` connectors.
+
+After a person approves a request that waited, the approved run is not
+checked against the profile again.
+
+MEHO applies the stricter of the person's rules and the profile's rules.
+Every audit row names the profile in its `mcp_profile` field.
+
+A login client can be tied to one profile, so its token works only at
+that profile's URL. See "A login client for one tool profile" on the
+Keycloak realm setup page. The MCP resources (`resources/list`,
+`resources/read`) are not limited by a profile; they hold no connector
+data.
+
 A small model also gains from shorter tool texts. Add `texts=short` to
 the URL, for example `https://<meho-host>/mcp?texts=short`, or together
 with a profile: `https://<meho-host>/mcp?profile=investigate&texts=short`.
 The biggest tools then show a short description. They accept the same
 inputs as before. Other sessions keep the full texts. A value other than
 `short` is refused with HTTP 400.
+
+A client that reads `structuredContent` can get each result once. Add
+`results=structured` to the URL, for example
+`https://<meho-host>/mcp?results=structured`. A tool that declares an
+output schema then sends one short line as its text, and the full result
+only in `structuredContent`. Errors and tools without an output schema
+still send the full text. Use it only with a client that gives the model
+`structuredContent`: a client that reads only the text (for example
+Cursor) would see only the short line. With `texts=short`, no tool
+declares an output schema, so this option then changes nothing. A value
+other than `structured` is refused with HTTP 400.
 
 ## The operator planes (behind `mcp:admin`)
 

@@ -19,8 +19,9 @@ const approvalFlowDocs = "https://evoila.github.io/meho/install/keycloak-realm/#
 
 // approvalFlowFix is the fix for a missing flow or binding.
 const approvalFlowFix = "a Keycloak admin runs the operation keycloak.authflow.ensure_approval_flow " +
-	"on the Keycloak target (it waits for approval); with the built-in Keycloak, `helm upgrade` " +
-	"does it too; see " + approvalFlowDocs
+	"on the Keycloak target; another admin approves it, never the person who asked, so the install " +
+	"needs two admins first (add the second one in Keycloak itself); with the built-in Keycloak, " +
+	"`helm upgrade` does it too; see " + approvalFlowDocs
 
 // approvalLevelCheckName names the doctor line for the approval level.
 const approvalLevelCheckName = "approval level"
@@ -97,5 +98,34 @@ func addApprovalSignInCheck(r *doctorReport, h *api.HealthResponse) {
 	default:
 		r.add(authed(approvalSignInCheckName, doctorWarn, "",
 			fmt.Sprintf("unknown state %q from the backplane: %s", s.State, detail), ""))
+	}
+}
+
+// secondAdminCheckName names the doctor line for the number of admins
+// who could approve a change of rights.
+const secondAdminCheckName = "second admin"
+
+// rightsChangeGuide is the guide part that explains who approves a change of rights.
+const rightsChangeGuide = "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
+
+// addSecondAdminCheck adds one line that says whether a change of rights
+// can be approved in the tenant: another admin must approve it, never the
+// person who asked (approvals.rights_change_admins in /api/v1/health,
+// #6641). One admin is a warning. A backplane that does not report the
+// count, or that cannot count the admins, gets no line.
+func addSecondAdminCheck(r *doctorReport, h *api.HealthResponse) {
+	if h.Approvals == nil || h.Approvals.RightsChangeAdmins == nil {
+		return
+	}
+	n := *h.Approvals.RightsChangeAdmins
+	if n == 1 {
+		r.add(authed(secondAdminCheckName, doctorWarn, "",
+			"This change needs a second admin to approve it. This tenant has only one admin.",
+			"add a second admin in Keycloak (in MEHO-Admins or MEHO-Platform-Admins); see "+rightsChangeGuide))
+		return
+	}
+	if n > 1 {
+		r.add(authed(secondAdminCheckName, doctorOK, "",
+			fmt.Sprintf("%d admins in this tenant", n), ""))
 	}
 }

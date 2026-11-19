@@ -1081,7 +1081,12 @@ async def test_the_approval_preview_shows_only_refs() -> None:
     )
     preview = await build_secret_move_preview(ctx)
     assert preview is not None
-    assert preview["sink"] == {"kind": "linux", "ref": f"{_TARGET_NAME}/home/seat/key#seat"}
+    assert preview["sink"] == {
+        "kind": "linux",
+        "ref": f"{_TARGET_NAME}/home/seat/key#seat",
+        "target": _TARGET_NAME,  # no such target here, so no id, host or port
+        "secret_exists": "not known",  # a linux sink cannot tell
+    }
     assert _SENTINEL not in json.dumps(preview)
 
 

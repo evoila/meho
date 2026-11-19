@@ -77,7 +77,7 @@ func newCountCmd() *cobra.Command {
 	f.StringVar(&opts.SessionID, "session-id", "",
 		"count only one agent session (UUID)")
 	f.StringVar(&opts.WorkRef, "filter-work-ref", "",
-		"count only the rows of one change-ticket reference (exact match; e.g. gh:evoila/meho#1)")
+		"count only the rows of one ticket id (whole id; white space at the ends is ignored)")
 	f.BoolVar(&jsonOut, "json", false,
 		"print the backplane's answer as it came instead of the summary")
 	f.StringVar(&opts.BackplaneOverride, "backplane", "",

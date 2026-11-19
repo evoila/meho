@@ -112,6 +112,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		dryRun                bool
 		cliOfflineSessionIdle int
 		mcpOfflineSessionIdle int
+		mcpProfiles           []string
 	)
 
 	cmd := &cobra.Command{
@@ -123,6 +124,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access, no refresh token (its access token lasts 15 minutes), and its own login flow `meho approval sign-in level` that always asks for the password and gives the approval level `meho-approve` (made if missing; the level is named in the realm's acr.loa.map). Only its tokens can approve on the command line\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
 			"  * two copies of the MCP client with their own names: `meho-mcp-code` for Claude Code and `meho-mcp-desktop` for Claude Desktop. With `MCP_CLIENT_PER_TOOL_KIND=true` on the backplane, each tool signs in with its own client and keeps a saved login of its own\n" +
+			"  * with `--mcp-profile <name>`: one more copy of the MCP client, `meho-mcp-profile-<name>`, with a fixed claim mapper that writes `mcp_profile: <name>` into every token. MEHO takes such a token only at `/mcp?profile=<name>`, and refuses it at `/mcp`, at another profile and at the REST API\n" +
 			"  * 8 protocol mappers on the CLI and MCP clients (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants); the approval client gets the same without meho-mcp-audience\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
@@ -230,6 +232,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 				MCPOfflineSessionIdleSeconds: mcpOfflineSessionIdle,
 				MCPRedirectURIs:              mcpRedirectURIs,
 				MCPWebOrigins:                mcpWebOrigins,
+				MCPProfiles:                  mcpProfiles,
 				DryRun:                       dryRun,
 				Out:                          cmd.OutOrStdout(),
 				Err:                          cmd.ErrOrStderr(),
@@ -357,6 +360,10 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"`client.offline.session.idle.timeout` attribute on the MCP "+
 			"browser-flow client. Default 48h. Without it the realm's "+
 			"Offline Session Idle applies (30 days by default)")
+	cmd.Flags().StringSliceVar(&mcpProfiles, "mcp-profile", nil,
+		"also make a login client `meho-mcp-profile-<name>` for this MCP tool profile "+
+			"(repeat for more). Every token of that client carries the claim "+
+			"`mcp_profile: <name>`, and MEHO takes it only at `/mcp?profile=<name>`")
 	// Optional-value flag: a bare `--cli-offline-access` also yields the
 	// 48h default, so older scripts keep working; a custom value MUST
 	// use the equals form (`--cli-offline-access=SECONDS`). pflag's

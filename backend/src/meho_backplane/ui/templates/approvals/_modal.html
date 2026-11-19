@@ -14,8 +14,8 @@
     (``approve_right``, the same service checks as the approve). The
     **Approve** button is disabled (read-only) when the answer is no
     (``approve_blocked``); its ``aria-label`` carries the reason. An own
-    change the person may not approve (``self_approval_blocked``) also gets
-    the single-operator guidance. **Deny** stays enabled (withdrawing your
+    change the person may not approve (``self_approval_blocked``) gets a
+    note that says who may approve it and where to ask. **Deny** stays enabled (withdrawing your
     own request is not an escalation). The button state is UX only -- the
     BFF re-checks server-side and 403s a forged approve, surfaced via
     ``error_*``.
@@ -61,6 +61,9 @@
     the modal opens (bell, history row, or a deep link), so the extra confirm
     cannot be skipped by the link the approver used.
 
+  A second person is a second login
+    A pending row shows one line that says so (``data-testid="approval-second-login"``).
+
   Phone layout (#6000)
     Below the ``sm`` width the dialog opens as a sheet from the bottom of
     the screen (``modal-bottom``), full width; from ``sm`` up it is the
@@ -96,11 +99,8 @@
                              self_approval -- whether this person may approve
     approve_blocked       -- bool: the person may not approve; disable Approve
     self_approval_blocked -- bool: the person may not approve their own change
-    self_approval_setting -- str: the break-glass env-var name to name in the label
-    self_approval_docs_url -- str: operator-docs deep link the single-operator
-                             guidance points at (#2669)
     self_approval_error   -- bool: the failed decision was a self-approval 403 —
-                             render the actionable guidance, not the bare error (#2669)
+                             render the own-change banner, not the bare error
     fresh_sign_in_error   -- bool: the approve was refused because the session's
                              sign-in is too old, did not ask for the password, or
                              already approved a destructive operation — render the
@@ -141,33 +141,6 @@
     <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ level }}</span>
   {%- endif -%}
 {%- endmacro -%}
-{#- Single-operator guidance (#2669). Named the same two patterns the docs
-    page and the settings.py flag docstring carry, so a solo operator who
-    hits ``self_approval_forbidden`` reaches an informed choice without
-    reading source: the recommended agent-requester (a distinct requester
-    subject, no flag) and the audited emergency break-glass. ``docs_url`` is
-    the console's UI-only deep link (the wire 403 text stays authoritative);
-    ``setting`` names the break-glass env var. Shared by the proactive
-    disabled-button note and the post-403 error banner so both read the
-    same. -#}
-{%- macro single_operator_choices(docs_url, setting) -%}
-  <p class="mt-1 opacity-90">On a single-operator deploy you have two ways forward:</p>
-  <ul class="mt-1 list-disc space-y-1 pl-5 opacity-90">
-    <li>
-      <span class="font-semibold">Recommended —</span> re-park the write under an
-      <span class="font-semibold">agent-requester</span>: a scheduled agent run whose
-      distinct subject makes the request, so you can approve it yourself with no flag.
-    </li>
-    <li>
-      <span class="font-semibold">Emergency —</span> a deployment admin enables
-      <code>{{ setting }}</code> for an audited, posture-wide break-glass.
-    </li>
-  </ul>
-  <p class="mt-2">
-    <a href="{{ docs_url }}" class="link link-primary" target="_blank" rel="noopener">
-      Approvals &amp; break-glass guide &rarr;</a>
-  </p>
-{%- endmacro -%}
 <dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Review approval request">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
@@ -188,11 +161,8 @@
       {# A recoverable decision failure (self-approval 403, already-decided
          409, role 403) re-rendered this modal with the typed banner. #}
       {% if self_approval_error %}
-        {# #2669: a rejected self-approval is the one failure worth more than a
-           bare error — surface the actionable single-operator guidance (both
-           patterns + docs link) so the solo operator reaches an informed
-           choice in place, not a dead end. Warning, not error: there is a way
-           forward. #}
+        {# A refused self-approval: the text says who may approve the change
+           and where to ask. Warning, not error: another person can approve. #}
         <div class="alert alert-warning mt-4 items-start" role="alert" aria-live="assertive">
           <div class="text-sm">
             <h4 class="font-semibold">You cannot approve your own request</h4>
@@ -202,7 +172,6 @@
             {% if error_hint %}
               <p class="mt-1 opacity-90" data-testid="approval-refusal-hint">{{ error_hint }}</p>
             {% endif %}
-            {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
           </div>
         </div>
       {% elif fresh_sign_in_error %}
@@ -630,6 +599,20 @@
         </div>
       {% endif %}
 
+      {% set target_notes = effect.get("target_warnings") %}
+      {% if target_notes is sequence and target_notes is not string and target_notes | length %}
+        {#- A setting of the target that is allowed but risky, for example a
+            Keycloak target that manages MEHO's own sign-in realm. -#}
+        <div class="alert alert-warning mt-2" role="alert" aria-label="Target warnings">
+          <div>
+            <h4 class="font-semibold text-sm">Check the target</h4>
+            <ul class="text-xs opacity-90 list-disc pl-4">
+              {% for note in target_notes %}<li>{{ note }}</li>{% endfor %}
+            </ul>
+          </div>
+        </div>
+      {% endif %}
+
       {% if effect.get("preview_unavailable") %}
         {#- #1628: the preview builder ran but faulted, so the blast radius
             could not be resolved. Error-styled -- this is not a small action. -#}
@@ -731,6 +714,7 @@
           values pretty-printed per row. -#}
       {% set fields = effect.get("params_echo") or effect.get("preview") %}
       {% if fields is mapping and fields %}
+        {% set script_request_id = request.id if request.status == "pending" else none %}
         {% include "approvals/_script.html" %}
         {#- The script block above shows every script_* field, so the table skips them. -#}
         {% set shows_script = fields.get("script") is string or fields.get("script_unavailable") %}
@@ -761,15 +745,12 @@
     </div>
 
     {% if request.status == "pending" and self_approval_blocked and not self_approval_error %}
-      {#- #2669: the Approve button is disabled because the reviewer is the
-          requester. Name the way forward inline — a second operator, or, on a
-          solo deploy, the two single-operator patterns — instead of leaving the
-          operator to infer it from a greyed-out button. Suppressed when the
-          post-403 banner above already carries the same guidance. -#}
+      {#- The Approve button is disabled because the reviewer is the
+          requester. The text says who may approve the change and where to
+          ask. Suppressed when the post-403 banner above already says it. -#}
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="no" data-approve-reason="{{ approve_right.reason }}">
         <h4 class="font-semibold">You requested this — you cannot approve it</h4>
         <p class="mt-1 opacity-90">{{ approve_right.message }}</p>
-        {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
       </div>
     {% elif request.status == "pending" and approve_blocked and not error_status %}
       {#- #3329: the person may not approve this request (wrong group, a role
@@ -785,6 +766,14 @@
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="yes" data-approve-reason="{{ approve_right.reason }}">
         <p>{{ approve_right.message }}</p>
       </div>
+    {% endif %}
+
+    {% if request.status == "pending" %}
+      {#- A second person is a second login: MEHO tells people apart by the
+          login ID in the token, not by who sits behind it. -#}
+      <p class="mt-3 text-xs opacity-80" data-testid="approval-second-login">
+        A second person means a second login. MEHO cannot tell when two logins belong to one person.
+      </p>
     {% endif %}
 
     {% if request.status == "pending" and approve_needs_sign_in and not fresh_sign_in_error and not approve_blocked %}

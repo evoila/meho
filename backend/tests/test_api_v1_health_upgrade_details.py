@@ -218,6 +218,7 @@ async def test_approvals_default_posture_and_missing_key() -> None:
             "(KEYCLOAK_ADMIN_URL, KEYCLOAK_ADMIN_CLIENT_ID, KEYCLOAK_ADMIN_CLIENT_SECRET; "
             "keycloakAdmin in the chart)."
         ),
+        "rights_change_admins": None,
     }
     by_name = {entry.name: entry for entry in response.features}
     assert set(by_name) == {
@@ -267,6 +268,7 @@ async def test_approvals_follow_the_settings_and_never_carry_the_key(
         },
         "web_sign_in_level_in_force": "required",
         "sign_in_level_warning": None,
+        "rights_change_admins": None,
     }
     by_name = {entry.name: entry for entry in response.features}
     assert by_name["approval_custody"].configured is True

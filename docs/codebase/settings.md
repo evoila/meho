@@ -216,7 +216,8 @@ them at once.
   password has no shape to find. A key that only names something about a
   token or secret (`token_url`, `secret_path`) passes. The name rule is
   `is_secret_param_name` in `broadcast/events.py`, the same one the broadcast
-  scrub and the approval echo use.
+  scrub and the approval echo use. So every name that the results hide is
+  refused here too (`snmpAuthKey`, `pass_phrase`, `password_ref`).
 - A mask such as `*`, `********` or `<keep>` is refused. It never means
   "keep the stored value".
 - Once a secret is found, nothing else is checked: no later check, and not
@@ -275,9 +276,22 @@ file yet.
   tenant, also when its token carries the platform-admin claim: the same
   rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
   `tests/test_tenant_scope_person_only.py`.
-- Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
-  command line writes at once or waits for someone to approve it, as the
-  target routes do for a call made with a token. Today it writes at once.
+- A file that adds or changes a target applies only for a person in the
+  web console (`runs_at_once` in `api/v1/_wait_for_approval.py`), the same
+  rule as `POST` and `PATCH /api/v1/targets`. A call with a token (the CLI,
+  a script, an AI tool with a person's login) that applies such a file gets
+  403 with the reason "A settings file that adds or changes targets is
+  applied in the web console. A call with a token cannot write targets at
+  once." Nothing is written, and no approval request is made. While the
+  console has no settings page, add or change targets through the target
+  routes (a call with a token waits for approval there), then import the
+  file: its target entries then match and are no change. The preview
+  works with a token, and so does a file that changes no target (a target
+  entry equal to the stored one is no change). The other parts of the file
+  have no such rule, because their REST routes write at once for a token
+  too: tenants, policies (`/api/v1/tenants/...`) and conventions
+  (`/api/v1/conventions`). Tests:
+  `tests/test_settings_import_target_writes.py`.
 
 ## Endpoints
 
@@ -329,7 +343,9 @@ When there are no mistakes, `diff` holds one entry per section — `tenants`,
 ### `POST /api/v1/settings/import`
 
 Runs the same checks. With any mistake it answers 422 with the preview's
-body and writes nothing. Otherwise it adds or updates, never deletes:
+body and writes nothing. When the file adds or changes a target and the
+caller is not a person in the web console, it answers 403 and writes
+nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 
 - One database transaction, in this order: tenants (`ensure_tenant`),
   policies, conventions, targets.

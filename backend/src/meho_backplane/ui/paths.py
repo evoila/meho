@@ -107,3 +107,82 @@ def ensure_static_dist_dir() -> Path:
     dist = static_dist_dir()
     dist.mkdir(parents=True, exist_ok=True)
     return dist
+
+
+def brand_css_dir() -> Path:
+    """Return the directory of brand stylesheets inside ``meho-ui``.
+
+    The shared theme, the plain token variables and the ``@font-face``
+    rules. Served at ``/ui/static/brand`` rather than copied into this
+    package: the brand package is the one copy of these files, and a
+    second copy here would drift from it the first time one side is
+    bumped and the other is not.
+
+    Resolved from the installed package, so it works in both deploy
+    shapes for the same reason :func:`templates_dir` does -- in the image
+    ``meho_ui`` sits beside ``meho_backplane`` in site-packages; in a
+    source checkout it sits in the virtualenv the backend runs from.
+    """
+    from meho_ui.brand import daisyui_theme_path
+
+    return daisyui_theme_path().parent
+
+
+def brand_fonts_dir() -> Path:
+    """Return the directory of webfonts and licences inside ``meho-ui``.
+
+    Served at ``/ui/static/fonts``, which is the URL
+    ``meho_ui.brand.fonts`` already writes into its own ``@font-face``
+    rules -- so the stylesheet resolves against this mount unaltered.
+
+    The licence files are served alongside the fonts deliberately: the
+    SIL Open Font License asks that its text travel with the fonts, and
+    a URL next to them is the plainest way to honour that.
+    """
+    from meho_ui.brand import fonts
+
+    return fonts.fonts_dir()
+
+
+def static_mounts() -> tuple[tuple[str, Path], ...]:
+    """Return the console's static mount table, in registration order.
+
+    The console's assets no longer all live in this package: the brand
+    stylesheets and the webfonts are served straight out of ``meho-ui``
+    by mounts of their own. Anything that maps a ``/ui/static/...`` URL
+    to a file -- the app, and the guard tests -- needs the same table,
+    and a copy of it in a test is a copy that goes stale the first time
+    a mount is added.
+
+    Order matters and is not cosmetic. A Starlette mount miss does not
+    fall through to a later, more specific mount, so the two brand
+    prefixes have to be registered before the broad ``/ui/static`` one
+    or every brand URL 404s. ``test_ui_static_assets`` asserts the
+    running app's mount table matches this one, which is what keeps the
+    two from drifting apart.
+    """
+    return (
+        ("/ui/static/brand", brand_css_dir()),
+        ("/ui/static/fonts", brand_fonts_dir()),
+        ("/ui/static", static_root_dir()),
+    )
+
+
+def static_asset_path(url: str) -> Path | None:
+    """Map a ``/ui/static/...`` URL to the file the app serves for it.
+
+    Resolves through :func:`static_mounts` longest-prefix-first, the way
+    Starlette matches, so the answer is the file a browser would get.
+    Returns ``None`` for a URL outside ``/ui/static/``.
+
+    The returned path is not guaranteed to exist -- a caller that cares
+    (every current caller is a guard test) checks. A URL that names a
+    mount point rather than a file inside one resolves to that
+    directory, which is never servable.
+    """
+    for prefix, directory in sorted(static_mounts(), key=lambda m: -len(m[0])):
+        if url == prefix:
+            return directory
+        if url.startswith(f"{prefix}/"):
+            return directory / url[len(prefix) + 1 :]
+    return None

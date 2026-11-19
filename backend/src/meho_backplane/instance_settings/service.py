@@ -21,6 +21,10 @@ cannot: :mod:`meho_backplane.tenancy.policies` for the tenant columns,
 :class:`~meho_backplane.conventions.service.ConventionsService` for
 conventions, and the ``create_target`` / ``update_target`` handlers (with
 their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
+A file that adds or changes a target applies only for a person in the web
+console (:func:`~meho_backplane.api.v1._wait_for_approval.runs_at_once`), the
+same rule as the target routes; any other caller gets 403 and nothing is
+written. The preview has no such limit.
 """
 
 from __future__ import annotations
@@ -41,9 +45,11 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._wait_for_approval import runs_at_once
 from meho_backplane.api.v1.targets import (
     _canonicalise_and_validate_product,
     _enforce_tls_trust_exclusion,
+    _require_keycloak_managed_realm,
     _resolve_create_secret_ref,
     _to_full,
     _validate_preferred_impl_id,
@@ -77,6 +83,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     parse_settings_file,
 )
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.secret_field_map import merge_secret_field_map
 from meho_backplane.tenancy.ensure import ensure_tenant
@@ -91,6 +98,7 @@ from meho_backplane.version import deployed_version_label
 
 __all__ = [
     "DEFAULT_POLICIES",
+    "TARGET_WRITES_NEED_CONSOLE",
     "ImportPlan",
     "ImportResult",
     "SettingsExportRefusedError",
@@ -128,6 +136,14 @@ TARGET_KEYS: Final[tuple[str, ...]] = (
 )
 
 _conventions = ConventionsService()
+
+#: The 403 reason when a call with a token applies a file that adds or
+#: changes targets. Only a person in the web console writes targets at once,
+#: the same rule as ``POST`` and ``PATCH /api/v1/targets``.
+TARGET_WRITES_NEED_CONSOLE: Final[str] = (
+    "A settings file that adds or changes targets is applied in the web console. "
+    "A call with a token cannot write targets at once."
+)
 
 
 class SettingsForbiddenError(Exception):
@@ -539,6 +555,7 @@ def _plan_new_target(
         return None
     try:
         product = _canonicalise_and_validate_product(body.product)
+        _require_keycloak_managed_realm(product, body.extras, body.name)
         _validate_preferred_impl_id(body.preferred_impl_id, product)
         secret_ref = _resolve_create_secret_ref(body, operator)
     except HTTPException as exc:
@@ -604,8 +621,9 @@ def _plan_targets(
     rows: list[TargetORM],
     operator: Operator,
     plan: _TenantPlan,
-    mistakes: list[str],
+    import_plan: ImportPlan,
 ) -> list[dict[str, Any]]:
+    mistakes, warnings = import_plan.mistakes, import_plan.warnings
     by_name = {row.name: row for row in rows}
     desired = {row.name: _target_block(row) for row in rows}
     for i, entry in enumerate(entries):
@@ -617,6 +635,7 @@ def _plan_targets(
             if planned_new is not None:
                 desired[entry.name], create_body = planned_new
                 plan.targets.append((i, entry.name, create_body))
+                _add_realm_warnings(path, desired[entry.name], warnings)
             continue
         planned = _plan_existing_target(path, loc_tuple, entry, row, operator, mistakes)
         if planned is None:
@@ -624,7 +643,16 @@ def _plan_targets(
         desired[entry.name], update_body = planned
         if update_body is not None:
             plan.targets.append((i, entry.name, update_body))
+            _add_realm_warnings(path, desired[entry.name], warnings)
     return [desired[name] for name in sorted(desired)]
+
+
+def _add_realm_warnings(path: str, block: dict[str, Any], warnings: list[str]) -> None:
+    """Add the warnings a target write would give (the same as REST) for the target at *path*."""
+    warnings.extend(
+        f"`{path}` ({block['name']}): {warning}"
+        for warning in keycloak_realm_warnings(block.get("product"), block.get("extras"))
+    )
 
 
 async def build_plan(
@@ -704,7 +732,7 @@ async def build_plan(
                 targets.get(tid, []),
                 tenant_operator,
                 tenant_plan,
-                plan.mistakes,
+                plan,
             ),
         }
         in_file[str(tid)] = {
@@ -859,7 +887,10 @@ async def apply_import(
     """Apply *content*: add or update, never delete. See the module docstring.
 
     Writes nothing when the file has mistakes (``result.plan.mistakes``) or
-    changes nothing (empty diff, no revision). The caller's session dependency
+    changes nothing (empty diff, no revision). Raises
+    :class:`SettingsForbiddenError` and writes nothing when the file adds or
+    changes a target and the caller is not a person in the web console
+    (:func:`runs_at_once`). The caller's session dependency
     commits the one transaction after the route returns.
     """
     plan = await build_plan(session, operator, content)
@@ -867,6 +898,8 @@ async def apply_import(
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff
         return result
+    if not runs_at_once(operator) and any(tp.targets for tp in plan.tenants):
+        raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
     audit_id = uuid.uuid4()
     bind_preallocated_audit_id(audit_id)

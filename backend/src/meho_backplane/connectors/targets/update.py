@@ -63,6 +63,7 @@ from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
 from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
@@ -79,6 +80,7 @@ __all__ = [
     "build_targets_update_preview",
     "register_targets_update_operation",
     "targets_update",
+    "targets_update_card_warnings",
 ]
 
 TARGETS_UPDATE_OP_ID: Final[str] = "targets.update"
@@ -217,6 +219,15 @@ TARGETS_UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "Names of the fields the call changed.",
         },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when a setting is allowed but risky, for example a "
+                "Keycloak target that manages the realm MEHO itself signs in with. "
+                "Tell the person about each line."
+            ),
+        },
     },
     "required": ["target_id", "name", "product", "version", "host", "updated_fields"],
 }
@@ -313,6 +324,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
 
+    warnings = keycloak_realm_warnings(updated.product, updated.extras)
     return {
         "target_id": str(updated.id),
         "name": updated.name,
@@ -320,6 +332,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
         "version": updated.version,
         "host": updated.host,
         "updated_fields": sorted(body.model_fields_set),
+        **({"warnings": warnings} if warnings else {}),
     }
 
 
@@ -385,6 +398,24 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
     if not ctx.agent_preview or get_settings().preview_typed_writes:
         preview["changes"] = _preview_changes(row, ctx.params, ctx)
     return preview
+
+
+async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
+    """The realm warnings for the target as it will be after ``targets.update``.
+
+    A sent ``product`` or ``extras`` replaces the stored one; a field that is
+    not sent keeps its stored value. No live target gives no warning: the
+    call would fail.
+    """
+    target_id = _parse_target_id(ctx.params)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await resolve_target_by_id(session, ctx.operator.tenant_id, target_id)
+    if row is None:
+        return []
+    return keycloak_realm_warnings(
+        ctx.params.get("product", row.product), ctx.params.get("extras", row.extras)
+    )
 
 
 async def register_targets_update_operation(

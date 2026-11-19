@@ -108,6 +108,7 @@ from meho_backplane.operations._audit import policy_decision_var
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.sandbox_mode import sandbox_mode_active
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetCreate
 
@@ -123,6 +124,7 @@ __all__ = [
     "build_targets_remove_preview",
     "register_targets_registry_operations",
     "targets_register",
+    "targets_register_card_warnings",
     "targets_remove",
 ]
 
@@ -241,6 +243,7 @@ async def targets_register(
         "secret_ref": created.secret_ref,
         "secret_ref_derived": created.secret_ref_derived,
         "next_step": _probe_next_step(created.name),
+        **({"warnings": list(created.warnings)} if created.warnings else {}),
     }
 
 
@@ -469,6 +472,11 @@ async def targets_remove(operator: Operator, target: Any, params: dict[str, Any]
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
     return {"status": "removed", "target_id": str(target_id), "name": name}
+
+
+async def targets_register_card_warnings(ctx: PreviewContext) -> list[str]:
+    """The realm warnings for the target that ``targets.register`` would create."""
+    return keycloak_realm_warnings(ctx.params.get("product"), ctx.params.get("extras"))
 
 
 async def build_targets_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:

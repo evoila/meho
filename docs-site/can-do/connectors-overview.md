@@ -54,19 +54,20 @@ contact evoila.
 | --- | --- | --- |
 | VMware vCenter and vSphere | 8.0 Update 1 or newer, 9.x | `vmware-rest-9.0`: 9.1.0.0: changes (Oct 2026, last tested with MEHO v0.37.0). `vmware-rest-8.0`: 8.0.3: changes (Oct 2026, last tested with MEHO v0.37.0). |
 | VMware NSX | 4.x, 9.x | `nsx-rest-9.0`: 9.1.0.0: reads (Nov 2026). `nsx-rest-4.2`: not yet tested live. |
-| VCF SDDC Manager | 5.x, 9.x | `sddc-rest-9.0`: 9.1.0.0: reads (Nov 2026). `sddc-vcf5-5.0`: not yet tested live. |
+| VCF SDDC Manager | 5.x, 9.x | `sddc-rest-9.1`: not yet recorded. `sddc-rest-9.0`: 9.1.0.0: reads (Nov 2026). `sddc-vcf5-5.0`: not yet tested live. |
+| VCF Operations for Networks | 6.14, 9.x | `vrni-rest-9.0`: not yet recorded. `vrni-rest-6.14`: not yet recorded. |
 | VCF Installer and Cloud Builder | 5.x, 9.x | `installer-rest-9.1`: 9.1.1.0: changes (Oct 2026, last tested with MEHO v0.37.0). `installer-cb-5.0`: not yet tested live. |
-| VCF fleet management and Aria Suite Lifecycle | 8.x, 9.x | `fleet-lcm-9.0`: not yet tested live. `fleet-rest-9.0`: not yet tested live. |
-| VCF Automation and Aria Automation | 8.x, 9.x | `vcfa-rest-9.0`: 9.1.0: changes (Oct 2026, last tested with MEHO v0.37.0); 9.1.1: reads (Nov 2026). `vcfa-vra8-8.0`: not yet tested live. |
-| VCF Operations and Aria Operations | 8.x, 9.x | `vrops-rest-9.0`: not yet tested live. `vrops-vrops8-8.0`: not yet tested live. |
-| VCF Operations for logs and Aria Operations for Logs | 8.x, 9.x | `vrli-rest-9.0`: not yet tested live. `vrli-vrli8-8.0`: not yet tested live. |
-| VCF Operations orchestrator | 8.x, 9.x | not yet tested live |
+| VCF fleet management and Aria Suite Lifecycle | 8.18 to 9.x | `fleet-lcm-9.0`: not yet tested live. `fleet-rest-9.0`: not yet tested live. |
+| VCF Automation and Aria Automation | 8.18 to 9.x | `vcfa-rest-9.0`: 9.1.0: changes (Oct 2026, last tested with MEHO v0.37.0); 9.1.1: reads (Nov 2026). `vcfa-vra8-8.0`: not yet tested live. |
+| VCF Operations and Aria Operations | 8.18 to 9.x | `vrops-rest-9.0`: not yet tested live. `vrops-vrops8-8.0`: not yet tested live. |
+| VCF Operations for logs and Aria Operations for Logs | 8.18 to 9.x | `vrli-rest-9.0`: not yet tested live. `vrli-vrli8-8.0`: not yet tested live. |
+| VCF Operations orchestrator | 8.18 to 9.x | not yet tested live |
 | VCF Identity Broker and Workspace ONE Access | 3.3, 9.x | `idb-rest-9.0`: not yet tested live. `idb-wsa-3.3`: not yet tested live. |
 | VMware Cloud Director | 10.x | not yet tested live |
-| VMware HCX | 4.7 to 9.x | not yet tested live |
+| VMware HCX | 4.11 to 9.x | not yet tested live |
 | VMware Site Recovery Manager | 8.8 to 9.x | not yet tested live |
 | VMware vSphere Replication | 8.8 to 9.x | not yet tested live |
-| VMware Aria Automation Config (Salt) | 8.x, 9.x | not yet tested live |
+| VMware Aria Automation Config (Salt) | 8.18 to 9.x | not yet tested live |
 | VMware Holodeck | 9.0 | not yet tested live |
 | Fortinet FortiGate | 7.2 to 7.x | not yet recorded |
 | Fortinet FortiManager | 7.2 to 7.x | not yet recorded |

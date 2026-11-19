@@ -1,20 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Inbound ingest orchestration: rate-limit -> resolve-secret -> auth -> publish (#2881).
+"""Inbound ingest orchestration: resolve-secret -> auth -> rate-limit -> publish.
 
 The endpoint (:mod:`meho_backplane.api.v1.events_ingest`) resolves the source
 and reads the capped body; this module runs everything that follows, in
 this order:
 
-1. Enforce the per-source rate limit. It runs first, so every delivery to
-   a source counts, whether or not it then authenticates, and the number
-   of Vault reads a source can cause per window is capped by the same
-   limit.
-2. Read the source's shared secret from Vault under the synthetic
+1. Read the source's shared secret from Vault under the synthetic
    ``__ingest__`` identity (a background-dispatch service principal, since
-   the webhook is JWT-less).
-3. Verify the sender against the source's auth strategy (constant-time).
+   the webhook is JWT-less). An empty or blank stored secret refuses every
+   sender.
+2. Verify the sender against the source's auth strategy (constant-time).
+   Before the check, the delivery takes a slot in the source's
+   **failed-check** counter
+   (:mod:`~meho_backplane.events.ingest.rate_limit`) with one atomic
+   ``INCR``. A check that passes gives the slot back; a failed check or a
+   failed Vault read keeps it. A failed check whose slot is over the
+   per-minute cap answers ``429``, so a flood of bad deliveries does not
+   block the real sender. The secret comes from this process's short copy
+   (:mod:`~meho_backplane.events.ingest.secret_cache`): Vault is read about
+   once per source, minute and process, and again at once after the
+   secret is changed through the update route. A failed Vault read is
+   kept the same way, so a burst of deliveries during a Vault failure
+   does not read Vault again.
+3. Enforce the per-source delivery rate limit. Only deliveries that passed
+   step 2 count against it.
 4. Compute the dedupe key: a SHA-256 of the signed message (the
    timestamped message for ``hmac-sha256`` with a timestamp, else the raw
    body), namespaced by source id. Only data the credential covers goes
@@ -83,7 +94,14 @@ from meho_backplane.event_source.schemas import EventSourceAuthStrategy
 from meho_backplane.event_source.secrets import read_event_source_secret
 from meho_backplane.events.ingest.auth import IngestAuthError, verify_ingest_auth
 from meho_backplane.events.ingest.config import IngestConfig
-from meho_backplane.events.ingest.rate_limit import enforce_ingest_rate_limit
+from meho_backplane.events.ingest.rate_limit import (
+    CheckSlot,
+    enforce_ingest_rate_limit,
+    failed_check_limit_error,
+    release_check_slot,
+    take_check_slot,
+)
+from meho_backplane.events.ingest.secret_cache import cached_secret
 from meho_backplane.events.normalizers import normalize_event
 from meho_backplane.events.outbox import publish
 from meho_backplane.settings import get_settings
@@ -175,7 +193,7 @@ async def _read_secret_or_fail(source: ResolvedSource) -> SecretStr:
         raise IngestAuthError("no_secret_configured")
     operator = await _build_ingest_operator(source.tenant_id)
     try:
-        return await read_event_source_secret(operator, source.secret_ref)
+        secret = await read_event_source_secret(operator, source.secret_ref)
     except VaultClientError as exc:
         _log.warning(
             "ingest_secret_read_failed",
@@ -183,6 +201,57 @@ async def _read_secret_or_fail(source: ResolvedSource) -> SecretStr:
             error_class=type(exc).__name__,
         )
         raise IngestVaultError(str(type(exc).__name__)) from exc
+    return secret
+
+
+async def _source_secret(source: ResolvedSource, slot: CheckSlot | None) -> SecretStr:
+    """Return the source's secret, from the per-process copy when limits are on.
+
+    With no slot (limits off), every delivery reads Vault.
+    """
+    if slot is None or source.secret_ref is None:
+        return await _read_secret_or_fail(source)
+    return await cached_secret(
+        source.id, source.secret_ref, slot.window, lambda: _read_secret_or_fail(source)
+    )
+
+
+async def _check_sender(
+    source: ResolvedSource,
+    *,
+    limit: int,
+    config: IngestConfig,
+    headers: Any,
+    raw_body: bytes,
+    now: datetime,
+) -> bytes:
+    """Check the sender against the source secret; return the signed message.
+
+    The delivery first takes a slot in the failed-check counter. A check
+    that passes gives the slot back; a failed check or a failed Vault read
+    keeps it. A failed check whose slot is over *limit* answers ``429``.
+    An empty or blank secret refuses every sender (``no_secret_configured``).
+    """
+    slot = await take_check_slot(source.tenant_id, source.slug, limit)
+    try:
+        secret = await _source_secret(source, slot)
+        if not secret.get_secret_value().strip():
+            raise IngestAuthError("no_secret_configured")
+        signed_message = verify_ingest_auth(
+            strategy=source.auth_strategy,
+            secret=secret,
+            headers=headers,
+            raw_body=raw_body,
+            config=config,
+            now=now.timestamp(),
+        )
+    except IngestAuthError as exc:
+        if slot is not None and slot.over_limit:
+            _log.info("ingest_failed_check_limit", slug=source.slug, reason=exc.reason)
+            raise failed_check_limit_error(limit) from exc
+        raise
+    await release_check_slot(slot)
+    return signed_message
 
 
 def _dedupe_key(source: ResolvedSource, signed_message: bytes) -> str:
@@ -308,30 +377,25 @@ async def accept_ingest_event(
     headers: Any,
     raw_body: bytes,
 ) -> IngestOutcome:
-    """Run rate-limit -> secret read -> auth -> dedupe -> normalise -> publish+audit.
+    """Run secret read -> auth -> rate-limit -> dedupe -> normalise -> publish+audit.
 
     Raises the typed ingest errors on a fail-closed guard; returns an
     :class:`IngestOutcome` on accept or on a duplicate delivery (no second
-    outbox/audit row). The rate limit runs before the Vault read, so it
-    bounds the Vault reads per source and window as well as the accepted
-    deliveries. The JSON body is parsed only after auth passes, so a parse
-    failure (400) is never reachable unauthenticated.
+    outbox/audit row). Only a delivery that passed the sender check counts
+    against the source's delivery limit; failed checks have their own
+    counter, and a short per-process copy of the secret keeps Vault reads
+    low (see the module docstring).
+    The JSON body is parsed only after auth passes, so a parse failure (400)
+    is never reachable unauthenticated.
     """
     started = time.perf_counter()
     now = datetime.now(UTC)
 
-    await enforce_ingest_rate_limit(
-        source.tenant_id, source.slug, _resolve_rate_limit(source, config)
+    limit = _resolve_rate_limit(source, config)
+    signed_message = await _check_sender(
+        source, limit=limit, config=config, headers=headers, raw_body=raw_body, now=now
     )
-    secret = await _read_secret_or_fail(source)
-    signed_message = verify_ingest_auth(
-        strategy=source.auth_strategy,
-        secret=secret,
-        headers=headers,
-        raw_body=raw_body,
-        config=config,
-        now=now.timestamp(),
-    )
+    await enforce_ingest_rate_limit(source.tenant_id, source.slug, limit)
 
     dedupe_key = _dedupe_key(source, signed_message)
     parsed_body = _parse_json_or_fail(raw_body)

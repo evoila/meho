@@ -210,6 +210,7 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_keycloak_realm.go # authenticated layer: warns about Keycloak targets MEHO refuses (GET /api/v1/targets/checks/keycloak-realm; all tenants for a platform admin).
     │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
     │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
@@ -1138,19 +1139,31 @@ that header from one place, so every verb gets it without its own flag.
   separator. Text that is not valid UTF-8 is refused too. Like the
   backplane, the CLI counts the length after it strips white space and
   makes the text NFC, so 130 decomposed letters (260 characters as typed)
-  pass. One difference, on purpose: the CLI looks for refused characters
-  before it strips white space. So it refuses a control character or a
-  line or paragraph separator also at the start or the end of the id: a
-  tab, a line feed, a vertical tab, a form feed, a carriage return (so
-  also CR LF), U+001C to U+001F, U+0085, U+2028 and U+2029.
-  The backplane strips these at the ends and takes the value. So the CLI
-  is stricter than the backplane, never looser. Such a character in a
-  flag or variable value is most likely a mistake. A given
+  pass. The CLI also strips first and checks after, so a control
+  character or a line or paragraph separator at the start or the end of
+  the id (a tab, a line feed, U+001C to U+001F, U+0085, U+2028, U+2029) is
+  stripped and accepted, as on the backplane. A given
   flag is always checked, so `--work-ref ""` is refused. An empty
   `MEHO_WORK_REF` means "not set". A bad value stops the command before
   any request leaves the CLI. A good value is cleaned with
   `api.CleanWorkRef` (it strips like Python's `str.strip` and makes the
   text NFC) and goes on the command context (`api.WithWorkRef`).
+- One Unicode difference is left. The backplane uses Unicode 16.0. The
+  CLI uses the Unicode 15.0 tables of the Go toolchain and of
+  `golang.org/x/text` (Go 1.26 has no newer tables). Both refuse the same
+  characters. But the NFC step joins 20 letter pairs of Unicode 16.0 only
+  on the backplane. They are in the blocks Todhri (U+105D2, U+105DA),
+  Tulu-Tigalari (U+11382, U+11384, U+1138B, U+11390, U+113C2), Gurung
+  Khema (U+1611E to U+16129) and Kirat Rai (U+16D63, U+16D67, U+16D69).
+  The CLI sends such an id in the form it was typed, and the backplane
+  makes it NFC when it arrives. So the stored value is the same. The
+  value that the CLI cleans before the send differs. Accept and refuse
+  differ in one case only: near the 256-character limit. The CLI counts
+  each of these pairs as two characters, and the backplane as one. So
+  the CLI can refuse an id made of many such pairs that the backplane
+  accepts (for example 130 pairs: 260 characters for the CLI, 130 for
+  the backplane). Move the CLI to Unicode 16.0 tables when the Go
+  toolchain has them.
 - One case list, `testdata/work_ref_cases.json`, is read by the Go test
   (`TestValidWorkRef_SharedCases`) and by the Python test
   (`backend/tests/test_work_ref_rule.py`), so the two rules cannot drift.

@@ -44,7 +44,7 @@ _RESULT: dict[str, Any] = {
         "id": {"type": "string", "description": "The user's internal UUID."},
         "username": {
             "type": ["string", "null"],
-            "description": "The username from the request; null when only id was passed.",
+            "description": "The user name stored in Keycloak.",
         },
         "enabled": {"type": "boolean", "description": "The value of enabled after the run."},
         "unrequested_changes": {
@@ -77,8 +77,9 @@ _WHEN_TO_USE_DISABLE = (
 
 _WHEN_TO_USE_ENABLE = (
     "Use to turn a disabled account on again (``keycloak.user.enable``), so "
-    "the person can sign in again. Dangerous: a MEHO-SA-Operator or a tenant "
-    "admin must approve. Key on the user UUID (``id``) or ``username``. "
+    "the person can sign in again. Dangerous, and a change of rights: another "
+    "admin than the one who asked must approve each call. Key on the user UUID "
+    "(``id``) or ``username``. "
     "Safe to run twice."
 )
 

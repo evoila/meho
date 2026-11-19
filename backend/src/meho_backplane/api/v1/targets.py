@@ -188,7 +188,11 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref, tenant_secret_ref
-from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import (
+    effective_tenant_scope_template,
+    is_plain_kv_path,
+    rendered_tenant_prefix,
+)
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
@@ -200,6 +204,8 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
+from meho_backplane.targets.required_extras import check_keycloak_managed_realm
 from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
@@ -210,6 +216,7 @@ from meho_backplane.targets.schemas import (
     TargetCreate,
     TargetListResponse,
     TargetUpdate,
+    TargetWriteResult,
     project_target_to_summary,
 )
 from meho_backplane.targets.secret_field_map import (
@@ -942,6 +949,26 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
         )
 
 
+def _require_keycloak_managed_realm(product: str, extras: Any, name: str) -> None:
+    """Reject a Keycloak target that names no managed realm, with a 422.
+
+    Runs on create and on update, on the target as it will be after the
+    write. See :mod:`meho_backplane.targets.required_extras`.
+    """
+    try:
+        check_keycloak_managed_realm(product, extras, name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
+def _with_warnings(target: Target) -> TargetWriteResult:
+    """Add the warnings of a risky but allowed setting to a create or update answer."""
+    warnings = keycloak_realm_warnings(target.product, target.extras)
+    return TargetWriteResult.model_validate({**target.model_dump(), "warnings": warnings})
+
+
 def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
     """Validate a PATCH's ``product`` field; return the effective product.
 
@@ -1059,11 +1086,11 @@ def _build_secret_ref_outside_tenant_scope_detail(
 def _tenant_prefix_or_empty(operator: Operator) -> str:
     """Render *operator*'s tenant prefix, normalised; ``""`` when the prefix check is off.
 
-    An empty ``VAULT_KV_TENANT_SCOPE_PREFIX`` (mid-migration deploy) has no
-    subtree to enforce, so only the plain-path rule applies, as at
-    dispatch time.
+    The prefix check is off when ``VAULT_KV_TENANT_SCOPE_PREFIX`` is empty
+    and the tenant has no Vault login role of its own; then only the
+    plain-path rule applies, as at dispatch time.
     """
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    template = effective_tenant_scope_template(operator)
     if not template:
         return ""
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
@@ -1172,17 +1199,15 @@ def _enforce_secret_ref_tenant_scope(
       relative to the mount, and the dispatch-time read addresses the
       default ``secret`` mount
       (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
-    * the operator's prefix is rendered from
-      :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-      (:func:`_tenant_prefix_or_empty`);
+    * the operator's prefix comes from :func:`_tenant_prefix_or_empty`;
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
     * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
       refused with any prefix setting, also an empty one
       (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
-    * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
-      mid-migration state) turns off only the prefix match: any plain
-      ref passes.
+    * an **empty** ``VAULT_KV_TENANT_SCOPE_PREFIX`` turns off only the
+      prefix match, and only for a tenant without its own Vault login role
+      (no entry in ``VAULT_OIDC_ROLE_BY_TENANT``): any plain ref passes.
 
     Only an *explicitly supplied* ``secret_ref`` is checked. The
     server-derived default
@@ -1624,6 +1649,7 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     product = _canonicalise_and_validate_product(body.product)
+    _require_keycloak_managed_realm(product, body.extras, body.name)
     _validate_preferred_impl_id(body.preferred_impl_id, product)
     enforce_vault_login_extras_platform_admin(
         operator, before=None, after=body.extras, target_name=body.name
@@ -1635,7 +1661,7 @@ async def create_target(
     body: TargetCreate,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
-) -> Target:
+) -> TargetWriteResult:
     """Create a new target in the requesting tenant.
 
     Returns 409 when a target with the same ``name`` already exists in
@@ -1721,7 +1747,7 @@ async def create_target(
     )
     if t.flight_recorder_capture is not None:  # #3272: audit a seeded override
         _audit_flight_recorder_capture_write(t, tenant_id=operator.tenant_id, before=None)
-    return _to_full(t)
+    return _with_warnings(_to_full(t))
 
 
 #: PATCH fields that change how MEHO reaches or logs in to a target. Sending
@@ -1853,6 +1879,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _require_keycloak_managed_realm(effective_product, updates.get("extras", t.extras), t.name)
     _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
@@ -1872,7 +1899,7 @@ async def update_target(
     body: TargetUpdate,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
-) -> Target:
+) -> TargetWriteResult:
     """Partially update a target.
 
     Only fields present in the request body are modified (Pydantic
@@ -1894,7 +1921,7 @@ async def update_target(
     :func:`apply_target_update`.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
-    return await apply_target_update(t, body, operator, session)
+    return _with_warnings(await apply_target_update(t, body, operator, session))
 
 
 async def apply_target_update(
@@ -2143,7 +2170,7 @@ async def _dispatch_targets_write(
 
 @router.post(
     "",
-    response_model=Target,
+    response_model=TargetWriteResult,
     status_code=201,
     operation_id="create_target_api_v1_targets_post",
     summary="Create Target",
@@ -2153,7 +2180,7 @@ async def create_target_route(
     body: TargetCreate,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
-) -> Target | JSONResponse:
+) -> TargetWriteResult | JSONResponse:
     """Create a new target in the requesting tenant (``tenant_admin``, a person).
 
     A person in the web interface creates it at once (201). A call made
@@ -2174,7 +2201,7 @@ async def create_target_route(
 
 @router.patch(
     "/{name}",
-    response_model=Target,
+    response_model=TargetWriteResult,
     operation_id="update_target_api_v1_targets__name__patch",
     summary="Update Target",
     responses=AWAITING_APPROVAL_RESPONSES,
@@ -2184,7 +2211,7 @@ async def update_target_route(
     body: TargetUpdate,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
-) -> Target | JSONResponse:
+) -> TargetWriteResult | JSONResponse:
     """Change a target (``tenant_admin``, a person). Only the sent fields change.
 
     The path value is a name, an alias or an id. A person in the web

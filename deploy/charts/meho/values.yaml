@@ -656,9 +656,9 @@ config:
   # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
   # single-operator answer — enabling it posture-wide re-opens, for every
   # op, the single-account request+grant hole the guard closes. The
-  # endorsed single-operator posture is an **agent-requester** (park the
-  # write under a scheduled agent run whose distinct subject clears the
-  # gate with no flag). Even under break-glass the self-approval is
+  # endorsed single-operator posture is the **MEHO-SA-Operators** group:
+  # its members approve their own changes on purpose, with a click in the
+  # web interface. Even under break-glass the self-approval is
   # forensically visible: it writes a decision audit row (requester ==
   # approver), emits a WARNING `approval_self_approval_break_glass` log,
   # and flips `GET /ready` → `features.approval_queue.effective_posture`
@@ -735,8 +735,19 @@ config:
   kbSimilarCheck: "false"
   # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
   # `"true"`, the biggest tools on the default MCP tool list send a short
-  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  # text, and no tool sends an output schema. The inputs they accept stay
+  # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- `mcpProfileConnectorLists` is rendered into
+  # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of
+  # `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use
+  # only the connectors of that profile. See `docs/codebase/mcp.md`.
+  mcpProfileConnectorLists: "false"
+  # -- `mcpConnectorProfiles` is rendered into `MCP_CONNECTOR_PROFILES`: the
+  # extra MCP tool profiles as one JSON object, for example
+  # `{"k8s": {"tools": "investigate", "connectors": ["kubernetes"]}}`. Empty
+  # means none. A bad value stops the start. See `docs/codebase/mcp.md`.
+  mcpConnectorProfiles: ""
   # -- `mcpClientPerToolKind` is rendered into `MCP_CLIENT_PER_TOOL_KIND`.
   # When `"true"`, Claude Code and Claude Desktop sign in with their own
   # login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client
@@ -2041,6 +2052,20 @@ networkPolicy:
   # -- Namespace label value selecting the ingress controller. RKE2 ships with
   # `ingress-nginx`; override per-cluster.
   ingressControllerNamespace: ingress-nginx
+  # -- Let the backplane reach its own console address (`ingress.host`).
+  # The first-start `certificate` check opens a TLS connection to it. A
+  # NetworkPolicy is checked after a host port or a Service sends the
+  # connection on to the ingress controller Pod, so the rule names those
+  # Pods (in `ingressControllerNamespace`) and their HTTPS port, not the
+  # address. Empty `podLabels` (the default): no rule. A separate key and
+  # not an `extraEgress` entry, because a later values file that sets
+  # `extraEgress` replaces the whole list. Install form 2 sets it for
+  # RKE2's Traefik in `values-single-node.yaml`.
+  ingressControllerEgress:
+    # -- Labels of the ingress controller Pods.
+    podLabels: {}
+    # -- The Pod port of the HTTPS entry point (Traefik: 8443).
+    port: 8443
   # -- PostgreSQL egress CIDR. Required and pattern-validated by the schema
   # only when `networkPolicy.enabled: true` (the default); when disabled the
   # template skips the NetworkPolicy resource and this field may be left blank.

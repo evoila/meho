@@ -372,6 +372,7 @@ async def test_role_mapping_assign_resolves_username_and_role(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/example/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/example/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
         mock.get("/admin/realms/example/roles/tenant_admin").respond(200, json=_REALM_ROLE)
         post_route = mock.post(
             f"/admin/realms/example/users/{_USER_UUID}/role-mappings/realm"
@@ -482,6 +483,7 @@ async def test_user_reset_password_resolves_username_and_no_leak(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/example/users").respond(200, json=[_EXISTING_USER])
+        mock.get(f"/admin/realms/example/users/{_USER_UUID}").respond(200, json=_EXISTING_USER)
         put_route = mock.put(f"/admin/realms/example/users/{_USER_UUID}/reset-password").respond(
             204
         )
@@ -541,14 +543,20 @@ async def test_write_ops_visible_to_search_operations(
     keycloak_write_e2e: KeycloakConnector,
 ) -> None:
     """All nine write ops are discoverable via search_operations."""
-    result = await search_operations(
-        _OPERATOR,
-        {
-            "connector_id": _CONNECTOR_ID,
-            "query": "keycloak create update realm client user role group member attributes",
-            "limit": 50,
-        },
-    )
-    surfaced = {hit["op_id"] for hit in result["hits"]}
+    # search_operations caps a page at 50 hits and Keycloak has more ops than
+    # that, so one query cannot show them all. Search the whole connector, then
+    # search the account write group, which holds the ops the first page misses.
+    surfaced: set[str] = set()
+    for group in (None, "account_write"):
+        result = await search_operations(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "query": "keycloak create update realm client user role group member attributes",
+                "group": group,
+                "limit": 50,
+            },
+        )
+        surfaced |= {hit["op_id"] for hit in result["hits"]}
     missing = set(EXPECTED_WRITE_OP_IDS) - surfaced
     assert not missing, f"search_operations did not surface: {missing}"

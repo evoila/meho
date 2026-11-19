@@ -34,6 +34,27 @@ Only a person can preview or import a file. An agent, a service or a
 runner gets `403` with `human_principal_required`. So every change in
 the history names a real person.
 
+### Targets are changed in the web console
+
+A file that adds or changes a target is applied only by a person in the
+web console. This is the same rule as for the target API, where a call
+with a token waits for approval. When you send such a file with a token
+(the CLI, a script or an AI tool), MEHO saves nothing and answers `403`:
+
+```json
+{"detail": "A settings file that adds or changes targets is applied in the web console. A call with a token cannot write targets at once."}
+```
+
+- The preview still works with a token. It shows the target changes.
+- A file that changes no target still applies with a token. A target in
+  the file that is the same as the stored one is no change.
+- Policies and conventions have no such rule. Their own API writes at
+  once with a token too.
+
+The web console does not have the settings file yet. Until it does, add
+or change each target with `meho targets` or the target API (with a
+token it waits for approval), then import the file.
+
 To call the API from a shell, get a token with the CLI. The value is a
 live login: do not log it or share it.
 
@@ -188,6 +209,9 @@ What the import does:
   keeps that whole part as it is.
 - It runs the same checks as the preview. With any mistake it answers
   `422` with the preview's answer and saves nothing.
+- With a token, a file that adds or changes a target is refused with
+  `403` and nothing is saved (see
+  [Targets are changed in the web console](#targets-are-changed-in-the-web-console)).
 - It saves each item through the same rules as the normal API for
   targets and conventions. When one item fails, MEHO saves the others.
   The failed items are in `failed`, and `ok` is then `false`.
@@ -205,7 +229,8 @@ What the import does:
   appears twice in the same block.
 - Anything that looks like a secret: a private key, a token, or a
   field in a target's `extras` named like a password or a key, whatever
-  its value.
+  its value. The check uses the same list of secret names that MEHO
+  hides in results.
 - A mask such as `********` or `<keep>`. A mask never means "keep the
   stored value": leave the field out instead.
 - An `apiVersion` other than `meho.evoila.com/v1`.

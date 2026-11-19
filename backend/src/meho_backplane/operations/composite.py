@@ -725,6 +725,7 @@ async def enforce_subop_policy(
         create_pending_request,
         record_approval_step_event,
         resume_requester_var,
+        rights_change_note,
     )
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
@@ -732,7 +733,7 @@ async def enforce_subop_policy(
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
-    from meho_backplane.operations.op_policy import apply_step_classification
+    from meho_backplane.operations.op_policy import apply_step_policy
     from meho_backplane.policy.stamp import take_rule
 
     started = time.monotonic()
@@ -795,10 +796,11 @@ async def enforce_subop_policy(
         requires_approval=requires_approval,
         parameter_schema={},
     )
-    # A classification entry can raise the step's level or make it always
-    # wait, the same as for a called operation. Only the step's group key is
-    # read from a stored row; the step runs without one.
-    await apply_step_classification(tenant_id=operator.tenant_id, step=descriptor)
+    # The override rows of the step's operation and a classification entry
+    # can raise the step's level or make it wait, the same as for a called
+    # operation. Only the step's group key is read from a stored row; the
+    # step runs without one.
+    await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -989,6 +991,7 @@ async def enforce_subop_policy(
                     # reviewer who runs the re-run. ``None`` outside a re-run.
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
+                    install_category=descriptor.policy_install_category,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed
@@ -1000,7 +1003,11 @@ async def enforce_subop_policy(
                 audit_id=request._audit_id,  # type: ignore[attr-defined]
             )
             return result_awaiting_approval(
-                op_id, request.id, duration_ms, audit_id=request.request_audit_id
+                op_id,
+                request.id,
+                duration_ms,
+                audit_id=request.request_audit_id,
+                note=await rights_change_note(request),
             )
 
         # DENY, or any unexpected verdict — fail closed: the sub-op never

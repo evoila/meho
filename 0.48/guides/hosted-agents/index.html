@@ -3883,7 +3883,11 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
   <code>preview_operation</code>, and <code>meho_connector_list</code> shows only the
   connectors in the list. When the agent asks for a connector that is not in
   the list, MEHO refuses the call and tells the agent which connectors it
-  may use.</li>
+  may use.
+  <code>result_query</code> reads only results that were stored under the list.
+  With the setting <code>AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST</code> on, an agent
+  with a <code>connectors</code> list does not get <code>query_topology</code>; the setting is
+  off by default.</li>
 </ul>
 <h3 id="the-tool-names">The tool names<a class="headerlink" href="#the-tool-names" title="Permanent link">&para;</a></h3>
 <p>These are the names you can put in <code>meta_tools</code>:</p>

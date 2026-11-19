@@ -1138,8 +1138,11 @@ client secret (then the user is the client's service-account user
 MEHO's next sign-in, or take its admin rights away. Then MEHO cannot reach
 that Keycloak until a person fixes it by hand.
 
-The check (`ops_user_login_guard.py`) compares the user name stored in
-Keycloak with the target's sign-in user (case does not count). It only
+The check (`ops_user_login_guard.py`) compares the user name and the email
+stored in Keycloak with the target's sign-in name (case does not count). A
+realm can let users sign in with their email, so the target's sign-in name
+can be the email of the user. When either one matches, the user is refused.
+It only
 applies when the realm of the write is the realm the target signs in to
 (`admin_realm`); otherwise it reads no admin credential. It refuses before
 the request waits for approval (a park check, with a reason that names no
@@ -1309,7 +1312,8 @@ How one delete runs:
      `security-admin-console`.
    - `target_login_client` / `target_login_user` — the client and the user
      this MEHO target logs in with: the admin credential's `client_id`, and
-     its `username` (password login) or the client's
+     its `username` (password login, matched against the stored user name
+     and the stored email) or the client's
      `service-account-<clientId>` user (client-secret login). They live in
      the target's `admin_realm`, so these guards apply when `managed_realm`
      is that same realm.

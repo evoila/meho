@@ -26,8 +26,9 @@ The secret move sink for a Keycloak password
 (:func:`refuse_login_user_in_realm`).
 
 Each check runs before the request waits for approval and again when the
-approved request runs. Nothing is written. Both use the user name that
-Keycloak stores for the user, not the name in the request. The check only
+approved request runs. Nothing is written. Both use the user name and the
+email that Keycloak stores for the user, not the name in the request: the
+target can log in with either one. The check only
 matters when the realm of the write is the realm the target signs in to,
 so it reads no admin credential otherwise.
 
@@ -149,8 +150,9 @@ async def refuse_login_user_rep(
 ) -> None:
     """Like :func:`refuse_login_user`, for a user the caller has already read.
 
-    A user without a stored user name is refused too: MEHO cannot tell
-    whether it is the sign-in user.
+    The stored user name and the stored email are both compared with the
+    target's login name. A user without a stored user name is refused too:
+    MEHO cannot tell whether it is the sign-in user.
     """
     realms = realms or resolve_realm_config(target)
     if realms.managed_realm != realms.admin_realm:
@@ -161,14 +163,13 @@ async def refuse_login_user_rep(
             f"{op_id}: Keycloak returned the user without a username, so MEHO cannot "
             "tell whether it is the user this target logs in with. Nothing was changed."
         )
-    await refuse_login_user(
+    await check_user_guards(
         connector,
         operator,
         target,
+        FoundObject(realms=realms, object_id=None, name=stored, rep=user),
         op_id=op_id,
         action=action,
-        username=stored,
-        realms=realms,
     )
 
 

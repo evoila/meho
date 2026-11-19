@@ -19,6 +19,8 @@ API (made-up names and ids):
   still wait for approval: they cannot lock MEHO out;
 * the secret move sink for a Keycloak password refuses that user before
   approval and when the move runs, and lets another user through;
+* a target that logs in with the user's email (not its user name) is
+  refused the same way, for every guarded write;
 * a plain import of the package registers the checks before approval.
 """
 
@@ -27,13 +29,19 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_user_login_guard import LOGIN_USER_WRITES
+from meho_backplane.connectors.keycloak.session import (
+    KeycloakAdminCredentials,
+    KeycloakPasswordCredentials,
+)
 from tests.test_connectors_keycloak_user_login_guard import (  # noqa: F401  (fixtures)
     _ADMIN_REALM,
     _KC_BASE_URL,
@@ -47,6 +55,7 @@ from tests.test_connectors_keycloak_user_login_guard import (  # noqa: F401  (fi
     _run,
     _stored_requests,
     _user,
+    _wire,
     kc,
 )
 
@@ -196,6 +205,83 @@ async def test_another_user_is_not_refused(kc: KeycloakConnector) -> None:  # no
             {"username": "event-guest", **_PASSWORD_REF},
             _SAME_REALM_TARGET,
         )
+    assert call["status"] == "awaiting_approval", call
+
+
+# ---------------------------------------------------------------------------
+# The target logs in with the user's email
+# ---------------------------------------------------------------------------
+
+_LOGIN_EMAIL = "Break-Glass@Example.invalid"
+
+#: Every guarded write by id, with the params it needs.
+_EMAIL_LOGIN_WRITES: list[tuple[str, dict[str, Any]]] = [
+    ("keycloak.user.disable", {}),
+    ("keycloak.user.required_actions.update", {"add": ["UPDATE_PASSWORD"]}),
+    *[(op_id, params) for op_id, _action, params in _GUARDED],
+]
+_EMAIL_IDS = ["disable", "required_actions.update", *_IDS]
+
+
+def _email_loader(_target: Any, _operator: Operator) -> Any:
+    async def _load() -> KeycloakAdminCredentials:
+        return KeycloakPasswordCredentials(username=_LOGIN_EMAIL, password="stub-password")
+
+    return _load()
+
+
+@pytest.fixture
+async def kc_email(kc: KeycloakConnector) -> AsyncIterator[KeycloakConnector]:  # noqa: F811
+    """The same targets, but the target logs in with the email of the user."""
+    connector = _wire(_email_loader)
+    yield connector
+    await connector.aclose()
+
+
+def _email_keycloak(mock: respx.MockRouter) -> _Keycloak:
+    api = _keycloak(mock)
+    api.users[_LOGIN_USER_UUID]["email"] = _LOGIN_EMAIL.lower()
+    return api
+
+
+@pytest.mark.parametrize(("op_id", "params"), _EMAIL_LOGIN_WRITES, ids=_EMAIL_IDS)
+async def test_email_sign_in_user_is_refused_before_approval(
+    kc_email: KeycloakConnector,
+    op_id: str,
+    params: dict[str, Any],
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _email_keycloak(mock)
+        call = await _call(op_id, {**_named(op_id, "id"), **params}, _SAME_REALM_TARGET)
+        written = _writes(mock)
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "refused_before_approval"
+    assert await _stored_requests() == []
+    assert written == []
+
+
+@pytest.mark.parametrize(("op_id", "params"), _EMAIL_LOGIN_WRITES, ids=_EMAIL_IDS)
+async def test_email_sign_in_user_is_refused_when_it_runs(
+    kc_email: KeycloakConnector,
+    op_id: str,
+    params: dict[str, Any],
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _email_keycloak(mock)
+        result = await _run(op_id, {**_named(op_id, "id"), **params}, _SAME_REALM_TARGET)
+        written = _writes(mock)
+    assert result["status"] != "ok", result
+    assert result["extras"]["exception_class"] == "KeycloakDeleteRefusedError", result
+    assert written == []
+
+
+async def test_email_sign_in_does_not_refuse_a_user_with_another_email(
+    kc_email: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _keycloak(mock)
+        api.users[_LOGIN_USER_UUID]["email"] = "someone-else@example.invalid"
+        call = await _call("keycloak.user.disable", {"id": _LOGIN_USER_UUID}, _SAME_REALM_TARGET)
     assert call["status"] == "awaiting_approval", call
 
 

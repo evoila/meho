@@ -416,8 +416,11 @@ async def show(
 async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView | None:
     """Load the trace of *audit_id* that *operator* may read, or ``None``.
 
-    A person gets every trace of the tenant. An agent login gets a trace
-    only when the tenant lets agents read traces, and never one marked
+    A person gets every trace of the tenant. An agent or service login
+    gets only the trace of a call it made itself (the trace's
+    ``operator_sub`` is its own ``sub``); a trace with no stored caller is
+    never shown to it. An agent login also gets a trace only when the
+    tenant lets agents read traces, and never one marked
     ``redaction_uncertain``. The tenant switch is checked first, so a
     tenant that keeps traces from agents has no trace loaded for them.
     """
@@ -427,9 +430,20 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         view = await load_trace(session, audit_id=audit_id, tenant_id=operator.tenant_id)
-    if is_agent and view is not None and view.redaction_uncertain:
+    if view is None:
+        return None
+    if is_agent and view.redaction_uncertain:
+        return None
+    if _reads_own_traces_only(operator) and (
+        not view.operator_sub or view.operator_sub != operator.sub
+    ):
         return None
     return view
+
+
+def _reads_own_traces_only(operator: Operator) -> bool:
+    """True when *operator* may read only the traces of its own calls."""
+    return operator.principal_kind in (PrincipalKind.AGENT, PrincipalKind.SERVICE)
 
 
 @router.get("/traces", response_model=AuditTraceSearchResult)
@@ -452,8 +466,10 @@ async def search_traces(
     The trace tables hold the request id and the caller since migration
     ``0169``; an older trace is found by the time window only. The access
     rules are those of the single trace read: a person reads every trace of
-    the tenant; an agent login reads none unless the tenant lets agents read
-    traces, and never a trace marked ``redaction_uncertain``.
+    the tenant; an agent or service login reads only the traces of its own
+    calls (its ``caller`` value is ignored); an agent login reads none
+    unless the tenant lets agents read traces, and never a trace marked
+    ``redaction_uncertain``.
     """
     _bind_audit_overrides(_AUDIT_TRACE_OP_ID)
     now = datetime.now(UTC)
@@ -470,7 +486,9 @@ async def search_traces(
             session,
             tenant_id=operator.tenant_id,
             request_id=request_id,
-            operator_sub=caller,
+            # An agent or service login reads only its own traces: its
+            # ``caller`` is ignored.
+            operator_sub=operator.sub if _reads_own_traces_only(operator) else caller,
             since=since_dt,
             until=until_dt,
             include_redaction_uncertain=not is_agent,
@@ -496,15 +514,18 @@ async def trace(
     A person keeps **full** access, independent of the agent gate: this serves
     redaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so
     an operator sees when a trace was withheld from agents. Paired add-ons
-    consume this same route with their operator principal — no separate add-on
-    surface.
+    use this same route — no separate add-on surface. A paired add-on logs in
+    as a service login, so it gets the traces of its own calls.
 
     An **agent** login gets the same rules as the agent read
     (:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the
     tenant lets agents read traces
-    (:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), and
-    never a trace marked ``redaction_uncertain``. Both answer
-    ``trace_present=False``, like a dispatch with no trace.
+    (:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), only
+    the trace of a call the agent made itself, and never a trace marked
+    ``redaction_uncertain``. A **service** login gets only the trace of a
+    call it made itself. Each answers ``trace_present=False``, like a
+    dispatch with no trace. A call that ran after a person approved it
+    belongs to the login that asked for it.
 
     Absence has two levels. A missing / cross-tenant **audit row** is a 404
     (never 403), matching :func:`show`: the existence check runs through the

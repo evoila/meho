@@ -1256,6 +1256,13 @@ upgrade and a new ingest of the API description.
   `requires_approval=false` (see below). A destructive operation always
   requires approval.
 
+A write step of a multi-step operation uses the override rows of its
+operation the same way, at the step gate and in the step preview
+(`apply_step_policy`, see
+[policy-classification.md](policy-classification.md)). There an override
+only makes the step stricter: one with `requires_approval=false` leaves
+the step's own approval flag as it is.
+
 With the `POLICY_CLASSIFICATION` switch on, a classification entry for the
 connector, group or operation can raise the level further or add a wait,
 after the overrides and before the floors; see

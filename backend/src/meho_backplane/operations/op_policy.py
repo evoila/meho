@@ -101,7 +101,7 @@ __all__ = [
     "PolicyEditResult",
     "apply_effective_policy",
     "apply_policy_edit",
-    "apply_step_classification",
+    "apply_step_policy",
     "approval_classification",
     "effective_policy",
     "effective_policy_map",
@@ -132,7 +132,7 @@ def approval_classification(row: EndpointDescriptor) -> dict[str, Any]:
 
     ``category``, ``labels`` and ``classification_rule`` (the entry that
     set them) of *row*, as :func:`apply_effective_policy` or
-    :func:`apply_step_classification` set them. ``category`` is ``None``
+    :func:`apply_step_policy` set them. ``category`` is ``None``
     when two entries conflict. A classified row always has a rule; a row
     has none when the switch was off at lookup, so this reads no setting.
     """
@@ -450,33 +450,47 @@ async def apply_effective_policy(
     return row
 
 
-async def apply_step_classification(
+async def apply_step_policy(
     *, tenant_id: UUID | None, step: EndpointDescriptor
 ) -> EndpointDescriptor:
-    """Apply the classification to *step*, the in-memory row of a composite step.
+    """Apply the override rows and the classification to *step*.
 
-    A multi-step operation checks each write step against a row built from
-    the step's declared risk level and approval flag. This raises them the
-    same way :func:`_with_classification` does for a stored row, and sets
-    ``step.policy_always_wait``, so no standing grant and no approval of
-    the run clears an "always wait" step. The category and labels of an
-    override row of the step's operation count too, as for a direct call,
-    so the step's approval request is routed like a direct call's. With the
-    ``POLICY_CLASSIFICATION`` switch off, *step* is returned unchanged and
-    no database session is opened.
+    *step* is the in-memory row of a write step of a multi-step operation,
+    built from the step's declared risk level and approval flag. The step
+    gate and the step preview both call this, so they give the same answer.
+
+    The override rows of the step's operation (install-wide plus the
+    tenant's, :func:`load_overrides`) apply like for a direct call
+    (:func:`effective_policy`): the highest risk level wins, and an
+    override that sets the approval flag makes the step wait. They only
+    make a step stricter: an override that turns approval off leaves the
+    step's own approval flag as it is. This holds with every policy switch.
+
+    With the ``POLICY_CLASSIFICATION`` switch on, the classification then
+    raises the level or adds a wait the same way :func:`_with_classification`
+    does for a stored row, and sets ``step.policy_always_wait``, so no
+    standing grant and no approval of the run clears an "always wait"
+    step. The category and labels of an override row count too, so the
+    step's approval request is routed like a direct call's.
     """
-    if not classification_enabled():
-        return step
     key = OpKey.of(step)
     async with get_sessionmaker()() as session:
-        overrides = await load_overrides(session, tenant_id=tenant_id, keys=[key])
-        classified = await classify_step(
-            session, tenant_id=tenant_id, step=step, overrides=overrides.get(key, [])
+        overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(key, [])
+        classified = (
+            await classify_step(session, tenant_id=tenant_id, step=step, overrides=overrides)
+            if classification_enabled()
+            else None
         )
-    policy = _with_classification(
-        EffectivePolicy(safety_level=step.safety_level, requires_approval=step.requires_approval),
-        classified,
+    policy = EffectivePolicy(
+        safety_level=step.safety_level, requires_approval=step.requires_approval
     )
+    if overrides:
+        raised = effective_policy(step.safety_level, step.requires_approval, overrides)
+        policy = replace(
+            raised, requires_approval=step.requires_approval or raised.requires_approval
+        )
+    if classified is not None:
+        policy = _with_classification(policy, classified)
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval
     _set_classification(step, policy)

@@ -1366,8 +1366,9 @@ CronJobs, pod templates in custom resources, the items of a list):
   summary.
 - An annotation value that is a JSON object or list (the
   `kubectl.kubernetes.io/last-applied-configuration` annotation holds a
-  whole earlier object) is cleaned by the same walk and written back as
-  JSON. A last-applied value that is not such JSON becomes
+  whole earlier object) is cleaned by the same walk. Each text inside it
+  also goes through `command_line.hide_in_text`. Then it is written back
+  as JSON. A last-applied value that is not such JSON becomes
   `[MEHO-REDACTED:last-applied-configuration]`. Other annotation values go
   through `command_line.hide_in_text` (the password in a URL, tokens with a
   known vendor prefix).

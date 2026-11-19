@@ -242,6 +242,29 @@ def test_other_annotation_values_are_checked_for_secret_shapes() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"message": f"deployed by token {_TOKEN}"},
+        ["first note", f"token {_TOKEN}", {"url": f"https://bot:{_FAKE}@git.example.invalid"}],
+    ],
+    ids=["object", "list"],
+)
+def test_texts_inside_a_json_annotation_are_checked_for_secret_shapes(value: Any) -> None:
+    pod = _pod()
+    pod["metadata"]["annotations"]["example.invalid/notes"] = json.dumps(value)
+    pod["metadata"]["annotations"][_LAST_APPLIED] = json.dumps(value)
+
+    annotations = agent_view(pod)["metadata"]["annotations"]
+
+    for name in ("example.invalid/notes", _LAST_APPLIED):
+        text = annotations[name]
+        assert _TOKEN not in text
+        assert _FAKE not in text
+        assert HIDDEN in text
+        assert json.loads(text)  # still valid JSON
+
+
 def test_managed_fields_are_left_out_of_body_and_summary() -> None:
     attributes = agent_view_attributes(_k8s_span({"kind": "PodList", "items": [_pod()]}))
 

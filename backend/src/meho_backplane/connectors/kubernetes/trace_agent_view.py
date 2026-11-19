@@ -25,9 +25,10 @@ reads the stored trace as it is. An agent gets a copy made by
 * every ``managedFields`` entry: the key is left out;
 * annotation values: a value that is a JSON object or list (the
   ``kubectl.kubernetes.io/last-applied-configuration`` annotation holds a
-  whole earlier object) is cleaned the same way and written back as JSON.
-  The last-applied annotation becomes :data:`LAST_APPLIED_MARKER` when it is
-  not such a value. Any other text value is passed through
+  whole earlier object) is cleaned the same way, each text inside it is
+  passed through :func:`~meho_backplane.redaction.command_line.hide_in_text`,
+  and it is written back as JSON. The last-applied annotation becomes
+  :data:`LAST_APPLIED_MARKER` when it is not such a value. Any other text value is passed through
   :func:`~meho_backplane.redaction.command_line.hide_in_text`, which hides
   the password in a URL and tokens with a known vendor prefix.
 
@@ -97,14 +98,26 @@ def _env_entry(entry: Any) -> Any:
 def _annotation_value(name: str, value: Any) -> Any:
     """One annotation value, cleaned as described in the module docstring."""
     if not isinstance(value, str):
-        return agent_view(value)
+        return _hide_texts(agent_view(value))
     if value.lstrip()[:1] in ("{", "["):
         try:
             parsed = json.loads(value)
         except (ValueError, RecursionError):
             parsed = None
         if isinstance(parsed, (dict, list)):
-            return json.dumps(agent_view(parsed), ensure_ascii=False, separators=(",", ":"))
+            cleaned = _hide_texts(agent_view(parsed))
+            return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
     if name == _LAST_APPLIED:
         return LAST_APPLIED_MARKER
     return hide_in_text(value)
+
+
+def _hide_texts(node: Any) -> Any:
+    """Copy *node* with :func:`hide_in_text` applied to every text value in it."""
+    if isinstance(node, dict):
+        return {key: _hide_texts(item) for key, item in node.items()}
+    if isinstance(node, list):
+        return [_hide_texts(item) for item in node]
+    if isinstance(node, str):
+        return hide_in_text(node)
+    return node

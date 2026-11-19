@@ -58,6 +58,7 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from ._rest_write_helpers import settings_import_at_once
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _insert_target,
@@ -325,7 +326,8 @@ async def test_round_trip_spec_is_byte_identical(client: TestClient) -> None:
         first = _export(client, token)
         await _wipe_tenant_settings()
 
-        applied = _import(client, token, first)
+        with settings_import_at_once(app):
+            applied = _import(client, token, first)
         assert applied.status_code == 200, applied.text
         body = applied.json()
         assert body["ok"] is True, body
@@ -350,7 +352,8 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
         tenant["targets"].append({"name": "nsx-01", "product": "nsx", "host": "10.1.0.3"})
         changed = yaml.safe_dump(doc, sort_keys=False)
 
-        first = _import(client, token, changed)
+        with settings_import_at_once(app):
+            first = _import(client, token, changed)
         assert first.status_code == 200, first.text
         assert first.json()["applied"] is True
 
@@ -775,7 +778,8 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
 
         # Restore onto a fresh install: the map comes back.
         await _wipe_tenant_settings()
-        restored = _import(client, token, first)
+        with settings_import_at_once(app):
+            restored = _import(client, token, first)
         assert restored.status_code == 200, restored.text
         assert restored.json()["applied"] is True
         assert _spec_yaml(_export(client, token)) == _spec_yaml(first)
@@ -785,7 +789,8 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
             name="mapped", product="ssh", host="10.0.0.1", secret_field_map={"password": "pass"}
         )
         preview = _import(client, token, changed, preview=True).json()
-        applied = _import(client, token, changed)
+        with settings_import_at_once(app):
+            applied = _import(client, token, changed)
         history = client.get("/api/v1/settings/history", headers=_auth(token)).json()
 
     (change,) = preview["diff"]["targets"]["changed"]
@@ -860,7 +865,8 @@ async def test_replacing_a_large_field_map_stays_within_the_limit(client: TestCl
         token = _token(key)
         preview = _import(client, token, content, preview=True)
         refused = _import(client, token, too_many)
-        applied = _import(client, token, content)
+        with settings_import_at_once(app):
+            applied = _import(client, token, content)
 
     assert preview.status_code == 200, preview.text
     assert preview.json()["mistakes"] == []

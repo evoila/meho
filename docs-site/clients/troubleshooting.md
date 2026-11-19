@@ -304,7 +304,7 @@ appear.
 requires (`read_only < operator < tenant_admin`), or the claim is
 missing entirely.
 
-**Fix.** Confirm the person is in one of the five MEHO groups and the
+**Fix.** Confirm the person is in one of the MEHO role groups and the
 `tenant-role` mapper is on the client; walk back through the realm
 setup ([Keycloak realm setup](../install/keycloak-realm.md)).
 

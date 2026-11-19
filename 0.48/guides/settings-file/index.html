@@ -2527,6 +2527,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#approval-policies-change-only-in-the-web-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Approval policies change only in the web console
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#what-is-never-in-the-file" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3303,6 +3314,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#approval-policies-change-only-in-the-web-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Approval policies change only in the web console
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#what-is-never-in-the-file" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3469,8 +3491,12 @@ with a token waits for approval. When you send such a file with a token
 <li>The preview still works with a token. It shows the target changes.</li>
 <li>A file that changes no target still applies with a token. A target in
   the file that is the same as the stored one is no change.</li>
-<li>Policies and conventions have no such rule. Their own API writes at
-  once with a token too.</li>
+<li>Two policies change only in the web console:
+  <code>run_approval_target_kinds</code> turned on and <code>announce_gate_enabled</code>
+  turned off. The web console cannot apply a settings file yet, so these
+  two changes cannot be made at all today. See
+  <a href="#approval-policies-change-only-in-the-web-console">Approval policies change only in the web console</a>.
+  The other policies and the conventions apply with a token.</li>
 </ul>
 <p>The web console does not have the settings file yet. Until it does, add
 or change each target with <code>meho targets</code> or the target API (with a
@@ -3532,6 +3558,32 @@ live login: do not log it or share it.</p>
   preview shows a warning. The import still runs.</li>
 <li>When a <code>tenant_admin</code> imports a file with only their own tenant, the
   tenant <code>id</code> may be left out.</li>
+</ul>
+<h3 id="approval-policies-change-only-in-the-web-console">Approval policies change only in the web console<a class="headerlink" href="#approval-policies-change-only-in-the-web-console" title="Permanent link">&para;</a></h3>
+<p>Two policies decide how far an approval reaches or whether a gate runs:</p>
+<ul>
+<li><code>run_approval_target_kinds: true</code> lets one run approval cover a whole
+  target kind, not only one target.</li>
+<li><code>announce_gate_enabled: false</code> turns the announce gate off.</li>
+</ul>
+<p>These two changes apply only for a person in the web console. The web
+console cannot apply a settings file yet, so today these two changes
+cannot be made at all. When you send such a file with a token (the CLI, a
+script or an AI tool), MEHO answers <code>403</code>, names each policy, and saves
+nothing from the file, also not its other parts. This includes
+<code>policies: null</code> when the gate is on, because it turns the gate off.</p>
+<div class="admonition warning">
+<p class="admonition-title">Turn the announce gate on only if you want to keep it on</p>
+<p>Turning the gate on applies with a token. Turning it off again
+cannot be done until the web console can apply a settings file.</p>
+</div>
+<ul>
+<li>The preview works with a token. It shows the change in <code>diff</code> and
+  names it in <code>warnings</code>.</li>
+<li>The other direction (<code>run_approval_target_kinds: false</code>,
+  <code>announce_gate_enabled: true</code>) applies with a token.</li>
+<li>A value that is the same as the stored one is no change.</li>
+<li>The other policies apply with a token.</li>
 </ul>
 <h3 id="what-is-never-in-the-file">What is never in the file<a class="headerlink" href="#what-is-never-in-the-file" title="Permanent link">&para;</a></h3>
 <ul>

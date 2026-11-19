@@ -37,6 +37,7 @@ from tests.mcp_test_fixtures import (
 AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
     {
         "agent_operation_tools_from_mcp",
+        "agent_topology_off_with_connector_list",
         "agent_reads_custom_description",
         "checks_agent_events",
         "connector_list_product_aliases",

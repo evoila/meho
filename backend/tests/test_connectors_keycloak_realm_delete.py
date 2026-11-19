@@ -12,9 +12,11 @@ What is proven:
 
 * the op registers on the ``destructive`` risk level, with approval required,
   the ``destructive`` tag, group ``realm_write`` and a required ``realm``;
-* the guards (``protected_realm``): the target's admin realm, its managed
-  realm, and the realm MEHO's own login uses (on every Keycloak target,
-  whatever its host); a change of letter case does not skip them;
+* a target works on one realm only: a realm other than the target's managed
+  realm is refused, also before approval, and nothing is sent to Keycloak;
+* the guards (``protected_realm``): master, the target's admin realm, and
+  the realm MEHO's own login uses (on every Keycloak target, whatever its
+  host); a change of letter case does not skip them;
 * a realm that is already gone → ``already_absent: true`` and no DELETE;
   ``deleted: true`` only after a read answers 404; a read that answers with
   something other than a realm object is an error, before and after the
@@ -75,7 +77,6 @@ _TARGET_NAME = "kc-realm-delete-e2e"
 _KC_HOST = "keycloak-realm-delete-e2e.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_REALM = "master"
-_MANAGED_REALM = "meho"
 _REALM = "throwaway-run-7"
 _REALM_PATH = f"/admin/realms/{_REALM}"
 
@@ -134,7 +135,7 @@ async def _seed_target() -> None:
                 secret_ref="keycloak/admin",
                 auth_model="shared_service_account",
                 vpn_required=False,
-                extras={"managed_realm": _MANAGED_REALM, "admin_realm": _ADMIN_REALM},
+                extras={"managed_realm": _REALM, "admin_realm": _ADMIN_REALM},
                 fingerprint={"version": "26.3.3"},
                 notes="seeded by test_connectors_keycloak_realm_delete",
             )
@@ -356,6 +357,10 @@ async def test_malformed_read_after_delete_is_not_deleted_true(
 
 async def test_realm_name_is_encoded_in_the_path(kc: KeycloakConnector) -> None:
     """A dot in a realm name stays inside its one path segment."""
+    async with get_sessionmaker()() as session:
+        row = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+        row.extras = {"managed_realm": "a.b", "admin_realm": _ADMIN_REALM}
+        await session.commit()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         get_route = mock.get("/admin/realms/a%2Eb").respond(404)
@@ -377,21 +382,22 @@ async def test_realm_delete_refuses_a_realm_that_is_not_a_plain_name(
     assert not route.called
 
 
-@pytest.mark.parametrize("realm", [_ADMIN_REALM, _MANAGED_REALM, "MASTER", "MEHO"])
-async def test_realm_delete_refuses_the_target_realms(kc: KeycloakConnector, realm: str) -> None:
+@pytest.mark.parametrize("realm", [_ADMIN_REALM, "MASTER", "other-realm", _REALM.upper()])
+async def test_realm_delete_refuses_another_realm_than_the_managed_realm(
+    kc: KeycloakConnector, realm: str
+) -> None:
+    """An approved call that names another realm sends nothing to Keycloak."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        get_route = mock.get(url__regex=r".*/admin/realms/.*").respond(200, json={})
-        del_route = mock.delete(url__regex=r".*").respond(204)
+        mock.route().respond(200, json={})
         result = await _run({"realm": realm})
     assert result["status"] == "error", result
-    assert result["extras"]["exception_class"] == "KeycloakDeleteRefusedError"
-    assert "(protected_realm)" in result["extras"]["exception_message"]
-    assert not get_route.called
-    assert not del_route.called
+    assert result["extras"]["exception_class"] == "ValueError"
+    assert "Use a target that names that realm" in result["extras"]["exception_message"]
+    assert len(mock.calls) == 0
 
 
-@pytest.mark.parametrize("realm", ["master", "ops-admin", "tenant-a"])
+@pytest.mark.parametrize("realm", ["master", "MASTER", "ops-admin", "OPS-ADMIN"])
 def test_guards_cover_master_and_a_custom_admin_realm(realm: str) -> None:
     """master stays protected when the target logs in to another admin realm."""
     target = SimpleNamespace(
@@ -400,7 +406,17 @@ def test_guards_cover_master_and_a_custom_admin_realm(realm: str) -> None:
     )
     with pytest.raises(KeycloakDeleteRefusedError, match=r"\(protected_realm\)"):
         check_realm_guards(target, realm)  # type: ignore[arg-type]
-    check_realm_guards(target, _REALM)  # type: ignore[arg-type]
+    check_realm_guards(target, "tenant-a")  # type: ignore[arg-type]
+
+
+def test_guards_refuse_a_managed_realm_that_is_also_the_admin_realm() -> None:
+    """A target that logs in to the realm it manages can never delete it."""
+    target = SimpleNamespace(
+        host="kc.test.invalid",
+        extras={"admin_realm": "tenant-a", "managed_realm": "tenant-a"},
+    )
+    with pytest.raises(KeycloakDeleteRefusedError, match=r"\(protected_realm\)"):
+        check_realm_guards(target, "tenant-a")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -430,12 +446,14 @@ async def test_login_realm_is_refused_on_a_target_with_a_different_host(
     kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MEHO's own login realm is refused on every Keycloak target, whatever its host."""
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"https://other-keycloak.test/realms/{_REALM}")
+    monkeypatch.setenv(
+        "KEYCLOAK_ISSUER_URL", f"https://other-keycloak.test/realms/{_REALM.upper()}"
+    )
     get_settings.cache_clear()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         del_route = mock.delete(url__regex=r".*").respond(204)
-        result = await _run({"realm": _REALM.upper()})
+        result = await _run({"realm": _REALM})
     assert result["status"] == "error", result
     assert "(protected_realm)" in result["extras"]["exception_message"]
     assert "MEHO's own login" in result["extras"]["exception_message"]
@@ -542,8 +560,12 @@ async def test_realm_card_without_a_live_connector_declines() -> None:
     assert effect is None
 
 
-async def test_realm_card_refuses_a_protected_realm(kc: KeycloakConnector) -> None:
-    effect = await _card({"realm": _MANAGED_REALM}, kc)
+async def test_realm_card_refuses_a_protected_realm(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"https://keycloak.test/realms/{_REALM}")
+    get_settings.cache_clear()
+    effect = await _card({"realm": _REALM}, kc)
     assert effect is not None
     assert effect["preview_unavailable"] is True
     assert "(protected_realm)" in effect["preview_error"]
@@ -577,17 +599,34 @@ async def test_realm_delete_without_preview_hash_is_refused(kc: KeycloakConnecto
     assert await _approval_rows() == 0
 
 
-async def test_protected_realm_is_refused_before_it_waits_for_approval(
+async def test_another_realm_is_refused_before_it_waits_for_approval(
     kc: KeycloakConnector,
 ) -> None:
+    """A realm other than the managed realm: no request to Keycloak, nothing stored."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.route().respond(200, json={})
+        call = await call_operation(_operator(), _args(_ADMIN_REALM))
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "refused_before_approval"
+    assert "Use a target that names that realm" in str(call)
+    assert len(mock.calls) == 0
+    assert await _approval_rows() == 0
+
+
+async def test_protected_realm_is_refused_before_it_waits_for_approval(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"https://keycloak.test/realms/{_REALM}")
+    get_settings.cache_clear()
     requester = _operator()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         del_route = mock.delete(url__regex=r".*").respond(204)
-        preview = await preview_operation(requester, _args(_ADMIN_REALM))
+        preview = await preview_operation(requester, _args(_REALM))
         assert preview["status"] == "ok", preview
         call = await call_operation(
-            requester, {**_args(_ADMIN_REALM), "preview_hash": preview["preview_hash"]}
+            requester, {**_args(_REALM), "preview_hash": preview["preview_hash"]}
         )
     assert call["status"] == "denied", call
     assert call["extras"]["error_code"] == "blast_radius_required"
@@ -653,6 +692,9 @@ async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConn
             effect = dict(row.proposed_effect)
         assert effect["safety_level"] == "destructive"
         assert effect["blast_radius"]["object"]["users"] == 12
+        # The realm in the first line of the card is the realm to delete.
+        assert effect["target_realm"] == _REALM
+        assert effect["blast_radius"]["object"]["realm"] == _REALM
 
         async with get_sessionmaker()() as session:
             approved = await approve_request(session, request_id, operator=approver, params=None)

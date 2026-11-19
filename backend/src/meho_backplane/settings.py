@@ -2672,6 +2672,12 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The realm in every Keycloak answer, behind a switch that is off by
+    #: default. When on, each dict answer of a Keycloak operation starts with
+    #: ``managed_realm``: the realm the call acted on
+    #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
+    #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
+    keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -3813,6 +3819,9 @@ def get_settings() -> Settings:
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
+        ),
+        keycloak_answer_realm=parse_bool_env(
+            os.environ.get("KEYCLOAK_ANSWER_REALM"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

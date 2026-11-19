@@ -168,11 +168,33 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 	if len(t.Extras) > 0 {
 		fmt.Fprintf(w, "%-18s %s\n", "extras:", formatExtras(t.Extras))
 	}
+	if line := keycloakRealmsLine(t); line != "" {
+		fmt.Fprintf(w, "%-18s %s\n", "realms:", line)
+	}
 	// Render timestamps in the same RFC3339Z shape the backend's
 	// model_dump(mode="json") emits, so --json output and the human
 	// view show byte-identical strings.
 	fmt.Fprintf(w, "%-18s %s\n", "created_at:", t.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-18s %s\n", "updated_at:", t.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+}
+
+// keycloakRealmsLine shows the admin realm and the managed realm of a
+// Keycloak target side by side. The target works on the managed realm only
+// and signs in to the admin realm (`master` when none is set). It is empty
+// for any other product.
+func keycloakRealmsLine(t *api.Target) string {
+	if !strings.EqualFold(strings.TrimSpace(t.Product), "keycloak") {
+		return ""
+	}
+	admin, _ := t.Extras["admin_realm"].(string)
+	if admin == "" {
+		admin = "master"
+	}
+	managed, _ := t.Extras["managed_realm"].(string)
+	if managed == "" {
+		managed = "(not set)"
+	}
+	return fmt.Sprintf("admin=%s, managed=%s", admin, managed)
 }
 
 // formatSecretFieldMap renders the secret field map as a sorted

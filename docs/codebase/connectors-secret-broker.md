@@ -400,6 +400,9 @@ meho secret move \
 - `--from` reads the `launcher-app` client's secret from the
   `example-realm` realm on the `my-keycloak` target (clientId→UUID via the
   `?clientId=` exact lookup, then `GET .../clients/{uuid}/client-secret`).
+  `example-realm` must be the managed realm of `my-keycloak`: a Keycloak
+  target works on one realm only, so a `keycloak:` ref (source or sink) on
+  another realm is refused before the move waits for approval.
 - `--to` writes it into the `client_secret` field of the KV-v2 secret at
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).

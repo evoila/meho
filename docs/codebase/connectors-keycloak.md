@@ -1275,10 +1275,14 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
 
 - **`realm` is required.** The op never falls back to the target's
   `managed_realm`.
+- **Only the managed realm.** A target works on one realm only, so `realm`
+  must be the target's `managed_realm`. Another realm is refused before the
+  request waits for approval and again when the approved call runs; nothing
+  is sent to Keycloak. To delete a realm, use a target that names it.
 - **Protected realms** are refused with the `protected_realm` code, before
   the request waits for approval and again when the approved call runs:
-  - the target's `admin_realm` (default `master`);
-  - the target's `managed_realm`;
+  - `master`, and the target's `admin_realm`, so a target that logs in to
+    the realm it manages can never delete it;
   - the realm MEHO's own login uses: the realm in `KEYCLOAK_ISSUER_URL`, and
     the realm in `KEYCLOAK_ADMIN_URL` when that is set. This realm is
     refused on every Keycloak target, because MEHO cannot tell for sure that
@@ -1769,6 +1773,45 @@ A params check refuses a bad value before the policy gate, so before a
 call waits for approval. The `<realm>` segment of a secret broker ref
 (`<target>/<realm>/<username>#password`, `<target>/<realm>/clients/<id>#secret`)
 must be plain too.
+
+**A target works on one realm only.** The managed realm is a fence, not a
+default. `realm_params.py` (`FENCED_OPS`) refuses a realm value that is not
+the managed realm for four ops: `keycloak.realm.update` (`realm` and
+`representation.realm`), `keycloak.realm.create` (`realm` and
+`representation.realm`), `keycloak.realm.delete` (`realm`) and
+`keycloak.user.check_login` (`realm`). The
+refusal runs twice. `realm_fence_park_check` refuses before the call waits
+for approval (and in `preview_operation`), so nothing is stored and nothing
+is sent to Keycloak. `realm_param`, with the target, refuses again in the
+handler, for a call that does not wait for approval. The text says: use a
+target that names that realm as its managed realm. It never repeats the
+value the caller gave. The `realm` parameter stays so that a call that names
+the managed realm still works; it will be removed. So `keycloak.realm.delete`
+deletes only the managed realm of its target. `check_realm_guards` still
+refuses `master`, the target's admin realm and MEHO's own login realm. Its
+approval card names the realm, with the user, client and group counts.
+Every other op takes no realm value and always acts on the managed realm.
+The secret broker refs follow the same fence: `managed_realm_problem`
+(`secret_endpoint.py`) refuses a `keycloak:` ref whose `<realm>` is not the
+managed realm of its target. `check_secret_move_realms`
+(`connectors/secret/move_preview.py`) is the park check of `secret.move`, so
+the move is refused before it waits for approval; the sink and the source
+refuse it again when the move runs, before any call to Keycloak.
+
+**Every answer names the realm.** `answer_realm.py` (`name_the_realm`,
+applied to `KeycloakConnector`) wraps each op handler. With the switch
+`KEYCLOAK_ANSWER_REALM` on (`Settings.keycloak_answer_realm`, off by
+default), a dict answer gets the field `managed_realm` first, set to the
+realm the call acted on. A read answer, a write answer and a refused write
+show the same field. With the switch off, every answer is as before. The
+field changes what an AI agent reads, so it stays off until it is measured.
+The
+approval card of a Keycloak write shows the realm in its first line: the
+dispatcher stamps `target_realm` on `proposed_effect`
+(`target_managed_realm` in `targets/keycloak_realm_warnings.py`) and the
+console renders it under "Proposed effect". `meho targets describe` shows a
+`realms:` line with the admin realm and the managed realm of a Keycloak
+target; `meho targets probe` shows both in its `extras` line.
 
 A Keycloak target with no managed realm, or a realm that is not a plain
 name, is refused like this:

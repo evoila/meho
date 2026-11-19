@@ -588,7 +588,7 @@ async def _realm_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     connector = _live_keycloak_connector(ctx)
     if connector is None:
         return None
-    realm = realm_name_param(ctx.params)
+    realm = realm_name_param(ctx.params, ctx.target)
     check_realm_guards(ctx.target, realm)
     return await realm_blast_radius(connector, ctx.operator, ctx.target, realm)
 

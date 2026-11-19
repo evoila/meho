@@ -27,6 +27,21 @@ connector cannot reach it: the sign-in and the probe fail. This page
 works only with a Keycloak that serves at the root path, such as your
 own Keycloak with no `http-relative-path` set.
 
+**One target, one realm.** A Keycloak target works on the managed realm it
+names, and on no other. The approval card of a write shows that realm
+first. With the switch `KEYCLOAK_ANSWER_REALM` on (off by default), every
+answer also has a `managed_realm` field with that realm. A call that names
+another realm in its `realm` value (`keycloak.realm.update`,
+`keycloak.realm.create`, `keycloak.realm.delete`,
+`keycloak.user.check_login`), and a `keycloak:` ref in `secret.move`
+that names another realm, are refused before they wait for approval. To
+work on another realm, register a second target that names it, with the
+same login (`--secret-ref`) as the first. To
+create a new realm, use a target that names that realm as its managed
+realm. `keycloak.realm.delete` still needs its `realm` value: give the
+managed realm. In the other calls the `realm` value stays for now, and
+it will be removed: leave it out.
+
 ## What this surface is
 
 The `keycloak-admin-26.x` connector is a **typed** connector: hand-coded

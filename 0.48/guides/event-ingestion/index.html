@@ -3468,10 +3468,17 @@ delivery, and the order is load-bearing:</p>
 <li><strong>Body cap</strong> (<code>413</code>) — enforced before the whole body is buffered, so
    an understated <code>Content-Length</code> cannot get an oversize payload past
    it. A source may lower the cap, never raise it.</li>
-<li><strong>Rate-limit</strong> (<code>429</code> with <code>Retry-After</code>) per tenant and source. Every
-   delivery counts, accepted or refused, and the limit runs before the
-   secret is read.</li>
-<li><strong>Authenticate</strong> (<code>401</code>) per the source's <code>auth_strategy</code>.</li>
+<li><strong>Authenticate</strong> (<code>401</code>) per the source's <code>auth_strategy</code>. A source
+   whose stored secret is empty or only spaces accepts no sender. Failed
+   checks have their own per-minute limit, the same number as the source's
+   rate limit. Once a source reaches it, MEHO answers <code>429</code> with
+   <code>Retry-After</code> to each delivery that fails the check. So bad deliveries
+   do not block the real sender. Each MEHO process keeps a copy of the
+   secret for up to one minute, so a burst of deliveries reads your
+   secret store about once per minute. A secret change through the
+   update applies to the next delivery in every MEHO process.</li>
+<li><strong>Rate-limit</strong> (<code>429</code> with <code>Retry-After</code>) per tenant and source. Only
+   deliveries that passed step 3 count.</li>
 <li><strong>De-duplicate</strong> — a hash of the signed data (the timestamp and the
    body for a timestamped HMAC, else the body) makes a redelivery of the
    same request collide at insert and return an idempotent <code>200</code>, so a
@@ -3512,13 +3519,22 @@ object. An event fires the trigger when the event <strong>payload contains</stro
 every key and value the filter names. The filter is a <em>subset</em> test, and
 the direction is fixed: a filter is matched against the payload, not the
 other way round.</p>
-<div class="highlight"><pre><span></span><code><span class="c1"># Fire the incident-triage agent on any critical, firing alert.</span>
+<div class="highlight"><pre><span></span><code><span class="c1"># Fire the incident-triage agent on any critical, firing alert from am-prod.</span>
 <span class="c1"># --agent-definition takes the definition's UUID (`meho agent show incident-triage`).</span>
 meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="w"> </span>--kind<span class="w"> </span>event<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--agent-definition<span class="w"> </span>&lt;definition-uuid&gt;<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--event-filter<span class="w"> </span><span class="s1">'{"status": "firing", "labels": {"severity": "critical"}}'</span>
+<span class="w">  </span>--event-filter<span class="w"> </span><span class="s1">'{"source": {"slug": "am-prod"}, "status": "firing", "labels": {"severity": "critical"}}'</span>
 </code></pre></div>
-<p>Author filters against the lifted top-level fields:</p>
+<div class="admonition note">
+<p class="admonition-title">A filter for webhook events names its source</p>
+<p>An event that came in through this endpoint starts a trigger only when
+the trigger's filter names the event source: <code>{"source": {"slug":
+"&lt;source-slug&gt;"}}</code> or <code>{"source": {"id": "&lt;source-id&gt;"}}</code>. MEHO writes
+the <code>source</code> field itself, so a sender cannot set it. A filter without
+a source never matches a webhook event, also when the body has the
+same fields.</p>
+</div>
+<p>Author filters against the lifted top-level fields, plus the source:</p>
 <table>
 <thead>
 <tr>
@@ -3530,42 +3546,41 @@ meho<span class="w"> </span>scheduler<span class="w"> </span>create<span class="
 <tbody>
 <tr>
 <td><code>alertmanager</code></td>
-<td><code>{"status": "firing", "labels": {"severity": "critical"}}</code></td>
+<td><code>{"source": {"slug": "am-prod"}, "status": "firing", "labels": {"severity": "critical"}}</code></td>
 <td>critical alerts, firing</td>
 </tr>
 <tr>
 <td><code>grafana</code></td>
-<td><code>{"state": "alerting", "labels": {"severity": "warning"}}</code></td>
+<td><code>{"source": {"slug": "grafana-prod"}, "state": "alerting", "labels": {"severity": "warning"}}</code></td>
 <td>warning alerts still alerting</td>
 </tr>
 <tr>
 <td><code>vcf-operations</code></td>
-<td><code>{"status": "active", "criticality": "critical"}</code></td>
+<td><code>{"source": {"slug": "vcf-ops"}, "status": "active", "criticality": "critical"}</code></td>
 <td>active critical VMware alerts</td>
 </tr>
 <tr>
 <td><code>vcf-operations</code></td>
-<td><code>{"resource_kind": "VirtualMachine"}</code></td>
+<td><code>{"source": {"slug": "vcf-ops"}, "resource_kind": "VirtualMachine"}</code></td>
 <td>any alert on a VM</td>
 </tr>
 <tr>
 <td><code>harbor</code></td>
-<td><code>{"type": "SCANNING_COMPLETED"}</code></td>
+<td><code>{"source": {"slug": "harbor"}, "type": "SCANNING_COMPLETED"}</code></td>
 <td>a completed image scan</td>
 </tr>
 <tr>
 <td><code>generic-json</code></td>
-<td><code>{"severity": "high"}</code></td>
+<td><code>{"source": {"slug": "hooks"}, "severity": "high"}</code></td>
 <td>any body with a top-level <code>severity: high</code></td>
 </tr>
 </tbody>
 </table>
 <div class="admonition warning">
-<p class="admonition-title">An empty filter matches every event of the tenant</p>
-<p><code>{}</code> names no constraints, so it matches everything — every source in
-the tenant shares one event stream. Always scope a filter to the
-fields (and the source's <code>kind</code>) you actually mean, or an unrelated
-alert will wake your agent.</p>
+<p class="admonition-title">A filter with only a source matches every event of that source</p>
+<p><code>{"source": {"slug": "am-prod"}}</code> matches every event from <code>am-prod</code>.
+Scope a filter to the fields you actually mean, or an unrelated alert
+will wake your agent. An empty filter <code>{}</code> matches no webhook event.</p>
 </div>
 <h2 id="what-fires-and-how-it-stays-governed">What fires, and how it stays governed<a class="headerlink" href="#what-fires-and-how-it-stays-governed" title="Permanent link">&para;</a></h2>
 <p>A match reuses the scheduler's own fire recipe, so an event-fired run is
@@ -3613,18 +3628,23 @@ dispatch, on the audit ledger.</p>
 </tr>
 <tr>
 <td>Ingest returns <code>202</code> (or <code>200</code> for a repeat of the same delivery) but no agent run fires</td>
-<td>The event was accepted but no <code>event</code> trigger's filter matched it.</td>
-<td>Compare the trigger's <code>--event-filter</code> against the lifted top-level fields; test with a broader filter first.</td>
+<td>The event was accepted but no <code>event</code> trigger's filter matched it. A filter without <code>source</code> never matches a webhook event.</td>
+<td>Add <code>"source": {"slug": "&lt;source-slug&gt;"}</code> to the trigger's <code>--event-filter</code>, then compare the rest against the lifted top-level fields.</td>
 </tr>
 <tr>
 <td>One alert fires many agent runs</td>
-<td>A filter is too broad (in the limit, <code>{}</code> matches everything).</td>
-<td>Tighten the filter to the fields and source <code>kind</code> you mean.</td>
+<td>A filter is too broad (in the limit, a filter with only the source matches every event of that source).</td>
+<td>Tighten the filter to the fields you mean.</td>
 </tr>
 <tr>
 <td>A source registered but ingest still fails closed</td>
 <td>It was registered without a secret.</td>
-<td>Set the secret with an update before pointing the sender at it.</td>
+<td>Set the secret with an update before pointing the sender at it. An empty secret, or one of only spaces, is refused with <code>422</code>.</td>
+</tr>
+<tr>
+<td>A secret change answers <code>503 secret_renew_failed</code></td>
+<td>The new secret is stored in Vault, but MEHO could not reach Valkey to tell every MEHO process to use it.</td>
+<td>Check Valkey, then send the change again.</td>
 </tr>
 </tbody>
 </table>

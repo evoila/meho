@@ -619,7 +619,10 @@ and each register path says so and names the probe:
   not match there. The handler checks MEHO's policy for `targets.probe` on
   the found target (`secondary_target_refusal`) before the system is
   contacted. A deny grant for that target refuses the call, and nothing is
-  stored. Another target of the same agent is still probed.
+  stored. Another target of the same agent is still probed. The REST route
+  runs the same check (`probe_policy_refusal`) for an agent, service or
+  runner login and answers 403 `{"error": "denied", ...}` on a refusal. For
+  a person these rules are the role gate the route already has.
 - **A call that waits for approval.** An agent with a `needs-approval`
   grant parks the call; a reviewer runs the approved call as the reviewer.
   So the park records who asked and the requester's policy on the named

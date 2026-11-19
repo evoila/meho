@@ -219,7 +219,11 @@ def _seed_request(
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
-    effect = proposed_effect or {"op_id": op_id, "connector_id": connector_id}
+    effect = proposed_effect or {
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "safety_level": "caution",
+    }
     # A live pending request carries a future deadline. The decision-time
     # deadline gate (F12 / #274) refuses an overdue row on the approve path,
     # so a decision-flow test must seed a non-expired deadline; ``None`` (the
@@ -519,7 +523,7 @@ def test_detail_modal_renders_request_fields() -> None:
         tenant_id=_TENANT_A,
         op_id="vsphere.vm.create",
         connector_id="vsphere-1.x",
-        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3"},
+        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3", "safety_level": "caution"},
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
@@ -2581,6 +2585,37 @@ def test_modal_shows_no_classification_without_one() -> None:
     )
     assert 'data-testid="approval-classification"' not in plain
     assert 'title="Category"' not in plain
+
+
+def test_modal_says_meho_could_not_build_the_preview() -> None:
+    """A request whose preview build failed says so plainly on its card."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "op_class": "config_write",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
+    )
+    assert "MEHO could not build the preview of this change." in body
+    assert "data-preview-failed" in body
+    assert "No preview was populated" not in body
+
+
+def test_modal_with_a_preview_has_no_preview_failed_notice() -> None:
+    """A request with a built preview shows no preview-failed notice."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "safety_level": "caution",
+            "preview": {"would_change": ["app/web"]},
+            "preview_populated": True,
+        }
+    )
+    assert "MEHO could not build the preview" not in body
 
 
 def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:

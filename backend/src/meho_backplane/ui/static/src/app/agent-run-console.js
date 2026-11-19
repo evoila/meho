@@ -53,7 +53,8 @@
 //     The proxy's 404 / 409 / 403 map to inline feedback: a 409 means the
 //     run already reached a terminal state (the controller flips to
 //     ``cancelled``/done rather than erroring), a 404 means the run no
-//     longer exists, a 403 means the operator may not cancel it.
+//     longer exists, a 403 means the operator may not cancel it (the
+//     console shows the rule of the answer: who may stop the run).
 //
 // Frame wire-shape (from ``api/v1/agent_runs._format_event``)
 //   Each SSE frame is ``event: <kind>`` with ``data:`` a single-line JSON
@@ -72,6 +73,25 @@
 //   a tenant admin reads it) instead of the data.
 //   The kind is the EventSource event ``type`` (the ``sse-swap`` name),
 //   read off ``$event.detail.type``; ``$event.detail.data`` is the JSON.
+
+// The text of a refused stop (403). The detail of the answer is
+// ``agent_run_cancel_forbidden: <rule>`` when the run belongs to another
+// login; the rule says who may stop the run, so the console shows it.
+const STOP_REFUSED_PREFIX = "agent_run_cancel_forbidden: ";
+
+async function stopRefusedText(response) {
+  const fallback = "You do not have permission to stop this run.";
+  let detail;
+  try {
+    detail = (await response.json()).detail;
+  } catch (e) {
+    return fallback;
+  }
+  if (typeof detail === "string" && detail.startsWith(STOP_REFUSED_PREFIX)) {
+    return `You may not stop this run: ${detail.slice(STOP_REFUSED_PREFIX.length)}.`;
+  }
+  return fallback;
+}
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("agentRunConsole", (opts) => ({
@@ -327,7 +347,7 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       if (response.status === 403) {
-        this.cancelError = "You do not have permission to stop this run.";
+        this.cancelError = await stopRefusedText(response);
         return;
       }
       this.cancelError = "Could not stop the run. Refresh and try again.";

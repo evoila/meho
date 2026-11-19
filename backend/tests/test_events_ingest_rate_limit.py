@@ -26,6 +26,9 @@ from meho_backplane.events.ingest.rate_limit import (
     INGEST_RATE_LIMIT_WINDOW_SECONDS,
     IngestRateLimitError,
     enforce_ingest_rate_limit,
+    failed_check_limit_error,
+    release_check_slot,
+    take_check_slot,
 )
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000c1")
@@ -45,6 +48,9 @@ class _FakePipeline:
 
     def incr(self, name: str, amount: int = 1) -> None:
         self._ops.append(("incr", name, amount))
+
+    def decr(self, name: str, amount: int = 1) -> None:
+        self._ops.append(("incr", name, -amount))
 
     def expire(self, name: str, time: int, *args: object, **kwargs: object) -> None:
         self._ops.append(("expire", name, time))
@@ -131,3 +137,46 @@ async def test_valkey_outage_propagates(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("meho_backplane.events.ingest.rate_limit.get_broadcast_client", _boom)
     with pytest.raises(ConnectionError):
         await enforce_ingest_rate_limit(_TENANT, "prod-am", limit=10)
+
+
+@pytest.mark.asyncio
+async def test_check_slots_go_over_the_limit_after_limit_slots(fake_valkey: _FakeValkey) -> None:
+    slots = [await take_check_slot(_TENANT, "prod-am", limit=3) for _ in range(4)]
+    assert [slot.over_limit for slot in slots if slot is not None] == [False, False, False, True]
+    # Another source in the tenant has its own counter.
+    other = await take_check_slot(_TENANT, "other", limit=3)
+    assert other is not None and not other.over_limit
+
+
+@pytest.mark.asyncio
+async def test_a_released_slot_is_given_back(fake_valkey: _FakeValkey) -> None:
+    for _ in range(3):
+        await release_check_slot(await take_check_slot(_TENANT, "prod-am", limit=3))
+    slot = await take_check_slot(_TENANT, "prod-am", limit=3)
+    assert slot is not None and not slot.over_limit
+    assert set(fake_valkey.store.values()) == {1}
+
+
+@pytest.mark.asyncio
+async def test_check_slots_do_not_use_up_the_delivery_limit(fake_valkey: _FakeValkey) -> None:
+    for _ in range(10):
+        await take_check_slot(_TENANT, "prod-am", limit=3)
+    for _ in range(3):
+        await enforce_ingest_rate_limit(_TENANT, "prod-am", limit=3)  # no raise
+
+
+@pytest.mark.asyncio
+async def test_check_slot_zero_limit_disables_no_round_trip(fake_valkey: _FakeValkey) -> None:
+    for _ in range(100):
+        slot = await take_check_slot(_TENANT, "prod-am", limit=0)
+        assert slot is None
+        await release_check_slot(slot)
+    assert fake_valkey.pipeline_calls == 0
+
+
+def test_failed_check_limit_error_names_the_window(fake_valkey: _FakeValkey) -> None:
+    exc = failed_check_limit_error(5)
+    assert exc.limit == 5
+    assert exc.retry_after_seconds == INGEST_RATE_LIMIT_WINDOW_SECONDS - (
+        int(_FIXED_NOW) % INGEST_RATE_LIMIT_WINDOW_SECONDS
+    )

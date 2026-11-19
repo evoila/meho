@@ -581,11 +581,14 @@ system folders), places in a home that the system runs or reads for logins
 (for example a `.ssh` folder, `.config/systemd` or `.bashrc`, compared in
 lower case), a home that does not exist, a link in
 any folder of the path below the home, and a target that is not a
-`linux-ssh` target. A person approves each move. The ref
+`linux-ssh` target. A person approves each move. The approval card names the
+target, its host and its port, and the approved run writes only to that
+target, host and port. The ref
 grammar and the full rules are in
 [connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
 store".
-Code: `connectors/linux/secret_endpoint.py`.
+Code: `connectors/linux/secret_endpoint.py` and
+`connectors/linux/secret_sink_target.py`.
 
 ### Root elevation
 

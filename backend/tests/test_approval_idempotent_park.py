@@ -143,6 +143,7 @@ async def _park_direct(
             params=call_params,
             params_hash=compute_params_hash(call_params),
             idempotency_key=key,
+            proposed_effect={"safety_level": "caution"},
         )
         await s.commit()
     return request

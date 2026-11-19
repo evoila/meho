@@ -219,6 +219,54 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   before any Vault login; nothing is read or written. An approval made
   before MEHO showed target ids is refused too; the requester sends a new
   request.
+- The approval binds every side that names a MEHO target. For a `linux:`
+  sink the card shows the name as typed (`target`), the Linux target it
+  points to (`target_id`, `target_name`), its `host` and its SSH `port`
+  (22 when the target names none). The approved run compares the id, the
+  host and the port with the target it finds (`check_target` of the
+  `linux:` store, in `connectors/linux/secret_sink_target.py`). Another
+  target, a new host or port on the same target, or a card without one of
+  them, refuses the run with `LinuxTargetChangedError`: "Nothing was read
+  or written. Send a new request". The check runs before the sudo password
+  lookup, before the source is read and before any SSH call. A `vault:`
+  side names no MEHO target.
+- For each `keycloak:` side (a user password sink or a client secret
+  source) the card shows the Keycloak target the name points to
+  (`target_id`, `target_name`), how MEHO connects to it (`host`, `port`,
+  `scheme` and the TLS check `tls`) and the reference of its admin login
+  (`secret_ref`). The `port` is the one MEHO dials: the target's own port,
+  or 443 for https and 80 for http. `tls` says whether MEHO checks the
+  certificate, and names a pinned CA (by a short SHA-256 digest) and a TLS
+  server name when the target sets them. The server name shows also when
+  MEHO does not check the certificate, because MEHO still sends it in the
+  TLS handshake. The approved run compares the
+  id, these connection fields and the secret reference with the target it
+  finds (`connectors/keycloak/secret_move_target.py`, called where the
+  Keycloak store finds its target). Another target, a new host, port,
+  scheme, TLS setting or secret reference on the same target, or a card
+  without one of them, refuses the run with `KeycloakTargetChangedError`:
+  "Nothing was read or written. Send a new request". The check runs before
+  any Keycloak login; for a sink it also runs before the source is read.
+  `preview_operation`, `meho_approvals_get` and `meho_approvals_list`
+  leave these fields out; only the card a person reads shows them.
+- A move with a `keycloak:` side is a change of rights, like
+  `keycloak.user.reset_password`: it sets a Keycloak user's password or
+  reads a client secret. The request carries the rights-change mark
+  (`register_rights_change_check("secret.move", has_keycloak_side)` in
+  `move_preview.py`). So the requester never approves it, and another
+  admin (a tenant admin or a platform admin) must. A move between two
+  Vault places (or to a `linux:` place) is not a change of rights.
+- Before the `linux:` store uses SSH, it drops the SSH logins this server
+  keeps for the target when a person changed the target since this server
+  last saw it (`forget_target_if_changed`). So the script goes to the host
+  and port the row holds now, also when another server made the change.
+- What a caller reads about a `linux:` side is behind the switch
+  `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
+  `preview_operation` shows only `kind` and `ref` for a `linux:` side, and
+  `meho_approvals_get` and `meho_approvals_list` leave out `target`,
+  `target_id`, `target_name`, `host` and `port`. On, they show them. The
+  card a person reads in the console and the check of the approved run do
+  not depend on the switch.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.
@@ -355,8 +403,9 @@ meho secret move \
 - `--to` writes it into the `client_secret` field of the KV-v2 secret at
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).
-- The op is `requires_approval=True`, so the move parks at
-  `awaiting_approval` and a human approves it before it runs. The response
+- The op is `requires_approval=True`, so the move waits for approval
+  before it runs. A `keycloak:` side makes it a change of rights, so
+  another admin must approve it, never the requester. The response
   is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 
@@ -477,7 +526,8 @@ owner is never `root`. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
 client id, the target names, and the paths. For a `linux:` move the approval
-card shows the path and the owner, never the content. The person who approves
+card shows the path, the owner, the target, its host and its port, never
+the content. The person who approves
 reads both: the path says where the secret goes, the owner says who can read
 it.
 

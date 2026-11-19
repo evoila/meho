@@ -304,9 +304,12 @@ group has more rules:
   the rights of everyone in the group. A person in the group cannot
   approve it. When MEHO could not read who is in the group, nobody can
   approve the request. Send a new one.
-- In MEHO's own login realm, a change of the platform admin group or
-  role, or a role of Keycloak's `realm-management` client, needs a
-  platform admin as the approver.
+- In MEHO's own login realm, a change that can give platform admin
+  rights, or a role of Keycloak's `realm-management` client, needs a
+  platform admin as the approver. For a group, MEHO checks what the group
+  gives, not its name: the attribute `platform_admin=true` on the group or
+  a parent group, a place under `/MEHO-Platform-Admins/`, or the realm role
+  in `JWT_PLATFORM_ADMIN_ROLE_NAME`. A group MEHO cannot read counts too.
 
 The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group

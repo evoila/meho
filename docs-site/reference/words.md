@@ -31,7 +31,7 @@ More: [Run your first operations](../guides/first-operations.md)
 
 ## Connector
 
-The part of MEHO that talks to one kind of system. A generic connector is built from the vendor's API file. A typed connector is written by hand.
+The part of MEHO that talks to one kind of system. A generic connector is built from the vendor's API file, and a typed connector is written by hand.
 
 More: [Connectors overview](../can-do/connectors-overview.md)
 
@@ -49,25 +49,25 @@ More: [Watch your estate with sensors](../guides/sensors-quickstart.md)
 
 ## Detected product and version
 
-MEHO finds the product and version of a target when it probes the target. This is also called the fingerprint. MEHO uses it to pick the connector.
+MEHO finds the product and version of a target when it probes the target, and uses them to pick the connector. This is also called the fingerprint.
 
 More: [Register targets and secrets](../guides/targets-and-secrets.md)
 
 ## Docs collection
 
-A set of documents that MEHO can search and answer questions from. It needs the docs add-on. A tenant can search only the collections it may use.
+A set of documents that MEHO can search and answer questions from, when the docs add-on is on. A tenant can search only the collections it may use.
 
 More: [Add-ons](../guides/add-ons.md)
 
 ## Five states
 
-Every sensor result is one of five states: `ok`, `degraded`, `critical`, `unknown` or `skip`. `unknown` means MEHO could not judge the result. `skip` means the sensor is paused.
+Every sensor result is one of five states: `ok`, `degraded`, `critical`, `unknown` or `skip`. `unknown` means MEHO could not judge the result, and `skip` means the sensor is paused.
 
 More: [Watch your estate with sensors](../guides/sensors-quickstart.md)
 
 ## Grant
 
-A permission that a person gives in advance. For example, a standing grant lets a service principal run its `caution` and `dangerous` changes without a wait. A delete still waits for a person.
+A permission that a person gives in advance. A standing grant lets a service principal run its `caution` and `dangerous` changes without a wait, but a delete still waits for a person.
 
 More: [Approvals](../can-do/approvals.md)
 
@@ -79,7 +79,7 @@ More: [Memory and knowledge](../guides/memory-and-knowledge.md)
 
 ## MCP
 
-Short for Model Context Protocol. It is how AI tools connect to MEHO. MEHO gives them a short list of tools, not one tool for each system.
+Short for Model Context Protocol, the way AI tools connect to MEHO. MEHO gives them a short list of tools, not one tool for each system.
 
 More: [MCP surface and scopes](../clients/mcp-surface-and-scopes.md)
 
@@ -115,13 +115,13 @@ More: [Run your first operations](../guides/first-operations.md)
 
 ## Preview
 
-Shows what a call would send, before you run it. It sends nothing. For some operations a preview is not available.
+Shows what a call would send, before you run it, and sends nothing. For some operations a preview is not available.
 
 More: [Run your first operations](../guides/first-operations.md)
 
 ## Result link
 
-When a result is large, MEHO gives you a sample and a link to the full result. The link is also called a result handle. It expires, and only you can read it.
+When a result is large, MEHO gives you a sample and a link to the full result, also called a result handle. The link expires, and only you can read it.
 
 More: [Run your first operations](../guides/first-operations.md)
 
@@ -139,7 +139,7 @@ More: [Approvals](../can-do/approvals.md)
 
 ## Runbook
 
-A saved list of steps. Each step calls an operation or asks a person to do something. Each step has a check before the run goes on.
+A saved list of steps, where each step calls an operation or asks a person to do something. Each step has a check before the run goes on.
 
 More: [Author and run runbooks](../guides/runbooks.md)
 

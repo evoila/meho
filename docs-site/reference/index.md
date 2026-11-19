@@ -4,8 +4,9 @@ Most pages in this section are **generated from the codebase**, so they
 cannot drift from the product without a red build. Each such page is
 rendered from a registry, command tree, or contract snapshot and
 committed, with a CI freshness gate that fails the moment the source and
-the committed page disagree. [What's new](whats-new.md) is the one page
-written by hand, at each release.
+the committed page disagree. Two pages are written by hand:
+[What's new](whats-new.md), at each release, and
+[Words we use](words.md).
 
 ## Available now
 

@@ -21,6 +21,10 @@ These writes use the same check (:data:`LOGIN_USER_WRITES`):
 * ``keycloak.group.member.remove`` (the admin rights can come from a group);
 * ``keycloak.role_mapping.client.remove``.
 
+The secret move sink for a Keycloak password
+(``keycloak:<target>/<realm>/<user>#password``) uses it too
+(:func:`refuse_login_user_in_realm`).
+
 Each check runs before the request waits for approval and again when the
 approved request runs. Nothing is written. Both use the user name that
 Keycloak stores for the user, not the name in the request. The check only
@@ -35,6 +39,7 @@ check in ``read_user_for_write``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
@@ -54,10 +59,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LOGIN_USER_WRITES",
+    "SECRET_SINK_ACTION",
     "login_user_action",
     "login_user_park_reason",
     "park_refusal_for_login_user",
     "refuse_login_user",
+    "refuse_login_user_in_realm",
     "refuse_login_user_of_write",
     "refuse_login_user_rep",
 ]
@@ -73,6 +80,9 @@ LOGIN_USER_WRITES: Final[dict[str, str]] = {
     "keycloak.group.member.remove": "removing it from a group",
     "keycloak.role_mapping.client.remove": "removing one of its roles",
 }
+
+#: The words for a secret move into the user's password.
+SECRET_SINK_ACTION: Final = "setting its password"
 
 #: ``keycloak.user.update`` fields the target can sign in with.
 _SIGN_IN_FIELDS: Final = ("username", "email")
@@ -227,3 +237,31 @@ async def login_user_park_reason(
     except KeycloakDeleteRefusedError:
         return park_refusal_for_login_user(op_id, action)
     return None
+
+
+async def refuse_login_user_in_realm(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    *,
+    realm: str,
+    user_id: str,
+    op_id: str,
+    action: str,
+) -> None:
+    """Refuse the user *user_id* of *realm* when the target signs in with it.
+
+    For a write whose realm is not the target's managed realm (the secret
+    move sink names its own realm). A user that cannot be read is let
+    through: the write then fails with "not found".
+    """
+    realms = replace(resolve_realm_config(target), managed_realm=realm)
+    if realms.managed_realm != realms.admin_realm:
+        return
+    path = fill_path(_USER_PATH, {"realm": realm, "user-id": user_id})
+    user = await get_or_none(connector, target, path, operator)
+    if user is None:
+        return
+    await refuse_login_user_rep(
+        connector, operator, target, user, op_id=op_id, action=action, realms=realms
+    )

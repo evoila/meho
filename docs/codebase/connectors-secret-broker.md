@@ -103,6 +103,14 @@ boundary redaction:
     opens no HTTP client of its own. The value is `strip_credential_value`-d
     before the PUT. This is the broker's second kind, so a cross-kind
     `vault:` → `keycloak:` move proves the initiative's "≥2 kinds" DoD.
+    The sink refuses the user its Keycloak target signs in with, when the
+    ref's realm is the realm the target signs in to: a new password would
+    lock MEHO out. `secret.move` asks the sink before the request waits for
+    approval (park check `refuse_sink_before_approval` in
+    `move_preview.py`, which calls the sink's `refuse_before_approval`),
+    and `write_secret` checks again before the PUT. It is the same check as
+    `keycloak.user.reset_password` (`ops_user_login_guard.py`). In another
+    realm the park check calls no Keycloak.
   - **`KeycloakClientSecretSourceEndpoint`** (source, #3619). **Source-only**:
     unlike a user password, a confidential client's secret IS served by
     the Admin REST API (`GET .../clients/{uuid}/client-secret` →

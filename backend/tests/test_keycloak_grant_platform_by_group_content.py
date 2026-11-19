@@ -250,6 +250,22 @@ async def test_a_group_too_deep_to_read_needs_a_platform_admin(
 
 
 @pytest.mark.asyncio
+async def test_a_role_that_differs_only_in_letter_case_needs_only_a_tenant_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_platform_role(monkeypatch)
+    _groups_by_id(monkeypatch, {_GROUP: _ops_team()})
+    roles = [{"id": "role-2", "name": _ROLE.swapcase()}]
+
+    effect = await _effect(_connector(roles=roles), _ADD_PARAMS)
+
+    assert effect["preview"]["grant"]["platform_admin"] is False
+    request_id = await _park(_ADD_PARAMS, effect)
+    await _approve(request_id, _person("person-admin"), _ADD_PARAMS)
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("attributes", [{}, {"platform_admin": ["false"]}, {"team": ["ops"]}])
 async def test_a_normal_group_needs_only_a_tenant_admin(
     monkeypatch: pytest.MonkeyPatch, attributes: dict[str, list[str]]

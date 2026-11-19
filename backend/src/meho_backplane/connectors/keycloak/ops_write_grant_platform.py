@@ -16,7 +16,8 @@ the group and counts it as "gives platform admin" when one of these holds:
 * ``JWT_PLATFORM_ADMIN_ROLE_NAME`` is set, and the group gives that realm
   role: mapped to the group or to a parent group, or as a part of a
   composite role. Keycloak's ``role-mappings/realm/composite`` answer for the
-  group lists all of these.
+  group lists all of these. The role name must match exactly, with the same
+  letter case, as in MEHO's login.
 
 The answer is ``None`` when MEHO cannot read the group, one of its parent
 groups or its roles. The approval treats ``None`` as the strict case: a
@@ -128,8 +129,7 @@ async def _maps_platform_role(
     names = {_text(row.get("name")) if isinstance(row, dict) else None for row in rows}
     if None in names:
         raise ValueError("a role without a name")
-    wanted = {role.casefold() for role in roles}
-    return any(name is not None and name.casefold() in wanted for name in names)
+    return bool(names & roles)
 
 
 async def group_gives_platform_admin(

@@ -549,7 +549,7 @@ second time.
 admin" (the grant fact `platform_admin`) when the group or a parent group
 has the attribute `platform_admin=true`, when the group is
 `MEHO-Platform-Admins` or its path is under `/MEHO-Platform-Admins/`, when
-the group gives the realm role in `JWT_PLATFORM_ADMIN_ROLE_NAME` (when set,
+the group gives the realm role named exactly as in `JWT_PLATFORM_ADMIN_ROLE_NAME`, with the same letter case (when set,
 read from `role-mappings/realm/composite`), or when the new attributes of
 `group.update_attributes` set `platform_admin`. The name alone never
 decides. When MEHO cannot read the group, a parent group or its roles, the

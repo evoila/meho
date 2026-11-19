@@ -168,6 +168,13 @@ accepted call, and commits `last_state`/`state_since` through the
   `ok` is confirmed too — deliberately unlike Nagios' immediate hard
   recovery, because the observed flap's second nuisance mail was a
   flapping all-clear); `unknown` participates like any state.
+- A new Sensor starts as `unknown` with no `state_since`. When its first
+  result is `unknown` too, the state does not change, but `state_since` is
+  set to the Sensor's `created_at`: the `unknown` has held since then. So
+  a Sensor that has a `state_since` always has a confirmed state. A
+  `for_seconds` hold also counts from `created_at`. Such a Sensor alerts
+  as `degraded` once `created_at` plus `for_seconds` has passed, so an
+  old Sensor alerts at once and is not held again after an upgrade.
 
 The gate lives in the repository function — not the runner task. Only
 the central check loop calls it today; results from a remote runner are
@@ -387,6 +394,15 @@ not claimed by the runner, so it makes no call to its target. The row, its
   Sensor the runner parked for a broken cadence (`invalid_cadence:*`)
   becomes `active` again. A Dashboard file import that changes the Sensor
   follows the same rule.
+
+**Run once now** (`POST /api/v1/sensors/{id}/run`, `meho sensor run <id>`,
+`tenant_admin`, op id `sensor.run`; code in `checks/sensor_run.py`). The
+route does not run the operation. It calls `accelerate_sensor_next_fire`
+with `not_later_than=now`, so the runner claims the Sensor at its next tick
+and runs it as on its schedule. It answers 202 with the Sensor id and its
+`next_fire_at`. A paused Sensor is 409 `sensor_paused`; an unknown id or
+the id of another tenant is 404. A Sensor that is already due keeps its due
+time, so the call is safe to send twice. There is no MCP tool for it.
 
 **Pause after refused logins** (`checks/auth_park.py`). When the credential
 of a target is no longer valid, every run starts a new login that fails.

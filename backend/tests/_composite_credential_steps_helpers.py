@@ -36,6 +36,10 @@ SECRET_VALUE = "made-up-value-7f3c"
 #: What the credential read returns: its version, then its value.
 read_answer: dict[str, Any] = {}
 
+#: ``True``: the credential read of ``credential_read_wait_change_composite``
+#: is marked ``requires_approval``, so its policy says it must wait.
+read_policy: dict[str, bool] = {"waits": False}
+
 CHANGE_STEP = "POST:/v1/sys/things"
 SECOND_CHANGE_STEP = "PUT:/v1/sys/things/{id}"
 WAIT_STEP = "POST:/v1/sys/things/{id}/seal"
@@ -49,6 +53,7 @@ CREDENTIAL_WRITE_CHILD = "vault.kv.patch"
 WRITE_WAIT_WRITE_OP_ID = "vault.composite.write_wait_write"
 CREDENTIAL_WRITE_WAIT_CHANGE_OP_ID = "vault.composite.credential_write_wait_change"
 CREDENTIAL_READ_WAIT_CHANGE_OP_ID = "vault.composite.credential_read_wait_change"
+APPROVED_READ_WAIT_CHANGE_OP_ID = "vault.composite.approved_credential_read_wait_change"
 TWO_CREDENTIAL_WRITES_OP_ID = "vault.composite.two_credential_writes_each_waits"
 LOST_CREDENTIAL_WRITE_OP_ID = "vault.composite.credential_write_answer_lost_then_wait"
 CHILD_CREDENTIAL_WRITE_OP_ID = "vault.composite.child_credential_write_wait_change"
@@ -59,6 +64,7 @@ def reset() -> None:
     sent.clear()
     read_answer.clear()
     read_answer.update({"version": 1, "value": SECRET_VALUE})
+    read_policy["waits"] = False
 
 
 async def _step(
@@ -136,19 +142,40 @@ async def credential_read_wait_change_composite(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> Any:
     """A credential read, a step that waits with the read's version, a change."""
-
-    async def _read() -> dict[str, Any]:
-        sent.append(CREDENTIAL_READ_STEP)
-        return {"data": {"value": read_answer["value"]}, "version": read_answer["version"]}
-
     read = await _step(
-        operator, target, CREDENTIAL_READ_STEP, {"path": "app"}, waits=False, call=_read
+        operator,
+        target,
+        CREDENTIAL_READ_STEP,
+        {"path": "app"},
+        waits=read_policy["waits"],
+        call=_read,
     )
     if read.stopped is not None:
         return read.stopped
     version = {"id": "t-1", "version": read.value["version"]}
     for op_id, waits in ((WAIT_STEP, True), (CHANGE_STEP, False)):
         step = await _step(operator, target, op_id, version, waits=waits)
+        if step.stopped is not None:
+            return step.stopped
+    return {"done": True}
+
+
+async def _read() -> dict[str, Any]:
+    sent.append(CREDENTIAL_READ_STEP)
+    return {"data": {"value": read_answer["value"]}, "version": read_answer["version"]}
+
+
+async def approved_read_wait_change_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """A credential read that waits for its own approval, a step that waits, a change."""
+    read = await _step(
+        operator, target, CREDENTIAL_READ_STEP, {"path": "app"}, waits=True, call=_read
+    )
+    if read.stopped is not None:
+        return read.stopped
+    for op_id, waits in ((WAIT_STEP, True), (CHANGE_STEP, False)):
+        step = await _step(operator, target, op_id, {"id": "t-1"}, waits=waits)
         if step.stopped is not None:
             return step.stopped
     return {"done": True}

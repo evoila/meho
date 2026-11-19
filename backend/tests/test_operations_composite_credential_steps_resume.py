@@ -12,7 +12,10 @@ counts the requests that reached the target
   finishes; the stored record says only that the write is finished;
 * credential read, wait, change: the read is sent again after the approval
   and the run finishes; when the read gives another answer and the approved
-  step changes with it, the run stops and the step is not sent;
+  step changes with it, the run stops and the step is not sent; when the
+  read's policy now says it must wait, it is not sent again and the run stops;
+* a credential read that a person approved, wait, change: the read is sent
+  once, and MEHO asks for no second approval and stops at once, naming the read;
 * two credential writes, each one waits: each write is sent once;
 * a credential write whose answer was lost, then a wait: MEHO asks for no
   approval and stops at once;
@@ -41,6 +44,7 @@ from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations import _preview, reset_dispatcher_caches
+from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 from meho_backplane.operations.composite_steps import (
     STEP_DONE_NO_RESULT,
@@ -326,6 +330,57 @@ async def test_credential_read_with_a_new_answer_stops_before_the_approved_step(
     assert c.sent == [c.CREDENTIAL_READ_STEP, c.CREDENTIAL_READ_STEP]
 
 
+async def test_credential_read_whose_policy_now_waits_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """The read needed no person, but its policy now says it must wait: the run stops."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.CREDENTIAL_READ_WAIT_CHANGE_OP_ID,
+        "credential_read_wait_change_composite",
+    )
+    first = await h.run(c.CREDENTIAL_READ_WAIT_CHANGE_OP_ID)
+    assert c.sent == [c.CREDENTIAL_READ_STEP]
+    c.read_policy["waits"] = True
+
+    second = await _approve_and_resume(first)
+
+    assert second.status == "error"
+    assert second.extras["error_code"] == "composite_resume_read_not_sent"
+    assert second.extras["blocked_op_id"] == c.CREDENTIAL_READ_STEP
+    assert c.CREDENTIAL_READ_STEP in (second.error or "")
+    assert c.sent == [c.CREDENTIAL_READ_STEP], "the read is not sent again"
+    assert len(await _requests()) == 1, "no approval request is made for the read"
+
+
+async def test_credential_read_a_person_approved_is_sent_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A read approved by a person, then a wait: MEHO asks no person again and stops at once."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.APPROVED_READ_WAIT_CHANGE_OP_ID,
+        "approved_read_wait_change_composite",
+    )
+
+    first = await h.run(c.APPROVED_READ_WAIT_CHANGE_OP_ID)
+    assert first.status == "awaiting_approval", first.error
+    assert c.sent == []
+
+    second = await _approve_and_resume(first)
+
+    assert second.status == "error"
+    assert second.extras["error_code"] == "composite_resume_read_not_sent"
+    assert second.extras["blocked_op_id"] == c.CREDENTIAL_READ_STEP
+    assert c.CREDENTIAL_READ_STEP in (second.error or "")
+    assert c.WAIT_STEP in (second.error or "")
+    assert c.sent == [c.CREDENTIAL_READ_STEP], "the read reaches the target once"
+    (only,) = await _requests()
+    assert only.op_id == c.CREDENTIAL_READ_STEP, "no approval is asked for the later step"
+
+
 # ---------------------------------------------------------------------------
 # The step record
 # ---------------------------------------------------------------------------
@@ -350,7 +405,7 @@ def test_finished_credential_steps_do_not_stop_a_later_wait() -> None:
     journal = StepJournal(composite_op_id="vault.composite.x")
     written = journal.start("vault-1.x", "vault.token.create", None, {"policy": "p"})
     journal.finish(written, {"auth": {"client_token": c.SECRET_VALUE}})
-    read = journal.start("vault-1.x", "vault.kv.read", None, {"path": "a"})
+    read = journal.start("vault-1.x", "vault.kv.read", None, {"path": "a"}, may_send_again=True)
     journal.finish(read, {"data": {"value": c.SECRET_VALUE}})
 
     assert (written["status"], read["status"]) == (STEP_DONE_NO_RESULT, STEP_RUN_AGAIN)
@@ -361,7 +416,7 @@ def test_finished_credential_steps_do_not_stop_a_later_wait() -> None:
 def test_read_taken_again_is_stored_once() -> None:
     """A read that a resume sends again has one entry in the record, in its place."""
     first_run = StepJournal(composite_op_id="vault.composite.x")
-    first_run.start("vault-1.x", "vault.kv.read", None, {"path": "a"})
+    first_run.start("vault-1.x", "vault.kv.read", None, {"path": "a"}, may_send_again=True)
     first_run.finish(first_run.start("vault-1.x", "POST:/a", None, {"n": 1}), {"id": "a-1"})
     resume = StepJournal(composite_op_id="vault.composite.x", replay=first_run.stored())
 
@@ -370,3 +425,31 @@ def test_read_taken_again_is_stored_once() -> None:
     resume.start("vault-1.x", "vault.kv.read", None, {"path": "a"})
 
     assert [entry["op_id"] for entry in resume.stored()] == ["vault.kv.read", "POST:/a"]
+
+
+def test_approved_read_stays_started_and_stops_a_later_wait() -> None:
+    """A read a person approved keeps no result and is a step a resume does not send again."""
+    journal = StepJournal(composite_op_id="vault.composite.x")
+    read = journal.start("vault-1.x", "vault.kv.read", None, {"path": "a"})
+    journal.finish(read, {"data": {"value": c.SECRET_VALUE}})
+
+    assert read["status"] == STEP_STARTED
+    assert "result" not in read
+    assert journal.first_unfinished() == "vault.kv.read"
+
+
+def test_run_again_entry_of_an_operation_that_is_not_a_read_is_taken_as_started() -> None:
+    """A stored ``run_again`` entry is sent again only while its operation reads a credential."""
+    stored = {
+        "connector_id": "vault-1.x",
+        "op_id": "POST:/a",
+        "target": None,
+        "params_hash": compute_params_hash({"n": 1}),
+        "status": STEP_RUN_AGAIN,
+    }
+    resume = StepJournal(composite_op_id="vault.composite.x", replay=[stored])
+
+    taken = resume.take("vault-1.x", "POST:/a", None, {"n": 1})
+
+    assert taken is not None and taken["status"] == STEP_STARTED
+    assert resume.first_unfinished() == "POST:/a"

@@ -32,9 +32,15 @@ A credential step keeps no result, so it has its own rules:
 * A step that writes or makes a credential and ended well becomes
   ``done_no_result``: the entry says only that the step is finished. On a
   resume the step is not sent again and gives back no result.
-* A step that reads a credential is ``run_again``: on a resume it is sent
-  again, with the same target and params. A read changes nothing on the
-  target, and its value is never stored.
+* A step that reads a credential is ``run_again`` when its policy let it go
+  ahead with no person: on a resume MEHO checks its policy again and sends it
+  again, with the same target and params, only when the policy still lets it
+  go ahead with no person. A read changes nothing on the target, and its
+  value is never stored.
+* A step that reads a credential and that a person approved (its own
+  approval, or the approval of the run) stays ``started``. A resume does not
+  send it again: a later step that would wait stops the run at once, with an
+  error that names the read.
 * A step whose end MEHO does not know stays ``started`` and stops the run.
 """
 
@@ -65,6 +71,7 @@ __all__ = [
     "composite_resume_steps",
     "composite_step_journal",
     "current_step_journal",
+    "is_credential_read",
     "step_target_key",
 ]
 
@@ -76,7 +83,8 @@ STEP_DONE = "done"
 STEP_STARTED = "started"
 #: A step that writes or makes a credential ran to its end; no result is kept.
 STEP_DONE_NO_RESULT = "done_no_result"
-#: A step that reads a credential; a resume sends it again, nothing is kept.
+#: A step that reads a credential and went ahead with no person; a resume
+#: checks its policy and sends it again, nothing is kept.
 STEP_RUN_AGAIN = "run_again"
 
 #: The statuses of a step that a resume does not stop at.
@@ -87,7 +95,7 @@ _FINISHED = frozenset({STEP_DONE, STEP_DONE_NO_RESULT, STEP_RUN_AGAIN})
 _CREDENTIAL_CHANGE_CLASSES = frozenset({"credential_mint", "credential_write"})
 
 
-def _is_credential_read(op_id: str) -> bool:
+def is_credential_read(op_id: str) -> bool:
     """True when *op_id* reads a credential: its class, or an answer that hides its values."""
     return classify_op(op_id) == "credential_read" or hides_secret_values(op_id)
 
@@ -134,8 +142,10 @@ class StepJournal:
         stored one.
 
         A ``run_again`` entry is taken off the earlier run's entries but not
-        added to this run's: the caller sends the step again and records it
-        with :meth:`start`.
+        added to this run's: the caller checks the step's policy, sends it
+        again and records it with :meth:`start`. A ``run_again`` entry whose
+        operation does not read a credential (any more) is given back as
+        ``started``, so the caller stops the run instead of sending it.
         """
         target_key = step_target_key(target)
         for index, entry in enumerate(self.replay):
@@ -146,26 +156,39 @@ class StepJournal:
                 and params_hash_matches(params, str(entry.get("params_hash", "")))
             ):
                 del self.replay[index]
+                if entry.get("status") == STEP_RUN_AGAIN and not is_credential_read(op_id):
+                    entry["status"] = STEP_STARTED
                 if entry.get("status") != STEP_RUN_AGAIN:
                     self.entries.append(entry)
                 return copy.deepcopy(entry)
         return None
 
     def start(
-        self, connector_id: str, op_id: str, target: Any, params: dict[str, Any]
+        self,
+        connector_id: str,
+        op_id: str,
+        target: Any,
+        params: dict[str, Any],
+        *,
+        may_send_again: bool = False,
     ) -> dict[str, Any]:
         """Add an entry for a step that is about to run.
 
-        A step that reads a credential is ``run_again`` from the start: a
-        read changes nothing on the target, so a resume may send it again
-        however it ended. Every other step is ``started``.
+        A step that reads a credential is ``run_again`` from the start when
+        *may_send_again* is ``True``: its policy let it go ahead with no
+        person, or the step runs through the dispatcher, which checks it
+        again. A read changes nothing on the target, so a resume may send it
+        again however it ended. Every other step is ``started``; a credential
+        read stays ``started`` too, and a resume does not send it again.
         """
         entry: dict[str, Any] = {
             "connector_id": connector_id,
             "op_id": op_id,
             "target": step_target_key(target),
             "params_hash": compute_params_hash(params),
-            "status": STEP_RUN_AGAIN if _is_credential_read(op_id) else STEP_STARTED,
+            "status": (
+                STEP_RUN_AGAIN if may_send_again and is_credential_read(op_id) else STEP_STARTED
+            ),
         }
         self.entries.append(entry)
         return entry
@@ -173,8 +196,8 @@ class StepJournal:
     def finish(self, entry: dict[str, Any], value: Any, *, ended_well: bool = True) -> None:
         """Mark *entry* finished, and keep *value* when it can be kept.
 
-        * A step that reads a credential stays ``run_again``; *value* is not
-          kept.
+        * A step that reads a credential keeps its status (``run_again`` or
+          ``started``); *value* is not kept.
         * A step that writes or makes a credential becomes ``done_no_result``
           when *ended_well*; *value* is not kept, whatever its field names.
           When it did not end well it stays ``started``.
@@ -186,7 +209,7 @@ class StepJournal:
         instead of sending it again.
         """
         op_id = entry["op_id"]
-        if entry.get("status") == STEP_RUN_AGAIN:
+        if entry.get("status") == STEP_RUN_AGAIN or is_credential_read(op_id):
             return
         if _is_credential_change(op_id):
             if ended_well:

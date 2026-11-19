@@ -4852,8 +4852,13 @@ of the steps each run went through (`operations/composite_steps.py`):
     `dispatch_child` result is `ok` and not `execution_outcome:
     "uncertain"`. The entry says only that the step is finished.
   - A step that **reads** a credential (`credential_read`, or an answer
-    that hides its values) is `run_again` from the start. A read changes
-    nothing on the target.
+    that hides its values) is `run_again` only when its policy let it go
+    ahead with no person: the verdict was "go ahead", no person's approval
+    cleared it (its own, or the approval of the run). A `dispatch_child`
+    read is always `run_again`: the dispatcher checks it each time. A read
+    changes nothing on the target.
+  - A credential read that a person approved stays `started`. Its result is
+    not stored either. A resume does not send it again.
   - A credential write whose end MEHO does not know (the call raised, a
     timeout after it was sent, an error or `uncertain` result) stays
     `started`, like any other step.
@@ -4876,14 +4881,22 @@ of the steps each run went through (`operations/composite_steps.py`):
     `dispatch_child` gives an `ok` `OperationResult` with `result=None`
     and `extras["result_kept"] = False`). A later step does not get the
     credential step's answer on a resume;
-  - `run_again`: the read is sent again, with the same target and params.
-    `run_governed_subop` and `enforce_subop_policy` let it go ahead without
-    a new check: this run already let the same read go ahead. A
-    `dispatch_child` read runs through the dispatcher again, with its
-    normal checks. The new answer goes to the handler and is not stored;
+  - `run_again`: `run_governed_subop` and `enforce_subop_policy` first
+    check the read's policy again (`apply_step_policy` and `policy_gate`,
+    the same check as a first send). Only when the answer is "go ahead"
+    with no person is the read sent again, with the same target and params.
+    An approval of the run does not count here. Any other answer (it must
+    wait, or it is denied) stops the run with
+    `composite_resume_read_not_sent`, which names the read, and the read is
+    not sent. A `dispatch_child` read runs through the dispatcher again,
+    with its normal checks. The new answer goes to the handler and is not
+    stored. A stored `run_again` entry whose operation does not read a
+    credential is taken as `started`;
   - `started`: the run stops with `composite_resume_step_outcome_unknown`
     (`execution_outcome: "uncertain"`, `retry: false`). MEHO does not know
-    if that change happened.
+    if that change happened. For a credential read a person approved, the
+    run stops with `composite_resume_read_not_sent` (`retry: false`), which
+    names the read: MEHO does not send it again under another approval.
 
   **What the approver's card shows when a read runs again.** The card of
   the waiting step shows that step and its params. The read is
@@ -4905,8 +4918,12 @@ of the steps each run went through (`operations/composite_steps.py`):
   and stops at once with `composite_resume_step_outcome_unknown`. Not for an
   `after_main_effect` step: its run after the approval continues at that
   step and does not reach the earlier one. A finished credential write
-  (`done_no_result`) and a credential read (`run_again`) do not stop a
-  later wait; a credential write with no known end does.
+  (`done_no_result`) and a credential read that needed no person
+  (`run_again`) do not stop a later wait; a credential write with no known
+  end does. A credential read that a person approved also stops a later
+  wait at once, with `composite_resume_read_not_sent`: the error names the
+  read and the step that would wait, and no approval request is made. So a
+  read a person approved reaches the target once in the whole run.
 - **A second wait.** A step that needs its own approval during a resume
   waits again. Its request stores the whole record so far: the replayed
   steps, the approved step and the steps after it. Two, three or more

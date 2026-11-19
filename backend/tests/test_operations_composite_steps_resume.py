@@ -60,7 +60,6 @@ from meho_backplane.operations.approval_rerun import (
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
     STEP_DONE_NO_RESULT,
-    STEP_RUN_AGAIN,
     STEP_STARTED,
     StepJournal,
 )
@@ -457,7 +456,7 @@ def test_result_with_a_secret_value_is_not_kept() -> None:
 @pytest.mark.parametrize(
     ("op_id", "status"),
     [
-        ("vault.kv.read", STEP_RUN_AGAIN),
+        ("vault.kv.read", STEP_STARTED),
         ("vault.kv.put", STEP_DONE_NO_RESULT),
         ("vault.token.create", STEP_DONE_NO_RESULT),
     ],

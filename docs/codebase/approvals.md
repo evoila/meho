@@ -1210,7 +1210,14 @@ that passes it counts (`secret.move` with a Keycloak side). Such an op does
 not count in `is_rights_change_op`. With `per_call=False` an op is checked
 here too, but it gets no per-call mark and does not count in
 `is_rights_change_op`: it is a change of rights only in the login realm
-(the Keycloak writes that only take away). `register_harmless_keys_rule`
+(the Keycloak writes that only take away). Such an op can register a check
+by its params (`register_grant_cover_check`, `operations/grant_cover_check.py`):
+when the check says so, the policy gate looks up no standing grant and no
+run approval for the call, and the shadow policy evaluator does the same.
+A card can name the login of a change whose params name none: the `grant`
+fact `for_login` (`FOR_LOGIN`, set by a `secret.move` that sets a password
+in the login realm). Then that login never approves it, and an unknown
+login cannot be approved. `register_harmless_keys_rule`
 records an op whose card carries `harmless_keys_only`
 (`HARMLESS_KEYS_ONLY`); `grant_changed_since_request` refuses the run of
 such a request when the approved card does not have it

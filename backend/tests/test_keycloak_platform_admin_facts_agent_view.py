@@ -30,7 +30,7 @@ from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     REASON_MAPPER,
     REASON_NEW_USER,
     REASON_SECRET_MOVE,
-    _keycloak_realms,
+    _keycloak_sides,
 )
 from meho_backplane.operations._preview import build_proposed_effect, proposed_effect_for_agent
 from meho_backplane.settings import get_settings
@@ -263,9 +263,10 @@ _SOURCE_REALMS = {"vault-source": [], "keycloak-client-source": ["other-realm"]}
 
 @pytest.mark.parametrize("source", list(_SOURCES), ids=list(_SOURCES))
 def test_a_sink_in_a_realm_named_clients_is_a_sink(source: str) -> None:
-    realms = _keycloak_realms({"from": _SOURCES[source], "to": _CLIENTS_SINK})
+    realms, sink, _ = _keycloak_sides({"from": _SOURCES[source], "to": _CLIENTS_SINK})
 
     assert realms == [*_SOURCE_REALMS[source], "clients"]
+    assert sink is not None and sink[1] == "clients"
 
 
 @pytest.mark.asyncio
@@ -274,6 +275,7 @@ async def test_a_move_to_a_login_in_a_login_realm_named_clients_needs_a_platform
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {"clients"})
+    keycloak.users_by_name["alice"] = _OTHER_USER
     params = {"from": source, "to": _CLIENTS_SINK}
 
     effect = await _effect(keycloak, "secret.move", params)

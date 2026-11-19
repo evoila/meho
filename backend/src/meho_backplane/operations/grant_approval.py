@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
+    "FOR_LOGIN",
     "GRANT_REASON_APPROVER_IN_GROUP",
     "GRANT_REASON_CHANGED",
     "GRANT_REASON_OLD_CARD",
@@ -174,6 +175,12 @@ GRANT_REASON_OLD_CARD: Final[str] = (
 #: The fact on the ``grant`` block that the call sets only harmless keys
 #: (:func:`register_harmless_keys_rule`).
 HARMLESS_KEYS_ONLY: Final[str] = "harmless_keys_only"
+
+#: The fact on the ``grant`` block that this request acts on the login in
+#: ``user_id``, for an operation whose params name no login id (a
+#: ``secret.move`` that sets a user's password). Then that login never
+#: approves the request, and an unknown login cannot be approved.
+FOR_LOGIN: Final[str] = "for_login"
 
 
 @dataclass(frozen=True)
@@ -321,7 +328,7 @@ def grant_facts(request: ApprovalRequest) -> GrantFacts | None:
         return None
     stamp = _stamp(request)
     return GrantFacts(
-        for_login=bool(op.user_id_params),
+        for_login=bool(op.user_id_params) or stamp.get(FOR_LOGIN) is True,
         for_group=bool(op.group_id_params),
         user_id=_first_text(params, op.user_id_params) or _text(stamp.get("user_id")),
         group_id=_first_text(params, op.group_id_params) or _text(stamp.get("group_id")),

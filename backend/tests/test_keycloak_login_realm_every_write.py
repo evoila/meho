@@ -247,8 +247,18 @@ _RUNS = [write for write in _WRITES if write.op_id != _REALM_DELETE]
 
 @pytest.fixture
 def fake(monkeypatch: pytest.MonkeyPatch) -> _FakeKeycloak:
+    """The fake Keycloak, also for ``secret.move``, which finds its target and connector itself."""
     keycloak = _FakeKeycloak()
     _login_realms(monkeypatch, {_REALM})
+
+    async def _resolve_target(_session: Any, _tenant: Any, _name: str) -> Any:
+        return _ctx("secret.move", {}, realm=keycloak.realm).target
+
+    monkeypatch.setattr("meho_backplane.targets.resolver.resolve_target", _resolve_target)
+    monkeypatch.setattr(
+        "meho_backplane.operations._handler_resolve.get_or_create_connector_instance",
+        lambda _cls: keycloak.connector(),
+    )
     return keycloak
 
 

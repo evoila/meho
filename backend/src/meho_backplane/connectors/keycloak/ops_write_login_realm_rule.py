@@ -19,7 +19,10 @@ every Keycloak write (:data:`~.rights_changes.RIGHTS_CHANGE_OPS` and
   ``platform_admin`` with the reason :data:`REASON_KEYS`.
 
 The approval check (:mod:`meho_backplane.operations.grant_approval`) then
-asks for a platform admin. The same step runs again on the card built
+asks for a platform admin. A write without a per-call mark is never cleared
+by a standing grant or a run approval in the login realm
+(:mod:`meho_backplane.operations.grant_cover_check`), so it reaches the
+approval card too. The same step runs again on the card built
 right before the approved change runs, so a change that now needs a
 stricter approval does not run. A request approved with a card that has
 no ``harmless_keys_only`` fact does not run either, in every realm.
@@ -54,6 +57,7 @@ from meho_backplane.connectors.keycloak.rights_changes import (
     NOT_RIGHTS_CHANGE_OPS,
     RIGHTS_CHANGE_OPS,
 )
+from meho_backplane.op_classes import needs_per_call_approval
 from meho_backplane.operations._preview import (
     register_agent_preview_filter,
     register_preview_last_step,
@@ -63,6 +67,7 @@ from meho_backplane.operations.grant_approval import (
     register_grant_op,
     register_harmless_keys_rule,
 )
+from meho_backplane.operations.grant_cover_check import register_grant_cover_check
 
 if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
@@ -150,6 +155,15 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
         return True
 
 
+def _grant_cover_check(op_id: str) -> Any:
+    async def _check(ctx: PreviewContext) -> bool:
+        if sets_only_harmless_keys(op_id, ctx.params):
+            return False
+        return await _changes_login_realm(op_id, ctx)
+
+    return _check
+
+
 def _last_step(op_id: str) -> Any:
     async def _step(ctx: PreviewContext, preview: dict[str, Any]) -> None:
         if ctx.agent_preview and not agent_cards_on():
@@ -183,8 +197,11 @@ def register_login_realm_rule() -> None:
     """Apply the rule to every Keycloak write. Safe to call twice.
 
     A write with no ``grant`` block of its own is registered for the
-    approval check here. It waits for a person's approval call by call only
+    approval check here. It is marked for a person's approval call by call
     when it is a change of rights (:data:`~.rights_changes.RIGHTS_CHANGE_OPS`).
+    A write without that mark is not cleared by a standing grant or a run
+    approval when it changes the login realm (:func:`_grant_cover_check`);
+    in other realms a standing grant or a run approval covers it.
     """
     for op_id in (*RIGHTS_CHANGE_OPS, *NOT_RIGHTS_CHANGE_OPS):
         register_preview_last_step(op_id, _last_step(op_id))
@@ -192,6 +209,8 @@ def register_login_realm_rule() -> None:
         if op_id not in _HAS_GRANT:
             register_grant_op(op_id, per_call=op_id in RIGHTS_CHANGE_OPS)
             register_agent_preview_filter(op_id, _no_grant_for_agent)
+        if not needs_per_call_approval(op_id):
+            register_grant_cover_check(op_id, _grant_cover_check(op_id))
 
 
 register_login_realm_rule()

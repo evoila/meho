@@ -584,6 +584,13 @@ write in `RIGHTS_CHANGE_OPS` and `NOT_RIGHTS_CHANGE_OPS`:
   registered for the approval check (`register_grant_op`). A write of
   `NOT_RIGHTS_CHANGE_OPS` is registered with `per_call=False`: in another
   realm it stays what it was, not a change of rights.
+- A write without a per-call mark also gets a check by its params
+  (`register_grant_cover_check` in `operations/grant_cover_check.py`).
+  When the call changes the login realm and sets more than harmless keys,
+  no standing grant and no run approval clears it: the policy gate looks
+  neither up, and the call waits for a person, so the card asks for a
+  platform admin. A call with no params, and a check that fails, wait
+  too. In another realm a grant clears it.
 
 The realm is the `realm` param for `realm.create` (also the `realm` of its
 representation), `realm.delete`, `realm.update` and `user.check_login`,
@@ -595,7 +602,13 @@ A `secret.move` whose source or sink is a `keycloak:` ref in the login
 realm always needs a platform admin (`secret_move_grant`). A ref is a
 client-secret source or a user-password sink by its address shape, the
 same way as `build_keycloak_secret_endpoint`: a sink in a realm named
-`clients` is still a sink.
+`clients` is still a sink. A user-password sink in the login realm also
+names its login on the card: `for_login` is `true` and `user_id` is the
+id MEHO reads for the user name. So the person whose password the move
+sets never approves it, also when someone else asked. When MEHO cannot
+read the login, `user_id` is `null` and the request cannot be approved.
+When the name names another login at run start, the run is refused
+(`GRANT_REASON_CHANGED`).
 
 Right before an approved write runs, MEHO builds the card again. The run
 is refused when the write now needs a stricter approval (for example the
@@ -609,7 +622,9 @@ tenant admin's approval is refused; a platform admin's approval goes
 through and the run check passes; when MEHO cannot read its login realms a
 tenant admin is refused; in another realm a tenant admin approves, and the
 run is refused when the realm becomes a login realm while the request
-waits):
+waits). `tests/test_keycloak_login_realm_grants_and_password_sink.py`
+tests the grant check for each write without a per-call mark, and the
+login of a `secret.move` password sink:
 
 | Write | In the login realm |
 |---|---|

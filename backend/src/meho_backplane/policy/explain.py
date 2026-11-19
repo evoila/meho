@@ -429,6 +429,7 @@ async def _today_and_evaluator(
                     target=target,
                     connector_id=connector_id,
                     decide_only=True,
+                    params={},
                 )
     finally:
         forget_rule()  # the gate's shadow kept a rule; explain writes no row

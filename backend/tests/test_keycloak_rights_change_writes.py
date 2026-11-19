@@ -91,9 +91,12 @@ _RIGHTS = tuple(sorted(RIGHTS_CHANGE_OPS))
 #: The changes of rights with no approval card facts: neither one login or
 #: group (``GRANT_OPS``) nor a write that can give platform admin rights.
 _RIGHTS_NOT_GRANT = tuple(op for op in _RIGHTS if op not in grant_approval._GRANT_OPS)
-#: A ``caution`` write that is not a change of rights: a grant or a run
-#: approval still covers it, so the tests show that the wait comes from
-#: the mark and not from a grant that does not match.
+#: A ``caution`` write that is not a change of rights: outside the login
+#: realm a grant or a run approval covers it, so the tests show that the
+#: wait comes from the mark and not from a grant that does not match. The
+#: calls here name no target, which counts as the login realm, so the tests
+#: take away the login realm check of the control
+#: (:func:`_without_login_realm_check`); that check has its own tests.
 _CONTROL = "keycloak.user.logout"
 _PARAMS: dict[str, Any] = {"representation": {"name": "example"}}
 _REQUESTER = "person-requester"
@@ -346,9 +349,16 @@ async def _add_grant_rows(*op_ids: str) -> None:
         await session.commit()
 
 
+def _without_login_realm_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meho_backplane.operations import grant_cover_check
+
+    monkeypatch.delitem(grant_cover_check._CHECKS, _CONTROL)
+
+
 @pytest.mark.asyncio
-async def test_an_older_grant_row_does_not_clear_the_wait() -> None:
+async def test_an_older_grant_row_does_not_clear_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     await KeycloakConnector.register_operations()
+    _without_login_realm_check(monkeypatch)
     # Written straight to the table, past the create check.
     await _add_grant_rows(*_RIGHTS, _CONTROL)
     service = _machine(PrincipalKind.SERVICE)
@@ -359,8 +369,9 @@ async def test_an_older_grant_row_does_not_clear_the_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_run_approval_does_not_clear_the_wait() -> None:
+async def test_a_run_approval_does_not_clear_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     await KeycloakConnector.register_operations()
+    _without_login_realm_check(monkeypatch)
     now = datetime.now(UTC)
     async with get_sessionmaker()() as session:
         session.add(

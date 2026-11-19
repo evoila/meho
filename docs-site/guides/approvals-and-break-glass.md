@@ -307,7 +307,10 @@ group has more rules:
   is for a login with platform admin rights. When MEHO cannot read which
   realm a write changes, it counts as the login realm. The approval card
   says why, in the row "Platform admin must approve". A tenant admin, also
-  an admin who may change other rights alone, cannot approve these.
+  an admin who may change other rights alone, cannot approve these. No
+  standing grant and no run approval clears such a write: each call waits
+  for a person. A person never approves a `secret.move` that sets the
+  password of their own login.
 - A Keycloak write approved before this rule does not run: MEHO refuses it
   when the run starts, in every realm. Send the request again.
 

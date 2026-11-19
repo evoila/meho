@@ -132,6 +132,11 @@ Detail payloads land in ``extras``. Codes:
   that method (a linux op on an rke2 target). Refused right after the
   target check, before the policy gate and any wait for approval, with
   one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
+* ``connector_not_allowed`` -- a hosted agent with a connector list called
+  an op on a target whose connector is not in the list, or that resolves
+  no single connector. Refused right after the mismatch check, before the
+  policy gate, with one audit row and no approval request
+  (:mod:`~meho_backplane.operations._target_connector_limit`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -446,6 +451,9 @@ from meho_backplane.operations._session_expired_hook import (
     session_ended_not_resent_error,
     session_expired_by_hook,
     with_refused_signin_remediation,
+)
+from meho_backplane.operations._target_connector_limit import (
+    refuse_target_connector_not_allowed,
 )
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._target_version_range import refuse_version_outside_range
@@ -4132,6 +4140,17 @@ async def _dispatch_now(
     )
     if mismatch is not None:
         return mismatch
+    # A hosted agent with a connector list may use only targets whose
+    # connector is in the list. Refused here too, before the policy gate.
+    not_allowed = await refuse_target_connector_not_allowed(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if not_allowed is not None:
+        return not_allowed
     # A target whose known version is outside the range of the connector
     # picked for it (through the fallback entry) is refused the same way.
     outside = await refuse_version_outside_range(

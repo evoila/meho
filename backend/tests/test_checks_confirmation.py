@@ -389,6 +389,22 @@ async def test_gate_unknown_participates_like_any_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gate_first_unknown_result_sets_state_since() -> None:
+    """A first ``unknown`` result changes no state but records when it was confirmed."""
+    sensor_id = await _create_sensor(retry_times=2)
+    assert (await _get_sensor(sensor_id)).state_since is None
+    at = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+
+    assert await _record(sensor_id, "unknown", at) is False
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert _aware(row.state_since) == at
+
+    assert await _record(sensor_id, "unknown", at + timedelta(seconds=10)) is False
+    assert _aware((await _get_sensor(sensor_id)).state_since) == at, "a repeat does not move it"
+
+
+@pytest.mark.asyncio
 async def test_gate_monotonicity_guard_rejects_before_pending_mutation() -> None:
     """An out-of-order gateway result opens no window (rejected up front)."""
     sensor_id = await _create_sensor(retry_times=1)

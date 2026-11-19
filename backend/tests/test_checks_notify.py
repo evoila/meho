@@ -1952,6 +1952,41 @@ async def test_member_with_a_confirmed_unknown_alerts_at_once(
 
 
 @pytest.mark.asyncio
+async def test_member_with_recorded_unknown_results_alerts_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: ``unknown`` results recorded by the runner count as a confirmed state.
+
+    The Sensor starts as ``unknown`` and its first results are ``unknown`` too,
+    so its state never changes. Recording them still sets ``state_since``, so
+    a later confirmation window does not make it look like a first result.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", evaluated=False, state_since=None, retry_times=2
+    )
+    start = datetime.now(UTC) - timedelta(minutes=5)
+    await _record(sid_b, "unknown", start)
+    await _record(sid_b, "unknown", start + timedelta(seconds=10))
+    await _record(sid_b, "ok", start + timedelta(seconds=20))
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+
+    await _evaluate(sid_b)
+
+    assert len(fake.calls) == 1
+    assert "ok -> degraded" in fake.calls[0]["subject"]
+    assert await _rollup_memo(dash) == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_member_added_to_a_degraded_dashboard_keeps_member_memos(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

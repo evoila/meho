@@ -168,6 +168,11 @@ accepted call, and commits `last_state`/`state_since` through the
   `ok` is confirmed too — deliberately unlike Nagios' immediate hard
   recovery, because the observed flap's second nuisance mail was a
   flapping all-clear); `unknown` participates like any state.
+- A new Sensor starts as `unknown` with no `state_since`. When its first
+  result is `unknown` too, the state does not change, but `state_since` is
+  set to that result's `evaluated_at`. So a Sensor that has a
+  `state_since` always has a confirmed state, and a `for_seconds` hold
+  counts from that first result.
 
 The gate lives in the repository function — not the runner task. Only
 the central check loop calls it today; results from a remote runner are

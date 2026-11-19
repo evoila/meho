@@ -50,7 +50,8 @@ stays, and nothing is sent: no mail, no investigation, no broadcast event.
 The member memos stay as they are. Only a Sensor that never had a
 confirmed state (`state_since` is empty) can wait. A Sensor that had one
 and now reports `unknown` alerts at once, also while new results wait for
-confirmation.
+confirmation. A first result of `unknown` counts as a confirmed state too:
+it changes no state, but result recording sets `state_since` for it.
 
 The wait has a limit. It ends at the first of these two times:
 

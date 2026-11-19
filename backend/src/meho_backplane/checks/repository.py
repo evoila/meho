@@ -215,12 +215,20 @@ async def _commit_through_confirmation_gate(
     the sensor. The gate lives in this repository seam, not the runner task, so
     the satellite-gateway batch-post path is confirmed identically. Flushes and
     returns ``True`` iff the committed state changed.
+
+    A first result equal to the initial ``unknown`` changes nothing, but it
+    sets ``state_since``: from then on the Sensor has a confirmed state, so
+    the Dashboard alert does not treat it as still waiting for one.
     """
     if state == row.last_state:
         # The committed state re-confirmed itself; any half-open confirmation
         # window was a transient -- close it.
         row.pending_state = None
         row.pending_count = 0
+        if row.state_since is None:
+            # A first result equal to the initial ``unknown`` confirms it:
+            # record when, so the Sensor no longer counts as never confirmed.
+            row.state_since = evaluated_at
         await session.flush()
         return False
     if row.retry_times > 0:

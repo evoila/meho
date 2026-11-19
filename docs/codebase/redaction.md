@@ -1333,6 +1333,54 @@ the span stores `BODY_OMITTED_MARKER`, and the trace is marked uncertain.
 This closes the case where the F2 cap cuts only a trailing newline, the cut
 body still parses, and an unmasked Secret value would otherwise be kept.
 
+### What an agent reads in the trace of a Kubernetes call
+
+The stored trace keeps the Kubernetes API answer with the whole object, for
+example the full pod definition of a pod list. Who reads what:
+
+- **A person** (the console, `meho audit trace`, `GET /api/v1/audit/{id}/trace`
+  and `GET /api/v1/audit/traces`) reads the stored trace as it is.
+- **A service login** (a paired add-on) reads the stored traces of its own
+  calls as they are.
+- **An agent login** reads a copy. It gets the copy through the trace handle
+  on a `call_operation` answer (`flight_recorder_trace_handle`, paged with
+  `result_query`) and through the two REST trace routes.
+
+In the agent's copy, each span of a Kubernetes call (connector product
+`k8s`, or an operation id that starts with `k8s.`) goes through
+`connectors/kubernetes/trace_agent_view.py::agent_view`, at any depth of the
+span (pods, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs,
+CronJobs, pod templates in custom resources, the items of a list):
+
+- Every `env` entry keeps its `name`; its `value` becomes
+  `[MEHO-REDACTED:env-value]`. An entry with `valueFrom` and every
+  `envFrom` entry stay, because they name a reference, not a value.
+- Each `command` and `args` pair goes through the command-line pass of the
+  `k8s.job.create` approval preview (`ops_write_preview._hide_command_line`).
+  The words stay. Hidden are the value of a secret-named `NAME=VALUE` or
+  `--name=value`, the argument after a secret flag (`--password x`), the
+  password in `user:password` after `-u`, the password in a URL and tokens
+  with a known vendor prefix. The script after `sh -c` is read as a shell
+  script.
+- `managedFields` is left out, in the body and in the `response_object`
+  summary.
+- An annotation value that is a JSON object or list (the
+  `kubectl.kubernetes.io/last-applied-configuration` annotation holds a
+  whole earlier object) is cleaned by the same walk and written back as
+  JSON. A last-applied value that is not such JSON becomes
+  `[MEHO-REDACTED:last-applied-configuration]`. Other annotation values go
+  through `command_line.hide_in_text` (the password in a URL, tokens with a
+  known vendor prefix).
+
+Nothing else in the span changes, and the spans of every other connector
+are copied unchanged. The copy is made when the agent reads, so the stored
+trace stays as it is (`flight_recorder/agent_view.py`). When a trace holds
+a Kubernetes span, the walk runs in a worker thread (`asyncio.to_thread`),
+and its time grows in line with the size of the trace. When the copy cannot
+be made (a body nested too deep), the agent gets no trace. Tests:
+`test_flight_recorder_k8s_agent_view.py`,
+`test_flight_recorder_k8s_agent_view_reads.py`.
+
 ## References
 
 - Parent goal: [#800](https://github.com/evoila/meho/issues/800)

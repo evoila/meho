@@ -77,6 +77,7 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan
+from meho_backplane.flight_recorder.agent_view import agent_view_rows
 from meho_backplane.flight_recorder.config import should_expose_to_agent
 from meho_backplane.settings import get_settings
 
@@ -347,7 +348,9 @@ async def _load_agent_trace_rows(
             .scalars()
             .all()
         )
-    return [_span_row(span) for span in spans]
+    # The agent's copy: a Kubernetes span has its env values, command-line
+    # secrets, managedFields and annotation secrets hidden (agent_view).
+    return await agent_view_rows([_span_row(span) for span in spans])
 
 
 async def materialize_agent_trace_handle(

@@ -1,0 +1,414 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""The agent's copy of a Kubernetes span hides env values and command-line secrets.
+
+Covers :mod:`meho_backplane.connectors.kubernetes.trace_agent_view` and
+:mod:`meho_backplane.flight_recorder.agent_view`:
+
+* a plain env value (a password inside a database URL) is hidden; the env
+  names and a ``valueFrom`` reference stay;
+* ``--password x`` on a command line and a token in an ``sh -c`` script are
+  hidden; the other words stay;
+* the last-applied annotation, which holds a whole object, is cleaned like
+  the object; other annotation values are checked for secret shapes;
+* ``managedFields`` is left out;
+* the same rules hold for Deployments, CronJobs, lists and custom resources;
+* nothing else in the span changes, and the span of a non-Kubernetes call is
+  copied unchanged;
+* the walk takes time in line with the body size and runs in a worker thread.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import threading
+import time
+from typing import Any
+
+import pytest
+
+import meho_backplane.flight_recorder.agent_view as agent_view_mod
+from meho_backplane.connectors.kubernetes.trace_agent_view import (
+    ENV_VALUE_MARKER,
+    LAST_APPLIED_MARKER,
+    agent_view,
+)
+from meho_backplane.flight_recorder.agent_view import agent_view_attributes, agent_view_rows
+from meho_backplane.redaction.command_line import HIDDEN
+
+_FAKE = "made-up-value-not-real-8812"
+_TOKEN = "ghp_" + "A" * 36
+_LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
+
+
+def _container(**extra: Any) -> dict[str, Any]:
+    return {
+        "name": "app",
+        "image": "registry.example.invalid/app:1.0",
+        "env": [
+            {"name": "DATABASE_URL", "value": f"postgres://app:{_FAKE}@db.example.invalid/app"},
+            {"name": "LOG_LEVEL", "value": "debug"},
+            {
+                "name": "API_KEY",
+                "valueFrom": {"secretKeyRef": {"name": "app-secrets", "key": "api-key"}},
+            },
+        ],
+        "envFrom": [{"configMapRef": {"name": "app-config"}}],
+        **extra,
+    }
+
+
+def _pod(**container_extra: Any) -> dict[str, Any]:
+    return {
+        "kind": "Pod",
+        "apiVersion": "v1",
+        "metadata": {
+            "name": "app-0",
+            "namespace": "default",
+            "uid": "uid-1",
+            "labels": {"app": "demo"},
+            "annotations": {"team": "platform"},
+            "managedFields": [
+                {
+                    "manager": "kubectl",
+                    "operation": "Update",
+                    "fieldsV1": {"f:spec": {"f:containers": {}}},
+                }
+            ],
+        },
+        "spec": {"containers": [_container(**container_extra)], "nodeName": "node-1"},
+        "status": {"phase": "Running"},
+    }
+
+
+def _k8s_span(body: Any) -> dict[str, Any]:
+    return {
+        "connector_id": "k8s-1.x",
+        "op_id": "k8s.pod.list",
+        "method": "GET",
+        "url": "https://cluster.example.invalid/api/v1/namespaces/default/pods",
+        "request_headers": {"accept": "application/json"},
+        "response_headers": {"content-type": "application/json"},
+        "request_body": None,
+        "response_body": body,
+        "body_recorded": True,
+        "response_object": {
+            "kind": "PodList",
+            "item_count": 1,
+            "managedFields": [{"manager": "kubectl"}],
+        },
+    }
+
+
+def _env(view: dict[str, Any]) -> list[dict[str, Any]]:
+    env: list[dict[str, Any]] = view["spec"]["containers"][0]["env"]
+    return env
+
+
+# --------------------------------------------------------------------------
+# env values
+# --------------------------------------------------------------------------
+
+
+def test_env_value_with_password_in_url_is_hidden_and_names_stay() -> None:
+    view = agent_view(_pod())
+
+    env = _env(view)
+    assert [entry["name"] for entry in env] == ["DATABASE_URL", "LOG_LEVEL", "API_KEY"]
+    assert env[0]["value"] == ENV_VALUE_MARKER
+    assert env[1]["value"] == ENV_VALUE_MARKER
+    # A value from a reference keeps the reference.
+    assert env[2] == {
+        "name": "API_KEY",
+        "valueFrom": {"secretKeyRef": {"name": "app-secrets", "key": "api-key"}},
+    }
+    assert view["spec"]["containers"][0]["envFrom"] == [{"configMapRef": {"name": "app-config"}}]
+    assert _FAKE not in json.dumps(view)
+
+
+def test_env_value_that_is_empty_or_not_text_is_hidden_too() -> None:
+    pod = _pod()
+    pod["spec"]["containers"][0]["env"] = [
+        {"name": "EMPTY", "value": ""},
+        {"name": "NUMBER", "value": 5},
+        {"name": "NULL", "value": None},
+        "not-an-entry",
+    ]
+
+    env = _env(agent_view(pod))
+
+    assert env[:3] == [
+        {"name": "EMPTY", "value": ENV_VALUE_MARKER},
+        {"name": "NUMBER", "value": ENV_VALUE_MARKER},
+        {"name": "NULL", "value": ENV_VALUE_MARKER},
+    ]
+    assert env[3] == "not-an-entry"
+
+
+# --------------------------------------------------------------------------
+# command lines and scripts
+# --------------------------------------------------------------------------
+
+
+def test_password_flag_on_a_command_line_is_hidden_and_the_words_stay() -> None:
+    pod = _pod(command=["/app/server"], args=["--password", _FAKE, "--port", "8080"])
+
+    container = agent_view(pod)["spec"]["containers"][0]
+
+    assert container["command"] == ["/app/server"]
+    assert container["args"] == ["--password", HIDDEN, "--port", "8080"]
+
+
+def test_flag_at_the_end_of_command_hides_the_first_arg() -> None:
+    pod = _pod(command=["/app/server", "--token"], args=[_FAKE, "--verbose"])
+
+    container = agent_view(pod)["spec"]["containers"][0]
+
+    assert container["args"] == [HIDDEN, "--verbose"]
+
+
+def test_token_in_an_inline_script_is_hidden_and_the_script_stays_readable() -> None:
+    script = f"export API_TOKEN={_FAKE}; curl -sf https://api.example.invalid/x && echo {_TOKEN}"
+    pod = _pod(command=["sh", "-c"], args=[script])
+
+    args = agent_view(pod)["spec"]["containers"][0]["args"]
+
+    assert _FAKE not in args[0]
+    assert _TOKEN not in args[0]
+    assert args[0].startswith(f"export API_TOKEN={HIDDEN};")
+    assert "curl -sf https://api.example.invalid/x" in args[0]
+
+
+def test_probe_exec_command_gets_the_same_pass() -> None:
+    probe = {"exec": {"command": ["check", f"--password={_FAKE}"]}}
+    pod = _pod(livenessProbe=probe)
+
+    container = agent_view(pod)["spec"]["containers"][0]
+
+    assert container["livenessProbe"]["exec"]["command"] == ["check", f"--password={HIDDEN}"]
+
+
+# --------------------------------------------------------------------------
+# annotations and managedFields
+# --------------------------------------------------------------------------
+
+
+def test_last_applied_annotation_is_cleaned_like_the_object() -> None:
+    earlier = _pod(command=["sh", "-c"], args=[f"PGPASSWORD={_FAKE} psql"])
+    pod = _pod()
+    pod["metadata"]["annotations"][_LAST_APPLIED] = json.dumps(earlier) + "\n"
+
+    view = agent_view(pod)
+
+    text = view["metadata"]["annotations"][_LAST_APPLIED]
+    assert _FAKE not in text
+    cleaned = json.loads(text)
+    assert _env(cleaned)[0] == {"name": "DATABASE_URL", "value": ENV_VALUE_MARKER}
+    assert "managedFields" not in cleaned["metadata"]
+    assert cleaned["spec"]["containers"][0]["args"] == [f"PGPASSWORD={HIDDEN} psql"]
+    assert cleaned["spec"]["nodeName"] == "node-1"
+    assert view["metadata"]["annotations"]["team"] == "platform"
+
+
+def test_last_applied_annotation_that_is_not_json_is_replaced() -> None:
+    pod = _pod()
+    pod["metadata"]["annotations"][_LAST_APPLIED] = '{"spec": {"cut'
+
+    view = agent_view(pod)
+
+    assert view["metadata"]["annotations"][_LAST_APPLIED] == LAST_APPLIED_MARKER
+
+
+def test_other_annotation_values_are_checked_for_secret_shapes() -> None:
+    pod = _pod()
+    pod["metadata"]["annotations"].update(
+        {
+            "example.invalid/backup-target": f"s3://backup:{_FAKE}@store.example.invalid/b",
+            "example.invalid/bot": f"token {_TOKEN}",
+            "example.invalid/config": json.dumps({"env": [{"name": "X", "value": _FAKE}]}),
+        }
+    )
+
+    annotations = agent_view(pod)["metadata"]["annotations"]
+
+    assert annotations["example.invalid/backup-target"] == (
+        f"s3://backup:{HIDDEN}@store.example.invalid/b"
+    )
+    assert annotations["example.invalid/bot"] == f"token {HIDDEN}"
+    assert json.loads(annotations["example.invalid/config"]) == {
+        "env": [{"name": "X", "value": ENV_VALUE_MARKER}]
+    }
+
+
+def test_managed_fields_are_left_out_of_body_and_summary() -> None:
+    attributes = agent_view_attributes(_k8s_span({"kind": "PodList", "items": [_pod()]}))
+
+    assert "managedFields" not in json.dumps(attributes)
+    assert attributes["response_object"] == {"kind": "PodList", "item_count": 1}
+
+
+# --------------------------------------------------------------------------
+# other workload kinds
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("wrap", "path"),
+    [
+        (
+            lambda pod: {"kind": "Deployment", "spec": {"template": {"spec": pod["spec"]}}},
+            ("spec", "template", "spec"),
+        ),
+        (
+            lambda pod: {
+                "kind": "CronJob",
+                "spec": {"jobTemplate": {"spec": {"template": {"spec": pod["spec"]}}}},
+            },
+            ("spec", "jobTemplate", "spec", "template", "spec"),
+        ),
+        (
+            lambda pod: {"kind": "StatefulSetList", "items": [{"spec": {"template": pod}}]},
+            ("items", 0, "spec", "template", "spec"),
+        ),
+        (
+            lambda pod: {
+                "apiVersion": "example.invalid/v1",
+                "kind": "Workflow",
+                "spec": {"steps": [{"podSpec": pod["spec"]}]},
+            },
+            ("spec", "steps", 0, "podSpec"),
+        ),
+    ],
+    ids=["deployment", "cronjob", "list", "custom-resource"],
+)
+def test_pod_templates_in_other_kinds_are_cleaned(wrap: Any, path: tuple[Any, ...]) -> None:
+    body = wrap(_pod(args=["--password", _FAKE]))
+
+    node: Any = agent_view(body)
+    for step in path:
+        node = node[step]
+
+    container = node["containers"][0]
+    assert container["env"][0] == {"name": "DATABASE_URL", "value": ENV_VALUE_MARKER}
+    assert container["args"] == ["--password", HIDDEN]
+
+
+# --------------------------------------------------------------------------
+# nothing else changes
+# --------------------------------------------------------------------------
+
+
+def test_only_the_listed_values_change_in_a_kubernetes_span() -> None:
+    original = _k8s_span({"kind": "PodList", "items": [_pod(args=["--password", _FAKE])]})
+    before = copy.deepcopy(original)
+
+    view = agent_view_attributes(original)
+
+    assert original == before  # the stored span is not touched
+    expected = copy.deepcopy(original)
+    pod = expected["response_body"]["items"][0]
+    del pod["metadata"]["managedFields"]
+    del expected["response_object"]["managedFields"]
+    for entry in pod["spec"]["containers"][0]["env"]:
+        if "value" in entry:
+            entry["value"] = ENV_VALUE_MARKER
+    pod["spec"]["containers"][0]["args"] = ["--password", HIDDEN]
+    assert view == expected
+
+
+def test_a_non_kubernetes_span_is_copied_unchanged() -> None:
+    span = _k8s_span({"kind": "PodList", "items": [_pod(args=["--password", _FAKE])]})
+    span["connector_id"] = "vmware-rest-9.0"
+    span["op_id"] = "vsphere.vm.list"
+
+    assert agent_view_attributes(span) == span
+
+
+@pytest.mark.parametrize(
+    ("connector_id", "op_id", "cleaned"),
+    [
+        ("k8s", "k8s.pod.list", True),
+        ("k8s-1.x", "k8s.pod.list", True),
+        (None, "k8s.pod.list", True),
+        ("k8sx-1.x", "k8sx.pod.list", False),
+        ("rke2-ssh-1.x", "rke2.node.list", False),
+        (None, None, False),
+    ],
+)
+def test_kubernetes_span_is_found_by_connector_or_operation(
+    connector_id: str | None, op_id: str | None, cleaned: bool
+) -> None:
+    span = _k8s_span(_pod())
+    span["connector_id"] = connector_id
+    span["op_id"] = op_id
+
+    view = agent_view_attributes(span)
+
+    assert (view != span) is cleaned
+
+
+async def test_rows_without_a_kubernetes_span_are_returned_as_they_are() -> None:
+    rows = [{"seq": 0, "attributes": {"connector_id": "vault", "response_body": {"a": 1}}}]
+
+    assert await agent_view_rows(rows) is rows
+
+
+# --------------------------------------------------------------------------
+# time and the event loop
+# --------------------------------------------------------------------------
+
+
+_TIME_LIMIT_SECONDS = 2.0
+
+
+def test_large_pod_list_is_cleaned_in_time_in_line_with_its_size() -> None:
+    pods = [_pod(command=["sh", "-c"], args=[f"run --token {_FAKE} --id {i}"]) for i in range(2000)]
+    span = _k8s_span({"kind": "PodList", "items": pods})
+
+    started = time.perf_counter()
+    view = agent_view_attributes(span)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < _TIME_LIMIT_SECONDS
+    assert _FAKE not in json.dumps(view)
+    assert len(view["response_body"]["items"]) == 2000
+
+
+def test_very_long_command_line_is_cleaned_in_time() -> None:
+    long_arg = "x" * (1 << 20)
+    pod = _pod(command=["sh", "-c"], args=[f"{long_arg} --password {_FAKE}"])
+
+    started = time.perf_counter()
+    args = agent_view(pod)["spec"]["containers"][0]["args"]
+
+    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert args == [f"{long_arg} --password {HIDDEN}"]
+
+
+async def test_the_walk_runs_in_a_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[threading.Thread] = []
+    real = agent_view_mod.agent_view_attributes
+
+    def _spy(attributes: Any) -> dict[str, Any]:
+        seen.append(threading.current_thread())
+        return real(attributes)
+
+    monkeypatch.setattr(agent_view_mod, "agent_view_attributes", _spy)
+    rows = [{"seq": 0, "attributes": _k8s_span(_pod())}]
+
+    cleaned = await agent_view_rows(rows)
+
+    assert seen
+    assert all(thread is not threading.main_thread() for thread in seen)
+    assert _env(cleaned[0]["attributes"]["response_body"])[0]["value"] == ENV_VALUE_MARKER
+
+
+def test_a_body_nested_too_deep_raises_so_the_trace_is_withheld() -> None:
+    node: Any = {}
+    for _ in range(5000):
+        node = {"a": node}
+
+    with pytest.raises(RecursionError):
+        agent_view_attributes(_k8s_span(node))

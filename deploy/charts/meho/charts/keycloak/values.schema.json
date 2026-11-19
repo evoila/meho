@@ -25,11 +25,11 @@
     "tenantName": {
       "type": "string",
       "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
-      "description": "The first tenant's short name (lowercase letters, digits and dashes). The five role groups carry it in the `meho_tenant` attribute."
+      "description": "The first tenant's short name (lowercase letters, digits and dashes). The three role groups carry it in the `meho_tenant` attribute."
     },
     "tenants": {
       "type": "array",
-      "description": "More tenants. The parent chart's bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one.",
+      "description": "More tenants. The parent chart's bootstrap Job makes the three groups `MEHO-<name>-<Role>` for each one.",
       "items": {
         "type": "object",
         "additionalProperties": false,

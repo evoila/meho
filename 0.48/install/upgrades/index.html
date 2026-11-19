@@ -3919,6 +3919,16 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A waiting approval request with no stored risk level now counts as <code>destructive</code>: only a person who may approve another person's <code>destructive</code> change may approve it, the self-approval emergency switch does not cover it, and its approval sign-in can approve only this one request. New requests keep the risk level of their operation also when MEHO could not build their preview, and the approval card then says "MEHO could not build the preview of this change."</td>
+<td>None for most installs. If a request that waits from before the upgrade has no risk level on its card, ask a person who may approve another person's <code>destructive</code> change to approve it, or reject it and run the call again.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
+<td>When a multi-step operation waits for approval at one of its steps and goes on after the approval, MEHO does not send the steps that already ran again. MEHO stores the steps of the run, with their results, on the approval request and replays them; the result of a step that reads, writes or makes a credential is not stored. A step whose end MEHO does not know stops the run with <code>composite_resume_step_outcome_unknown</code>, and a later step of that run that needs approval stops it at once with the same error. A second step that waits in the same run waits for its own approval (the error <code>composite_resume_multi_gate_unsupported</code> is gone). A request of a step of a multi-step operation is never run again through <code>POST /api/v1/approvals/{id}/rerun</code> (refusal <code>multi_step_run</code>, which replaces <code>input_not_kept</code>). Connector authors run each change of a multi-step operation that can go on after an approval through <code>run_governed_subop</code>.</td>
+<td>A multi-step run that waits for approval at the upgrade does not go on: its request expires at start-up like every request of the older release, and an approved one that has not run yet is refused. The requester starts the operation again.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A webhook event now starts only an <code>event</code> trigger whose filter names the event source, by slug (<code>{"source": {"slug": "&lt;source-slug&gt;"}}</code>) or by id. Only deliveries that pass the sender check count against an event source's rate limit; failed checks have their own limit of the same size. An event source secret that is empty or only spaces is refused with 422, and a source whose stored secret is empty accepts no sender. No schema migration.</td>
 <td>For each <code>event</code> trigger that should start on webhook events, add <code>"source": {"slug": "&lt;source-slug&gt;"}</code> to its filter. Without it, the trigger does not start on webhook events. See <a href="https://evoila.github.io/meho/latest/guides/event-ingestion/">Event ingestion</a>.</td>
 </tr>

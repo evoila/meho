@@ -52,6 +52,7 @@ from meho_backplane.connectors.linux.ops import PathConfinementError
 from meho_backplane.connectors.linux.ops_write import (
     _MAX_SECRET_ENV,
     _RESERVED_ENV_NAMES,
+    ENV_NOTE,
     WRITE_OPS,
     LinuxWriteError,
     LinuxWriteSafetyError,
@@ -612,7 +613,7 @@ async def test_file_write_preview_echoes_shape_never_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_script_run_preview_shows_script_never_argument_or_env_values() -> None:
+async def test_script_run_preview_shows_script_and_env_values_never_argument_values() -> None:
     ctx = types.SimpleNamespace(
         params={
             "script": _SCRIPT_CANARY,
@@ -636,11 +637,12 @@ async def test_script_run_preview_shows_script_never_argument_or_env_values() ->
         "use_sudo": True,
         "argument_bytes": len(_ARG_CANARY.encode("utf-8")),
         "env_var_names": ["MEHO_ENV_NAME"],
+        "env": {"MEHO_ENV_NAME": _ENV_VALUE_CANARY},
+        "env_note": ENV_NOTE,
         "working_directory": "/opt/app",
         "timeout_seconds": 30,
     }
-    for hidden_value in (_ARG_CANARY, _ENV_VALUE_CANARY):
-        assert hidden_value not in repr(preview)
+    assert _ARG_CANARY not in repr(preview)
 
 
 # ---------------------------------------------------------------------------

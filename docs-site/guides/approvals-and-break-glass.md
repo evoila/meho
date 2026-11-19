@@ -99,6 +99,19 @@ bell with the live pending count, a request-detail window with the
 proposed effect, and Approve / Deny buttons. The window also says
 whether you may approve the request, and why not.
 
+A `linux.script.run` request shows the script and each `env` name with
+its value. Read the `env` values as carefully as the script: some names
+change what a tool runs (for example `TAR_OPTIONS` or `GIT_SSH_COMMAND`).
+The run uses exactly these values; a call with other values needs a new
+approval. Secrets do not belong in `env`. Send them in `secret_env`, as a
+Vault path and field: the request shows only that reference, never the
+secret. MEHO refuses a call with a secret-looking `env` name (for example
+`DB_PASSWORD`) or value (for example a token or a password in a URL)
+before it waits for approval. The `env` values are for the person who
+approves: reads by an agent or a token show the `env` names only (the
+MCP approval tools, and the REST approval reads with an agent, service or
+runner login).
+
 When several requests belong to one change ticket and depend on each
 other, approve them as a group, oldest first:
 

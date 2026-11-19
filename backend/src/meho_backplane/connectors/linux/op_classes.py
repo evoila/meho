@@ -25,8 +25,8 @@ declare_op_classes(
         # material (``--token=...``, ``API_KEY=...``) that the scrub misses,
         # and ``.run`` is not a write suffix, so an undeclared class would
         # fall through to ``other`` and ship the command line in full. The
-        # park-time preview echoes only program identity, argument byte size
-        # and env-var NAMES, never any value.
+        # park-time preview echoes the script, the argument byte size and the
+        # ``env`` values the approver must see; never the argument values.
         "linux.script.run",
     ),
 )

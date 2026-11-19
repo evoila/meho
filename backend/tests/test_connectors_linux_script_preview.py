@@ -15,7 +15,7 @@
 * A long script is cut and marked; the SHA-256 is of the full script.
 * The optional ``script_ref`` and ``expected_sha256`` give "matches" or
   "does not match"; the handler refuses a script that does not match.
-* The argument values and the env values stay out of the preview.
+* The argument values stay out of the preview; each env value is in it.
 * A failed redaction pass shows no text and no hash.
 * The parked approval row carries the script in its preview.
 """
@@ -82,15 +82,15 @@ async def test_preview_shows_script_size_and_sha256() -> None:
 
 
 @pytest.mark.asyncio
-async def test_preview_keeps_argument_and_env_values_out() -> None:
+async def test_preview_shows_env_values_and_keeps_argument_values_out() -> None:
     preview = await _linux_script_run_preview(
         _ctx({"script": _SCRIPT, "arguments": _ARG_CANARY, "env": {"APP_MODE": _ENV_VALUE_CANARY}})
     )
     assert preview is not None
     assert preview["script"] == _SCRIPT
     assert preview["env_var_names"] == ["APP_MODE"]
+    assert preview["env"] == {"APP_MODE": _ENV_VALUE_CANARY}
     assert _ARG_CANARY not in repr(preview)
-    assert _ENV_VALUE_CANARY not in repr(preview)
 
 
 @pytest.mark.parametrize(
@@ -315,4 +315,4 @@ async def test_parked_row_preview_carries_the_script(
     assert preview["script_sha256"] == _sha(_SCRIPT)
     assert preview["script_ref"] == "app-repo@abc123:check.sh"
     assert preview["script_check"] == SCRIPT_CHECK_MATCHES
-    assert _ENV_VALUE_CANARY not in repr(row.proposed_effect)
+    assert preview["env"] == {"APP_MODE": _ENV_VALUE_CANARY}

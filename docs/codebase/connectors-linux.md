@@ -622,11 +622,11 @@ differently, by design:
   (`register_preview_builder`, fail-soft). For `file.write` it echoes only
   shape — path + content byte size + backup path + validate command, never
   the `content`. For `script.run` it shows interpreter + argument byte size +
-  env-var **names** + the `secret_env` **reference mapping**
+  each `env` name **with its value** + the `secret_env` **reference mapping**
   (`ENV → <vault-path>#<field>`, the non-secret Vault pointers) + working
   directory + sudo intent + timeout, and **the script itself** (see "What the
-  approver of `script.run` reads" below) — never the argument values / env
-  values / resolved `secret_env` values.
+  approver of `script.run` reads" below) — never the argument values /
+  resolved `secret_env` values.
 - `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
   register **no** bespoke builder and stay previewable via
   `preview_operation` on the generic params-echo default. For
@@ -654,6 +654,42 @@ keeps answering other requests while it works. In `preview_operation`
 with the `PREVIEW_TYPED_WRITES` switch on, the preview builder of a credential
 write runs only for a caller whom the policy does not refuse.
 
+Next to the script fields, `ops_write.py` (`_linux_script_run_preview`) adds:
+
+| Field | What it holds |
+|---|---|
+| `env_var_names` | The `env` names, sorted. |
+| `env` | Each `env` name with its value, sorted by name, each value as the handler exports it. An `env` value can change which code the script runs (for example `TAR_OPTIONS` or `GIT_SSH_COMMAND`), so the approver reads every one. Person-only (see below). |
+| `env_note` | One line: the approver sees every env value; put secrets in `secret_env`, not in `env`. Person-only (see below). |
+| `secret_env` | The `ENV → <vault-path>#<field>` references, never a value. |
+
+The params hash of the approval request covers `env`, so the approved run
+uses the `env` values on the card: an approval or a run with other values is
+refused (`ParamsMismatchError`).
+
+**Who sees the `env` values.** `env` and `env_note` are person-only card
+fields (`register_person_only_preview_keys`, always on for this op). A
+person who opens the request in the console approval window sees every
+value, and so does `meho approvals show` with a person's sign-in. The MCP
+approval tools (`meho_approvals_get`, `meho_approvals_list`) read the
+stored request through `proposed_effect_for_agent`, which drops these two
+keys: an agent gets `env_var_names` only, also for a request another
+principal sent. The REST approval list and detail follow the same rule:
+a person's login gets the values, and a read by an agent or a token (an
+agent, service or runner login) shows the names only.
+
+**No secret in `env`.** The card shows every `env` value, so the op's check
+before the wait for approval (`_refuse_secret_in_env`, registered with
+`register_park_check`) refuses a call when an `env` name holds a secret
+word (the command-line rule `is_secret_shaped_name`: `PASS`, `PWD`,
+`SECRET`, `TOKEN`, `KEY`, `CREDENTIAL`, `AUTH`, also inside a longer name)
+or an `env` value has a secret shape (`has_secret_shape`, the rules that
+hide secrets in the script text: a password in a URL, a JWT, a bearer
+token, a private key block, a token with a known vendor prefix, a secret
+on a command line). The answer is `refused_before_approval`; it names the
+`env` name, never the value, and asks for `secret_env`. No approval request
+is stored. A plain value such as `TAR_OPTIONS=x` still waits.
+
 When `expected_sha256` is set and the script does not match it, the handler
 refuses to run the script. The preview lives only in the approval row's
 `proposed_effect`; the audit row keeps only the params hash, and the
@@ -663,7 +699,11 @@ The console approval modal shows the text as code in a "Script to run"
 block (`ui/templates/approvals/_script.html`), with the hash, the reviewed
 copy and the check. `meho approvals show` and the `meho approvals approve`
 prompt print the same block, one line per script line
-(`cli/internal/cmd/approvals/script.go`).
+(`cli/internal/cmd/approvals/script.go`). The `env` values show in the
+preview fields: the console table renders them as JSON, and the CLI prints
+the preview as JSON made safe for the terminal (`output.SafeLines`), so a
+control character in a value shows as a visible escape (`\u001b`). The MCP
+approval tools return the card without `env` and `env_note` (see above).
 
 **Longer than one page.** `linux.script.run` accepts a script of at most
 1,048,576 bytes (1 MiB, `SCRIPT_MAX_BYTES`): a larger one is refused when
@@ -707,10 +747,12 @@ own write-root allow-list (`/etc`, `/var/lib`, `/run`, `/opt`, `/srv`,
 deliberately not writable here.
 
 **Operator rule (shared-machinery caveat):** do not put a bare secret in
-`content` / `arguments` / `env`. `ApprovalRequest.params` stores the params
-verbatim so the approved call can be re-dispatched, so a secret placed
-there is durable on the approval row (the same rule as the guest
-`program.run` / `file.write` verbs). For `script.run`, pass the credential by
+`content` / `arguments` / `env`. Both ops are credential writes: MEHO keeps
+their params encrypted, for the one approved run (the custody row of
+`approval_handoff.py`), and leaves `ApprovalRequest.params` empty. The row
+is deleted when the request runs or ends without a run. The `script.run`
+approval card shows every `env` value to the approver, and a secret-looking
+`env` name or value is refused (see above). For `script.run`, pass the credential by
 reference via `secret_env` (below) — the backplane resolves it server-side at
 run time, so the value never touches the params.
 
@@ -718,11 +760,10 @@ run time, so the value never touches the params.
 
 `script.run` is `safety_level=dangerous`, `requires_approval=True`, and pinned
 `credential_write`: its `script` / `arguments` / `env` are base64-carried on
-the wire but stored **verbatim** in `ApprovalRequest.params` (needed to
-re-dispatch the exact call on approval) and in the audit params. That is the
-right design for re-dispatch, but it means a script cannot safely *receive* a
-credential through `arguments` / `env` — any secret placed there is durable on
-the approval row and in audit. The only server-side secret resolution the
+the wire, and the params of the waiting call are kept encrypted for the one
+approved run (not in `ApprovalRequest.params`). But the approval card shows
+the script and every `env` value, so a script must not *receive* a
+credential through `arguments` / `env`. The only server-side secret resolution the
 connector otherwise performs is the sudo password (`_resolve_sudo_password`,
 read from the target's own Vault secret) and the SSH auth material.
 
@@ -778,8 +819,9 @@ to extend it to.
 
 ### Reserved env names (`env` and `secret_env`)
 
-The approver of `script.run` sees the script and the env **names**, not the
-env values. So an env value must not change which code runs. `env` and
+The approver of `script.run` sees the script and each `env` name with its
+value, but never a `secret_env` value: MEHO reads it from Vault only at run
+time. So a `secret_env` value must not change which code runs. `env` and
 `secret_env` refuse the same reserved names:
 
 - the wrapper's own shell variables: `tmp`, `args`, `f`;

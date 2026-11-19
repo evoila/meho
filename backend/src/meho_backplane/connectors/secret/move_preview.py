@@ -39,6 +39,15 @@ What the card adds to the refs
   SSH ``port``. The approved run compares the id, host and port with the
   target it finds and refuses another one
   (:class:`~meho_backplane.connectors.linux.secret_sink_target.LinuxTargetChangedError`).
+* A ``keycloak`` side (a user password sink or a client secret source)
+  names the Keycloak target it points to now (``target_id``,
+  ``target_name``), its ``host`` and the reference of its admin login
+  (``secret_ref``). The approved run compares the id, host and secret
+  reference with the target it finds, before any Keycloak login, and
+  refuses another one
+  (:class:`~meho_backplane.connectors.keycloak.secret_move_target.KeycloakTargetChangedError`).
+  ``preview_operation``, ``meho_approvals_get`` and ``meho_approvals_list``
+  leave these four fields out; only the card a person reads shows them.
 * The sink says whether its secret exists (``secret_exists``) and, with
   ``merge``, whether the named field exists (``field_exists``): ``"yes"``,
   ``"no"`` or ``"not known"``. A Vault sink looks it up with the same
@@ -52,6 +61,16 @@ What the card adds to the refs
 The agent's own ``preview_operation`` gets only the refs: ``{kind, ref}``
 and, for a ``vault-target`` side, the target name as typed. It makes no
 target lookup and no Vault login.
+
+A move with a ``keycloak`` side is a change of rights
+=====================================================
+
+Such a move sets a Keycloak user's password or reads a client secret, so
+it counts as a change of rights, like ``keycloak.user.reset_password``
+(:func:`~meho_backplane.operations.grant_approval.register_rights_change_check`
+with :func:`has_keycloak_side`). The requester never approves it, and
+another admin (a tenant admin or a platform admin) must. A move between
+two Vault places is not a change of rights.
 
 What a caller reads about a ``linux`` side is behind the switch
 ``SECRET_MOVE_LINUX_TARGET_CARD`` (``Settings.secret_move_linux_target_card``,
@@ -100,6 +119,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.keycloak.secret_move_target import keycloak_side_card
 from meho_backplane.connectors.linux.secret_endpoint import (
     LinuxSecretRefError,
     LinuxSecretSinkEndpoint,
@@ -123,6 +143,7 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
+from meho_backplane.operations.grant_approval import register_rights_change_check
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 
@@ -130,13 +151,18 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.secret.endpoints import SecretRef
 
-__all__ = ["build_secret_move_preview", "check_secret_move_sink"]
+__all__ = ["build_secret_move_preview", "check_secret_move_sink", "has_keycloak_side"]
 
 _LINUX_KIND = "linux"
+_KEYCLOAK_KIND = "keycloak"
 
 #: The fields the approval request adds to a ``linux:`` side. A caller reads
 #: them only while ``SECRET_MOVE_LINUX_TARGET_CARD`` is on.
 _LINUX_CARD_KEYS: frozenset[str] = frozenset({"target", "target_id", "target_name", "host", "port"})
+
+#: The fields the approval request adds to a ``keycloak:`` side. Only the card
+#: a person reads shows them.
+_KEYCLOAK_CARD_KEYS: frozenset[str] = frozenset({"target_id", "target_name", "host", "secret_ref"})
 
 
 def _ref_only(spec: SecretRef, *, linux_target: bool) -> dict[str, str]:
@@ -160,18 +186,38 @@ def _linux_card_on() -> bool:
     return get_settings().secret_move_linux_target_card
 
 
-def _hide_linux_target_card(preview: dict[str, Any]) -> dict[str, Any]:
-    """The stored preview as a caller reads it: no ``linux:`` target fields with the switch off."""
-    if _linux_card_on():
-        return preview
+def _hide_target_cards(preview: dict[str, Any]) -> dict[str, Any]:
+    """The stored preview as a caller reads it.
+
+    No ``keycloak:`` target fields, and no ``linux:`` target fields with
+    ``SECRET_MOVE_LINUX_TARGET_CARD`` off.
+    """
+    hidden = {_KEYCLOAK_KIND: _KEYCLOAK_CARD_KEYS}
+    if not _linux_card_on():
+        hidden[_LINUX_KIND] = _LINUX_CARD_KEYS
     shown = dict(preview)
     for side in ("source", "sink"):
         summary = shown.get(side)
-        if isinstance(summary, dict) and summary.get("kind") == _LINUX_KIND:
-            shown[side] = {
-                key: value for key, value in summary.items() if key not in _LINUX_CARD_KEYS
-            }
+        if not isinstance(summary, dict):
+            continue
+        keys = hidden.get(str(summary.get("kind")))
+        if keys is not None:
+            shown[side] = {key: value for key, value in summary.items() if key not in keys}
     return shown
+
+
+def has_keycloak_side(params: dict[str, Any]) -> bool:
+    """Whether the source or the sink of a ``secret.move`` is a ``keycloak:`` ref. No I/O."""
+    for key in ("from", "to"):
+        raw = params.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            if parse_secret_ref(raw).kind == _KEYCLOAK_KIND:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 async def _linux_target_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
@@ -202,6 +248,11 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
     (``target_id``, ``target_name``), its ``host`` and its SSH ``port``.
     The approved run compares the id, host and port with the target it
     finds.
+
+    A ``keycloak:`` side also names the Keycloak target it points to now
+    (``target_id``, ``target_name``), its ``host`` and its ``secret_ref``.
+    The approved run compares the id, host and secret reference with the
+    target it finds.
     """
     summary = _ref_only(spec, linux_target=True)
     if spec.kind == VAULT_TARGET_KIND:
@@ -215,6 +266,9 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
         summary["vault_role"], summary["vault_mount"] = login_of(row)
     elif spec.kind == _LINUX_KIND:
         summary.update(await _linux_target_summary(spec, operator))
+    elif spec.kind == _KEYCLOAK_KIND:
+        target_name = spec.ref.partition("/")[0].strip()
+        summary.update(await keycloak_side_card(target_name, operator))
     return summary
 
 
@@ -325,11 +379,12 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 def _register_secret_move_preview_builder() -> None:
-    """Wire the ``secret.move`` preview builder, permission check and params check. Import-time."""
+    """Wire the ``secret.move`` preview builder and its checks. Import-time."""
     register_preview_builder("secret.move", build_secret_move_preview)
     register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
-    register_agent_preview_filter("secret.move", _hide_linux_target_card)
+    register_agent_preview_filter("secret.move", _hide_target_cards)
+    register_rights_change_check("secret.move", has_keycloak_side)
 
 
 _register_secret_move_preview_builder()

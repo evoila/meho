@@ -62,7 +62,9 @@ The rights-change mark
 Every change of rights carries one mark (``ApprovalRequest.rights_change``):
 the changes above in MEHO's own login realm, every request of an
 operation registered with :func:`register_rights_change_op` (for example
-a change of an operation's category or labels), and any other request
+a change of an operation's category or labels), every request whose params
+pass the check registered with :func:`register_rights_change_check` (for
+example a ``secret.move`` with a Keycloak side), and any other request
 that was parked with the mark. :func:`check_rights_change_approval` applies
 it: the requester never approves their own change of rights, whatever
 their group, at every risk level and with the break-glass switch on, and
@@ -83,6 +85,7 @@ needs no second mark for this.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -109,6 +112,7 @@ __all__ = [
     "is_rights_change",
     "is_rights_change_op",
     "register_grant_op",
+    "register_rights_change_check",
     "register_rights_change_op",
 ]
 
@@ -201,6 +205,25 @@ def register_rights_change_op(op_id: str) -> None:
     declare_per_call_approval((op_id,))
 
 
+#: Operations whose request is a change of rights when its params pass a
+#: check: op_id -> the check. The check reads the params only (no I/O).
+_RIGHTS_CHANGE_CHECKS: dict[str, Callable[[dict[str, Any]], bool]] = {}
+
+
+def register_rights_change_check(op_id: str, check: Callable[[dict[str, Any]], bool]) -> None:
+    """Record that a request of *op_id* is a change of rights when *check* passes on its params.
+
+    A person approves each call of *op_id* (:func:`declare_per_call_approval`).
+    """
+    _RIGHTS_CHANGE_CHECKS[op_id] = check
+    declare_per_call_approval((op_id,))
+
+
+def _params_are_rights_change(request: ApprovalRequest) -> bool:
+    check = _RIGHTS_CHANGE_CHECKS.get(request.op_id)
+    return check is not None and isinstance(request.params, dict) and check(request.params)
+
+
 @dataclass(frozen=True)
 class GrantFacts:
     """What an approval needs to know about a change of rights."""
@@ -267,10 +290,16 @@ def is_rights_change_op(op_id: str) -> bool:
 def is_rights_change(request: ApprovalRequest) -> bool:
     """True when *request* carries the rights-change mark.
 
-    A request parked before the ``rights_change`` column has no stored
-    mark, so a registered change in the login realm counts too.
+    A request whose params pass the check of its operation
+    (:func:`register_rights_change_check`) counts too. A request parked
+    before the ``rights_change`` column has no stored mark, so a
+    registered change in the login realm counts too.
     """
-    if request.rights_change or request.op_id in _RIGHTS_CHANGE_OPS:
+    if (
+        request.rights_change
+        or request.op_id in _RIGHTS_CHANGE_OPS
+        or _params_are_rights_change(request)
+    ):
         return True
     facts = grant_facts(request)
     return facts is not None and facts.login_realm

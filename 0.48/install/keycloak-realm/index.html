@@ -1420,6 +1420,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-console-approval-client-meho-web-approve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The console approval client meho-web-approve
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#add-the-approval-flow-to-a-running-realm-through-meho" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3619,6 +3630,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-console-approval-client-meho-web-approve" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The console approval client meho-web-approve
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#add-the-approval-flow-to-a-running-realm-through-meho" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4046,7 +4068,7 @@ the end, then return to the trail.</p>
 </tr>
 <tr>
 <td><code>meho approval sign-in level</code></td>
-<td>Login flow, bound to <code>meho-cli-approve</code></td>
+<td>Login flow, bound to <code>meho-cli-approve</code> and <code>meho-web-approve</code></td>
 <td>Asks for the password (and the one-time code, when the person has one). Gives the approval level <code>meho-approve</code>.</td>
 </tr>
 <tr>
@@ -4075,6 +4097,11 @@ the end, then return to the trail.</p>
 <td>The MEHO web UI. Redirect URI <code>https://&lt;host&gt;/ui/auth/callback</code>.</td>
 </tr>
 <tr>
+<td><code>meho-web-approve</code></td>
+<td>Confidential client with the secret of <code>meho-web</code>, authorization-code + PKCE, with the login flow <code>meho approval sign-in level</code></td>
+<td>The sign-in before an approve in the web UI. Redirect URI <code>https://&lt;host&gt;/ui/auth/approval-callback</code>. See <a href="#the-console-approval-client-meho-web-approve">The console approval client</a>.</td>
+</tr>
+<tr>
 <td><code>meho approval touch</code></td>
 <td>Login flow, bound to <code>meho-web</code>, with two levels</td>
 <td>Level 1 is the normal console login. Level 3 (<code>meho-touch</code>) asks for a passkey touch every time. See <a href="#the-passkey-touch-level">The passkey touch level</a>.</td>
@@ -4086,7 +4113,7 @@ the end, then return to the trail.</p>
 </tr>
 <tr>
 <td>8 protocol mappers</td>
-<td>On the login clients (<code>meho-cli-approve</code> without <code>meho-mcp-audience</code>)</td>
+<td>On the login clients (<code>meho-cli-approve</code> and <code>meho-web-approve</code> without <code>meho-mcp-audience</code>)</td>
 <td>Make issued tokens carry the claims the backplane validates</td>
 </tr>
 <tr>
@@ -4274,7 +4301,10 @@ console session, and it checks that this sign-in asked for the password
 or a passkey.
 When the sign-in is too old, the console shows <strong>Sign in to approve</strong>
 and asks for the password again (see
-<a href="#the-web-console-session">The web console session</a>).</p>
+<a href="#the-web-console-session">The web console session</a>). When MEHO requires
+the approval level, the console asks for the same level as the command
+line, with its own approval client (see
+<a href="#the-console-approval-client-meho-web-approve">The console approval client</a>).</p>
 <p>Create a second public client with these settings:</p>
 <table>
 <thead>
@@ -4576,7 +4606,9 @@ does now in <code>approvals.sign_in_level_in_force</code> (<code>off</code>, <co
 <code>required</code>), and a warning in <code>approvals.sign_in_level_warning</code> whenever
 MEHO does not require the level (the value is <code>off</code> or <code>observe</code>, or it
 is <code>auto</code> and MEHO acts as <code>observe</code>), and also when MEHO could not read
-the realm. The audit row of an approval records the mode in force in
+the realm. The warning covers the console's approval client too (see
+<a href="#the-console-approval-client-meho-web-approve">The console approval client</a>).
+The audit row of an approval records the mode in force in
 <code>level_in_force</code>.</p>
 <ul>
 <li>With the default <code>auto</code>, MEHO requires the level as soon as the realm
@@ -4585,11 +4617,118 @@ the realm. The audit row of an approval records the mode in force in
   the command line and REST: the client then signs in through the
   realm's normal flow and gets <code>acr</code> <code>1</code>. <code>approvals.sign_in</code> names the
   cause.</li>
-<li>Known limit: when MEHO requires the level, a person who has only a company account
-  (no MEHO password) cannot approve on the command line. They approve in
-  the web interface.</li>
-<li>The web interface does not use this check. It has its own checks.</li>
+<li>Known limit: when MEHO requires the level, a person who signs in only
+  through a company login (no MEHO password) cannot approve in the web
+  interface and not on the command line, until they have a MEHO password
+  and a one-time code. On the built-in Keycloak with the default <code>auto</code>,
+  this starts with the upgrade to v0.49.0: it adds the client
+  <code>meho-web-approve</code> and binds it, and from then on the console needs the
+  approval sign-in level. What you can do: give these approvers a MEHO
+  password and a one-time code, or set <code>APPROVAL_SIGN_IN_LEVEL=observe</code>
+  for now.</li>
+<li>The web interface uses the same setting for its own approval client
+  <code>meho-web-approve</code>. See
+  <a href="#the-console-approval-client-meho-web-approve">The console approval client</a>.</li>
 </ul>
+<h4 id="the-console-approval-client-meho-web-approve">The console approval client <code>meho-web-approve</code><a class="headerlink" href="#the-console-approval-client-meho-web-approve" title="Permanent link">&para;</a></h4>
+<p>The console's normal login (<code>meho-web</code>) never gives the approval level,
+also right after a new login. So the console has a second client, used
+only for the sign-in before an approve. The console's normal login does
+not change.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Client ID</td>
+<td><code>meho-web-approve</code> (suggested)</td>
+<td>Must match <code>UI_KEYCLOAK_APPROVE_CLIENT_ID</code> on the backplane (default <code>meho-web-approve</code>).</td>
+</tr>
+<tr>
+<td>Client authentication</td>
+<td><strong>On</strong>, with the <strong>same secret as <code>meho-web</code></strong></td>
+<td>The backplane uses one secret (<code>UI_KEYCLOAK_CLIENT_SECRET</code>) for both console clients.</td>
+</tr>
+<tr>
+<td>Standard flow</td>
+<td><strong>On</strong>, PKCE method <code>S256</code></td>
+<td>The browser sign-in.</td>
+</tr>
+<tr>
+<td>Direct access grants, device grant, service accounts</td>
+<td><strong>Off</strong></td>
+<td>Each of them would skip the approval flow.</td>
+</tr>
+<tr>
+<td>Valid redirect URIs</td>
+<td><code>https://&lt;host&gt;/ui/auth/approval-callback</code></td>
+<td>The approval sign-in comes back here.</td>
+</tr>
+<tr>
+<td>Use refresh tokens</td>
+<td><strong>Off</strong></td>
+<td>The console keeps the token only until the next approve.</td>
+</tr>
+<tr>
+<td>Access token lifespan</td>
+<td><code>900</code> seconds</td>
+<td>As long as the approval window.</td>
+</tr>
+<tr>
+<td>Default client scopes</td>
+<td><code>basic</code>, <code>roles</code>, <code>web-origins</code>, <code>acr</code>, <code>profile</code>, <code>email</code></td>
+<td>The same as <code>meho-cli-approve</code>.</td>
+</tr>
+<tr>
+<td>Protocol mappers</td>
+<td>The same as <code>meho-cli-approve</code></td>
+<td>The token must carry the claims MEHO checks.</td>
+</tr>
+<tr>
+<td>Authentication flow overrides → Browser Flow</td>
+<td><code>meho approval sign-in level</code></td>
+<td>The flow gives the approval level.</td>
+</tr>
+</tbody>
+</table>
+<p>What happens:</p>
+<ul>
+<li>Under <code>required</code> (and under <code>auto</code> when MEHO's check of this client's
+  binding is <code>ok</code>), the Approve button needs the console approval
+  sign-in. The console sends the person to Keycloak with this client,
+  <code>prompt=login</code>, <code>max_age=0</code> and <code>acr_values=meho-approve</code>. The person
+  types the password (and the code). The console keeps the token with
+  the session and approves with it while it is recent. A normal console
+  session never approves, also a fresh one.</li>
+<li>Under <code>observe</code> the console approves as before and records the level
+  it saw. Under <code>off</code> it approves as before.</li>
+<li>The audit row of every approval records the channel (<code>web</code> or
+  <code>rest</code>), the <code>acr</code> and <code>level_in_force</code>.</li>
+</ul>
+<p>A sign-in through a company login from the approval page does not run the
+approval flow's steps, so it gets no level, and MEHO refuses it under
+<code>required</code>. Keycloak still shows the company login's button on that page.
+Keycloak can set a login theme for one client, and such a theme could
+hide the button; MEHO does not ship one yet.</p>
+<p><code>/api/v1/health</code> shows this client's state in <code>approvals.web_sign_in</code>
+(the same states as <code>approvals.sign_in</code>) and what MEHO does for the
+console in <code>approvals.web_sign_in_level_in_force</code>. Under <code>auto</code> the two
+clients can differ: <code>approvals.sign_in_level_warning</code> also warns when the
+console does not require the level, or when MEHO could not read this
+client. When the console refuses an approve for a missing level, its
+message says: "An admin must check approvals.web_sign_in in
+/api/v1/health."</p>
+<p>The Keycloak that ships with the MEHO chart creates this client on the
+next upgrade. On your own Keycloak, create it by hand as above, then run
+<code>meho admin keycloak bootstrap-clients</code> (or bind the flow by hand):
+it binds an existing <code>meho-web-approve</code> to <code>meho approval sign-in level</code>.
+It does not create the client, because the client needs the console's
+secret.</p>
 <h4 id="add-the-approval-flow-to-a-running-realm-through-meho">Add the approval flow to a running realm through MEHO<a class="headerlink" href="#add-the-approval-flow-to-a-running-realm-through-meho" title="Permanent link">&para;</a></h4>
 <p>The operation <code>keycloak.authflow.ensure_approval_flow</code> adds the flow
 <code>meho approval sign-in level</code> to the realm of a Keycloak target (its

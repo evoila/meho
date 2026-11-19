@@ -18111,6 +18111,7 @@
 <li><code>--skip-user-provisioning</code> — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created</li>
 <li><code>--tenant-id</code> — tenant UUID written as the <code>tenant_id</code> attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant</li>
 <li><code>--tenant-name</code> — the first tenant's short name (lowercase letters, digits, dashes), written into the <code>meho_tenant</code> attribute of the five MEHO role groups</li>
+<li><code>--web-approve-client-id</code> — the console's approval sign-in client_id (matches the backplane's UI_KEYCLOAK_APPROVE_CLIENT_ID); when the realm has it, it is bound to the approval sign-in flow</li>
 <li><code>--web-client-id</code> — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level</li>
 </ul>
 <h3 id="meho-admin-tools"><code>meho admin tools</code><a class="headerlink" href="#meho-admin-tools" title="Permanent link">&para;</a></h3>

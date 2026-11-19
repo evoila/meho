@@ -978,6 +978,9 @@ async def _execute_and_audit(
         target=target,
         descriptor=descriptor,
         connector_id=connector_id,
+        # An approved call runs under the approver, but the trace belongs to
+        # the requester, the same owner as its result handle.
+        owner_sub=handle_owner_sub_var.get(),
     )
     try:
         result = await _execute_and_audit_inner(

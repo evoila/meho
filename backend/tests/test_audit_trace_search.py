@@ -126,12 +126,13 @@ def _get(
     *,
     role: TenantRole = TenantRole.OPERATOR,
     principal_kind: str | None = None,
+    sub: str = "op-1",
 ) -> Any:
     clear_jwks_cache()
     key = make_rsa_keypair("kid-S")
     token = mint_token(
         key,
-        sub="op-1",
+        sub=sub,
         tenant_role=role.value,
         tenant_id=str(_TENANT_A),
         principal_kind=principal_kind,
@@ -287,7 +288,8 @@ async def test_route_as_an_agent_reads_nothing_when_the_tenant_switch_is_off(
 ) -> None:
     await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=False)
     rid = uuid.uuid4()
-    await _seed(tenant_id=_TENANT_A, request_id=rid, operator_sub="u1", when=datetime.now(UTC))
+    # The trace is the agent's own, so only the tenant switch keeps it back.
+    await _seed(tenant_id=_TENANT_A, request_id=rid, operator_sub="op-1", when=datetime.now(UTC))
     agent = _get(client, f"?request_id={rid}", principal_kind="agent")
     assert agent.status_code == 200, agent.text
     assert agent.json()["items"] == []
@@ -298,10 +300,49 @@ async def test_route_as_an_agent_reads_nothing_when_the_tenant_switch_is_off(
 async def test_route_as_an_agent_never_gets_an_uncertain_trace(client: TestClient) -> None:
     await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=True)
     now = datetime.now(UTC)
-    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="u1", when=now, uncertain=True)
-    clean = await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="u1", when=now)
-    agent = _get(client, "?caller=u1", principal_kind="agent")
+    await _seed(
+        tenant_id=_TENANT_A, request_id=None, operator_sub="agent-1", when=now, uncertain=True
+    )
+    clean = await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="agent-1", when=now)
+    agent = _get(client, "", principal_kind="agent", sub="agent-1")
     assert agent.status_code == 200, agent.text
     assert [item["audit_id"] for item in agent.json()["items"]] == [str(clean)]
-    person = _get(client, "?caller=u1")
+    person = _get(client, "?caller=agent-1")
     assert len(person.json()["items"]) == 2
+
+
+async def test_route_as_an_agent_lists_only_its_own_traces(client: TestClient) -> None:
+    await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=True)
+    now = datetime.now(UTC)
+    own = await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="agent-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="person-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub=None, when=now)
+    for query in ("?caller=person-1", "", "?caller=agent-1"):
+        agent = _get(client, query, principal_kind="agent", sub="agent-1")
+        assert agent.status_code == 200, agent.text
+        assert [item["audit_id"] for item in agent.json()["items"]] == [str(own)], query
+
+
+async def test_route_as_a_person_lists_every_trace_of_the_tenant(client: TestClient) -> None:
+    await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=True)
+    now = datetime.now(UTC)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="agent-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="person-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub=None, when=now)
+    person = _get(client, "", sub="person-2")
+    assert person.status_code == 200, person.text
+    assert len(person.json()["items"]) == 3
+    by_caller = _get(client, "?caller=person-1", sub="person-2")
+    assert len(by_caller.json()["items"]) == 1
+
+
+async def test_route_as_a_service_login_lists_only_its_own_traces(client: TestClient) -> None:
+    await _seed_tenant(_TENANT_A, "tenant-a", agent_readable=True)
+    now = datetime.now(UTC)
+    own = await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="svc-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub="person-1", when=now)
+    await _seed(tenant_id=_TENANT_A, request_id=None, operator_sub=None, when=now)
+    for query in ("?caller=person-1", "", "?caller=svc-1"):
+        service = _get(client, query, principal_kind="service", sub="svc-1")
+        assert service.status_code == 200, service.text
+        assert [item["audit_id"] for item in service.json()["items"]] == [str(own)], query

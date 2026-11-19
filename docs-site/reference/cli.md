@@ -4610,7 +4610,7 @@ meho scheduler create [flags]
 - `--agent-definition` — UUID of the agent definition to fire
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cron-expr` — 5-field cron expression (required when --kind=cron)
-- `--event-filter` — event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-)
+- `--event-filter` — event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-); for webhook events it must name the event source (source.slug or source.id)
 - `--fire-at` — ISO 8601 fire time (required when --kind=one_off)
 - `--identity-sub` — identity sub the scheduler impersonates at fire time (default '__scheduler__')
 - `--in-flight-policy` — killed-mid-flight policy: fail_into_audit | resume (default fail_into_audit)

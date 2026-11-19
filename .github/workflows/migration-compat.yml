@@ -38,7 +38,7 @@ concurrency:
 jobs:
   check:
     name: Backward-compat migration guard
-    # Untrusted-PR runner isolation (F06, meho-internal#268). This job
+    # Untrusted-PR runner isolation. This job
     # checks out and executes PR-controlled code
     # (scripts/ci/check_migration_compat.py); on a fork PR that code is
     # untrusted. It needs no internal route, deployment credential or

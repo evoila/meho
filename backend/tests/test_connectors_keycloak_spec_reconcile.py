@@ -69,8 +69,8 @@ one, that test fails and the constant must be promoted into
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
 ops, to 48 by the passkey step op, to 49 by the user disable / enable PUT, to 54
-by the client role and credential delete writes, and to 55 by the client role users
-read of the remove card) were
+by the client role and credential delete writes, to 55 by the client role users
+read of the remove card, and to 56 by the realm roles a group gives) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -139,6 +139,9 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_GROUP_PATH": ("GET", "PUT", "DELETE"),
     "_GROUP_CHILDREN_PATH": ("GET", "POST"),
     "_GROUP_MEMBERS_PATH": ("GET",),
+    # The roles a group gives directly (the group member add approval card).
+    "_GROUP_REALM_COMPOSITE_PATH": ("GET",),
+    "_GROUP_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_GROUPS_PATH": ("GET",),
     "_USER_GROUP_PATH": ("PUT", "DELETE"),
     # Realm delete approval card (#3886): user and group counts.
@@ -154,6 +157,8 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     # Safe reads of the login setup: required actions and the event settings.
     "_REQUIRED_ACTIONS_PATH": ("GET",),
     "_EVENTS_CONFIG_PATH": ("GET",),
+    "_EVENTS_PATH": ("GET",),
+    "_ADMIN_EVENTS_PATH": ("GET",),
     # The passkey step op: copy the browser flow, configure and move the step.
     "_AUTH_FLOW_COPY_PATH": ("POST",),
     "_AUTH_EXECUTION_CONFIG_PATH": ("POST",),
@@ -225,6 +230,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "DELETE:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "DELETE:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
         "GET:/admin/realms/{realm}",
+        "GET:/admin/realms/{realm}/admin-events",
         "GET:/admin/realms/{realm}/authentication/config/{id}",
         "GET:/admin/realms/{realm}/authentication/flows",
         "GET:/admin/realms/{realm}/authentication/flows/{flowAlias}/executions",
@@ -238,12 +244,15 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users",
+        "GET:/admin/realms/{realm}/events",
         "GET:/admin/realms/{realm}/events/config",
         "GET:/admin/realms/{realm}/groups",
         "GET:/admin/realms/{realm}/groups/count",
         "GET:/admin/realms/{realm}/groups/{group-id}",
         "GET:/admin/realms/{realm}/groups/{group-id}/children",
         "GET:/admin/realms/{realm}/groups/{group-id}/members",
+        "GET:/admin/realms/{realm}/groups/{group-id}/role-mappings",
+        "GET:/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/composite",
         "GET:/admin/realms/{realm}/identity-provider/instances",
         "GET:/admin/realms/{realm}/roles",
         "GET:/admin/realms/{realm}/roles-by-id/{role-id}/composites",

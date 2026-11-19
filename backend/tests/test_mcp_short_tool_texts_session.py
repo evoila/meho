@@ -132,13 +132,17 @@ def test_short_texts_shown(
 async def test_switch_off_a_session_that_asked_sees_the_short_texts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The 14 tools show their short text with the same inputs; no other tool changes."""
+    """The tools show their short text with the same inputs and no output schema.
+
+    No other tool changes, apart from losing its output schema (#4714).
+    """
     _set_switch(monkeypatch, on=False)
     full = await _listed(_operator())
     short = await _listed(_operator(short=True))
     assert set(full) == set(short)
     changed = {name for name in full if full[name] != short[name]}
-    assert changed == set(SHORT_TEXTS)
+    assert changed == set(SHORT_TEXTS) | {name for name in full if "outputSchema" in full[name]}
+    assert not [name for name in short if "outputSchema" in short[name]]
     for name, text in SHORT_TEXTS.items():
         assert short[name]["description"].endswith(text.description), name
         assert _without_descriptions(short[name]["inputSchema"]) == _without_descriptions(

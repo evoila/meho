@@ -40,14 +40,17 @@ More rules:
   the `MEHO-SA-Operators` group or an admin. A person may approve their
   own change in three cases only:
     - A member of the `MEHO-SA-Operators` group or of the `MEHO-Admins`
-      group may approve their own change at every risk level. See
-      [Approvals and break-glass](../guides/approvals-and-break-glass.md).
+      group may approve their own change at every risk level, but never
+      a change of rights. Another admin approves a change of rights. See
+      [Approvals and break-glass](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
     - An operator or an admin may approve their own `caution` change
       when it waited only because they sent it with a token. This works
-      only with a click in the web interface.
+      only with a click in the web interface. It never covers a change of
+      rights.
     - When an admin turns on the audited emergency switch for the whole
       deploy, a person may approve their own `safe` or `caution` change.
-      The switch never covers a `dangerous` or `destructive` change.
+      The switch never covers a `dangerous` or `destructive` change, and
+      never a change of rights.
 - The approver does not see the stored parameters of a request. The
   approver sees the preview, and the preview hides secret values.
 - A request that waits stores the parameters of the call, because MEHO

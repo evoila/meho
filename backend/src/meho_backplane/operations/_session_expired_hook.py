@@ -48,11 +48,13 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.flight_recorder.typed import record_typed_call, typed_span_start
 from meho_backplane.operations._branches import _profile_pagination
 from meho_backplane.operations.composite import approved_run_var
+from meho_backplane.operations.uncertain_outcome import LOGIN_ENDED_ADVICE, changes_target
 
 __all__ = [
     "NOT_RESENT_REMEDIATION",
     "REFUSED_SIGNIN_REMEDIATION",
     "SAME_ANSWER_REMEDIATION",
+    "drop_login_before_approved_change",
     "mark_session_relogin",
     "may_resend_after_session_end",
     "same_answer_after_signin_error",
@@ -87,9 +89,8 @@ SAME_ANSWER_REMEDIATION = (
 NOT_RESENT_REMEDIATION = (
     "the product said that the login session ended. MEHO dropped the kept "
     "session, so the next call signs in again. MEHO did not send this "
-    "operation again, because it may already have changed the product: the "
-    "change may or may not have been made. Check the state on the product "
-    "before you make a new call."
+    "operation again, because it may already have changed the product. "
+    f"{LOGIN_ENDED_ADVICE}"
 )
 
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -154,6 +155,39 @@ def may_resend_after_session_end(
     if descriptor.source_kind != "ingested":
         return False
     return rejected.method not in _READ_METHODS or _profile_pagination(connector_instance) is None
+
+
+async def drop_login_before_approved_change(
+    descriptor: Any, connector_instance: Any, target: Any
+) -> None:
+    """Drop the kept login of *target* before MEHO sends an approved change.
+
+    A change that waited for a person can meet a login that ended while it
+    waited. So an approved run of an operation that changes something starts
+    with a fresh login: the connector's ``invalidate_session`` hook drops
+    the kept one, and the call logs in again. A read, and a change that did
+    not wait for a person, keep the kept login. A connector without the hook
+    has nothing to drop. The hook is duck-typed (``getattr``) like the other
+    session hooks, and is called with the target only (a connector's
+    ``rejected`` argument is optional), so a hook that takes only the target
+    works too.
+
+    A hook that raises is logged and the call goes on: the change is sent
+    once, and a refused login is then stored as an unknown outcome.
+    """
+    if not changes_target(descriptor.safety_level):
+        return
+    hook = getattr(connector_instance, "invalidate_session", None)
+    if not callable(hook):
+        return
+    try:
+        await hook(target)
+    except Exception:
+        _log.warning(
+            "approved_change_login_drop_failed",
+            connector=type(connector_instance).__name__,
+            exc_info=True,
+        )
 
 
 def mark_session_relogin(status_code: int, *, resent: bool) -> None:

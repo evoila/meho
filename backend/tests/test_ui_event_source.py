@@ -471,6 +471,55 @@ def test_create_slug_pattern_violation_names_the_slug_field() -> None:
     assert 'data-error-for="name"' not in body
 
 
+def test_create_blank_secret_names_the_secret_field() -> None:
+    """A secret of only spaces is refused on the form, and no source is made."""
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources",
+            data={
+                "name": "Blank",
+                "slug": "blank-secret",
+                "kind": "grafana",
+                "auth_strategy": "basic",
+                "status": "active",
+                "extras": "",
+                "secret": "   ",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    assert 'data-error-for="secret"' in resp.text
+    assert _get_row("blank-secret") is None
+
+
+def test_edit_blank_secret_names_the_secret_field() -> None:
+    _seed_tenant()
+    _seed_event_source(slug="prod-am", status="active")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources/prod-am/edit",
+            data={
+                "kind": "alertmanager",
+                "auth_strategy": "hmac-sha256",
+                "status": "active",
+                "extras": "",
+                "secret": "   ",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    assert 'data-error-for="secret"' in resp.text
+
+
 def test_create_conflict_names_both_uniqueness_fields() -> None:
     """A 409 flags Name and Slug -- the API cannot tell which collided (#384).
 

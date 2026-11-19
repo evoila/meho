@@ -41,7 +41,7 @@ Closed vocabulary of three values: `AUTO_EXECUTE`, `NEEDS_APPROVAL`, `DENY`. DB-
 Stateless, async, session-per-method. Public API:
 
 - `grant(tenant_id, created_by_sub, payload)` → `AgentGrantRead`
-- `revoke(tenant_id, grant_id)` → `bool`
+- `revoke(tenant_id, grant_id, *, auto_execute_only=False)` → `bool`; with `auto_execute_only` a `deny` or `needs-approval` row raises `GrantRevokeNeedsPersonError` and stays
 - `get(tenant_id, grant_id)` → `AgentGrantRead | None`
 - `list_(tenant_id, *, principal_sub, include_expired, limit, offset)` → `list[AgentGrantRead]`
 
@@ -337,7 +337,7 @@ Mirrors the G5.2 memory-expiry sweeper pattern verbatim.
 | `GET` | `/api/v1/agents/grants/{id}` | tenant_admin | Show one |
 | `POST` | `/api/v1/agents/grants` | tenant_admin **+ human** | Create (permanent or elevation). Machine `principal_kind` → 403 `human_principal_required`. |
 | `POST` | `/api/v1/agents/grants/elevate` | tenant_admin **+ human** | Create elevation (`expires_at` required). Machine `principal_kind` → 403 `human_principal_required`. |
-| `DELETE` | `/api/v1/agents/grants/{id}` | tenant_admin | Revoke |
+| `DELETE` | `/api/v1/agents/grants/{id}` | tenant_admin (**+ human** for a `deny` or `needs-approval` grant) | Revoke. A machine `principal_kind` removes only an `auto-execute` grant; for any other verdict it gets 403 `human_principal_required` and the row stays. |
 
 The two **write** verbs that mint or widen a grant — `POST /agents/grants` and
 `POST /agents/grants/elevate` — carry `require_human_principal` (`auth/rbac.py`)
@@ -345,14 +345,24 @@ in addition to the `tenant_admin` role gate, so a machine `principal_kind`
 (`agent` / `service` / `runner`) is refused 403 `human_principal_required`
 regardless of role. This is the REST peer of the MCP human-only block below: an
 agent minted `tenant_admin` cannot mint or widen its own (or a sibling's) grant
-over REST any more than it can over MCP. `list` / `show` /
-`revoke` keep the role-only gate.
+over REST any more than it can over MCP. `list` / `show` keep the role-only
+gate.
+
+`revoke` keeps the role-only gate for an `auto-execute` grant, because
+removing it only narrows the agent. A `deny` or `needs-approval` grant limits
+the agent, and removing it can let a broader `auto-execute` grant apply again
+(`resolve_verdict` in `auth/permissions.py`). So only a person removes it, on
+REST, MCP and the console. `AgentGrantService.revoke(..., auto_execute_only=True)`
+puts the verdict into the `DELETE` statement, so the check and the delete are
+one step. When the row has another verdict it raises
+`GrantRevokeNeedsPersonError`; each surface turns that into its
+`human_principal_required` answer.
 
 ## MCP surface
 
 Four tools under `meho_agents_grant_*`: `list`, `show`, `create`, `revoke`. Registered via `register_mcp_tool` (auto-discovered by `eager_import_mcp_modules`).
 
-`meho_agents_grant_create` is for people, the same as `POST /agents/grants`. Its handler calls `ensure_human_mcp_caller` (`mcp/human_only.py`) first. An agent, service or runner login gets JSON-RPC `-32602` with `human_principal_required: ...`, also with `tenant_admin` and `mcp:admin`, and also when MEHO infers the kind from the token (a client-credentials token with no `principal_kind` claim is a service login). The text names the console and `meho agent grant create`. `meho_agent_principals_register` follows the same rule. `list`, `show` and `revoke` keep the role check alone.
+`meho_agents_grant_create` is for people, the same as `POST /agents/grants`. Its handler calls `ensure_human_mcp_caller` (`mcp/human_only.py`) first. An agent, service or runner login gets JSON-RPC `-32602` with `human_principal_required: ...`, also with `tenant_admin` and `mcp:admin`, and also when MEHO infers the kind from the token (a client-credentials token with no `principal_kind` claim is a service login). The text names the console and `meho agent grant create`. `meho_agent_principals_register` follows the same rule. `list` and `show` keep the role check alone. `meho_agents_grant_revoke` keeps it for an `auto-execute` grant; for a `deny` or `needs-approval` grant a machine login gets `human_principal_required` and the text names the console and `meho agent grant revoke <grant-id>`.
 
 The dedicated elevation verb — `meho_agents_grant_elevate` — has **no MCP path under any claim set** (#3155, Initiative #3153): granting a time-bounded privilege elevation is a human-only operator action, not agent-invocable. It stays on the REST / CLI / console surfaces above (`POST /api/v1/agents/grants/elevate`, `meho agent grant elevate`), unchanged. Its wire name is pinned in `backend/src/meho_backplane/mcp/human_only.py`, so a `tools/call` on it is denied with a remediation naming the CLI/console path. (Note: `meho_agents_grant_create` accepts an `expires_at` and can create a time-bounded grant; it stays on the operator plane per the T1 surface classification — only the dedicated `elevate` verb is removed.)
 
@@ -367,7 +377,8 @@ meho agent grant revoke <grant-id> [--confirm]
 ```
 
 All verbs require `tenant_admin`; `create` and `elevate` additionally require a
-**human** principal (machine `principal_kind` → 403).
+**human** principal (machine `principal_kind` → 403). `revoke` of a `deny` or
+`needs-approval` grant requires a human principal too.
 
 ## Console surface
 
@@ -378,8 +389,9 @@ person (`ensure_ui_human` in `ui/routes/agents/operator.py`). A console session
 that holds an agent, service or runner token gets 403
 `human_principal_required`. The unified revoke route
 `POST /ui/grants/{kind}/{id}/revoke` uses `_human_admin` (`ui/routes/grants.py`)
-for both kinds. List, show and the revoke on `/ui/agents/grants/{id}/revoke`
-keep the role check alone.
+for both kinds. List and show keep the role check alone. The revoke on
+`/ui/agents/grants/{id}/revoke` keeps it for an `auto-execute` grant; a
+`deny` or `needs-approval` grant needs a person (`ensure_ui_human`).
 
 ## Dependencies
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
@@ -45,6 +46,7 @@ from sqlalchemy import delete
 import meho_backplane.api.v1.feed as feed_module
 from meho_backplane.api.v1.feed import (
     FeedStart,
+    StreamLiveness,
     announcement_feed_frames,
     resolve_feed_start,
 )
@@ -761,6 +763,7 @@ def _frames(
         start=start or FeedStart(),
         flt=flt or AnnouncementFilter(),
         surface="api",
+        liveness=StreamLiveness(ends_at=math.inf),
     )
 
 

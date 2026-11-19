@@ -35,6 +35,7 @@ handling.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
@@ -61,6 +62,7 @@ from meho_backplane.operations.deny_reasons import (
     is_agent_no_grant,
 )
 from meho_backplane.operations.uncertain_outcome import (
+    LOGIN_ENDED_ADVICE,
     UNCERTAIN_ADVICE,
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
@@ -589,6 +591,7 @@ def result_no_connector(
     version: str | None,
     duration_ms: float,
     exception_message: str | None = None,
+    hint: str | None = None,
 ) -> OperationResult:
     """Resolver miss -- no registered impl for *(product, version)*.
 
@@ -613,6 +616,9 @@ def result_no_connector(
     The argument is optional for backward compatibility with call sites
     that pre-date the resolver-helper unification — they pass through
     the bare ``(product, version)`` form and ``extras`` omits the field.
+
+    ``hint`` is a fixed sentence that names the fix for a known cause. It
+    is added to the error text and to ``extras["hint"]``.
     """
     extras: dict[str, Any] = {
         "error_code": "no_connector",
@@ -621,10 +627,14 @@ def result_no_connector(
     }
     if exception_message is not None:
         extras["exception_message"] = _sanitize_free_text(exception_message)
+    error = f"no_connector: no implementation for product={product!r} version={version!r}"
+    if hint is not None:
+        extras["hint"] = hint
+        error = f"{error}; {hint}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"no_connector: no implementation for product={product!r} version={version!r}",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
     )
@@ -1189,6 +1199,7 @@ def result_awaiting_approval(
     *,
     reused: bool = False,
     audit_id: uuid.UUID | None = None,
+    note: str | None = None,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1216,6 +1227,12 @@ def result_awaiting_approval(
     *audit_id* is the id of the committed ``approval.request`` audit row
     of the pending request (its ``request_audit_id``). It becomes the
     result's ``audit_id`` receipt. ``None`` when the caller has no row id.
+
+    *note* (#6641) is a sentence the person must read about the wait, for
+    example that no other admin of the tenant could approve a change of
+    rights (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). It
+    is added to ``error`` and kept in ``extras["approval_note"]``; the key is
+    absent without a note.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1223,10 +1240,14 @@ def result_awaiting_approval(
     }
     if reused:
         extras["approval_request_reused"] = True
+    error = f"awaiting_approval: {op_id!r} requires approval before execution"
+    if note:
+        extras["approval_note"] = note
+        error = f"{error}. {note}"
     return OperationResult(
         status="awaiting_approval",
         op_id=op_id,
-        error=f"awaiting_approval: {op_id!r} requires approval before execution",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
         audit_id=audit_id,
@@ -2505,6 +2526,30 @@ def _auth_scheme_remediation(target_name: str | None) -> str:
     )
 
 
+#: A clause that tells the reader to try the call again ("..., then retry.").
+_RETRY_CLAUSE_RE: Final = re.compile(
+    r",?\s+(?:and\s+)?then\s+(?:retry|try again|call again)\b[^.]*", re.IGNORECASE
+)
+#: A sentence that tells the reader to try the call again ("Try again.").
+_RETRY_SENTENCE_RE: Final = re.compile(
+    r"(?<!not )\b(?:retry|try again|call again)\b", re.IGNORECASE
+)
+_SENTENCE_SPLIT_RE: Final = re.compile(r"(?<=[.!?])\s+")
+
+
+def _without_retry_advice(text: str) -> str:
+    """Return *text* without any advice to send the call again.
+
+    Used for a change whose outcome is unknown: the change may already be
+    made, so the only advice is to check the target and make a new request.
+    A "then retry" clause is cut, and a sentence that still asks for a
+    retry is left out.
+    """
+    text = _RETRY_CLAUSE_RE.sub("", text)
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    return " ".join(s for s in sentences if not _RETRY_SENTENCE_RE.search(s))
+
+
 #: Shared doc-reference tail every ``connector_auth_failed`` summary ends with.
 _AUTH_FAILED_DOC_TAIL = (
     "See docs/architecture/connector-auth.md for the connector auth contract "
@@ -2605,8 +2650,15 @@ def result_connector_auth_failed(
     duration_ms: float,
     *,
     relogin: Literal["not_available", "attempted_failed", "reestablished"] = "not_available",
+    changes_target: bool = False,
 ) -> OperationResult:
     """Connector raised an upstream **auth/session failure** on dispatch.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the refusal came after the change was sent (any stage but
+    ``establish``), the result carries ``execution_outcome: uncertain`` and
+    ``retry: False`` with the advice that a person checks the target first.
+    A refused login (stage ``establish``) stays a plain failure.
 
     T5 (#1804) of the G0.26 v0.16.0 dogfood-hardening Initiative (#1800),
     the auth-class sibling of :func:`result_connector_http_403` (#1649)
@@ -2737,6 +2789,9 @@ def result_connector_auth_failed(
         remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
+    uncertain = changes_target and stage != "establish"
+    if uncertain:
+        remediation = _without_retry_advice(remediation)
     # #6154: a connector that does not use HTTP (a database login, for
     # example) still passes a status code; the text then names its own
     # cause instead of an HTTP status it never got.
@@ -2750,6 +2805,8 @@ def result_connector_auth_failed(
         over_http=over_http,
         session_ended=cause.startswith("session_ended_"),
     )
+    if uncertain:
+        summary = _without_retry_advice(summary)
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
@@ -2766,6 +2823,14 @@ def result_connector_auth_failed(
     if upstream_response is not None:
         _add_upstream_fault(extras, upstream_response)
     _add_attached_upstream_fault(extras, exc)
+    if uncertain:
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        if LOGIN_ENDED_ADVICE not in remediation:
+            remediation = f"{remediation} {LOGIN_ENDED_ADVICE}"
+            extras["remediation"] = remediation
+        if LOGIN_ENDED_ADVICE not in summary:
+            summary = f"{summary} {LOGIN_ENDED_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,

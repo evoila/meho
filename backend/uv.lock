@@ -1695,7 +1695,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "kubernetes-asyncio", specifier = ">=36.1.0,<37" },
     { name = "markdown-it-py", extras = ["linkify"], specifier = ">=4.2.0" },
-    { name = "meho-ui", specifier = ">=0.2.0" },
+    { name = "meho-ui", specifier = ">=0.4.0" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "openapi-spec-validator", specifier = ">=0.9.0" },
     { name = "packaging", specifier = ">=26.3" },
@@ -1750,10 +1750,10 @@ source = { editable = "connector-kit" }
 
 [[package]]
 name = "meho-ui"
-version = "0.2.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c3/01/33040cae915fc04de640b408a29b1a4f9af81e325dc5348371696336aba3/meho_ui-0.2.0-py3-none-any.whl", hash = "sha256:9c86ef731def8d46000ba70f2f42b6412d09f278a87cca4b94b3724f45b97833", size = 180263, upload-time = "2026-11-16T12:39:57.054Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/44/6cf8a90a3e5fe8073e11205cbd8214313065464858081318a45006f3fd69/meho_ui-0.4.0-py3-none-any.whl", hash = "sha256:b008a5d5be3763b61a60880f3b65e27ea0c8bb7168aa361a7d9614cc5b00e5ac", size = 192073, upload-time = "2026-11-18T11:01:42.187Z" },
 ]
 
 [[package]]

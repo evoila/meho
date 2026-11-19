@@ -58,6 +58,18 @@ was closed as not planned).
    error after streaming began is one `event: feed_error` frame. A
    heartbeat comment follows 30 seconds without output.
 
+   **A stream ends when its login ends.** `/api/v1/feed` ends the
+   stream at the token's `exp` plus the JWT leeway, and after
+   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest.
+   `/ui/broadcast/stream` checks its session again (the same check as
+   `require_ui_operator`) at most every
+   `UI_SESSION_READ_REVALIDATION_SECONDS`, before a frame, a heartbeat
+   or a wait; a signed-out, revoked or expired session, or a lost
+   role, ends it. The client reconnects with a fresh login and
+   `Last-Event-Id`, so it misses no announcement: `meho status --watch`
+   and `meho broadcast watch` renew the token once on a 401, and the
+   browser's `EventSource` reconnects by itself.
+
    **Row identifier semantics.** Every reader returns `event_id` (the
    announcement's UUID, equal to the `agent_announcement` row's PK).
    Readers de-duplicate by `event_id`.

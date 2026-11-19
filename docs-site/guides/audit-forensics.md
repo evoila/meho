@@ -143,9 +143,9 @@ meho audit query --session-id <agent_session_id> --since 24h
 ```
 
 …or reconstruct the whole session as a parent/child tree. Over MCP an
-operator replays **their own** session. MEHO checks the stored audit
-rows: the session must hold a row of your own calls. The
-`Mcp-Session-Id` header plays no part in that check.
+operator replays **their own** session: the tree holds only the audit
+rows of your own calls. The `Mcp-Session-Id` header does not change
+which rows you get.
 
 ```json
 // query_audit {"shape": "tree", "agent_session_id": "<your own session id>"}
@@ -180,7 +180,7 @@ themselves broadcast the credential's path.
 |---|---|---|
 | `broadcast_event_id` is `null` on every row | Working as designed — the field is always `null`. The broadcast feed carries only agent notes, which do not link to audit rows. | Filter the audit log by `target`, `principal`, `op_id` and time instead. |
 | `parent_audit_id` returns fewer rows than the full tree | The filter returns direct children only, not grandchildren. | Run it again with a child's `id`, or use `meho audit replay` for a whole session. |
-| `shape="tree"` returns an empty `root` | The tree path is **self-session only** — the session holds no row of your own calls, so it answers like a session that does not exist. An agent or service login sees only its own rows in any tree. | To replay another session, a person with tenant_admin uses `meho audit replay <session-id>`. |
+| `shape="tree"` returns an empty `root` | The tree path is **self-session only** — it holds only the rows of your own calls, and this session has none, so it answers like a session that does not exist. | To replay another session, a person with tenant_admin uses `meho audit replay <session-id>`. |
 | A replay is refused with `session_too_large` | The session exceeds the 10,000-row replay cap. | Narrow with `--since` / `--until` and page the flat `meho audit query --session-id …` shape. |
 | `meho audit query --since Tuesday` errors | `since` / `until` want ISO-8601 or the duration shorthand, not prose. | Use `--since 3d` or `--since 2026-07-28T00:00:00Z`. |
 | An empty result when you expected rows | The tenant boundary is on your JWT — a target/session in another tenant returns zero rows, not another tenant's data. | Confirm you are authenticated to the right tenant. |

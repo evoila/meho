@@ -6,10 +6,10 @@
 ``query_audit`` (flat and ``shape="tree"``) and ``meho_audit_replay`` run
 against real rows (:mod:`tests._audit_own_rows_seed`) of a service login and
 of a person in one tenant. The service login gets only its own rows, also
-with the ``tenant_admin`` role. The tree shape checks from the stored rows
-that the session holds a row of the caller, for a person too; it does not
-read the ``Mcp-Session-Id`` header. A session that is not the caller's
-answers like a session that does not exist.
+with the ``tenant_admin`` role. The tree shape holds only the rows of the
+caller's own calls, for a person too, whatever session id the
+``Mcp-Session-Id`` header names. A session that is not the caller's answers
+like a session that does not exist.
 """
 
 from __future__ import annotations
@@ -127,11 +127,10 @@ async def test_query_audit_person_keeps_every_row(client: TestClient, seeded: Se
 async def test_tree_of_another_session_answers_like_a_missing_session(
     client: TestClient, seeded: Seeded
 ) -> None:
-    """The tree shape replays only a session that holds a row of the caller.
+    """The tree shape holds only the rows of the caller's own calls.
 
-    The check reads the stored rows, never the ``Mcp-Session-Id`` header: a
-    header that names another session does not open it. A service login
-    sees only its own rows in the tree.
+    A header that names another session does not open it, for a person and
+    for a service login.
     """
 
     def tree(operator: Operator, session_id: uuid.UUID, header: uuid.UUID | None = None) -> Any:
@@ -153,6 +152,9 @@ async def test_tree_of_another_session_answers_like_a_missing_session(
     # A person: their own session replays, another session does not.
     assert tree(_PERSON, seeded.person_session)["row_count"] == 2
     assert tree(_PERSON, seeded.service_session, header=seeded.service_session) == absent
+    person_mixed = tree(_PERSON, seeded.mixed_session)
+    assert person_mixed["row_count"] == 1
+    assert person_mixed["root"][0]["principal_sub"] == PERSON_SUB
 
     # A service login: the same, and only its own row of the mixed session.
     assert tree(_SERVICE, seeded.person_session, header=seeded.person_session) == absent
@@ -162,6 +164,29 @@ async def test_tree_of_another_session_answers_like_a_missing_session(
     own = tree(_SERVICE, seeded.service_session)
     assert own["row_count"] == 2
     assert [c["id"] for c in own["root"][0]["children"]] == [str(seeded.service.session_child)]
+
+
+def _nodes(forest: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [n for node in forest for n in (node, *_nodes(node.get("children", [])))]
+
+
+async def test_tree_after_a_call_with_the_header_of_another_session_shows_only_own_rows(
+    client: TestClient, seeded: Seeded
+) -> None:
+    """Two requests with the session id of another login in the header.
+
+    The first request makes MEHO store a row of the person in the session of
+    the service login. The second request replays that session: the tree
+    holds the person's own row and no row of the service login.
+    """
+    header = {"Mcp-Session-Id": str(seeded.service_session)}
+    _tool(client, _PERSON, "query_audit", WINDOW, headers=header)
+    args = {"shape": "tree", "agent_session_id": str(seeded.service_session)}
+    nodes = _nodes(_tool(client, _PERSON, "query_audit", args, headers=header)["root"])
+
+    assert nodes, "the first request stored a row of the person in the session"
+    assert {n["principal_sub"] for n in nodes} == {PERSON_SUB}
+    assert not {n["id"] for n in nodes} & seeded.service.all_ids
 
 
 async def test_meho_audit_replay_service_login_replays_only_own_sessions(

@@ -1090,31 +1090,39 @@ async def test_unit_edge_depth_cap_truncates_deep_chain(sqlite_session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_unit_edge_query_audit_tree_needs_a_row_of_the_caller(
+async def test_unit_edge_query_audit_tree_shows_only_rows_of_the_caller(
     sqlite_session: AsyncSession,
 ) -> None:
-    """``query_audit(shape="tree")`` replays only a session that holds a row of the caller.
+    """``query_audit(shape="tree")`` replays with the caller's ``sub`` as ``owner_sub``.
 
-    The check reads the stored rows
-    (:func:`~meho_backplane.audit_query.session_has_rows_of`), never the
-    ``Mcp-Session-Id`` header. A session with rows of another login only, or
-    with no rows, is not the caller's.
+    A session with rows of two logins replays only the caller's row. A
+    session with no row of the caller replays as empty, the same as a
+    session that does not exist.
     """
-    from meho_backplane.audit_query import session_has_rows_of
-
     tenant_id = uuid.uuid4()
     sess = uuid.uuid4()
-    await _seed_sqlite_anchor(sqlite_session, tenant_id=tenant_id, second=0, agent_session_id=sess)
+    own = await _seed_sqlite_anchor(
+        sqlite_session, tenant_id=tenant_id, second=0, agent_session_id=sess
+    )
+    await seed_audit_row(
+        sqlite_session,
+        tenant_id=tenant_id,
+        occurred_at=_BASE + timedelta(seconds=1),
+        principal_sub="someone-else",
+        op_id="vsphere.vm.list",
+        op_class="read",
+        agent_session_id=sess,
+    )
     await sqlite_session.commit()
 
-    async def has(sub: str, session_id: uuid.UUID = sess) -> bool:
-        return await session_has_rows_of(
-            session_id, tenant_id=tenant_id, principal_sub=sub, session=sqlite_session
+    async def replay(sub: str) -> list[uuid.UUID]:
+        roots = await replay_session(
+            sess, tenant_id=tenant_id, session=sqlite_session, owner_sub=sub
         )
+        return [node.id for node in roots]
 
-    assert await has("op") is True
-    assert await has("someone-else") is False
-    assert await has("op", uuid.uuid4()) is False
+    assert await replay("op") == [own]
+    assert await replay("nobody") == []
 
 
 # ---------------------------------------------------------------------------

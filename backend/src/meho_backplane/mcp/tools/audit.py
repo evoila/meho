@@ -73,7 +73,6 @@ from meho_backplane.audit_query import (
     parse_duration,
     query_audit,
     replay_session,
-    session_has_rows_of,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import OP_CLASS_ENUM
@@ -240,11 +239,10 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "(every operation plus the lineage graph between them) "
                 "and returns `{root, session_id, tenant_id, row_count}`. "
                 "`tree` is SELF-SESSION ONLY: `agent_session_id` must be "
-                "present (absence is rejected with -32602), and MEHO checks "
-                "from the stored audit rows that the session holds a row "
-                "of your own calls. Any other session answers like a "
-                "session that does not exist: an empty `root`. An agent "
-                "or service login sees only its own rows in the tree. "
+                "present (absence is rejected with -32602). The tree holds "
+                "only the audit rows of your own calls, so any other "
+                "session answers like a session that does not exist: an "
+                "empty `root`. "
                 "To replay a DIFFERENT session, a tenant_admin uses the "
                 "`meho_audit_replay` tool."
             ),
@@ -390,7 +388,6 @@ async def _build_replay_response(
     tenant_id: uuid.UUID,
     max_depth: int,
     owner_sub: str | None,
-    member_sub: str | None,
 ) -> dict[str, Any]:
     """Count-guard, reconstruct, and JSON-serialise one session's replay tree.
 
@@ -412,27 +409,19 @@ async def _build_replay_response(
     pre-413 behaviour). ``loose_row_count`` (#4670) is the number of nodes
     in the tree whose parent id names no row in the tenant.
 
-    ``member_sub`` set: the stored rows of the session must hold a row of
-    that login. Otherwise the answer is an empty tree, the same as for a
-    session that does not exist. ``owner_sub`` set (a service login): the
-    tree and every count hold only that login's rows.
+    ``owner_sub`` set: the tree and every count hold only the rows of that
+    login. A session with no row of it answers with an empty tree, the same
+    as a session that does not exist.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        root: list[ReplayNode] = []
-        if member_sub is None or await session_has_rows_of(
+        root = await _replay_within_cap(
             session_id,
             tenant_id=tenant_id,
-            principal_sub=member_sub,
+            max_depth=max_depth,
+            owner_sub=owner_sub,
             session=session,
-        ):
-            root = await _replay_within_cap(
-                session_id,
-                tenant_id=tenant_id,
-                max_depth=max_depth,
-                owner_sub=owner_sub,
-                session=session,
-            )
+        )
         excluded_null_session_count = await _count_excluded_null_session_rows(
             tenant_id=tenant_id,
             session=session,
@@ -508,10 +497,11 @@ def _requested_session_id(arguments: dict[str, Any]) -> uuid.UUID:
     returns the other in-tenant principals' rows to a person:
     cross-session forensic replay is reserved for the
     ``tenant_admin``-gated ``meho_audit_replay`` tool. Absent or not a
-    UUID → -32602. Whether the session is the caller's is checked later,
-    from the stored audit rows (:func:`_build_replay_response`), never
-    from a header the client sends: the session must hold a row of the
-    caller's own calls, and a service login sees only its own rows in it.
+    UUID → -32602. The tree then holds only the rows of the caller's own
+    calls (:func:`_build_replay_response` with ``owner_sub`` set to the
+    caller's ``sub``). Each stored row names the login of the checked
+    token, so the session id the client sends, also in the
+    ``Mcp-Session-Id`` header, opens no row of another login.
     """
     requested = arguments.get("agent_session_id")
     if requested is None:
@@ -555,8 +545,8 @@ async def _query_audit_handler(
 
     ``shape="tree"`` short-circuits steps 1-4: it reconstructs the
     caller's own session as a :class:`ReplayNode` forest via
-    :func:`_build_replay_response`, which checks from the stored rows that
-    the session is the caller's. ``shape`` is a tool-boundary
+    :func:`_build_replay_response`, limited to the rows of the caller's own
+    calls. ``shape`` is a tool-boundary
     control, not a substrate filter, so it is stripped before
     :class:`AuditQueryFilters` is constructed on the flat path. The tree
     path uses the substrate's default depth cap — ``query_audit`` does
@@ -571,8 +561,7 @@ async def _query_audit_handler(
             session_id,
             tenant_id=operator.tenant_id,
             max_depth=_REPLAY_DEFAULT_MAX_DEPTH,
-            owner_sub=own_rows_sub(operator),
-            member_sub=operator.sub,
+            owner_sub=operator.sub,
         )
 
     now = datetime.now(UTC)
@@ -825,7 +814,6 @@ async def _replay_handler(
         tenant_id=operator.tenant_id,
         max_depth=max_depth,
         owner_sub=own_rows_sub(operator),
-        member_sub=None,
     )
 
 

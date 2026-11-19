@@ -598,19 +598,19 @@ def test_query_audit_tree_own_session_returns_tree(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_query_audit_tree_session_without_own_rows_answers_empty(
+def test_query_audit_tree_replays_only_the_rows_of_the_caller(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``shape="tree"`` on a session with no row of the caller → an empty tree.
+    """``shape="tree"`` replays with the caller's own ``sub`` as ``owner_sub``.
 
-    The session id in the ``Mcp-Session-Id`` header does not count: MEHO
-    checks the stored rows. The answer is the same as for a session that
-    does not exist, and the substrate is never reached.
+    Also for a person, and whatever session id the ``Mcp-Session-Id`` header
+    names. With no row of the caller in the session the substrate returns no
+    root, so the answer is the same as for a session that does not exist.
     """
     client, op = client_with_operator
     _seed_own_session_row(op.model_copy(update={"sub": "someone-else"}), _OTHER_SESSION_ID)
-    mock_replay = AsyncMock(return_value=_two_level_tree())
-    mock_count = AsyncMock(return_value=2)
+    mock_replay = AsyncMock(return_value=[])
+    mock_count = AsyncMock(return_value=0)
     with patch(_REPLAY_PATCH, new=mock_replay), patch(_COUNT_PATCH, new=mock_count):
         response = post_mcp(
             client,
@@ -630,7 +630,8 @@ def test_query_audit_tree_session_without_own_rows_answers_empty(
     payload = json.loads(body["result"]["content"][0]["text"])
     assert payload["root"] == []
     assert payload["row_count"] == 0
-    mock_replay.assert_not_awaited()
+    assert mock_replay.await_args.kwargs["owner_sub"] == op.sub
+    assert mock_count.await_args.kwargs["owner_sub"] == op.sub
 
 
 @pytest.mark.parametrize(

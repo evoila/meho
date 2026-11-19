@@ -131,11 +131,13 @@ func printContract(w io.Writer, c *Contract) {
 }
 
 // indentJSON pretty-prints raw JSON for the human view; it falls back
-// to the raw text when the bytes are not valid JSON.
+// to the raw text when the bytes are not valid JSON. Both forms go
+// through output.SafeLines: a valid JSON string may hold a literal
+// bidi control or C1 character, and json.Indent keeps it as it is.
 func indentJSON(raw json.RawMessage) string {
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "  ", "  "); err != nil {
-		return "  " + string(raw)
+		return output.SafeLines("  " + string(raw))
 	}
-	return "  " + buf.String()
+	return output.SafeLines("  " + buf.String())
 }

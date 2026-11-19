@@ -115,3 +115,40 @@ func TestRenderersPrintPlainServerTextUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestContractShowsSchemaControlCharactersAsEscapes — the parameter
+// schema is valid JSON whose description holds a literal U+202E and a
+// C1 character (U+009B). The printed schema shows both as escapes,
+// keeps its indented lines, and sends no raw character.
+func TestContractShowsSchemaControlCharactersAsEscapes(t *testing.T) {
+	schema := json.RawMessage("{\"type\":\"object\",\"description\":\"abc\u202edef\u009bg\"}")
+	if !json.Valid(schema) {
+		t.Fatalf("test schema is not valid JSON: %q", schema)
+	}
+	var b bytes.Buffer
+	printContract(&b, &Contract{OpID: "op", ParameterSchema: schema})
+	out := b.String()
+	for _, want := range []string{`\u202e`, `\x9b`, "\n    \"type\": \"object\",\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output does not hold %q:\n%s", want, out)
+		}
+	}
+	if strings.ContainsAny(out, "\u202e\u009b") {
+		t.Errorf("output holds a raw bidi or C1 character:\n%q", out)
+	}
+}
+
+// TestContractShowsInvalidSchemaControlCharactersAsEscapes — a schema
+// that is not valid JSON is printed as raw text, with ESC and BEL shown
+// as escapes.
+func TestContractShowsInvalidSchemaControlCharactersAsEscapes(t *testing.T) {
+	var b bytes.Buffer
+	printContract(&b, &Contract{OpID: "op", ParameterSchema: json.RawMessage(controlText)})
+	out := b.String()
+	if !strings.Contains(out, `\x1b`) {
+		t.Errorf("output has no visible \\x1b escape:\n%q", out)
+	}
+	if strings.ContainsAny(out, "\x1b\a") {
+		t.Errorf("output holds a raw ESC or BEL byte:\n%q", out)
+	}
+}

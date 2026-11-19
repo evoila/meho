@@ -211,9 +211,11 @@ JSON-shaped (so it can grow without a migration):
     the stored id. One `approval.reveal` audit row, nothing runs. A hosted run
     does not offer this input today; the check holds wherever the list is
     bound.
-  - `query_topology` is not registered for a spec with a list (disabled
+  - With `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST=true`
+    (`Settings.agent_topology_off_with_connector_list`, off by default),
+    `query_topology` is not registered for a spec with a list (disabled
     reason `outside_connector_list`): the topology links objects of every
-    connector.
+    connector. With the setting off, the spec gets it when it names it.
   This keeps the "connector-ops ∩ identity permissions" intersection honest
   without putting vendor identifiers in tool names (postulate 5). Per-op RBAC
   + tenant scoping + audit + sanitization still fire unchanged inside
@@ -517,7 +519,7 @@ hosted tool also needs its role floor, and the docs tools need the tenant's
 | `meho_broadcast_announce` | yes | Default, named `broadcast_announce`. |
 | `meho_broadcast_recent` | yes | Default, named `broadcast_recent`. |
 | `meho_broadcast_watch` | yes | Default, named `broadcast_watch`. |
-| `query_topology` | yes | Opt-in. Not for a spec with a `connectors` list. |
+| `query_topology` | yes | Opt-in. Not for a spec with a `connectors` list when `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` is on. |
 | `search_memory` | yes | Opt-in. |
 | `search_knowledge` | yes | Opt-in. |
 | `add_to_memory` | yes | Opt-in. Writes with the agent's limits: only a `tenant_admin` writes `tenant` scope, and a direct run narrows a `tenant_admin` caller to `operator`. |

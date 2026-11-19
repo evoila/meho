@@ -11,7 +11,9 @@ With the agent's list bound (``connector_limit``):
 * the fetch of an approved secret reveal is refused with
   ``connector_not_allowed`` when the request's connector, or the connector
   of its stored target, is not in the list; one audit row, nothing runs;
-* ``query_topology`` is not registered for an agent with a list;
+* ``query_topology`` is not registered for an agent with a list when the
+  ``AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST`` setting is on, and is kept when
+  it is off (the default);
 * an ``unknown_op`` answer and the agent tool's own refusal name no
   connector outside the list.
 
@@ -49,7 +51,6 @@ from meho_backplane.mcp.tools._call_operation_reveal import fetch_reveal_over_mc
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._target_connector_limit import connector_limit
 from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
-from meho_backplane.operations.result_query import ResultHandleNotFoundError
 from meho_backplane.settings import get_settings
 from tests._result_store_helpers import MemoryResultStore
 from tests._reveal_fetch_helpers import (
@@ -141,7 +142,7 @@ async def _spill(store: MemoryResultStore, operator: Operator) -> UUID:
 async def _reads(operator: Operator, handle_id: UUID) -> bool:
     try:
         await rq.read_result_window(operator, handle_id, 0, 10)
-    except ResultHandleNotFoundError:
+    except rq.ResultHandleNotFoundError:
         return False
     return True
 
@@ -172,7 +173,7 @@ async def test_result_stored_without_a_list_is_a_miss_under_a_list(
     handle_id = await _spill(store, _PERSON)
     with connector_limit(_ONLY_VAULT):
         assert not await _reads(_PERSON, handle_id)
-        with pytest.raises(ResultHandleNotFoundError):
+        with pytest.raises(rq.ResultHandleNotFoundError):
             await rq.run_result_query(_PERSON, handle_id, rq.ResultQuerySpec())
     assert await _reads(_PERSON, handle_id)
 
@@ -237,15 +238,29 @@ async def test_agent_result_query_reads_only_results_stored_under_its_list(
     assert len(answer["rows"]) == 2
 
 
-def test_query_topology_is_not_registered_with_a_list() -> None:
-    resolution = toolset_mod.resolve_agent_toolset(
-        {"meta_tools": ["query_topology", "result_query"], "connectors": [CONNECTOR_ID]},
-        _agent(),
-    )
+_TOPOLOGY_SPEC: dict[str, Any] = {
+    "meta_tools": ["query_topology", "result_query"],
+    "connectors": [CONNECTOR_ID],
+}
+
+
+def test_query_topology_is_not_registered_with_a_list_when_the_setting_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST", "true")
+    get_settings.cache_clear()
+    resolution = toolset_mod.resolve_agent_toolset(_TOPOLOGY_SPEC, _agent())
     assert [t.name for t in resolution.tools] == ["result_query"]
     assert resolution.disabled["query_topology"] == "outside_connector_list"
     without = _tools(["query_topology"], None)
     assert list(without) == ["query_topology"]
+
+
+def test_query_topology_stays_with_a_list_when_the_setting_is_off() -> None:
+    assert get_settings().agent_topology_off_with_connector_list is False
+    resolution = toolset_mod.resolve_agent_toolset(_TOPOLOGY_SPEC, _agent())
+    assert {t.name for t in resolution.tools} == {"query_topology", "result_query"}
+    assert "query_topology" not in resolution.disabled
 
 
 @pytest.mark.asyncio

@@ -72,9 +72,11 @@ can grow without a migration — the T2 design constraint):
   (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`):
   the dispatcher checks the connector each target picks, every stored
   result keeps the list, and ``result_query`` reads only results stored
-  under a list inside the agent's own. ``query_topology`` is not
-  registered for an agent with a list (``outside_connector_list``): the
-  topology links objects of every connector. A refusal names no
+  under a list inside the agent's own. With the
+  ``agent_topology_off_with_connector_list`` setting on (off by default),
+  ``query_topology`` is not registered for an agent with a list
+  (``outside_connector_list``): the topology links objects of every
+  connector. A refusal names no
   connector outside the list.
 
 Unknown keys in the spec are ignored (forward-compat): a future spec field
@@ -107,7 +109,8 @@ author can tell them from the ``agent_toolset_resolved`` log line:
   ``meta_tools`` list leaves it out (``not_in_allow_list``), the run's role
   is below the tool's floor (``role_below_floor``), the tenant lacks the
   tool's capability (``capability_missing``), or the spec has a
-  ``connectors`` list and the tool cannot keep to it
+  ``connectors`` list, the tool cannot keep to it and the
+  ``agent_topology_off_with_connector_list`` setting is on
   (``outside_connector_list``).
 
 A disabled tool is still not registered, so the model never sees it.
@@ -222,9 +225,19 @@ _CONNECTOR_ID_ARG = "connector_id"
 #: not call.
 _CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_operation"})
 
-#: Meta-tools an agent with a ``connectors`` list does not get: their
-#: answers cannot be kept to the connectors of the list.
+#: Meta-tools an agent with a ``connectors`` list does not get when the
+#: ``agent_topology_off_with_connector_list`` setting is on: their answers
+#: cannot be kept to the connectors of the list.
 _NOT_WITH_CONNECTOR_LIST: frozenset[str] = frozenset({"query_topology"})
+
+
+def _outside_connector_list(tool_name: str, allowed_connectors: frozenset[str] | None) -> bool:
+    """Return whether a run with *allowed_connectors* does not get *tool_name*."""
+    return (
+        allowed_connectors is not None
+        and tool_name in _NOT_WITH_CONNECTOR_LIST
+        and get_settings().agent_topology_off_with_connector_list
+    )
 
 
 def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
@@ -853,7 +866,7 @@ def resolve_agent_toolset(
         if not capability_satisfied(operator, meta.required_capability):
             disabled[meta.name] = "capability_missing"
             continue
-        if allowed_connectors is not None and meta.name in _NOT_WITH_CONNECTOR_LIST:
+        if _outside_connector_list(meta.name, allowed_connectors):
             disabled[meta.name] = "outside_connector_list"
             continue
         tools.append(_make_meta_tool(meta, allowed_connectors=allowed_connectors))

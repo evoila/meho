@@ -37,9 +37,9 @@ More: [Connectors overview](../can-do/connectors-overview.md)
 
 ## Connector version
 
-A connector id ends with a version, for example `k8s-1.x`. It says which versions of the product the connector works with.
+The end of a connector id, for example `1.x` in `k8s-1.x`, names the product version line. The exact versions are on the Connectors page.
 
-More: [Run your first operations](../guides/first-operations.md)
+More: [Connectors](connectors.md)
 
 ## Dashboard
 
@@ -49,7 +49,7 @@ More: [Watch your estate with sensors](../guides/sensors-quickstart.md)
 
 ## Detected product and version
 
-MEHO finds the product and version of a target when it probes the target, and uses them to pick the connector. This is also called the fingerprint.
+MEHO finds the product and version of a target when it checks the target (a probe), and uses them to pick the connector. This is also called the fingerprint.
 
 More: [Register targets and secrets](../guides/targets-and-secrets.md)
 
@@ -67,7 +67,7 @@ More: [Watch your estate with sensors](../guides/sensors-quickstart.md)
 
 ## Grant
 
-A permission that a person gives in advance. A standing grant lets a service principal run its `caution` and `dangerous` changes without a wait, but a delete still waits for a person.
+A permission that a person gives in advance to an automation login (a service principal), for example a build pipeline. With it, many `caution` and `dangerous` changes run without a wait; deletes, secret reads and changes of rights still wait for a person.
 
 More: [Approvals](../can-do/approvals.md)
 
@@ -103,7 +103,7 @@ More: [Run your first operations](../guides/first-operations.md)
 
 ## Operator tools
 
-Extra tools for admin work, such as connectors, agents and schedules. A session sees them only when it asks for the `mcp:admin` scope.
+Extra tools for admin work, such as connectors, agents and schedules. A session sees them only when it asks for the extra right `mcp:admin` at sign-in.
 
 More: [MCP surface and scopes](../clients/mcp-surface-and-scopes.md)
 
@@ -145,7 +145,7 @@ More: [Author and run runbooks](../guides/runbooks.md)
 
 ## Sandbox mode
 
-A setting for an instance that holds only test systems that you can throw away. There, an admin may give a service principal a grant that also covers deletes.
+A setting for a MEHO install that holds only test systems you can throw away. There, an admin may let an automation login also run deletes without a wait.
 
 More: [Approvals and break-glass](../guides/approvals-and-break-glass.md)
 

@@ -3949,6 +3949,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>Adding a check to a dashboard that already has a state no longer sends a false alarm. MEHO waits for the new check's first confirmed result, but not forever. If the check has no confirmed result by its first due time (at most one day after the check was made), plus the time its result confirmation takes (with the run time of each run), plus 60 seconds, MEHO alerts as <code>degraded</code>. It also alerts when the check is more than 60 seconds overdue. A check that already had a confirmed state does not wait. A first result of <code>unknown</code> now also counts as a confirmed state, and the check shows that it is <code>unknown</code> since it was made. A check with a hold time (<code>for_seconds</code>) and only <code>unknown</code> results alerts once the hold time after it was made has passed, so an older check does not start its hold again after the upgrade.</td>
+<td>None.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>An agent login and a service login now see only the stored call traces (flight recorder) of their own calls, on <code>GET /api/v1/audit/{audit_id}/trace</code> and <code>GET /api/v1/audit/traces</code>. This holds for a paired add-on, because it logs in as a service login. It also holds for a client-credentials login whose token has no <code>principal_kind</code> claim: MEHO treats such a login as a service login. People still see every trace of their tenant.</td>
 <td>If a paired add-on or another client-credentials login must read the traces of calls that a person or another login made, give that work to a person login. A trace that such a login may not read answers <code>trace_present=false</code> on the single read, and is left out of the list on the search.</td>
 </tr>

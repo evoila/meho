@@ -129,12 +129,11 @@ tick interval)` — each confirming re-check waits its backoff plus up to
 one tick of grid quantization (the same fire-time contract shape #2245
 states for the scheduler's 30 s grid).
 
-**Satellite asymmetry:** the commit gate lives in
-`record_sensor_result`, so satellite-gateway batch-posted results are
-confirmation-counted identically — but the accelerated re-fire is
-runner-local (`next_fire_at` is the central runner's clock; a satellite
-re-checks at its own posting cadence, so remote confirmation is paced
-by that cadence instead of `retry_backoff_seconds`).
+**Remote runners:** results from a remote (satellite) runner do not go
+through `record_sensor_result`. They are stored in `runner_check_results`
+and nothing reads them yet: they do not change a check's state, do not
+count toward confirmation, and do not reach dashboards, mails or the
+investigator. This is not built yet.
 
 ### Safe reads only
 

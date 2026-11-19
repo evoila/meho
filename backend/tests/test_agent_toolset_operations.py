@@ -54,6 +54,7 @@ from meho_backplane.agent.toolset_operations import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.mcp.registry import get_tool
+from meho_backplane.mcp.tools._group_operations import group_operations_for_settings
 from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
 from meho_backplane.operations import meta_tools
 from meho_backplane.operations._search_typed_first import INCLUDE_RAW_LINE
@@ -114,6 +115,8 @@ def test_hosted_schema_is_mcp_wire_schema_minus_left_out_fields(name: str) -> No
     definition, _handler = entry
     if name != "call_operation":
         definition = include_raw_for_settings(definition)
+    if name == "list_operation_groups":
+        definition = group_operations_for_settings(definition)
     wire = definition.to_wire()["inputSchema"]
     spec = _specs()[name]
 
@@ -142,7 +145,10 @@ def test_descriptions_follow_the_mcp_text() -> None:
     for name in ("list_operation_groups", "search_operations"):
         entry = get_tool(name)
         assert entry is not None
-        assert specs[name].description == include_raw_for_settings(entry[0]).description
+        shown = include_raw_for_settings(entry[0])
+        if name == "list_operation_groups":
+            shown = group_operations_for_settings(shown)
+        assert specs[name].description == shown.description
     assert "EXACT-OP MODE" in specs["search_operations"].description
     assert "unknown_op" in specs["search_operations"].description
 

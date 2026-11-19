@@ -107,12 +107,26 @@
     direct ``base.html`` render outside the FastAPI flow does not trip
     ``StrictUndefined``. -#}
 {% set session_operator_sub = session_operator_sub | default(none) %}
-<!doctype html>
-<html lang="en" data-theme="evoila" class="h-full">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{% block page_title %}MEHO Operator Console{% endblock %}</title>
+{% extends "_page_frame.html" %}
+
+{#- The document skeleton -- <html>, <head>, <body> -- comes from
+   ``meho_ui.shell``'s page frame. What stays here is the console's own
+   chrome: the drawer, the side menu, the mobile navbar and the
+   app-shell scripts.
+
+   The 67 templates that extend this file are untouched. Their
+   ``content``, ``page_title``, ``component_scripts`` and ``scripts``
+   blocks keep the names they already use. ``content`` in particular is
+   declared inside the frame's ``main`` slot below -- the frame's slot is
+   named ``main`` precisely so this file can expose ``content`` to its
+   own children without the two colliding. -#}
+
+{% block page_title %}MEHO Operator Console{% endblock %}
+
+{#- The frame renders ``head_scripts`` BEFORE ``head_assets``, which is
+   the ordering this file used to own directly. The ``component_scripts``
+   note inside says why it is load-bearing. -#}
+{% block head_scripts %}
     {#- App-shell approvals-bell controller (G10.7-T3 #1778). Loaded
        OUTSIDE the overridable ``component_scripts`` block so it ships on
        EVERY console page (a surface that overrides that block must not be
@@ -157,13 +171,21 @@
        and vendor bundles (Cytoscape, CodeMirror) stay in the
        body-end ``scripts`` block so they don't delay Alpine boot. -#}
     {% block component_scripts %}{% endblock %}
+{% endblock %}
+
+{% block head_assets %}
     {% include "_head_assets.html" %}
-  </head>
+{% endblock %}
+
+{% block body_class %}min-h-full text-base-content antialiased{% endblock %}
+
   {# ``data-meho-tenant``: the tenant this page was made for (#5240).
      ``page-tenant.js`` sends it with every htmx request and plain form, so
      a request from this tab after a tenant switch in another tab is
      refused ("The tenant changed. Reload the page."). #}
-  <body class="min-h-full text-base-content antialiased"{% if session_tenant is not none %} data-meho-tenant="{{ session_tenant.id }}"{% endif %}>
+{% block body_attrs %}{% if session_tenant is not none %} data-meho-tenant="{{ session_tenant.id }}"{% endif %}{% endblock %}
+
+{% block main %}
     <div
       class="drawer lg:drawer-open"
       x-data="{
@@ -438,6 +460,8 @@
        ``component_scripts`` block instead -- from here they execute
        after Alpine has already started and the registration is lost
        (#1692). #}
+{% endblock %}
+
+{% block page_scripts %}
     {% block scripts %}{% endblock %}
-  </body>
-</html>
+{% endblock %}

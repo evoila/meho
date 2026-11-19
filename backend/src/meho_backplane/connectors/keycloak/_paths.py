@@ -63,6 +63,8 @@ __all__ = [
     "_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH",
     "_EVENTS_CONFIG_PATH",
     "_EVENTS_PATH",
+    "_GROUP_REALM_COMPOSITE_PATH",
+    "_GROUP_ROLE_MAPPINGS_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
     "_ROLE_BY_ID_COMPOSITES_PATH",
@@ -122,6 +124,12 @@ _GROUPS_PATH = "/admin/realms/{realm}/groups"
 _GROUP_PATH = "/admin/realms/{realm}/groups/{group-id}"
 _GROUP_CHILDREN_PATH = "/admin/realms/{realm}/groups/{group-id}/children"
 _GROUP_MEMBERS_PATH = "/admin/realms/{realm}/groups/{group-id}/members"
+# The roles a group gives directly (the group member add approval card).
+_GROUP_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/groups/{group-id}/role-mappings"
+# Every realm role a group gives: its own, its parent groups' and the parts of composites.
+_GROUP_REALM_COMPOSITE_PATH = (
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/composite"
+)
 _USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
 # NB: the user-group membership sub-resource uses the camelCase ``{groupId}``
 # path-parameter name (a Keycloak spec quirk — the groups resource itself uses

@@ -336,7 +336,10 @@ register_mcp_tool(
             "kind=one_off), or event_filter (object for kind=event). A "
             "kind=event trigger fires whenever a MEHO event's payload "
             "contains its event_filter (payload @> event_filter); it is "
-            "dispatched by the event drain, not the clock. For "
+            "dispatched by the event drain, not the clock. "
+            "A webhook (external) event fires only a trigger whose "
+            "event_filter names its event source: "
+            "{source: {slug: '<source-slug>'}} or {source: {id: ...}}. For "
             "kind=cron/one_off, inputs (JSON object) is REQUIRED and must "
             "render a non-empty prompt (a 'prompt' string, or any non-empty "
             "object; inputs: {} is rejected); it is optional for kind=event "
@@ -378,7 +381,11 @@ register_mcp_tool(
                 },
                 "event_filter": {
                     "type": ["object", "null"],
-                    "description": "Event-match filter (required when kind=event).",
+                    "description": (
+                        "Event-match filter (required when kind=event). To "
+                        "start on webhook events it must name the event "
+                        "source: source.slug or source.id."
+                    ),
                 },
                 "timezone": {
                     "type": "string",

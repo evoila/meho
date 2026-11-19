@@ -632,6 +632,7 @@ async def test_script_run_preview_shows_script_never_argument_or_env_values() ->
         "interpreter": "/usr/bin/python3",
         "script": _SCRIPT_CANARY,
         "script_bytes": len(_SCRIPT_CANARY.encode("utf-8")),
+        "script_pages": 1,
         "script_sha256": hashlib.sha256(_SCRIPT_CANARY.encode("utf-8")).hexdigest(),
         "use_sudo": True,
         "argument_bytes": len(_ARG_CANARY.encode("utf-8")),

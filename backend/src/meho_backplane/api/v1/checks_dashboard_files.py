@@ -138,6 +138,11 @@ async def import_dashboard_file(
             "sensors": {s.name: s.action for s in result.sensors},
             "members_added": result.members_added,
             "members_removed": result.members_removed,
+            "identity_sub": {
+                s.name: {"before": s.identity_sub_before, "after": s.identity_sub_after}
+                for s in result.sensors
+                if s.identity_sub_after is not None
+            },
         },
     )
     return result

@@ -42,7 +42,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
@@ -1223,6 +1223,69 @@ async def test_no_connector_error_names_target_product_not_connector_id(
     assert result.extras["error_code"] == "no_connector"
     assert result.extras["product"] == "kubernetes"
     assert result.extras["version"] is None
+
+
+async def test_no_connector_error_names_the_probe_again_fix_for_old_openbao_target(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An OpenBao target probed before 0.47 is stored as ``vault`` 2.x.
+
+    No connector serves it, and the error names the fix. The resolver test
+    in ``test_connectors_vault_version_ranges.py`` covers the target after a
+    probe that finds ``openbao``.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="GET:/v1/openbao-hint",
+        source_kind="ingested",
+        method="GET",
+        path="/v1/openbao-hint",
+        handler_ref=None,
+        summary="vault op",
+        description="Ingested op under product vault.",
+        tags=[],
+        parameter_schema={},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    target = _FakeTarget(product="vault", version="2.7.1", name="bao-one")
+    target.fingerprint = SimpleNamespace(version="2.7.1", product="vault")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="GET:/v1/openbao-hint",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("no_connector:")
+    assert "meho targets probe -- bao-one" in result.error
+    assert result.extras["error_code"] == "no_connector"
+    assert "meho targets probe -- bao-one" in result.extras["hint"]
 
 
 # ---------------------------------------------------------------------------
@@ -3931,6 +3994,58 @@ async def test_park_without_builder_uses_identifier_default(
             "preview_reason": "connector_did_not_populate",
         }
         assert "preview" not in row.proposed_effect
+
+
+@pytest.mark.asyncio
+async def test_park_keeps_the_catalog_risk_level_when_the_preview_build_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A preview build that raises still stores the op's risk level and class."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.failing_preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op whose preview build fails.",
+        description="Parks for approval; the preview build raises.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    with patch(
+        "meho_backplane.operations.dispatcher.build_proposed_effect",
+        new_callable=AsyncMock,
+        side_effect=RecursionError("too deep"),
+    ):
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.failing_preview_op",
+            target=target,
+            params={"note": "x"},
+        )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    async with get_sessionmaker()() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        assert row.proposed_effect == {
+            "op_id": "vault.kv.failing_preview_op",
+            "connector_id": "vault-1.x",
+            "target_id": str(target.id),
+            "op_class": "other",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
 
 
 @pytest.mark.asyncio

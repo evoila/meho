@@ -478,8 +478,18 @@ this stage it exposes:
   repeated. A call that runs after a person's approval is repeated only
   when it is `safe`: one approval is one run of a change. When MEHO does not repeat, the caller gets
   `connector_auth_failed` (cause `session_ended_<status>_not_resent`)
-  that says the change may or may not have been made and to check the
-  product before a new call. The repeat never loops: at most two sign-ins
+  that says the change may or may not have been made, that a person must
+  check the target first, and then make a new request. The result is stored as
+  `uncertain` (`execution_outcome: uncertain`, `retry: false`), so the re-run
+  route refuses it. A refused sign-in before anything was sent stays `failed`.
+  An approved run of an operation that changes something starts with a fresh
+  login: `drop_login_before_approved_change` calls the connector's
+  `invalidate_session` hook once in `_dispatch_now`, before the send. It holds
+  for ingested, typed and multi-step operations, and for every way an
+  approved run starts (console, API, agent wait, re-run). A multi-step
+  operation drops the login once for the whole run, not for each step. A
+  read, and a change that did not wait for a person, keep the stored login. A
+  connector without the hook has nothing to drop. The repeat never loops: at most two sign-ins
   per call. The audit row has `session_relogin` (MEHO dropped the kept
   session), `session_resent` (MEHO sent the operation again),
   `result_unknown` (true when MEHO did not send it again: the change may

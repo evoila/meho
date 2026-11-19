@@ -188,12 +188,14 @@ async def _seed_trace(
     tenant_id: UUID,
     spans: list[SpanInput],
     redaction_uncertain: bool = False,
+    operator_sub: str | None = None,
 ) -> UUID:
     trace_id = await record_trace(
         audit_id=audit_id,
         tenant_id=tenant_id,
         spans=spans,
         redaction_uncertain=redaction_uncertain,
+        operator_sub=operator_sub,
         now=_BASE,
     )
     assert trace_id is not None, "record_trace returned None (seed failed)"
@@ -414,7 +416,8 @@ def test_openapi_lists_trace_route(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Agent logins: the tenant switch and the redaction-uncertain flag apply
+# Agent logins: the tenant switch, the owner rule and the redaction-uncertain
+# flag apply
 # ---------------------------------------------------------------------------
 
 
@@ -434,13 +437,20 @@ async def _seed_tenant_with_agent_read(tenant_id: UUID, *, agent_readable: bool 
 
 
 _AGENT_KEY = make_rsa_keypair("kid-agent")
+_AGENT_SUB = "agent-sub"
 
 
-def _get_trace(client: TestClient, audit_id: UUID, *, principal_kind: str | None) -> Any:
+def _get_trace(
+    client: TestClient,
+    audit_id: UUID,
+    *,
+    principal_kind: str | None,
+    sub: str = _AGENT_SUB,
+) -> Any:
     key = _AGENT_KEY
     token = mint_token(
         key,
-        sub="agent-sub",
+        sub=sub,
         tenant_role=TenantRole.OPERATOR.value,
         tenant_id=str(_TENANT_A),
         principal_kind=principal_kind,
@@ -457,7 +467,12 @@ def _get_trace(client: TestClient, audit_id: UUID, *, principal_kind: str | None
 async def test_trace_agent_gets_no_trace_when_tenant_switch_off(client: TestClient) -> None:
     await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=False)
     audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
-    await _seed_trace(audit_id=audit_id, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
+    await _seed_trace(
+        audit_id=audit_id,
+        tenant_id=_TENANT_A,
+        spans=_vendor_and_flux_spans(),
+        operator_sub=_AGENT_SUB,
+    )
 
     resp = _get_trace(client, audit_id, principal_kind="agent")
 
@@ -482,6 +497,7 @@ async def test_trace_agent_never_gets_redaction_uncertain_trace(client: TestClie
         tenant_id=_TENANT_A,
         spans=_vendor_and_flux_spans(),
         redaction_uncertain=True,
+        operator_sub=_AGENT_SUB,
     )
 
     resp = _get_trace(client, audit_id, principal_kind="agent")
@@ -497,7 +513,49 @@ async def test_trace_agent_never_gets_redaction_uncertain_trace(client: TestClie
 
 
 @pytest.mark.asyncio
-async def test_trace_agent_gets_trace_when_tenant_switch_on(client: TestClient) -> None:
+async def test_trace_agent_gets_trace_of_its_own_call(client: TestClient) -> None:
+    await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
+    audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
+    await _seed_trace(
+        audit_id=audit_id,
+        tenant_id=_TENANT_A,
+        spans=_vendor_and_flux_spans(),
+        operator_sub=_AGENT_SUB,
+    )
+
+    resp = _get_trace(client, audit_id, principal_kind="agent")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["trace_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_trace_agent_gets_no_trace_of_a_persons_call(client: TestClient) -> None:
+    await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
+    audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
+    await _seed_trace(
+        audit_id=audit_id,
+        tenant_id=_TENANT_A,
+        spans=_vendor_and_flux_spans(),
+        operator_sub="person-sub",
+    )
+
+    resp = _get_trace(client, audit_id, principal_kind="agent")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["trace_present"] is False
+    assert body["trace"] is None
+    assert "vendor.example" not in resp.text
+
+    # Any person of the tenant still reads the trace, also another person.
+    person = _get_trace(client, audit_id, principal_kind=None, sub="other-person")
+    assert person.status_code == 200, person.text
+    assert person.json()["trace_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_trace_with_no_stored_caller_is_not_shown_to_an_agent(client: TestClient) -> None:
     await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
     audit_id = await _seed_audit_row(tenant_id=_TENANT_A)
     await _seed_trace(audit_id=audit_id, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
@@ -505,4 +563,37 @@ async def test_trace_agent_gets_trace_when_tenant_switch_on(client: TestClient) 
     resp = _get_trace(client, audit_id, principal_kind="agent")
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["trace_present"] is True
+    assert resp.json()["trace_present"] is False
+
+    person = _get_trace(client, audit_id, principal_kind=None)
+    assert person.status_code == 200, person.text
+    assert person.json()["trace_present"] is True
+
+
+@pytest.mark.asyncio
+async def test_trace_service_login_gets_only_the_trace_of_its_own_call(
+    client: TestClient,
+) -> None:
+    await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
+    own = await _seed_audit_row(tenant_id=_TENANT_A, second=1)
+    await _seed_trace(
+        audit_id=own, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans(), operator_sub="svc-1"
+    )
+    other = await _seed_audit_row(tenant_id=_TENANT_A, second=2)
+    await _seed_trace(
+        audit_id=other,
+        tenant_id=_TENANT_A,
+        spans=_vendor_and_flux_spans(),
+        operator_sub="person-sub",
+    )
+    no_caller = await _seed_audit_row(tenant_id=_TENANT_A, second=3)
+    await _seed_trace(audit_id=no_caller, tenant_id=_TENANT_A, spans=_vendor_and_flux_spans())
+
+    mine = _get_trace(client, own, principal_kind="service", sub="svc-1")
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["trace_present"] is True
+    for audit_id in (other, no_caller):
+        resp = _get_trace(client, audit_id, principal_kind="service", sub="svc-1")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["trace_present"] is False
+        assert "vendor.example" not in resp.text

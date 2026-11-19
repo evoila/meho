@@ -271,6 +271,13 @@ class Settings(BaseModel):
         via ``VAULT_OIDC_ROLE_BY_TENANT``. Lets one fixed role stop
         spanning tenants on a shared multi-tenant instance; the fail-closed boundary is each role's
         Vault policy + ``bound_claims``, provisioned consumer-side.
+    vault_oidc_role_tenants:
+        Optional list of the tenants that may use ``vault_oidc_role``.
+        Comma-separated tenant UUIDs. Empty (the default) keeps
+        ``vault_oidc_role`` for every tenant without an entry in
+        ``vault_oidc_role_by_tenant``. When set, a tenant in neither list
+        gets a clear refusal and no Vault login is tried. Set via
+        ``VAULT_OIDC_ROLE_TENANTS``.
     vault_oidc_mount_path:
         Mount path of Vault's JWT/OIDC auth method, **without** the
         ``auth/`` prefix. Vault's recommended convention is to mount
@@ -675,6 +682,13 @@ class Settings(BaseModel):
         running as a cheap heartbeat; ``enabled=False`` skips starting the
         loop entirely (no audit-row noise, no log line). Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    feed_stream_max_seconds:
+        Longest time, in seconds, one ``GET /api/v1/feed`` stream stays
+        open. The stream ends when its token expires (``exp`` plus
+        ``keycloak_jwt_leeway_seconds``), and after this time at the
+        latest, also for a token that lasts longer. The client then opens
+        a new stream with a fresh token and ``Last-Event-Id``, so it
+        misses no announcement. Default 3600 (one hour).
     checks_evidence_retention_days:
         Maximum age (in days) of ``sensor_results`` per-tick evidence rows
         the #2756 retention prune task preserves. Rows whose
@@ -1011,6 +1025,17 @@ class Settings(BaseModel):
         (unset) keeps the chassis-only deploys booting; any ``/ui/auth/*``
         request with the default surfaces an actionable error rather than
         silently misusing one of the other client ids.
+    ui_keycloak_approve_client_id:
+        OAuth ``client_id`` of the console's approval sign-in client
+        (#6282). Default ``meho-web-approve``. A confidential client with
+        the same secret as :attr:`ui_keycloak_client_id`, bound to the
+        approval sign-in flow ``meho approval sign-in level``. The console
+        uses it only for the new sign-in before an approve; the normal
+        console login keeps :attr:`ui_keycloak_client_id`. Only its tokens
+        carry the approval level into a console approve. Empty means the
+        console has no approval sign-in: ``auto`` then only records the
+        level, and an explicit ``required`` refuses every approve. Env var
+        ``UI_KEYCLOAK_APPROVE_CLIENT_ID``.
     ui_keycloak_client_secret:
         Client secret of the confidential ``meho-web`` Keycloak client.
         Initiative #337, Task #865. Sourced from Vault in production
@@ -1355,7 +1380,11 @@ class Settings(BaseModel):
         check of the approval sign-in (``approvals.sign_in`` in
         ``/api/v1/health``) shows for sure that the realm does not give the
         level, else ``required``, also when the check failed. Any other value
-        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``.
+        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``. The console
+        uses the same setting for its own approval sign-in (#6282); ``auto``
+        there reads the binding of :attr:`ui_keycloak_approve_client_id`
+        (``approvals.web_sign_in`` in ``/api/v1/health``), and only records
+        when that setting is empty.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1562,9 +1591,10 @@ class Settings(BaseModel):
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
-        (:mod:`meho_backplane.mcp.short_texts`). The inputs a tool accepts
-        stay the same. A small model keeps more of its context window for
-        the job. It stays off until model tests show it helps. Env
+        (:mod:`meho_backplane.mcp.short_texts`), and no tool sends an
+        output schema. The inputs a tool accepts stay the same. A small
+        model keeps more of its context window for the job. It stays off
+        until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
     mcp_call_flow_guide:
         Off by default. When on, the MCP session-start text starts with a
@@ -1716,6 +1746,11 @@ class Settings(BaseModel):
     # Enforcement stays Vault-side: the boundary is the policy + ``bound_claims``
     # on each selected role; this setting only decides which role a login uses.
     vault_oidc_role_by_tenant: str = Field(default="")
+    # Tenants that may use ``vault_oidc_role``. Comma-separated tenant UUIDs.
+    # Empty (the default) keeps ``vault_oidc_role`` for every tenant that has
+    # no entry in ``vault_oidc_role_by_tenant``. When set, a tenant that is
+    # in neither list is refused before any Vault call.
+    vault_oidc_role_tenants: str = Field(default="")
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
@@ -1944,6 +1979,8 @@ class Settings(BaseModel):
     broadcast_announcement_retention_days: int = Field(default=90, ge=0, le=3650)
     broadcast_announcement_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     broadcast_announcement_prune_enabled: bool = True
+    # Longest life of one ``GET /api/v1/feed`` stream (see the docstring).
+    feed_stream_max_seconds: int = Field(default=3600, gt=0)
     # Checks per-tick evidence retention (#2756, Initiative #2780) -- the
     # sensor_results history table + its retention sweeper. Same mould as the
     # broadcast-announcement knobs above, with ONE deliberate divergence: here
@@ -2191,6 +2228,7 @@ class Settings(BaseModel):
     # Central-only deployments (no runner role) leave this unset.
     satellite_write_allowlist: str = ""
     ui_keycloak_client_id: str = ""
+    ui_keycloak_approve_client_id: str = "meho-web-approve"
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
     # Dedicated custody key for encrypted credential-write approval handoffs.
@@ -2643,6 +2681,14 @@ class Settings(BaseModel):
     #: the connector has no such operation. Off: both are as before. Set via
     #: ``SEARCH_TYPED_FIRST``.
     search_typed_first: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Each group's typed and multi-step operations in
+    #: ``list_operation_groups`` (#4713), behind a switch that is off by
+    #: default. When on, each group lists them with ``op_id``, a one-line
+    #: summary, the risk level and the approval flag, and an answer is paged
+    #: so that it stays under a size limit
+    #: (:mod:`meho_backplane.operations._group_listing_operations`). Off: the
+    #: listing is as before. Set via ``GROUP_LISTING_OPERATIONS``.
+    group_listing_operations: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Node size and reserved room in ``k8s.node.list`` (#4652), behind a
     #: switch that is off by default. When on, each node row also has
     #: ``capacity``, ``allocatable``, ``requested`` and ``requests_error``,
@@ -2658,16 +2704,27 @@ class Settings(BaseModel):
     #: Off: the same answers, hashes and tool texts as before. Set via
     #: ``PREVIEW_TYPED_WRITES``.
     preview_typed_writes: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    #: What ``preview_operation`` gives back for three Keycloak changes of
+    #: What ``preview_operation`` gives back for Keycloak changes of
     #: rights. The approval request a person reads always shows their cards:
     #: for ``keycloak.client.update`` and ``keycloak.realm.update`` the values
     #: now of each field the request sends next to the new values, for
     #: ``keycloak.protocol_mapper.create`` the client's mappers now and the
     #: new one (:mod:`meho_backplane.connectors.keycloak.ops_write_rights_card`).
+    #: More changes of rights show the object as it is now, such as the roles a
+    #: user has now (:mod:`meho_backplane.connectors.keycloak.ops_write_current_state`).
     #: On, ``preview_operation`` shows the same cards. Off (the default), it
     #: gives back the same answers as before. Set via
     #: ``KEYCLOAK_RIGHTS_CHANGE_CARDS``.
     keycloak_rights_change_cards: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: What a caller reads about a ``linux:`` side of ``secret.move``. The
+    #: approval request a person reads always shows the name as typed
+    #: (``target``), the Linux target it points to (``target_id``,
+    #: ``target_name``), its ``host`` and its SSH ``port``. On,
+    #: ``preview_operation`` adds ``target`` to a ``linux:`` side, and
+    #: ``meho_approvals_get`` / ``meho_approvals_list`` show all five. Off
+    #: (the default), they give back the same answers as before. Set via
+    #: ``SECRET_MOVE_LINUX_TARGET_CARD``.
+    secret_move_linux_target_card: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Other product names in the ``product`` filter of
     #: ``meho_connector_list`` (#6560), behind a switch that is off by
     #: default. When on, the filter ignores case, also matches the names a
@@ -2684,6 +2741,12 @@ class Settings(BaseModel):
     #: them. Off: the same answers and tool texts as before. Set via
     #: ``SEARCH_HIT_CALL_HINTS``.
     search_hit_call_hints: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: File parameters on operations, behind a switch that is off by default.
+    #: A parameter whose schema has ``x-meho-switch: "file_ref_params"`` is
+    #: left out of every place that shows the schema, and a call that gives
+    #: it is refused like any unknown parameter, until this is on. See
+    #: ``operations/switch_params.py``. Set via ``FILE_REF_PARAMS``.
+    file_ref_params: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3057,6 +3120,25 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("vault_oidc_role_tenants")
+    @classmethod
+    def _vault_oidc_role_tenants_must_be_uuid_csv(cls, value: str) -> str:
+        """Stop the start when ``VAULT_OIDC_ROLE_TENANTS`` has an entry that is not a UUID."""
+        chunks = [part.strip() for part in value.split(",") if part.strip()]
+        if value.strip() and not chunks:
+            raise ValueError(
+                f"VAULT_OIDC_ROLE_TENANTS has no tenant UUID; got {value!r}. "
+                "Leave it empty, or list tenant UUIDs."
+            )
+        for chunk in chunks:
+            try:
+                UUID(chunk)
+            except ValueError as exc:
+                raise ValueError(
+                    f"VAULT_OIDC_ROLE_TENANTS entries must be tenant UUIDs; got {chunk!r}"
+                ) from exc
+        return value
+
     @field_validator("audit_wrapper_rows_retired")
     @classmethod
     def _wrapper_cutover_needs_request_usage(cls, value: bool, info: ValidationInfo) -> bool:
@@ -3203,6 +3285,7 @@ def get_settings() -> Settings:
         # #3852 -- empty/blank keeps the single-role behaviour byte-for-byte
         # (the resolver falls back to ``vault_oidc_role`` for every tenant).
         vault_oidc_role_by_tenant=os.environ.get("VAULT_OIDC_ROLE_BY_TENANT", "").strip(),
+        vault_oidc_role_tenants=os.environ.get("VAULT_OIDC_ROLE_TENANTS", "").strip(),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
         # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no
         # header) from empty-string (operator misconfiguration); the
@@ -3322,6 +3405,7 @@ def get_settings() -> Settings:
         broadcast_announcement_prune_enabled=parse_bool_env(
             os.environ.get("BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED", "true"),
         ),
+        feed_stream_max_seconds=int(os.environ.get("FEED_STREAM_MAX_SECONDS", "3600")),
         checks_evidence_retention_days=int(
             os.environ.get("CHECKS_EVIDENCE_RETENTION_DAYS", "7"),
         ),
@@ -3547,6 +3631,9 @@ def get_settings() -> Settings:
         satellite_write_verify_key=os.environ.get("SATELLITE_WRITE_VERIFY_KEY", "").strip(),
         satellite_write_allowlist=os.environ.get("SATELLITE_WRITE_ALLOWLIST", "").strip(),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
+        ui_keycloak_approve_client_id=os.environ.get(
+            "UI_KEYCLOAK_APPROVE_CLIENT_ID", "meho-web-approve"
+        ).strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
         approval_handoff_encryption_key=os.environ.get(
@@ -3756,6 +3843,9 @@ def get_settings() -> Settings:
         search_typed_first=parse_bool_env(
             os.environ.get("SEARCH_TYPED_FIRST"),
         ),
+        group_listing_operations=parse_bool_env(
+            os.environ.get("GROUP_LISTING_OPERATIONS"),
+        ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
         ),
@@ -3765,12 +3855,16 @@ def get_settings() -> Settings:
         keycloak_rights_change_cards=parse_bool_env(
             os.environ.get("KEYCLOAK_RIGHTS_CHANGE_CARDS"),
         ),
+        secret_move_linux_target_card=parse_bool_env(
+            os.environ.get("SECRET_MOVE_LINUX_TARGET_CARD"),
+        ),
         connector_list_product_aliases=parse_bool_env(
             os.environ.get("CONNECTOR_LIST_PRODUCT_ALIASES"),
         ),
         search_hit_call_hints=parse_bool_env(
             os.environ.get("SEARCH_HIT_CALL_HINTS"),
         ),
+        file_ref_params=parse_bool_env(os.environ.get("FILE_REF_PARAMS")),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
         ).strip(),

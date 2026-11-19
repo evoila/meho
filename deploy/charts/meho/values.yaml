@@ -733,9 +733,14 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `fileRefParams` is rendered into `FILE_REF_PARAMS`. When `"true"`,
+  # the operation parameters that wait behind this switch show to agents
+  # and people and are accepted. See `docs/codebase/mcp.md`.
+  fileRefParams: "false"
   # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
   # `"true"`, the biggest tools on the default MCP tool list send a short
-  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  # text, and no tool sends an output schema. The inputs they accept stay
+  # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
   # -- `mcpProfileConnectorLists` is rendered into
   # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of

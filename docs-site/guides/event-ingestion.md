@@ -105,10 +105,17 @@ delivery, and the order is load-bearing:
 2. **Body cap** (`413`) — enforced before the whole body is buffered, so
    an understated `Content-Length` cannot get an oversize payload past
    it. A source may lower the cap, never raise it.
-3. **Rate-limit** (`429` with `Retry-After`) per tenant and source. Every
-   delivery counts, accepted or refused, and the limit runs before the
-   secret is read.
-4. **Authenticate** (`401`) per the source's `auth_strategy`.
+3. **Authenticate** (`401`) per the source's `auth_strategy`. A source
+   whose stored secret is empty or only spaces accepts no sender. Failed
+   checks have their own per-minute limit, the same number as the source's
+   rate limit. Once a source reaches it, MEHO answers `429` with
+   `Retry-After` to each delivery that fails the check. So bad deliveries
+   do not block the real sender. Each MEHO process keeps a copy of the
+   secret for up to one minute, so a burst of deliveries reads your
+   secret store about once per minute. A secret change through the
+   update applies to the next delivery in every MEHO process.
+4. **Rate-limit** (`429` with `Retry-After`) per tenant and source. Only
+   deliveries that passed step 3 count.
 5. **De-duplicate** — a hash of the signed data (the timestamp and the
    body for a timestamped HMAC, else the body) makes a redelivery of the
    same request collide at insert and return an idempotent `200`, so a
@@ -158,30 +165,38 @@ the direction is fixed: a filter is matched against the payload, not the
 other way round.
 
 ```bash
-# Fire the incident-triage agent on any critical, firing alert.
+# Fire the incident-triage agent on any critical, firing alert from am-prod.
 # --agent-definition takes the definition's UUID (`meho agent show incident-triage`).
 meho scheduler create --kind event \
   --agent-definition <definition-uuid> \
-  --event-filter '{"status": "firing", "labels": {"severity": "critical"}}'
+  --event-filter '{"source": {"slug": "am-prod"}, "status": "firing", "labels": {"severity": "critical"}}'
 ```
 
-Author filters against the lifted top-level fields:
+!!! note "A filter for webhook events names its source"
+
+    An event that came in through this endpoint starts a trigger only when
+    the trigger's filter names the event source: `{"source": {"slug":
+    "<source-slug>"}}` or `{"source": {"id": "<source-id>"}}`. MEHO writes
+    the `source` field itself, so a sender cannot set it. A filter without
+    a source never matches a webhook event, also when the body has the
+    same fields.
+
+Author filters against the lifted top-level fields, plus the source:
 
 | Kind | Example `--event-filter` | Matches |
 |---|---|---|
-| `alertmanager` | `{"status": "firing", "labels": {"severity": "critical"}}` | critical alerts, firing |
-| `grafana` | `{"state": "alerting", "labels": {"severity": "warning"}}` | warning alerts still alerting |
-| `vcf-operations` | `{"status": "active", "criticality": "critical"}` | active critical VMware alerts |
-| `vcf-operations` | `{"resource_kind": "VirtualMachine"}` | any alert on a VM |
-| `harbor` | `{"type": "SCANNING_COMPLETED"}` | a completed image scan |
-| `generic-json` | `{"severity": "high"}` | any body with a top-level `severity: high` |
+| `alertmanager` | `{"source": {"slug": "am-prod"}, "status": "firing", "labels": {"severity": "critical"}}` | critical alerts, firing |
+| `grafana` | `{"source": {"slug": "grafana-prod"}, "state": "alerting", "labels": {"severity": "warning"}}` | warning alerts still alerting |
+| `vcf-operations` | `{"source": {"slug": "vcf-ops"}, "status": "active", "criticality": "critical"}` | active critical VMware alerts |
+| `vcf-operations` | `{"source": {"slug": "vcf-ops"}, "resource_kind": "VirtualMachine"}` | any alert on a VM |
+| `harbor` | `{"source": {"slug": "harbor"}, "type": "SCANNING_COMPLETED"}` | a completed image scan |
+| `generic-json` | `{"source": {"slug": "hooks"}, "severity": "high"}` | any body with a top-level `severity: high` |
 
-!!! warning "An empty filter matches every event of the tenant"
+!!! warning "A filter with only a source matches every event of that source"
 
-    `{}` names no constraints, so it matches everything — every source in
-    the tenant shares one event stream. Always scope a filter to the
-    fields (and the source's `kind`) you actually mean, or an unrelated
-    alert will wake your agent.
+    `{"source": {"slug": "am-prod"}}` matches every event from `am-prod`.
+    Scope a filter to the fields you actually mean, or an unrelated alert
+    will wake your agent. An empty filter `{}` matches no webhook event.
 
 ## What fires, and how it stays governed
 
@@ -215,8 +230,9 @@ dispatch, on the audit ledger.
 |---|---|---|
 | Deliveries return `401` | The slug is wrong, the source is paused, the source has no secret yet, or the signature or secret did not verify — the answer is the same for all of them on purpose, and the reason is never returned. | Confirm the slug and that the source is active with a secret set, then re-check the sender's secret and signature header against the source's `auth_strategy`. The server log names the reason. |
 | Deliveries return `503 secret_unavailable` | MEHO could not read the source's secret from Vault. Intake reads it with the check-runner identity, so that role's policy must cover `secret/data/tenants/+/event-sources/*`. | Give the check-runner Vault role read access to the event-source secrets ([`docs/cross-repo/vault-provisioning.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md)). |
-| Ingest returns `202` (or `200` for a repeat of the same delivery) but no agent run fires | The event was accepted but no `event` trigger's filter matched it. | Compare the trigger's `--event-filter` against the lifted top-level fields; test with a broader filter first. |
-| One alert fires many agent runs | A filter is too broad (in the limit, `{}` matches everything). | Tighten the filter to the fields and source `kind` you mean. |
-| A source registered but ingest still fails closed | It was registered without a secret. | Set the secret with an update before pointing the sender at it. |
+| Ingest returns `202` (or `200` for a repeat of the same delivery) but no agent run fires | The event was accepted but no `event` trigger's filter matched it. A filter without `source` never matches a webhook event. | Add `"source": {"slug": "<source-slug>"}` to the trigger's `--event-filter`, then compare the rest against the lifted top-level fields. |
+| One alert fires many agent runs | A filter is too broad (in the limit, a filter with only the source matches every event of that source). | Tighten the filter to the fields you mean. |
+| A source registered but ingest still fails closed | It was registered without a secret. | Set the secret with an update before pointing the sender at it. An empty secret, or one of only spaces, is refused with `422`. |
+| A secret change answers `503 secret_renew_failed` | The new secret is stored in Vault, but MEHO could not reach Valkey to tell every MEHO process to use it. | Check Valkey, then send the change again. |
 
 **Next:** [Satellite gateway](satellite-gateway.md).

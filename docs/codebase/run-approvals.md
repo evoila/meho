@@ -38,8 +38,10 @@ status. MEHO records the decision; there is no second-person step.
   never deleted. The partial unique index `run_approval_open_run_idx`
   lets one run hold at most one open row (see below).
 - `Tenant.run_approval_target_kinds_enabled` (migration `0143`, default
-  `false`): the tenant setting for target kinds. It is set with the
-  settings file (`policies.run_approval_target_kinds`).
+  `false`): the tenant setting for target kinds
+  (`policies.run_approval_target_kinds`). Only the settings file sets it;
+  turning it on applies only in the web console, which has no settings
+  page yet.
 - `operations/run_approval_schemas.py`: `RunApprovalEntry`,
   `RunApprovalCreate`, `RunApprovalRevoke`, `RunApprovalRead`
   (`status`: `pending`, `approved`, `revoked`, `ended`, `expired`).

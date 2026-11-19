@@ -105,6 +105,7 @@ async def _submit(*, expires_at: datetime | None = None) -> ApprovalRequest:
             params_hash=compute_params_hash(_PARAMS),
             expires_at=expires_at,
             idempotency_key=_KEY,
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request

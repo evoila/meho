@@ -144,8 +144,9 @@ output schema then sends one short line as its text, and the full result
 only in `structuredContent`. Errors and tools without an output schema
 still send the full text. Use it only with a client that gives the model
 `structuredContent`: a client that reads only the text (for example
-Cursor) would see only the short line. A value other than `structured` is
-refused with HTTP 400.
+Cursor) would see only the short line. With `texts=short`, no tool
+declares an output schema, so this option then changes nothing. A value
+other than `structured` is refused with HTTP 400.
 
 ## The operator planes (behind `mcp:admin`)
 

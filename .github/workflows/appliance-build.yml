@@ -8,11 +8,21 @@
 # Runs by hand (workflow_dispatch) with a release tag. It fetches the
 # signed form-2 download of that tag from the GitHub release, checks the
 # signature and the checksum, builds the OVA, and keeps the OVA,
-# SHA256SUMS and the CIS scan's result list (#4640) as workflow artifacts.
-# Publishing is #4814. A run on every release tag comes once the release
-# test exists (#4816).
+# SHA256SUMS-ova and the CIS scan's result list (#4640) as workflow
+# artifacts. A run on every release tag comes once the release test
+# exists (#4816).
 #
-# Runner: the lab's self-hosted pool, which must reach the lab's vCenter
+# Two jobs. The build job runs on the lab's runner, reads nothing secret
+# but the lab's own settings, and gets only read rights. The publish job
+# runs on a GitHub-hosted runner. It checks the OVA, signs SHA256SUMS with
+# cosign (keyless, like linux-download.yml) and checks the signature. A
+# release run (input publish, started from the tag itself) also makes and
+# signs the OS-package file and uploads the files to Google Cloud Storage.
+# Only a release run uses the GitHub environment "release", which holds
+# the signing key (secret MEHO_OS_PACKAGES_SIGNING_KEY). See
+# docs/RELEASING.md.
+#
+# Build runner: the lab's self-hosted pool, which must reach the lab's vCenter
 # and the build VM's address, and GitHub for the CIS content. The build VM
 # must reach the Ubuntu archive. The lab's test place is an internal ticket.
 # The vCenter login is in repository secrets
@@ -24,7 +34,9 @@
 # a mask does not reach a file. The build SSH key is made new for every run
 # and never stored.
 #
-# Permissions: read-only. The job runs no pull-request code.
+# Permissions: the build job is read-only. Only the publish job may get a
+# GitHub sign-in token (for cosign and for the Google Cloud sign-in). No
+# job runs pull-request code.
 
 name: appliance-build
 
@@ -35,6 +47,11 @@ on:
         description: The release tag whose form-2 download to build from, for example v0.40.0.
         required: true
         type: string
+      publish:
+        description: Make and sign the OS-package file, and upload the files to the release bucket.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -52,6 +69,8 @@ jobs:
     # The form-2 install on the build VM takes up to 30 minutes, the clean
     # and the export about as long again.
     timeout-minutes: 180
+    permissions:
+      contents: read
     env:
       TAG: ${{ inputs.tag }}
     steps:
@@ -161,6 +180,14 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/ova"
           deploy/appliance/build.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
 
+      - name: Write the OVA checksum for the publish job
+        # Not signed: the publish job checks it after the download, then
+        # signs its own SHA256SUMS.
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/ova"
+          sha256sum "meho-appliance-${TAG#v}.ova" > SHA256SUMS-ova
+
       - name: Write the summary
         if: always()
         run: |
@@ -170,15 +197,15 @@ jobs:
           {
             echo "## Appliance OVA"
             echo ""
-            if [[ -f SHA256SUMS ]]; then
+            if [[ -f SHA256SUMS-ova ]]; then
               echo "- File: \`meho-appliance-${TAG#v}.ova\` ($(stat -c %s "meho-appliance-${TAG#v}.ova") bytes)"
-              echo "- sha256: \`$(cut -d ' ' -f 1 SHA256SUMS)\`"
+              echo "- sha256: \`$(cut -d ' ' -f 1 SHA256SUMS-ova)\`"
             else
               echo "- The build failed. Read the log of the step \"Build the OVA\"."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Keep the OVA, the checksums and the CIS scan as artifacts
+      - name: Keep the OVA, its checksum and the CIS scan as artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: meho-appliance-ova
@@ -186,9 +213,194 @@ jobs:
           # of the lab.
           path: |
             ${{ runner.temp }}/ova/meho-appliance-*.ova
-            ${{ runner.temp }}/ova/SHA256SUMS
+            ${{ runner.temp }}/ova/SHA256SUMS-ova
             ${{ runner.temp }}/ova/meho-appliance-*-cis.txt
           if-no-files-found: error
           retention-days: 3
           # The disk in the OVA is already compressed (stream-optimized).
           compression-level: 0
+
+      - name: Keep the OS update packages for the publish job
+        # The .deb files are the OS updates of the build day, in
+        # ${RUNNER_TEMP}/os-debs. When there are none, no artifact is kept,
+        # and the step "Download the OS update packages" of a release run
+        # fails.
+        if: ${{ inputs.publish }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-appliance-os-debs
+          path: ${{ runner.temp }}/os-debs/*.deb
+          if-no-files-found: warn
+          retention-days: 3
+
+  publish:
+    name: Sign and publish the appliance release files
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # A release run is a run with the input publish, started from the tag
+    # itself ("Use workflow from" is the tag). Only a release run uses the
+    # environment "release": it allows tags v* only, needs the release
+    # owner's approval, and holds the signing key. Any other run has no
+    # environment, so it cannot read the key.
+    environment: ${{ (inputs.publish && github.ref == format('refs/tags/{0}', inputs.tag)) && 'release' || '' }}
+    permissions:
+      contents: read
+      # The GitHub sign-in token for cosign keyless signing and for the
+      # Google Cloud sign-in (workload identity federation).
+      id-token: write
+    env:
+      TAG: ${{ inputs.tag }}
+      RELEASE_RUN: ${{ (inputs.publish && github.ref == format('refs/tags/{0}', inputs.tag)) && '1' || '' }}
+    steps:
+      - name: Check the settings of the environment release
+        # The workflow cannot enforce these two settings, so a release run
+        # reads them first and stops before the key is read. Without the
+        # tag rule, a branch run could use the environment and read the
+        # key. Without a required reviewer, anyone with write access could
+        # start a release run from an existing tag. This public repository
+        # lets the job's read-only token read both.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="repos/${GITHUB_REPOSITORY}/environments/release"
+          if ! environment=$(gh api "${api}"); then
+            echo "::error::Cannot read the environment release. Ask the release owner to check it in the repository settings."
+            exit 1
+          fi
+          reviewers=$(jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' <<<"${environment}")
+          if [[ "${reviewers}" -lt 1 ]]; then
+            echo "::error::The environment release has no required reviewer. Ask the release owner to add the release owner and the backup person as required reviewers."
+            exit 1
+          fi
+          if [[ "$(jq -r '.deployment_branch_policy.custom_branch_policies // false' <<<"${environment}")" != "true" ]]; then
+            echo "::error::The environment release has no tag rule. Ask the release owner to allow tags v* only."
+            exit 1
+          fi
+          if ! policies=$(gh api --paginate "${api}/deployment-branch-policies" --jq '.branch_policies[]'); then
+            echo "::error::Cannot read the tag rule of the environment release. Ask the release owner to check it in the repository settings."
+            exit 1
+          fi
+          # Exactly one rule: the tag rule v*. Any other rule lets more refs in.
+          if [[ "$(jq -s 'length == 1 and .[0].type == "tag" and .[0].name == "v*"' <<<"${policies}")" != "true" ]]; then
+            echo "::error::The environment release must allow tags v* only. Ask the release owner to fix its deployment rule."
+            exit 1
+          fi
+          echo "The environment release has a required reviewer and allows tags v* only."
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        # Same pin as linux-download.yml.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Download the OVA from the build job
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: meho-appliance-ova
+          path: ${{ runner.temp }}/ova
+
+      - name: Check the OVA checksum
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/ova"
+          sha256sum -c SHA256SUMS-ova
+
+      - name: Say that this run publishes nothing
+        if: ${{ env.RELEASE_RUN != '1' }}
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [[ "${PUBLISH}" == "true" ]]; then
+            echo "::warning::The input publish is on, but the run did not start from the tag ${TAG}. This run signs SHA256SUMS with cosign and checks it, and publishes nothing. Start the run from the tag to publish."
+          else
+            echo "This run signs SHA256SUMS with cosign and checks it, and publishes nothing."
+          fi
+
+      - name: Download the OS update packages
+        if: ${{ env.RELEASE_RUN == '1' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: meho-appliance-os-debs
+          path: ${{ runner.temp }}/os-debs
+
+      - name: Install apt-utils
+        # os-packages.sh needs apt-ftparchive.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        run: |
+          set -euo pipefail
+          command -v apt-ftparchive >/dev/null 2>&1 && exit 0
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apt-utils
+
+      - name: Make and sign the OS-package file
+        # The key is an environment secret of "release", so only a release
+        # run can read it. MEHO_RELEASE=1 makes the script read the key
+        # only from MEHO_OS_PACKAGES_SIGNING_KEY, refuse a test key, and
+        # refuse any key whose fingerprint is not the variable
+        # MEHO_OS_PACKAGES_KEY_FINGERPRINT.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        env:
+          MEHO_RELEASE: "1"
+          MEHO_OS_PACKAGES_SIGNING_KEY: ${{ secrets.MEHO_OS_PACKAGES_SIGNING_KEY }}
+          MEHO_OS_PACKAGES_KEY_FINGERPRINT: ${{ vars.MEHO_OS_PACKAGES_KEY_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/os-debs"
+          deploy/appliance/os-packages.sh "${TAG#v}" "${RUNNER_TEMP}/os-debs" "${RUNNER_TEMP}/ova"
+
+      - name: Sign the checksums with cosign
+        # SHA256SUMS lists the OVA and, on a release run, the OS-package
+        # file. Same signing as SHA256SUMS-linux in linux-download.yml; the
+        # bundle file sits next to it.
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/ova"
+          shopt -s nullglob
+          sha256sum "meho-appliance-${TAG#v}.ova" meho-appliance-*-os-packages.tar > SHA256SUMS
+          cosign sign-blob --yes --bundle=SHA256SUMS.cosign.bundle SHA256SUMS
+          cosign verify-blob \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/appliance-build.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle SHA256SUMS.cosign.bundle \
+            SHA256SUMS
+
+      - name: Sign in to Google Cloud
+        # Workload identity federation: no stored key. The provider and the
+        # service account are secrets of the environment "release", not
+        # variables: the job log prints the inputs of an action, and GitHub
+        # masks only secrets there. The service account may only create and
+        # read objects in the release bucket. The provider's condition must
+        # allow only this repository and the environment "release".
+        if: ${{ env.RELEASE_RUN == '1' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.MEHO_RELEASE_GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.MEHO_RELEASE_GCP_SERVICE_ACCOUNT }}
+
+      - name: Upload the files to the release bucket
+        # The script stops with a plain message when the bucket is not set
+        # up or does not exist, never creates a bucket, never changes who
+        # can read it, and never overwrites a published file.
+        if: ${{ env.RELEASE_RUN == '1' }}
+        env:
+          MEHO_RELEASE_BUCKET: ${{ vars.MEHO_RELEASE_BUCKET }}
+        run: |
+          set -euo pipefail
+          deploy/appliance/upload-release.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
+
+      - name: Keep the signed checksums as artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: meho-appliance-signed-checksums
+          path: |
+            ${{ runner.temp }}/ova/SHA256SUMS
+            ${{ runner.temp }}/ova/SHA256SUMS.cosign.bundle
+            ${{ runner.temp }}/ova/meho-appliance-*-os-packages.tar
+          if-no-files-found: error
+          retention-days: 3

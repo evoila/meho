@@ -544,6 +544,18 @@ the login is never its own approver" in [approvals.md](approvals.md)).
 Both functions add the per-call mark, so no connector has to set it a
 second time.
 
+**How MEHO decides that a group change gives platform admin rights.**
+`group.member.add` and `group.update_attributes` count as "gives platform
+admin" (the grant fact `platform_admin`) when the group or a parent group
+has the attribute `platform_admin=true`, when the group is
+`MEHO-Platform-Admins` or its path is under `/MEHO-Platform-Admins/`, when
+the group gives the realm role named exactly as in `JWT_PLATFORM_ADMIN_ROLE_NAME`, with the same letter case (when set,
+read from `role-mappings/realm/composite`), or when the new attributes of
+`group.update_attributes` set `platform_admin`. The name alone never
+decides. When MEHO cannot read the group, a parent group or its roles, the
+fact is unknown and a platform admin must approve. The run reads the group
+again with the same rule (`ops_write_grant_platform.py`).
+
 **The approval card.** `connectors/keycloak/ops_write_rights_card.py`
 shows the object as it is now next to the new values:
 
@@ -582,11 +594,62 @@ A client attribute with a secret in it is hidden like the client secret:
 `client.secret.rotated` (the old secret during a rotation) is on the
 Keycloak list of secret fields in `redaction.py`.
 
-The other changes of rights keep the card they had. The cards of
-`role_mapping.assign`, `group.member.add`, `user.reset_password` and the
-two login flow writes do not yet show the object as it is now (the roles
-the user has now, the members the group has now, the flow that is bound
-now).
+**More cards with the object as it is now.**
+`connectors/keycloak/ops_write_current_state.py` adds the object as it is
+now to the cards of more changes of rights:
+
+| Write | Card key | What it holds |
+|---|---|---|
+| `role_mapping.assign` | `current_roles` | the realm roles given to the user directly now |
+| `role_mapping.client.assign` | `current_roles` | the roles of that client given to the user directly now |
+| `group.member.add` | `current_group` | the first 50 members now (`id`, `username`), `member_count`, `members_complete`, `members_not_shown`, and the realm and client roles given to the group directly |
+| `user.reset_password`, `user.enable` | `current_user` | the user as stored: `username`, `enabled`, `required_actions`. Never a credential, a password or an attribute |
+| `authflow.ensure_passkey_code_skip` | `current_binding` | the realm's browser flow now |
+| `authflow.ensure_approval_flow`, `authflow.ensure_approval_touch` | `current_binding` | the realm's browser flow, and the client's own browser flow now (id and name; `None` when the client uses the realm's flow) |
+
+The members are read in pages of 100, up to 1,000, and one row more to
+know whether there are more. `member_count` is the number read (at most
+1,000); `members_complete: false` means the group has more. The card
+lists the first 50 members by id and then one line in
+`members_not_shown`, for example "950 more members not shown" (or "More
+than 950 more members not shown" past 1,000). When MEHO
+cannot read the state (no live connection, an unknown user, group or
+client, an error, an odd answer), the card says
+`<key>_available: false`, has no `<key>`, and says in `<key>_note`:
+"MEHO could not read the object as it is now; an approved run will be
+refused." MEHO logs `approval_card_state_not_read` with the op and the
+card key.
+
+**The approved run checks the state again.** Each of these writes is
+registered with `register_state_pin` (`operations/approval_state_pin.py`,
+see "State on the card" in [approvals.md](approvals.md)). Right before the
+approved run, MEHO builds the card again. When the state changed while
+the request waited, the run is refused: "The object changed since the
+approval; send the request again." When MEHO could not read the state,
+when the request waited or now, the run is refused too. Nothing is sent
+to Keycloak. A re-run after a first run that failed part way is refused
+when the first run already changed the object: the state is no longer the
+one the approver saw. Send the request again.
+
+For `group.member.add` the run compares only the group id and the roles
+the group gives, not the member list. The new member gets the group's
+roles; who else is in the group does not change that. So a group with
+more than 1,000 members runs, and a member who joined or left while the
+request waited does not refuse the run.
+
+The person who approves always sees the state. What the caller gets back
+from `preview_operation` and from `meho_approvals_get` and
+`meho_approvals_list` follows the same switch `KEYCLOAK_RIGHTS_CHANGE_CARDS`:
+off, these keys (`<key>`, `<key>_available`, `<key>_note`) are left out
+(`register_person_only_preview_keys`). The run check is always on: the
+switch decides only which callers get these card keys. The REST read
+`GET /api/v1/approvals/{id}` returns the keys whatever the switch says.
+
+**Guard.** `rights_changes.py` lists, for each change of rights, the card
+key that shows the object as it is now (`CURRENT_STATE_ON_CARD`), or why
+there is none: the write makes a new object (`NEW_OBJECT_OPS`).
+`backend/tests/test_keycloak_rights_change_current_state.py` fails when a
+change of rights is on neither list.
 
 **MEHO's own realm.** The checks that are stricter in MEHO's own login
 realm read the realm from Keycloak (`GET /admin/realms/{realm}`) and

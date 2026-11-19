@@ -167,6 +167,17 @@ identity and adds them to every login, with any role. So the person also
 leaves the Vault groups of Step 6 (item 4), and you check each role
 (item 5).
 
+A tenant with an entry in `VAULT_OIDC_ROLE_BY_TENANT` also always gets the
+MEHO folder check. Every Vault path that a caller or a target names for
+this tenant must be in the tenant's folder:
+
+- When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty, the folder is
+  `secret/tenants/<tenant-uuid>/`.
+- When `VAULT_KV_TENANT_SCOPE_PREFIX` is not empty, the folder of that
+  setting applies.
+- With either setting, MEHO also checks a person's read of a target's
+  secret when a call runs on that target.
+
 1. **Write a policy for this tenant's path only.** Put the tenant UUID
    into the path itself. A read-only example:
 
@@ -240,6 +251,14 @@ leaves the Vault groups of Step 6 (item 4), and you check each role
     about this setting is in
     [deploying.md](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes)
     (row v0.35.13).
+
+    Optional: set `VAULT_OIDC_ROLE_TENANTS` to the tenant ids that may
+    use the shared login role `VAULT_OIDC_ROLE`, separated by commas. A
+    tenant that is not in this list and has no entry in
+    `VAULT_OIDC_ROLE_BY_TENANT` then gets a clear refusal, and MEHO tries
+    no Vault login. The list also covers the login of checks (Sensors)
+    and of incoming events when `VAULT_CHECK_RUNNER_ROLE` is empty.
+    Leave it empty on the built-in Vault.
 
 4. **Take the person out of the Vault groups of Step 6.** The roles
    above log in with `user_claim: sub` on the same auth mount as the

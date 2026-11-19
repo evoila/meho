@@ -6448,6 +6448,10 @@ class RunApproval(Base):
     # JWT ``sub`` of the service principal that asked. Soft reference, no FK
     # -- same discipline as ServicePrincipalGrant.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # OAuth client id of the login that asked. MEHO finds the add-on pairing
+    # by it when a person approves the list (operations/people_behind.py).
+    # NULL on a list from before migration 0176.
+    principal_client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_ref: Mapped[str] = mapped_column(Text, nullable=False)
     entries: Mapped[list[dict[str, object]]] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=False

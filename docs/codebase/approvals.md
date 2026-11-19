@@ -1850,7 +1850,7 @@ request is made (`create_pending_request`):
 The checks investigator runs as an agent (`run_scheduled`), so its
 requests follow the agent row. A sensor never makes a request.
 
-**What MEHO stores.** Migration `0176` adds three columns:
+**What MEHO stores.** Migration `0176` adds four columns:
 
 - `approval_request.people_behind` — JSON list of
   `{"sub", "name", "why"}`, one entry per person and reason. `NULL` for a
@@ -1865,6 +1865,10 @@ requests follow the agent row. A sensor never makes a request.
   was created, so an edit of a deleted definition with the same name does
   not count.
 - `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`.
+- `run_approval.principal_client_id` — the client id of the add-on login
+  that asked for a run approval list. At approve time MEHO finds the
+  add-on pairing by the login id and by this client id. `NULL` on a list
+  from before the upgrade: then MEHO uses the login id alone.
 
 **The rule.** One shared check, `_check_approver_group`, used by every
 approve door (`approve_request`, so REST approve and decide, the CLI and
@@ -1899,12 +1903,15 @@ every door and fails when a new function writes an approval without the
 check.
 
 **Audit.** When a person behind the login approves, the
-`approval.decision` row and the `approval.approved` step event carry
-`self_approved: true`, `approver_behind_requester: true` and
-`approver_behind_why` (the reason codes).
+`approval.decision` audit row carries `self_approved: true`,
+`approver_behind_requester: true` and `approver_behind_why` (the reason
+codes). The `approval.approved` step event of an add-on carries only
+`self_approved: true`.
 
 **Where people see it.** REST `ApprovalRequestView.people_behind`
-(`sub`, `name`, `why`, `why_text`) and `people_behind_known`; the web
+(`sub`, `name`, `why`, `why_text`) and `people_behind_known`, filled only
+when a person calls the API (an agent, service or runner login reads
+`null`); the web
 console request card ("Set up by Ann. Grant by Bob.") and the request
 modal ("Behind it"); `meho approvals show` ("Behind it:"). When MEHO
 knows nobody, each says "Set up by: not known".

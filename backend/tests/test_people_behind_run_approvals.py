@@ -6,9 +6,11 @@
 An add-on's service login asks for a list of operations for one run. MEHO
 looks up the people behind the login when a person approves the list: who
 paired or owns the add-on, and who gave one of its standing grants in force.
+MEHO finds the pairing by the login id, and by the client id that MEHO
+stored on the list when the add-on asked.
 
-* A person behind it may approve the list only when they may approve their
-  own change (a MEHO-SA-Operator or an Admin).
+* A person behind it may approve the list only when they are a person who
+  may approve their own change.
 * A list with a change of rights needs an admin who is not behind it.
 * When MEHO knows nobody behind the login, only an Admin may approve.
 * The lookup runs at approve time, so a list that waited across an upgrade
@@ -55,9 +57,9 @@ def _person(sub: str, *, role: TenantRole = TenantRole.OPERATOR, sa: bool = Fals
     )
 
 
-async def _ask() -> uuid.UUID:
+async def _ask(asker: Operator | None = None) -> uuid.UUID:
     read = await RunApprovalService().request(
-        _operator(),
+        asker or _operator(),
         RunApprovalCreate(
             work_ref=_RUN,
             entries=[RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP)],
@@ -110,6 +112,33 @@ async def test_the_pairing_owner_counts_too() -> None:
         )
         await session.commit()
     approval_id = await _ask()
+
+    with pytest.raises(RunApprovalGroupError, match="own_change"):
+        await RunApprovalService().approve(_person("pairing-owner"), approval_id)
+    assert (await RunApprovalService().approve(_person("someone-else"), approval_id)).status == (
+        "approved"
+    )
+
+
+async def test_a_pairing_without_a_service_account_id_is_found_by_the_client_id() -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            AddonPairing(
+                tenant_id=_TENANT_A,
+                name="builder",
+                keycloak_client_id="addon:builder",
+                keycloak_internal_id="kc-builder",
+                service_account_sub=None,
+                owner_sub="pairing-owner",
+                contract_version=1,
+                addon_contract_version=1,
+                addon_min_backplane_version=1,
+                created_by_sub="pairing-owner",
+            )
+        )
+        await session.commit()
+    asker = _operator().model_copy(update={"client_id": "addon:builder"})
+    approval_id = await _ask(asker)
 
     with pytest.raises(RunApprovalGroupError, match="own_change"):
         await RunApprovalService().approve(_person("pairing-owner"), approval_id)

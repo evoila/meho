@@ -247,15 +247,17 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
 
 
 async def _check_people_behind(
-    session: AsyncSession, operator: Operator, requester_sub: str
+    session: AsyncSession, operator: Operator, row: RunApproval
 ) -> frozenset[str]:
     """Apply the rule of the people behind the service login that asked.
 
     MEHO looks them up now (:mod:`~meho_backplane.operations.people_behind`):
     who paired or owns its add-on, and who gave one of its standing grants
-    in force. A person behind it may approve the list only when they may
-    approve their own change (:attr:`Operator.may_self_approve`). When MEHO
-    knows nobody behind the login, only an admin may approve the list.
+    in force. The pairing is found by the login id and by the client id
+    stored on the list when the add-on asked. A person behind it may
+    approve the list only when they may approve their own change
+    (:attr:`Operator.may_self_approve`). When MEHO knows nobody behind the
+    login, only an admin may approve the list.
     Returns the subs of the people behind, for the rights-change check.
     """
     from meho_backplane.operations.approval_queue import is_admin_approver
@@ -263,8 +265,8 @@ async def _check_people_behind(
     people = await find_people_behind(
         session,
         tenant_id=operator.tenant_id,
-        sub=requester_sub,
-        client_id=None,
+        sub=row.principal_sub,
+        client_id=row.principal_client_id,
         kind=PrincipalKind.SERVICE.value,
     )
     if people_behind_unknown(PrincipalKind.SERVICE.value, people):
@@ -509,6 +511,7 @@ class RunApprovalService:
             row = RunApproval(
                 tenant_id=operator.tenant_id,
                 principal_sub=operator.sub,
+                principal_client_id=operator.client_id,
                 work_ref=payload.work_ref,
                 entries=[e.model_dump(mode="json", exclude_none=True) for e in payload.entries],
                 reason=payload.reason,
@@ -577,7 +580,7 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
-            behind = await _check_people_behind(session, operator, row.principal_sub)
+            behind = await _check_people_behind(session, operator, row)
             await _check_approver_group(session, operator, row.entries, row.principal_sub, behind)
             row.approved_at = now
             row.approved_by_sub = operator.sub

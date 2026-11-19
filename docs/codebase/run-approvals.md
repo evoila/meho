@@ -231,7 +231,9 @@ approve. With the switch off, nothing changes.
 
 `RunApprovalService.approve` looks up the people behind the service login
 that asked (`_check_people_behind`): who paired or owns its add-on and who
-gave one of its standing grants in force. The lookup runs at approve time,
+gave one of its standing grants in force. MEHO finds the add-on pairing by
+the login id, and by the client id it stored on the list when the add-on
+asked (`run_approval.principal_client_id`). The lookup runs at approve time,
 so a list that waited across an upgrade follows the rule too.
 
 - A person behind the login may approve the list only when they may approve

@@ -3,8 +3,9 @@
 
 """Behavioural tests for ``0176_add_people_behind_columns``.
 
-The migration adds three nullable columns: ``approval_request.people_behind``,
-``agent_definition.updated_by_sub`` and ``runbook_runs.reassigned_by``. It
+The migration adds four nullable columns: ``approval_request.people_behind``,
+``agent_definition.updated_by_sub``, ``runbook_runs.reassigned_by`` and
+``run_approval.principal_client_id``. It
 fills ``updated_by_sub`` from the newest successful ``agent.edit`` audit row
 of the definition, else from ``created_by_sub``. An edit from before the
 definition was created (an edit of a deleted definition with the same name)
@@ -38,6 +39,7 @@ _NEW = {
     "approval_request": "people_behind",
     "agent_definition": "updated_by_sub",
     "runbook_runs": "reassigned_by",
+    "run_approval": "principal_client_id",
 }
 _TENANT = "00000000-0000-0000-0000-000000000175"
 _OTHER_TENANT = "00000000-0000-0000-0000-000000000176"
@@ -130,7 +132,7 @@ def audit_payload(op_id: str, agent_name: str) -> str:
     return f'{{"op_id": "{op_id}", "agent_name": "{agent_name}"}}'
 
 
-def test_up_adds_three_nullable_columns_and_down_drops_them(
+def test_up_adds_four_nullable_columns_and_down_drops_them(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg

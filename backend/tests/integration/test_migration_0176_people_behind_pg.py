@@ -8,7 +8,7 @@ The SQLite twin is
 holds the seed data. On PostgreSQL the fill reads the ``jsonb`` payload of
 the audit rows with ``->>``. The tests check:
 
-* the upgrade adds the three columns and the downgrade drops them;
+* the upgrade adds the four columns and the downgrade drops them;
 * ``agent_definition.updated_by_sub`` comes from the newest successful
   ``agent.edit`` audit row of the definition, else from ``created_by_sub``;
   an edit from before the definition was created does not count.

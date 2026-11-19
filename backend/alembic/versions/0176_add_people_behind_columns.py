@@ -13,7 +13,7 @@ Why
 A request made by an agent, a service login or a runner counts as a
 request of the people who set that login up, changed it or started its
 run (``docs/codebase/approvals.md``, "The people behind a request").
-MEHO needs three facts it does not keep yet:
+MEHO needs four facts it does not keep yet:
 
 * ``approval_request.people_behind`` -- JSON, nullable. The list
   ``[{"sub", "name", "why"}]`` MEHO found when the request was made.
@@ -26,11 +26,16 @@ MEHO needs three facts it does not keep yet:
   the same name does not count.
 * ``runbook_runs.reassigned_by`` -- Text, nullable. The person who last
   handed the run to a new assignee.
+* ``run_approval.principal_client_id`` -- Text, nullable. The client id
+  of the add-on login that asked for the run approval list. MEHO uses it
+  to find the add-on pairing when a person approves the list. NULL on a
+  list from before the upgrade; then MEHO finds the pairing by the login
+  id alone.
 
 Reversibility
 -------------
 
-``downgrade()`` drops the three columns. The filled values are lost; the
+``downgrade()`` drops the four columns. The filled values are lost; the
 audit rows they came from stay.
 """
 
@@ -95,15 +100,17 @@ def fill_sql(dialect: str) -> str:
 
 
 def upgrade() -> None:
-    """Add the three columns and fill ``updated_by_sub``."""
+    """Add the four columns and fill ``updated_by_sub``."""
     op.add_column("approval_request", sa.Column("people_behind", sa.JSON(), nullable=True))
     op.add_column("agent_definition", sa.Column("updated_by_sub", sa.Text(), nullable=True))
     op.add_column("runbook_runs", sa.Column("reassigned_by", sa.Text(), nullable=True))
+    op.add_column("run_approval", sa.Column("principal_client_id", sa.Text(), nullable=True))
     op.execute(sa.text(fill_sql(op.get_bind().dialect.name)))
 
 
 def downgrade() -> None:
-    """Drop the three columns."""
+    """Drop the four columns."""
+    op.drop_column("run_approval", "principal_client_id")
     op.drop_column("runbook_runs", "reassigned_by")
     op.drop_column("agent_definition", "updated_by_sub")
     op.drop_column("approval_request", "people_behind")

@@ -3944,6 +3944,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A <code>secret.move</code> whose source or sink is a <code>keycloak:</code> ref is now a change of rights. The requester never approves it, and another admin (a tenant admin or a platform admin) must. Its approval card names, for each <code>keycloak:</code> side, the Keycloak target, how MEHO connects to it (host, port, http or https, TLS check) and the reference of its admin login. The approved run works only on that target, with that connection and admin login, and MEHO refuses it before any Keycloak login when one of them changed. A move that waits for approval from before the upgrade has no such card, and MEHO refuses it when it runs: nothing is read or written.</td>
+<td>Ask another admin to approve such moves. Send a move with a <code>keycloak:</code> side that waits for approval again after the upgrade. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>The approval card of a <code>secret.move</code> to a <code>linux:</code> place now names the Linux target, its host and its SSH port. The approved run writes only to that target, host and port. A move that waits for approval from before the upgrade has no such card, and MEHO refuses it when it runs: nothing is read or written. <code>preview_operation</code>, <code>meho_approvals_get</code> and <code>meho_approvals_list</code> show the target, host and port only when the new setting <code>SECRET_MOVE_LINUX_TARGET_CARD</code> is on (off by default).</td>
 <td>Send such a waiting move again after the upgrade. No schema action.</td>
 </tr>

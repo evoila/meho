@@ -1060,10 +1060,12 @@ lines (indented JSON, an error message) and keeps the line breaks.
   body shows as `\x09`.
 - `meho docs ask` uses its own helpers (`sanitizeText`, `sanitizeBlock`
   in `cmd/docs/ask.go`) for the answer and the sources.
-- Not escaped yet: `meho sessions show` and `list`, the wiki hits of
-  `meho kb search`, `meho agent run`, `agent run-status` and
-  `agent run-events`, `meho docs read` and `docs search`, and an error
-  that a command returns as a plain Go error, which cobra prints itself.
+- Not escaped yet: the file paths of `meho sessions get`, the wiki hits
+  of `meho kb search`, `meho agent run`, `agent list`, `agent run-list`,
+  `agent run-status` and `agent run-events`, `meho runbook
+  list-templates` and `runbook runs`, `meho memory promote`, `meho docs
+  read` and `docs search`, and an error that a command returns as a
+  plain Go error, which cobra prints itself.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control

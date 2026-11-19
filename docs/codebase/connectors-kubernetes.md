@@ -1359,9 +1359,13 @@ secret-named fields inside their text values, before it builds
 `spec_excerpt`, `status_excerpt` and `fields`. It hides a secret-named
 field inside an annotation value before it cuts the value. On a
 `reveal_secret: true` call by a person, an excerpt or an annotation value
-that is not cut, and `fields`, keep the raw values: the dispatcher hides
-them in the default view and the audit copy and gives them back on the
-reveal. A cut excerpt stays hidden, also on a reveal. Both operations
+that is not cut keeps the raw values: the dispatcher hides them in the
+default view and the audit copy and gives them back on the reveal. In
+`fields` a raw value stays only where the dispatcher hides it under its
+path (`_revealed_fields`). A value cut out of its object loses the names
+around it (the `name` of an env entry, the SNMP setting next to a
+`community`), so the dispatcher cannot hide it there; such a value comes
+from the hidden object. A cut excerpt stays hidden, also on a reveal. Both operations
 build their rows in a worker thread, so a large text value does not hold
 up other calls. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next

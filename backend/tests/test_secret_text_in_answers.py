@@ -519,6 +519,49 @@ async def test_cr_info_reveal_by_a_person_returns_the_raw_excerpt_and_fields(
     assert _shown_fakes(json.dumps(row.raw_payload)) == []
 
 
+def _custom_resource_with_context_secrets() -> dict[str, Any]:
+    return {
+        "apiVersion": "db.example.test/v1",
+        "kind": "Database",
+        "metadata": {"name": "app", "namespace": "team-a"},
+        "spec": {
+            "password": _FAKE,
+            "env": [
+                {"name": "DB_USER", "value": "app"},
+                {"name": "DB_PASSWORD", "value": _FAKE_ENV},
+            ],
+            "snmpVersion": "2c",
+            "community": _FAKE_SNMP,
+        },
+    }
+
+
+_CONTEXT_PATHS = ["spec.password", "spec.env.1.value", "spec.community", "spec.env.0.value"]
+
+
+async def _custom_resource_context_info(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    return custom_resource_row(_custom_resource_with_context_secrets(), _CONTEXT_PATHS)
+
+
+async def test_cr_info_reveal_keeps_no_raw_field_the_dispatcher_cannot_hide(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(_custom_resource_context_info, stub_embedding_service, op_id="k8s.cr.info")
+
+    result = await _read(_operator(PrincipalKind.USER), reveal=True, op_id="k8s.cr.info")
+
+    assert result.status == "ok", result.error
+    fields = result.result["fields"]
+    assert fields["spec.password"] == _FAKE
+    assert fields["spec.env.0.value"] == "app"
+    assert _FAKE_ENV not in json.dumps(fields)
+    assert _FAKE_SNMP not in json.dumps(fields)
+    row = await _audit_row("k8s.cr.info")
+    assert _shown_fakes(json.dumps(row.raw_payload)) == []
+
+
 def test_cr_excerpt_that_is_cut_stays_hidden_on_a_reveal() -> None:
     token = reveal_secret_var.set(True)
     try:

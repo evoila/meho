@@ -259,6 +259,53 @@ def _with_hidden_blocks(obj: dict[str, Any], *, is_chart: bool) -> dict[str, Any
     }
 
 
+def _keep_raw_where_hidden(raw: Any, view: Any, hidden: Any) -> Any:
+    """*hidden*, with the raw value put back where *view* hides it.
+
+    *view* is the dispatcher's default view of *raw*. Where it hides a
+    value, the dispatcher also hides it in the audit copy and gives it back
+    on a reveal, so the raw value can stay. Everywhere else the value comes
+    from *hidden*. Where *view* hides a whole block, the raw block stays;
+    where only the shapes differ, *hidden* stays.
+    """
+    if type(raw) is type(view) and raw == view:
+        return hidden
+    if isinstance(raw, dict) and isinstance(view, dict) and isinstance(hidden, dict):
+        return {
+            key: _keep_raw_where_hidden(value, view.get(key), hidden.get(key))
+            for key, value in raw.items()
+        }
+    if (
+        isinstance(raw, list)
+        and isinstance(view, list)
+        and isinstance(hidden, list)
+        and len(raw) == len(view) == len(hidden)
+    ):
+        return [_keep_raw_where_hidden(*items) for items in zip(raw, view, hidden, strict=True)]
+    if isinstance(view, dict | list):
+        return hidden
+    return raw
+
+
+def _revealed_fields(
+    obj: dict[str, Any], hidden: dict[str, Any], paths: list[str]
+) -> tuple[dict[str, Any], list[str]]:
+    """``(fields, fields_missing)`` of a reveal call.
+
+    A path's value is cut out of its object, so the dispatcher no longer
+    sees the names around it (the ``name`` of an env entry, the SNMP
+    setting next to a ``community``). So a raw value stays only where the
+    dispatcher's default view of ``fields`` hides it; every other value
+    comes from *hidden*. The ``k8s.cr`` operations declare no plain fields,
+    so this view is the one the dispatcher builds.
+    """
+    raw_found, missing = select_fields(obj, paths)
+    hidden_found, _ = select_fields(hidden, paths)
+    view, _ = scrub_secret_named_values({"fields": raw_found}, hide_numbers=True)
+    view = hide_secret_text_leaves(view)
+    return _keep_raw_where_hidden(raw_found, view["fields"], hidden_found), missing
+
+
 def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) -> dict[str, Any]:
     """Project a raw custom-resource dict into the bounded wire shape.
 
@@ -300,7 +347,7 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
     ``status_excerpt`` and ``fields`` are built
     (:func:`_hide_secret_fields`). So is a secret-named field inside an
     annotation value, before the value is cut. A reveal keeps what is not
-    cut raw, for the dispatcher (:func:`_excerpt`).
+    cut raw, for the dispatcher (:func:`_excerpt`, :func:`_revealed_fields`).
     ``k8s.secret.list`` / ``k8s.secret.info`` are the dedicated way to
     look at a core Secret's key names.
 
@@ -352,7 +399,8 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
             obj.get("status"), CR_SPEC_EXCERPT_MAX_BYTES
         )
     if fields:
-        row["fields"], row["fields_missing"] = select_fields(obj if reveal else hidden, fields)
+        read = _revealed_fields(obj, hidden, fields) if reveal else select_fields(hidden, fields)
+        row["fields"], row["fields_missing"] = read
     if is_secret:
         row["data"] = obj.get("data") or {}
         row["string_data"] = obj.get("stringData") or {}

@@ -337,8 +337,7 @@ async def test_one_approval_runs_both_dangerous_steps_once(
     Either the whole run waits (a ``dangerous`` multi-step operation sent with
     a token) or its first step waits. After one approval, given with a web
     click or on the command line, the resume runs both steps: the approval of
-    the run covers the second step, so nothing waits again and nothing is
-    refused with ``composite_resume_multi_gate_unsupported``.
+    the run covers the second step, so nothing waits again.
     """
     await h.register_child(stub_embedding_service)
     await h.register_composite(

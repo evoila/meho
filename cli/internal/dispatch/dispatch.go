@@ -210,9 +210,9 @@ func parkedNote(extras json.RawMessage) string {
 func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	fmt.Fprintf(w, "  %s\n", ParkedHint)
 	if note := parkedNote(extras); note != "" {
-		fmt.Fprintf(w, "  %s\n", note)
+		fmt.Fprintf(w, "  %s\n", output.SafeText(note))
 	}
-	if id := ParkedApprovalID(extras); id != "" {
+	if id := output.SafeText(ParkedApprovalID(extras)); id != "" {
 		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
 		fmt.Fprintf(w, "  after approval, read the output with: meho approvals result %s\n", id)
 	}
@@ -697,9 +697,9 @@ func (c Connector) PrintGeneric(w io.Writer, opID string, r *CallResult) {
 // so it matters most on this branch.
 func WriteErrorTrailer(w io.Writer, r *CallResult) {
 	if r.Error != nil && *r.Error != "" {
-		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
+		fmt.Fprintf(w, "meho: connector error: %s\n", output.SafeLines(*r.Error))
 	} else {
-		fmt.Fprintf(w, "meho: connector status=%s\n", r.Status)
+		fmt.Fprintf(w, "meho: connector status=%s\n", output.SafeText(r.Status))
 	}
 	if r.Status == StatusNotFound {
 		WriteNotFoundIDs(w, r.Extras)
@@ -708,9 +708,9 @@ func WriteErrorTrailer(w io.Writer, r *CallResult) {
 		fmt.Fprintln(w, "extras:")
 		pretty, err := PrettyJSON(r.Extras)
 		if err == nil {
-			fmt.Fprintln(w, pretty)
+			fmt.Fprintln(w, output.SafeLines(pretty))
 		} else {
-			fmt.Fprintln(w, string(r.Extras))
+			fmt.Fprintln(w, output.SafeLines(string(r.Extras)))
 		}
 	}
 	WriteAuditReceipt(w, r.AuditID)
@@ -742,9 +742,9 @@ func WriteNotFoundIDs(w io.Writer, extras json.RawMessage) {
 	if len(ids) == 0 {
 		return
 	}
-	line := "not found: " + ids[0]
+	line := "not found: " + output.SafeText(ids[0])
 	for _, id := range ids[1:] {
-		line += ", " + id
+		line += ", " + output.SafeText(id)
 	}
 	fmt.Fprintln(w, line)
 }

@@ -173,8 +173,9 @@ func printList(cmd *cobra.Command, result listResult) {
 		fmt.Fprintln(tw, "SESSION\tPROJECT\tAPP\tSTATE\tUPLOADS\tLAST UPLOAD\tBY")
 		for _, s := range result.Items {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-				s.SessionId, s.Project, s.App, s.State, s.UploadCount,
-				s.LastSeenAt.UTC().Format(time.RFC3339), s.UploadedBySub)
+				output.SafeText(s.SessionId), output.SafeText(s.Project), output.SafeText(s.App),
+				output.SafeText(string(s.State)), s.UploadCount,
+				s.LastSeenAt.UTC().Format(time.RFC3339), output.SafeText(s.UploadedBySub))
 		}
 		_ = tw.Flush()
 	}

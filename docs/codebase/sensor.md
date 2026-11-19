@@ -447,7 +447,9 @@ editable. When an edit changes `connector_id`, `op_id`, `params` or
 `assertion`, and `identity_sub` is another person (not the editor, not
 `__sensor__`), MEHO sets `identity_sub` to `__sensor__` and adds the change
 to `before` / `after`. So a Sensor never runs as a person who did not choose
-its operation.
+its operation. The rule is one function,
+`checks/sensor_edit.identity_after_change`; the Dashboard file import uses it
+too (see "Export and import as a file").
 
 A Dashboard has the same edit (`PATCH /api/v1/checks/dashboards/{id}` →
 `checks/dashboard_edit.edit_dashboard`, `meho dashboard edit <id>`):
@@ -539,7 +541,12 @@ A Dashboard and its Sensors can move to another site as one JSON file
   a different one is updated (like an edit: due at once, the soft-state
   window cleared; a Sensor paused by an operator or after refused logins
   stays paused, only one paused for a broken cadence becomes `active`), an
-  equal one is not written. The Dashboard's members
+  equal one is not written. An update that changes the Sensor's
+  `connector_id`, `op_id`, `target`, `params` or `assertion` follows the
+  identity rule of an edit: when the Sensor runs as another person (not the
+  importer, not `__sensor__`), its `identity_sub` becomes `__sensor__`. The
+  Sensor's entry in the result then has `identity_sub_before` and
+  `identity_sub_after`. The Dashboard's members
   become the Sensors of the file; a member that is not in the file leaves
   the Dashboard but is not deleted. The Dashboard's mail address stays. So
   the same file imported twice changes nothing the second time
@@ -549,7 +556,9 @@ A Dashboard and its Sensors can move to another site as one JSON file
   left) and writes nothing; the request counts as a preview for the audit.
 - The audit row (`op_id=dashboard.import`) carries the Dashboard name and
   id, `dry_run`, the `target_map` and what happened to each Sensor and to
-  the members. It carries no params.
+  the members, and under `identity_sub` the before and after value of each
+  Sensor whose identity the import set to `__sensor__`. It carries no
+  params.
 
 ## Dependencies
 
@@ -620,9 +629,12 @@ A Dashboard and its Sensors can move to another site as one JSON file
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
   safe-tier floor at dispatch, so a race that lands a non-safe
   descriptor records `unknown` rather than executing.
-- **The `identity_sub` ownership guard (#2699) is create-time only.** The
-  edit route cannot change `identity_sub`, so it covers every new row, but
-  any `sensor` row
+- **The `identity_sub` ownership guard (#2699) is create-time only.** No
+  route sets `identity_sub` to a person: a create takes only `__sensor__`
+  or the creator, a Dashboard file import creates with `__sensor__`, and
+  an edit or an import that changes what a Sensor runs sets another
+  person's identity to `__sensor__` (`identity_after_change`). So it covers
+  every new row and every changed row, but any `sensor` row
   persisted *before* the guard landed with a spoofed `identity_sub` keeps
   dispatching (and audit-attributing) under it — no data migration
   normalises historical rows. Deployments that ran the pre-guard build

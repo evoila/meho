@@ -4506,7 +4506,7 @@ tenant), and each time they open the account page. No default group sets
 `approver` or `self_approver`: a login in MEHO-Approvers or
 MEHO-SA-Operators stores both as false. MEHO does not read the `approver`
 claim of the token, so only a login group that gives the flag (a customer
-role) stores `approver` as true. Migration `0175` set
+role) stores `approver` as true. Migration `0176` set
 both flags to false on the rows that existed at the upgrade; the next
 sign-in stores the person's current flags.
 

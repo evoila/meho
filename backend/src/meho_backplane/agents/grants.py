@@ -111,7 +111,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, AgentPrincipal, PermissionVerdict
 from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 
-__all__ = ["AgentGrantService", "GrantValidationError"]
+__all__ = ["AgentGrantService", "GrantRevokeNeedsPersonError", "GrantValidationError"]
 
 _log = structlog.get_logger(__name__)
 
@@ -139,6 +139,22 @@ class GrantValidationError(Exception):
     def __init__(self, message: str) -> None:
         self.message = message
         super().__init__(message)
+
+
+class GrantRevokeNeedsPersonError(Exception):
+    """Raised when a revoke limited to ``auto-execute`` rows meets another verdict.
+
+    A ``deny`` or ``needs-approval`` row limits what an agent may do.
+    Removing it can let a broader ``auto-execute`` row apply again, so
+    only a person removes it. The REST route maps this to HTTP 403
+    ``human_principal_required``; the MCP tool and the console do the same.
+    The row stays.
+    """
+
+    def __init__(self, grant_id: uuid.UUID, verdict: str) -> None:
+        self.grant_id = grant_id
+        self.verdict = verdict
+        super().__init__(f"grant {grant_id} has verdict {verdict!r}; only a person removes it")
 
 
 async def _validate_principal_registered(
@@ -415,6 +431,8 @@ class AgentGrantService:
         self,
         tenant_id: uuid.UUID,
         grant_id: uuid.UUID,
+        *,
+        auto_execute_only: bool = False,
     ) -> bool:
         """Delete the grant matching ``(tenant_id, grant_id)``.
 
@@ -425,18 +443,32 @@ class AgentGrantService:
         Cross-tenant revoke attempts silently return ``False`` — the
         ``tenant_id`` WHERE clause excludes other tenants' rows so
         existence is not leaked.
+
+        With *auto_execute_only* (the caller is a machine login) the
+        delete matches only an ``auto-execute`` row: removing it only
+        narrows the agent. A ``deny`` or ``needs-approval`` row of the
+        tenant raises :class:`GrantRevokeNeedsPersonError` and stays. The
+        verdict is part of the ``DELETE`` statement, so the check and the
+        delete are one step.
         """
+        conditions = [AgentPermission.tenant_id == tenant_id, AgentPermission.id == grant_id]
+        if auto_execute_only:
+            conditions.append(AgentPermission.verdict == PermissionVerdict.AUTO_EXECUTE.value)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             result = await session.execute(
-                delete(AgentPermission)
-                .where(
-                    AgentPermission.tenant_id == tenant_id,
-                    AgentPermission.id == grant_id,
-                )
-                .returning(AgentPermission.id)
+                delete(AgentPermission).where(*conditions).returning(AgentPermission.id)
             )
             deleted = result.scalar_one_or_none() is not None
+            if not deleted and auto_execute_only:
+                kept = await session.scalar(
+                    select(AgentPermission.verdict).where(
+                        AgentPermission.tenant_id == tenant_id,
+                        AgentPermission.id == grant_id,
+                    )
+                )
+                if kept is not None:
+                    raise GrantRevokeNeedsPersonError(grant_id, kept)
             await session.commit()
 
         self._log.info(

@@ -35,6 +35,7 @@ import io
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -58,7 +59,9 @@ from meho_backplane.db.models import (
     ScheduledTrigger,
     Tenant,
 )
+from meho_backplane.event_source.schemas import EventSourceAuthStrategy
 from meho_backplane.events.drain import run_one_drain_tick
+from meho_backplane.events.ingest.service import ResolvedSource, _normalise
 from meho_backplane.events.matcher import (
     _event_inputs,
     _payload_contains,
@@ -821,3 +824,90 @@ async def test_empty_or_non_string_key_keeps_per_event_run_key(bad_key: object) 
     assert await _fire(event_id) == 1
     runs = await _wait_for_runs(1)
     assert runs[0].work_ref == f"event:{event_id}:{trigger.id}"
+
+
+# ---------------------------------------------------------------------------
+# External events fire only triggers whose filter names their source
+# ---------------------------------------------------------------------------
+
+_EXTERNAL_SOURCE_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
+
+
+async def _publish_generic_json_event(body: dict[str, object], *, slug: str = "hooks") -> int:
+    """Publish an event the way the webhook intake does for a generic-json source."""
+    source = ResolvedSource(
+        id=_EXTERNAL_SOURCE_ID,
+        tenant_id=_TENANT_A,
+        slug=slug,
+        kind="generic-json",
+        auth_strategy=EventSourceAuthStrategy.HMAC_SHA256,
+        secret_ref="tenants/t/event-sources/hooks",
+        extras={},
+    )
+    event_kind, envelope = _normalise(source, body, datetime.now(UTC))
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await publish(session, tenant_id=_TENANT_A, event_kind=event_kind, payload=envelope)
+        await session.flush()
+        event_id = row.event_id
+        await session.commit()
+    return event_id
+
+
+async def test_external_body_shaped_like_a_run_completion_fires_nothing() -> None:
+    """A webhook body with the fields of ``agent_run.completed`` does not start a
+    trigger whose filter names no source; the real completion event still does."""
+    def_id = await _seed_tenant_and_agent()
+    event_filter = {"agent_definition_id": str(_UPSTREAM_DEF_ID), "status": "succeeded"}
+    await _create_event_trigger(
+        agent_definition_id=def_id, event_filter=event_filter, inputs={"prompt": "go"}
+    )
+
+    external_id = await _publish_generic_json_event(dict(event_filter))
+    assert await _fire(external_id, _make_no_call_invoker()) == 0
+    assert await _all_runs() == []
+
+    internal_id = await _publish_completed_event(status="succeeded")
+    assert await _fire(internal_id) == 1
+    assert len(await _wait_for_runs(1)) == 1
+
+
+async def test_external_event_fires_trigger_that_names_its_source() -> None:
+    """An external event starts a trigger whose filter names its source by slug or
+    id, and not one that names another source."""
+    def_id = await _seed_tenant_and_agent()
+    await _create_event_trigger(
+        agent_definition_id=def_id,
+        event_filter={"source": {"slug": "hooks"}, "severity": "high"},
+        inputs={"prompt": "go"},
+    )
+    await _create_event_trigger(
+        agent_definition_id=def_id,
+        event_filter={"source": {"id": str(_EXTERNAL_SOURCE_ID)}},
+        inputs={"prompt": "go"},
+    )
+    await _create_event_trigger(
+        agent_definition_id=def_id,
+        event_filter={"source": {"slug": "other"}, "severity": "high"},
+        inputs={"prompt": "go"},
+    )
+
+    event_id = await _publish_generic_json_event({"type": "alert", "severity": "high"})
+    assert await _fire(event_id) == 2
+
+
+@pytest.mark.parametrize(
+    "event_filter",
+    [{}, {"severity": "high"}, {"source": {"kind": "generic-json"}}, {"source": "hooks"}],
+)
+async def test_external_event_needs_a_source_slug_or_id_in_the_filter(
+    event_filter: dict[str, object],
+) -> None:
+    """An empty filter, a filter without a source, or a source named only by kind
+    (or as a bare string) does not match an external event."""
+    def_id = await _seed_tenant_and_agent()
+    await _create_event_trigger(
+        agent_definition_id=def_id, event_filter=event_filter, inputs={"prompt": "go"}
+    )
+    event_id = await _publish_generic_json_event({"type": "alert", "severity": "high"})
+    assert await _fire(event_id, _make_no_call_invoker()) == 0

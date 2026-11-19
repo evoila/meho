@@ -34,6 +34,11 @@ What the card adds to the refs
   The approved run compares all three with the target it finds and
   refuses another target, role or mount
   (:class:`~meho_backplane.connectors.secret.vault_target_endpoint.VaultTargetChangedError`).
+* A ``linux`` side names the target as typed (``target``), the Linux target
+  it points to now (``target_id``, ``target_name``), its ``host`` and its
+  SSH ``port``. The approved run compares the id, host and port with the
+  target it finds and refuses another one
+  (:class:`~meho_backplane.connectors.linux.secret_sink_target.LinuxTargetChangedError`).
 * The sink says whether its secret exists (``secret_exists``) and, with
   ``merge``, whether the named field exists (``field_exists``): ``"yes"``,
   ``"no"`` or ``"not known"``. A Vault sink looks it up with the same
@@ -47,6 +52,15 @@ What the card adds to the refs
 The agent's own ``preview_operation`` gets only the refs: ``{kind, ref}``
 and, for a ``vault-target`` side, the target name as typed. It makes no
 target lookup and no Vault login.
+
+What a caller reads about a ``linux`` side is behind the switch
+``SECRET_MOVE_LINUX_TARGET_CARD`` (``Settings.secret_move_linux_target_card``,
+off by default). On, ``preview_operation`` adds the target name as typed,
+and ``meho_approvals_get`` / ``meho_approvals_list`` show the five fields
+of the card. Off, they leave them out
+(:func:`~meho_backplane.operations._preview.proposed_effect_for_agent`).
+The approval request a person reads and the check of the approved run do
+not depend on the switch.
 
 Why ``secret.move`` reaches a builder at all
 ============================================
@@ -86,7 +100,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.linux.secret_endpoint import parse_linux_secret_ref
+from meho_backplane.connectors.linux.secret_endpoint import (
+    LinuxSecretRefError,
+    LinuxSecretSinkEndpoint,
+    parse_linux_secret_ref,
+)
+from meho_backplane.connectors.linux.secret_sink_target import sink_target_card
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
 from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
 from meho_backplane.connectors.secret.vault_target_endpoint import (
@@ -99,10 +118,13 @@ from meho_backplane.connectors.secret.vault_target_endpoint import (
 )
 from meho_backplane.operations._preview import (
     PreviewContext,
+    register_agent_preview_filter,
     register_permission_preflight,
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
+from meho_backplane.settings import get_settings
+from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -110,8 +132,14 @@ if TYPE_CHECKING:
 
 __all__ = ["build_secret_move_preview", "check_secret_move_sink"]
 
+_LINUX_KIND = "linux"
 
-def _ref_only(spec: SecretRef) -> dict[str, str]:
+#: The fields the approval request adds to a ``linux:`` side. A caller reads
+#: them only while ``SECRET_MOVE_LINUX_TARGET_CARD`` is on.
+_LINUX_CARD_KEYS: frozenset[str] = frozenset({"target", "target_id", "target_name", "host", "port"})
+
+
+def _ref_only(spec: SecretRef, *, linux_target: bool) -> dict[str, str]:
     """Render a parsed ``<kind>:<ref>`` as a ref-only summary dict.
 
     Names the store-selecting ``kind`` and the store-specific ``ref``
@@ -120,11 +148,44 @@ def _ref_only(spec: SecretRef) -> dict[str, str]:
     a value. No I/O.
     """
     summary = {"kind": spec.kind, "ref": spec.ref}
-    if spec.kind == VAULT_TARGET_KIND:
-        # The target whose role does this read or write, named on its own
-        # so a reviewer does not have to cut it out of the ref.
+    if spec.kind == VAULT_TARGET_KIND or (spec.kind == _LINUX_KIND and linux_target):
+        # The target this side names, on its own so a reviewer does not
+        # have to cut it out of the ref.
         summary["target"] = spec.ref.partition("/")[0]
     return summary
+
+
+def _linux_card_on() -> bool:
+    """Whether a caller reads the ``linux:`` target fields (``SECRET_MOVE_LINUX_TARGET_CARD``)."""
+    return get_settings().secret_move_linux_target_card
+
+
+def _hide_linux_target_card(preview: dict[str, Any]) -> dict[str, Any]:
+    """The stored preview as a caller reads it: no ``linux:`` target fields with the switch off."""
+    if _linux_card_on():
+        return preview
+    shown = dict(preview)
+    for side in ("source", "sink"):
+        summary = shown.get(side)
+        if isinstance(summary, dict) and summary.get("kind") == _LINUX_KIND:
+            shown[side] = {
+                key: value for key, value in summary.items() if key not in _LINUX_CARD_KEYS
+            }
+    return shown
+
+
+async def _linux_target_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
+    """The Linux target a ``linux:`` side points to now: id, name, host and port.
+
+    Empty when the name finds no Linux target (or more than one). The
+    approved run then finds no target id on the card and refuses.
+    """
+    try:
+        endpoint = LinuxSecretSinkEndpoint(spec.ref)
+        row = await endpoint.check_target(operator)
+    except (LinuxSecretRefError, TargetNotFoundError, AmbiguousTargetError):
+        return {}
+    return sink_target_card(row)
 
 
 async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
@@ -136,8 +197,13 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
     approved run compares them with the target it finds. A name that does
     not resolve to a usable Vault target gets no ``target_id``; the
     permission check then refuses the call.
+
+    A ``linux:`` side also names the Linux target it points to now
+    (``target_id``, ``target_name``), its ``host`` and its SSH ``port``.
+    The approved run compares the id, host and port with the target it
+    finds.
     """
-    summary = _ref_only(spec)
+    summary = _ref_only(spec, linux_target=True)
     if spec.kind == VAULT_TARGET_KIND:
         endpoint = VaultTargetKvSecretEndpoint(spec.ref)
         try:
@@ -147,6 +213,8 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
         summary["target_id"] = str(row.id)
         summary["target_name"] = row.name
         summary["vault_role"], summary["vault_mount"] = login_of(row)
+    elif spec.kind == _LINUX_KIND:
+        summary.update(await _linux_target_summary(spec, operator))
     return summary
 
 
@@ -184,7 +252,7 @@ def _linux_sink_refusal(raw_to: str) -> str | None:
         sink = parse_secret_ref(raw_to)
     except ValueError:
         return None  # the run reports a malformed ref itself
-    if sink.kind != "linux":
+    if sink.kind != _LINUX_KIND:
         return None
     try:
         parse_linux_secret_ref(sink.ref)
@@ -243,8 +311,8 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     summary: dict[str, Any] = {"action": "secret.move"}
     if ctx.agent_preview:
         # The agent's own preview: the refs only, no lookup.
-        summary["source"] = _ref_only(source)
-        summary["sink"] = _ref_only(sink)
+        summary["source"] = _ref_only(source, linux_target=_linux_card_on())
+        summary["sink"] = _ref_only(sink, linux_target=_linux_card_on())
     else:
         summary["source"] = await _ref_summary(source, ctx.operator)
         summary["sink"] = await _ref_summary(sink, ctx.operator)
@@ -261,6 +329,7 @@ def _register_secret_move_preview_builder() -> None:
     register_preview_builder("secret.move", build_secret_move_preview)
     register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
+    register_agent_preview_filter("secret.move", _hide_linux_target_card)
 
 
 _register_secret_move_preview_builder()

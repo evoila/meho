@@ -219,6 +219,28 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   before any Vault login; nothing is read or written. An approval made
   before MEHO showed target ids is refused too; the requester sends a new
   request.
+- The approval binds every side that names a MEHO target. For a `linux:`
+  sink the card shows the name as typed (`target`), the Linux target it
+  points to (`target_id`, `target_name`), its `host` and its SSH `port`
+  (22 when the target names none). The approved run compares the id, the
+  host and the port with the target it finds (`check_target` of the
+  `linux:` store, in `connectors/linux/secret_sink_target.py`). Another
+  target, a new host or port on the same target, or a card without one of
+  them, refuses the run with `LinuxTargetChangedError`: "Nothing was read
+  or written. Send a new request". The check runs before the sudo password
+  lookup, before the source is read and before any SSH call. A `vault:`
+  side names no MEHO target.
+- Before the `linux:` store uses SSH, it drops the SSH logins this server
+  keeps for the target when a person changed the target since this server
+  last saw it (`forget_target_if_changed`). So the script goes to the host
+  and port the row holds now, also when another server made the change.
+- What a caller reads about a `linux:` side is behind the switch
+  `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
+  `preview_operation` shows only `kind` and `ref` for a `linux:` side, and
+  `meho_approvals_get` and `meho_approvals_list` leave out `target`,
+  `target_id`, `target_name`, `host` and `port`. On, they show them. The
+  card a person reads in the console and the check of the approved run do
+  not depend on the switch.
 - `secret.handoff.export` refuses a `vault-target:` source (its params
   check and its handler). Move the secret to a `vault:` place first.
 - `meho secret move --merge` sends `merge: true`.
@@ -477,7 +499,8 @@ owner is never `root`. See "The `linux:` store" below.
 
 The audit rows and the approval previews of the three calls show only the
 client id, the target names, and the paths. For a `linux:` move the approval
-card shows the path and the owner, never the content. The person who approves
+card shows the path, the owner, the target, its host and its port, never
+the content. The person who approves
 reads both: the path says where the secret goes, the owner says who can read
 it.
 

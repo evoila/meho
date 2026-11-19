@@ -482,10 +482,10 @@ class Settings(BaseModel):
         shape or an absent role resolves to ``False``.
     jwt_approver_claim_name:
         Name of the JWT claim ``approver`` (default). MEHO does not read
-        this claim in any token form: it gives no approval right. The
-        ``approver`` flag comes only from a login group whose grant gives
-        it (a custom role). The setting stays until the old group names
-        are removed.
+        this claim in any token form: it gives no approval right. MEHO
+        keeps the ``approver`` flag in the code; no role gives it today,
+        and roles that customers define come later. The setting stays
+        until the old group names are removed.
     jwt_self_approver_group:
         Name of the old login group ``MEHO-SA-Operators`` (default). MEHO
         reads that group as Operators: it gives no self-approval. A token

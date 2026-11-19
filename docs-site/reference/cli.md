@@ -4911,7 +4911,7 @@ meho sensor
 
 ### `meho sensor ack`
 
-Acknowledge a sensor finding until a set time, with a reason (operator or approver)
+Acknowledge a sensor finding until a set time, with a reason (operator role)
 
 ```
 meho sensor ack <sensor_id> [flags]

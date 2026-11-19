@@ -974,8 +974,9 @@ request field, header or command-line flag can set it.
 
 MEHO reads the old group MEHO-SA-Operators as Operators and MEHO-Approvers as
 Readers. The default groups set no `approver` flag and no self-approval flag
-(`_GROUP_GRANTS` in `auth/operator.py`). The `approver` flag stays in the code
-for customer roles. The old names stay known until they are removed.
+(`_GROUP_GRANTS` in `auth/operator.py`). MEHO keeps the `approver` flag in the
+code. No role gives it today; roles that customers define come later. The old
+names stay known until they are removed.
 
 - Agents, service principals and runners never approve, on any path
   (`NonHumanApprovalError`, checked first).
@@ -1535,11 +1536,11 @@ install routing (`install_floor`), so it names the groups the click
 allows now. Then `_check_routed_approver`: the person's
 group kind (`kind_of`: Admins, Operators or
 Readers) must be in the stored kinds. `kind_of` reads the role and the
-`approver` flag: a `read_only` person with the flag (a customer role)
-counts as Operators, because they approve what an Operator approves. So
-when no routing entry narrows the kinds, they keep their right. A binding
-of the policy file can set the role and the flag
-([policy-bindings.md](policy-bindings.md)). So a binding can set the kind
+`approver` flag: a `read_only` person with the flag counts as Operators,
+because they approve what an Operator approves. No role gives the flag
+today; roles that customers define come later. A binding of the policy
+file sets the role ([policy-bindings.md](policy-bindings.md)). So a
+binding can set the kind
 that the routing checks: a person whose group is bound to `Operators`
 approves a change routed to Operators. If not, `ApprovalRoutingError` (a
 subclass of `ApprovalGroupForbiddenError`, so every approve route answers
@@ -3723,13 +3724,13 @@ before #3898. Ops that do not opt in never read the binding.
 row below except `/result` is gated by `require_approvals_access`
 (`auth/rbac.py`), which admits a principal that is **either**
 `operator`-or-higher on the linear tenant-role lattice **or** carries the
-orthogonal `approver` capability (`Operator.approver`, set only by a login group whose grant gives it;
-MEHO does not read an `approver` claim). This lets a dedicated approver
-be provisioned as `read_only` role + `approver=true`: it can clear a
-four-eyes gate here yet is denied `POST /api/v1/operations/call` (still
-`require_role(TenantRole.OPERATOR)`, and `read_only` ranks below
-`operator`), so "approve but never operate" is now expressible at the role
-layer instead of resting on operator discipline. The gate has a
+orthogonal `approver` capability (`Operator.approver`; MEHO does not read an
+`approver` claim). MEHO keeps the flag in the code. No role gives it today;
+roles that customers define come later. A `read_only` principal with
+`approver=true` would clear a four-eyes gate here yet is denied
+`POST /api/v1/operations/call` (still `require_role(TenantRole.OPERATOR)`,
+and `read_only` ranks below `operator`), so "approve but never operate"
+stays a rule of the role layer. The gate has a
 service-layer twin (`_check_reviewer_role`) applying the same rule for
 direct queue callers, and the `sub`-keyed self-approval refusal (#1401) is
 unchanged — an approver cannot approve a request it parked. A refused
@@ -4064,14 +4065,14 @@ shared service gate rather than a console-local role check. The BFF
 reconstructs the full `Operator` via `_resolve_operator` →
 `verify_access_token_with_refresh` → `_operator_from_claims` (which lifts
 the orthogonal `approver` flag, `Operator.approver`; MEHO does not read an
-`approver` claim, and no default login group gives the flag), then calls
+`approver` claim, and no role gives the flag today), then calls
 `approve_request` / `reject_request`; their `_check_reviewer_role` admits
 a principal that is `operator`-or-higher **or** carries `approver`, and
 refuses only a `read_only` principal *without* the flag (403, re-rendered
-in the modal banner naming both levers). So a dedicated approver
-given the flag by a login group (a customer role) as `read_only` role +
-`approver=true` can clear a four-eyes gate through the console exactly as
-it can over REST/CLI. The read
+in the modal banner naming both levers). So a `read_only` principal
+with `approver=true` would clear a four-eyes gate through the console
+exactly as over REST/CLI. MEHO keeps the flag in the code; no role gives
+it today, and roles that customers define come later. The read
 surfaces (badge / panel / history / detail) stay gated on the BFF session
 alone — any authenticated console session may glance the tenant-scoped
 queue, unchanged. Two invariants are preserved and pinned in

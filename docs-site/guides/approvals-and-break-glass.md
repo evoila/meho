@@ -391,14 +391,15 @@ change. Understand exactly what you traded away:
 
 A different need is **separation of duties** — someone who may approve
 other people's changes but may never run an operation. MEHO expresses
-that directly: a principal can carry an **`approver`** capability,
+that in the code: a principal can carry an **`approver`** capability,
 independent of its tenant role. An approver may list, inspect, approve,
 and reject waiting requests, yet dispatch stays gated on the operator
-role — so an approver with the `read_only` role plus the `approver`
-flag of a custom role may approve another person's lower-risk change but
-is refused `call_operation` outright. No default group gives the flag,
-and MEHO does not read it from the `approver` claim of the token.
-"Approve, but never operate" is a role, not a matter of discipline.
+role — so a `read_only` login with the `approver` flag would approve
+another person's lower-risk change but is refused `call_operation`
+outright. No role gives the flag today, and MEHO does not read it from
+the `approver` claim of the token. Roles that customers define come
+later. Today, put a person in `MEHO-Operators` or `MEHO-Admins` to let
+them approve.
 
 An approver cannot approve a request it filed itself, and it cannot
 approve a `dangerous` or `destructive` change. The capability grants

@@ -56,9 +56,9 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
 * ``approver`` — whether this principal holds the **approve-only**
   capability: the right to decide (list / show / approve / reject /
   decide) parked approval requests, orthogonal to :class:`TenantRole`
-  and deliberately *decoupled from dispatch*. Set only by a
-  login group whose grant gives it (a custom role); no default group
-  does, and MEHO does not read the ``approver`` JWT claim. Defaults to
+  and deliberately *decoupled from dispatch*. MEHO keeps the flag in
+  the code. No role gives it today; roles that customers define come
+  later. MEHO does not read the ``approver`` JWT claim. Defaults to
   ``False``.
   The approvals plane admits a principal that is **either**
   ``operator``-or-higher **or** carries this flag
@@ -279,8 +279,8 @@ class GroupGrant(NamedTuple):
 
     * ``role`` — the :class:`TenantRole`.
     * ``approver`` — the person may decide approval requests
-      (the same meaning as :attr:`Operator.approver`). No default group
-      sets it; a customer role can.
+      (the same meaning as :attr:`Operator.approver`). No group sets it
+      today; roles that customers define come later.
     * ``self_approval`` — the person may approve their own change. No
       default group sets it: an Admin approves their own change through
       the ``tenant_admin`` role (:attr:`Operator.may_self_approve`).

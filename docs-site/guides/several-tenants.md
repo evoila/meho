@@ -413,8 +413,8 @@ A platform admin **may**:
 
 A platform admin **may not**:
 
-- get the `approver` flag from the platform admin group. It comes only
-  from a custom role of the current tenant (the old `Approvers` group is read as Readers).
+- get the `approver` flag from the platform admin group. No role gives
+  this flag today (the old `Approvers` group is read as Readers).
 - pick a tenant that does not exist. MEHO answers
   `403 tenant_not_found` and never makes a tenant from a typo.
 - move a machine login. Agent, service and runner logins always stay in

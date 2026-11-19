@@ -1186,11 +1186,11 @@ realm settings. So on a running realm, do one of these:
 ## Approve-only principal
 
 Clearing the approval queue needs the **operator** role. MEHO keeps an
-**`approver`** capability for custom roles: a `read_only` login with it
-may approve and reject waiting requests but is refused `call_operation`
+**`approver`** capability in the code: a `read_only` login with it would
+approve and reject waiting requests but is refused `call_operation`
 (see
 [Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver)).
-No default group gives it:
+No role gives it today. Roles that customers define come later:
 
 - MEHO reads the old group **`MEHO-Approvers`** as Readers. Its members
   do not approve and do not see the Approvals pages.

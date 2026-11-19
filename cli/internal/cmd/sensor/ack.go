@@ -27,12 +27,12 @@ var validAckReasons = map[string]bool{"accepted_risk": true, "fix_planned": true
 //	  --reason accepted_risk|fix_planned|false_alarm --note <text>
 //	  [--json] [--backplane <url>]
 //
-// Role: operator or higher, or the approver flag of a custom role; people only.
+// Role: operator or higher (the approver flag too, which no role gives today); people only.
 func newAckCmd() *cobra.Command {
 	var opts ackOptions
 	cmd := &cobra.Command{
 		Use:   "ack <sensor_id>",
-		Short: "Acknowledge a sensor finding until a set time, with a reason (operator or approver)",
+		Short: "Acknowledge a sensor finding until a set time, with a reason (operator role)",
 		Long: "ack calls POST /api/v1/sensors/{id}/acknowledgement. You say until " +
 			"when and why. MEHO records who. The sensor keeps running and its " +
 			"real state stays visible.\n\n" +
@@ -47,9 +47,7 @@ func newAckCmd() *cobra.Command {
 			"(up to 500 characters).\n\n" +
 			"Only a green or never-checked sensor is refused (422), and a sensor " +
 			"that already has an active acknowledgement (409). Needs the operator " +
-			"role or higher, or the approver flag of a custom role (a read-only " +
-			"approver can acknowledge too). An agent or service token is refused " +
-			"(403), also with the approver flag.",
+			"role or higher. An agent or service token is refused (403).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

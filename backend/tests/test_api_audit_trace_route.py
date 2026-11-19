@@ -597,3 +597,81 @@ async def test_trace_service_login_gets_only_the_trace_of_its_own_call(
         assert resp.status_code == 200, resp.text
         assert resp.json()["trace_present"] is False
         assert "vendor.example" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_trace_of_an_approved_call_goes_to_the_login_that_asked(
+    client: TestClient,
+) -> None:
+    """The full route after an approval: the row names the approver, the trace the requester.
+
+    The agent and the service login that asked read the trace. The answer
+    holds no field of the approver's row. ``show`` keeps the approver's row
+    from them. Another login gets the same 404 as for a missing row.
+    """
+    await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=True)
+    approved = {}
+    for second, sub in ((1, _AGENT_SUB), (2, "svc-asker")):
+        audit_id = await _seed_audit_row(
+            tenant_id=_TENANT_A, second=second, operator_sub="approver-person"
+        )
+        await _seed_trace(
+            audit_id=audit_id,
+            tenant_id=_TENANT_A,
+            spans=_vendor_and_flux_spans(),
+            operator_sub=sub,
+        )
+        approved[sub] = audit_id
+
+    agent = _get_trace(client, approved[_AGENT_SUB], principal_kind="agent")
+    service = _get_trace(client, approved["svc-asker"], principal_kind="service", sub="svc-asker")
+    for resp in (agent, service):
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["trace_present"] is True
+        assert "approver-person" not in resp.text
+
+    missing = _get_trace(client, uuid.uuid4(), principal_kind="agent").json()
+    for audit_id, kind, sub in (
+        (approved[_AGENT_SUB], "service", "svc-asker"),
+        (approved["svc-asker"], "agent", _AGENT_SUB),
+    ):
+        other = _get_trace(client, audit_id, principal_kind=kind, sub=sub)
+        assert other.status_code == 404, other.text
+        assert other.json() == missing
+        assert "vendor.example" not in other.text
+
+    token = mint_token(
+        _AGENT_KEY,
+        sub=_AGENT_SUB,
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind="agent",
+    )
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_AGENT_KEY))
+        show = client.get(
+            f"/api/v1/audit/show/{approved[_AGENT_SUB]}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert show.status_code == 404, show.text
+
+
+@pytest.mark.asyncio
+async def test_trace_of_an_approved_call_with_agent_traces_off_answers_no_trace(
+    client: TestClient,
+) -> None:
+    """With the tenant switch off, the agent that asked gets no trace, not a 404."""
+    await _seed_tenant_with_agent_read(_TENANT_A, agent_readable=False)
+    audit_id = await _seed_audit_row(tenant_id=_TENANT_A, operator_sub="approver-person")
+    await _seed_trace(
+        audit_id=audit_id,
+        tenant_id=_TENANT_A,
+        spans=_vendor_and_flux_spans(),
+        operator_sub=_AGENT_SUB,
+    )
+
+    resp = _get_trace(client, audit_id, principal_kind="agent")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["trace_present"] is False
+    assert "vendor.example" not in resp.text

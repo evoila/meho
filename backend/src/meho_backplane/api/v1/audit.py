@@ -237,6 +237,7 @@ async def _dispatch(
     filters: AuditQueryFilters,
     *,
     operator: Operator,
+    own_rows_only: bool = True,
 ) -> AuditQueryResult:
     """Acquire a session, call :func:`query_audit`, bind ``audit_row_count``.
 
@@ -244,7 +245,9 @@ async def _dispatch(
     focused on filter construction. The tenant is the caller's own. A
     service login reads only the rows of its own calls
     (:func:`~meho_backplane.audit_query.own_rows_sub`); a person reads
-    every row of the tenant. Maps the substrate's operator-
+    every row of the tenant. ``own_rows_only=False`` reads every row of the
+    tenant for any caller; only :func:`trace` uses it, and it checks the
+    row's owner itself. Maps the substrate's operator-
     facing validation errors (:class:`InvalidCursorError`,
     :class:`UnsupportedFilterError`) to 400 — other exceptions
     propagate and the chassis turns them into 500.
@@ -256,7 +259,7 @@ async def _dispatch(
                 filters,
                 tenant_id=operator.tenant_id,
                 session=session,
-                owner_sub=own_rows_sub(operator),
+                owner_sub=own_rows_sub(operator) if own_rows_only else None,
             )
     except (InvalidCursorError, UnsupportedFilterError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -441,6 +444,17 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
     return view
 
 
+async def _trace_asked_by(sub: str, audit_id: uuid.UUID, *, tenant_id: uuid.UUID) -> bool:
+    """True when the stored trace of *audit_id* names *sub* as its caller.
+
+    The caller of a trace is the login that asked for the call, also when a
+    person approved it and the audit row names that person.
+    """
+    async with get_sessionmaker()() as session:
+        view = await load_trace(session, audit_id=audit_id, tenant_id=tenant_id)
+    return view is not None and view.operator_sub == sub
+
+
 def _reads_own_traces_only(operator: Operator) -> bool:
     """True when *operator* may read only the traces of its own calls."""
     return operator.principal_kind in (PrincipalKind.AGENT, PrincipalKind.SERVICE)
@@ -536,7 +550,11 @@ async def trace(
     (F1/F7), so "no trace" is a normal observable state, not an error.
 
     A service login reads only the rows of its own calls, so for a row of
-    another login it gets the same 404.
+    another login it gets the same 404. One case differs: a call that ran
+    after a person approved it. Its audit row names the person who
+    approved, but its trace names the login that asked for the call. That
+    login gets the trace (:func:`_trace_asked_by`); the answer holds no
+    field of the approver's audit row.
 
     Tenant isolation is enforced twice: the existence check is tenant-scoped,
     and :func:`~meho_backplane.flight_recorder.load_trace` additionally filters
@@ -549,11 +567,26 @@ async def trace(
     # Audit-existence gate first: 404 (never 403) on a missing / cross-tenant
     # row, exactly as ``show`` does — so a probing operator cannot distinguish
     # "no such dispatch" from "dispatch in another tenant".
-    audit = await _dispatch(AuditQueryFilters(audit_id=audit_id, limit=1), operator=operator)
+    audit = await _dispatch(
+        AuditQueryFilters(audit_id=audit_id, limit=1),
+        operator=operator,
+        own_rows_only=False,
+    )
     if not audit.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
+    owner_sub = own_rows_sub(operator)
+    row = audit.rows[0]
+    if (
+        owner_sub is not None
+        and row.principal_sub != owner_sub
+        and not (
+            row.event_class == AuditEventClass.OPERATION_EXECUTION
+            and await _trace_asked_by(owner_sub, audit_id, tenant_id=operator.tenant_id)
+        )
+    ):
+        raise HTTPException(status_code=404, detail="audit row not found")
 
-    event_class = audit.rows[0].event_class
+    event_class = row.event_class
     view = None
     if event_class == AuditEventClass.OPERATION_EXECUTION:
         view = await _load_trace_for(operator, audit_id)

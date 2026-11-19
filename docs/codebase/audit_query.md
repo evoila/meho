@@ -820,8 +820,8 @@ the console pane renders the same trace through the audit-row drawer.
 
 | Caller | Audit rows (list, count, filter, `show`, `by-work-ref`, `who-touched`, the `audit.loose_rows` operation) | Session tree (`shape="tree"`, `meho_audit_replay`, REST replay) | Flight-recorder trace |
 |---|---|---|---|
-| A person (`principal_kind=user`) | Every row of the tenant. | `shape="tree"`: only a session whose stored rows hold a row of the person's own calls; then the whole tree. `meho_audit_replay` and REST replay (tenant_admin): any session of the tenant. | Every trace of the tenant, also one marked `redaction_uncertain`. |
-| A service login: an agent, a runner, an add-on, any client-credentials login (also one with no `principal_kind` claim, which MEHO reads as `service`) | Only the rows of its own calls (`operator_sub` equals its own `sub`), whatever role it carries. | Only its own rows of the session, on every tree path. A session of another login answers like a session that does not exist. | Only the trace of its own call: `GET /{audit_id}/trace` needs a row it may read, and the trace's stored caller must be its own `sub` (a trace with no stored caller is never shown); `GET /traces` filters on its own `sub`. An agent also needs the tenant switch, and never gets a `redaction_uncertain` trace. |
+| A person (`principal_kind=user`) | Every row of the tenant. | `shape="tree"`: only the rows of the person's own calls in the session; a session with none answers like a session that does not exist. `meho_audit_replay` and REST replay (tenant_admin): any session of the tenant. | Every trace of the tenant, also one marked `redaction_uncertain`. |
+| A service login: an agent, a runner, an add-on, any client-credentials login (also one with no `principal_kind` claim, which MEHO reads as `service`) | Only the rows of its own calls (`operator_sub` equals its own `sub`), whatever role it carries. | Only its own rows of the session, on every tree path. A session of another login answers like a session that does not exist. | Only the trace of its own call: `GET /{audit_id}/trace` needs a row of its own call, or a trace whose stored caller is its own `sub` (a call a person approved and ran: the row names the approver, the trace names the login that asked). The trace's stored caller must be its own `sub` (a trace with no stored caller is never shown); `GET /traces` filters on its own `sub`. An agent also needs the tenant switch, and never gets a `redaction_uncertain` trace. |
 
 How it works: `audit_query.own_rows_sub(operator)` gives `None` for a
 person and the login's `sub` for every machine kind
@@ -838,13 +838,18 @@ error text tells anything about the rows of another login. A row of
 another login answers like a row that does not exist: `show` and the
 trace route give the same 404, a list gives no row.
 
-The `shape="tree"` check reads the stored rows
-(`audit_query.session_has_rows_of`), never the `Mcp-Session-Id` header:
-the client sets that header itself. A runner never reaches these routes
+The `shape="tree"` path of `query_audit` passes the caller's own `sub` as
+`owner_sub` for every caller, a person too. Each stored row names the login
+of the checked token. So a session id the client sends, also in the
+`Mcp-Session-Id` header, shows no row of another login, even when the
+caller wrote rows of its own into that session. A runner never reaches these routes
 (`runner_scope_violation`), and an agent acts with at most the operator
 role, so it never reaches the tenant_admin replay paths. The rows of a
 call that a person approved and ran are the person's rows: the agent that
 asked sees its own request row, not the approver's decision and run rows.
+The trace route makes one exception for the trace: the agent that asked
+reads the trace of the run, and the answer holds no field of the
+approver's row besides `event_class`.
 
 **Tenant-broadcast read surfaces for people.** Within a tenant,
 `query` and `show` are principal-agnostic for a person: `POST /api/v1/audit/query` (with

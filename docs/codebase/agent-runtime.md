@@ -177,6 +177,21 @@ JSON-shaped (so it can grow without a migration):
   per-op RBAC still apply); `[]` forbids every connector. A `call_operation`
   to a connector outside the list is rejected with a `ModelRetry` — a
   structured, agent-reasonable error the model can recover from, not a crash.
+  The dispatcher picks the connector that runs a call from the target, so
+  the list is checked against the target too: the two tools bind the list
+  (`operations/_target_connector_limit.py::connector_limit`), and `dispatch`
+  and `preview_dispatch` refuse a target whose connector is not in the list,
+  or that resolves no single connector, with `connector_not_allowed`. This
+  covers operations from an API file, connector methods (also a method on a
+  base class two connectors share), module-level functions, and the steps of
+  a multi-step operation. The refusal comes right after the
+  `target_connector_mismatch` check, before the policy gate: one audit row,
+  no approval request, nothing sent. A call that waits for approval stores
+  the list on its request (`approval_request.allowed_connectors`, migration
+  `0175`). `_dispatch_resume_with_bound_context` binds it again for the run,
+  so a person who approves after the agent stopped waiting runs the call and
+  its steps with the same list. Test:
+  `tests/test_agent_target_connector_limit.py`.
   This keeps the "connector-ops ∩ identity permissions" intersection honest
   without putting vendor identifiers in tool names (postulate 5). Per-op RBAC
   + tenant scoping + audit + sanitization still fire unchanged inside

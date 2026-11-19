@@ -138,6 +138,10 @@ from meho_backplane.operations._errors import (
     result_target_gone_since_approval,
 )
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
+from meho_backplane.operations._target_connector_limit import (
+    restored_connector_limit,
+    stored_connector_limit,
+)
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     params_hash_candidates,
@@ -1783,6 +1787,7 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        allowed_connectors=stored_connector_limit(),
         **_policy_rule_fields(),
     )
     if rights_change or is_rights_change(request):
@@ -3345,6 +3350,11 @@ async def _dispatch_resume_with_bound_context(
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.
 
+    A hosted agent's connector list, stored on the row, is bound again
+    (:func:`~meho_backplane.operations._target_connector_limit.restored_connector_limit`),
+    so the run and each step of a multi-step operation stay on targets of
+    the agent's connectors, also after the agent stopped waiting.
+
     *reveal_secret* is the requester's ``reveal_secret: true``, stored on
     the request row. It goes on the params of the run, so the answer holds
     the values the requester asked for; the dispatcher stamps the choice on
@@ -3367,6 +3377,7 @@ async def _dispatch_resume_with_bound_context(
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
+            restored_connector_limit(request.allowed_connectors),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

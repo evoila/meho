@@ -1186,8 +1186,10 @@ The group rule (`_check_approver_group`, used by `approve_request` and
   it is another approver in this check;
 - for a group attribute change in the login realm, when the approver is in
   the group, or when MEHO could not read who is in the group;
-- in the login realm, when the approver is not a platform admin for the
-  platform admin group or role.
+- in the login realm, when the approver is not a platform admin and the
+  change can give platform admin rights (a group or role that gives them;
+  see "How MEHO decides that a group change gives platform admin rights"
+  in [connectors-keycloak.md](connectors-keycloak.md)).
 
 A request without the `grant` block, or with a group MEHO could not read,
 gets the strict rule. The decision audit row carries `grant_user_id`,

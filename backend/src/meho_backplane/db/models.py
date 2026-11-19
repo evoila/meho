@@ -2052,6 +2052,11 @@ class EndpointDescriptor(Base):
     policy_install_category = cast("str | None", None)
     policy_labels = cast(Mapping[str, str], MappingProxyType({}))
     policy_rule_ref = cast("str | None", None)
+    #: Not a column. On a row that ``apply_effective_policy`` returned, the
+    #: schema a call is checked against: a parameter whose switch is off
+    #: accepts no value there (``operations/switch_params.py``).
+    #: ``parameter_schema`` is then the shown schema, without it.
+    parameter_check_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,

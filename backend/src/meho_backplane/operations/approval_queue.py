@@ -1381,9 +1381,16 @@ async def _write_audit_row(
         "approval_request_id": str(request.id),
         "op_id": request.op_id,
         "connector_id": request.connector_id,
-        "principal_sub": request.principal_sub,
+        # Two pairs, each id next to the name of the same person:
+        # ``principal_sub`` / ``principal_name`` is the person who acted on
+        # this row (the row's ``operator_sub``), ``requester_sub`` /
+        # ``requester_name`` is the person who asked for the operation.
+        "principal_sub": operator.sub,
+        "requester_sub": request.principal_sub,
         "result_status": path.split(".")[-1],  # "request" | "decision"
     }
+    if request.principal_name:
+        payload["requester_name"] = request.principal_name
     # The class of the operation that waits, as the approval request stores
     # it (the stored class of an ingested row counts). Only on the "request" row.
     op_class = (request.proposed_effect or {}).get("op_class")
@@ -1433,6 +1440,9 @@ async def _write_audit_row(
             payload["step_id"] = step_id
     if extra_payload:
         payload.update(extra_payload)
+    # The reviewer's name next to ``reviewed_by`` on an approve or reject row.
+    if principal_name and payload.get("reviewed_by") == operator.sub:
+        payload["reviewed_by_name"] = principal_name
     # policy-gate verdict (#130). The parked "request" row is written on the
     # requester's task, where the dispatcher (or, for a step inside a
     # multi-step operation, the step gate ``composite.enforce_subop_policy``,

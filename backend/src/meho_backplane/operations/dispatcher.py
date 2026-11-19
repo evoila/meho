@@ -130,12 +130,13 @@ Detail payloads land in ``extras``. Codes:
 * ``target_connector_mismatch`` -- a typed/composite op whose handler is
   a connector method, called on a target whose connector does not have
   that method (a linux op on an rke2 target). Refused right after the
-  target check, before the policy gate and any wait for approval, with
-  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
+  connector list check, before the policy gate and any wait for approval,
+  with one audit row (:mod:`~meho_backplane.operations._target_connector_match`).
 * ``connector_not_allowed`` -- a hosted agent with a connector list called
   an op on a target whose connector is not in the list, or that resolves
-  no single connector. Refused right after the mismatch check, before the
-  policy gate, with one audit row and no approval request
+  no single connector. Refused right after the target check and before the
+  mismatch check, so the answer names only connectors in the list. One
+  audit row, no approval request
   (:mod:`~meho_backplane.operations._target_connector_limit`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
@@ -4205,20 +4206,10 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
-    # #5948: a connector-bound op whose handler the target's connector does
-    # not have (a linux op on an rke2 target) cannot run. Refused here, before
-    # the policy gate and any wait for approval, with its own audit row.
-    mismatch = await refuse_target_connector_mismatch(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params_hash=params_hash,
-        started=started,
-    )
-    if mismatch is not None:
-        return mismatch
     # A hosted agent with a connector list may use only targets whose
-    # connector is in the list. Refused here too, before the policy gate.
+    # connector is in the list. Refused here, before the policy gate. This
+    # check comes first, so its answer (which names only the listed
+    # connectors) is the one a caller with a list gets.
     not_allowed = await refuse_target_connector_not_allowed(
         operator=operator,
         descriptor=descriptor,
@@ -4228,6 +4219,18 @@ async def _dispatch_now(
     )
     if not_allowed is not None:
         return not_allowed
+    # A connector-bound op whose handler the target's connector does not
+    # have (a linux op on an rke2 target) cannot run. Refused here too,
+    # before the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
     # A target whose known version is outside the range of the connector
     # picked for it (through the fallback entry) is refused the same way.
     outside = await refuse_version_outside_range(

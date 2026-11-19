@@ -276,12 +276,14 @@ async def _approval_rows() -> int:
     return len(await _approval_requests())
 
 
-def _assert_refused(result: Any, picked: str | None) -> None:
+def _assert_refused(result: Any) -> None:
+    """The refusal names only the connectors in the list, never the target's one."""
     assert result.status == "error"
     assert result.extras["error_code"] == CONNECTOR_NOT_ALLOWED
-    assert result.extras["target_connector_id"] == picked
+    assert "target_connector_id" not in result.extras
     assert result.extras["allowed_connectors"] == [_HOST]
     assert result.error.startswith(f"{CONNECTOR_NOT_ALLOWED}: ")
+    assert "clusteros-ssh" not in result.model_dump_json()
 
 
 # --- the three kinds of operation, call and preview ------------------------
@@ -293,8 +295,8 @@ async def test_api_file_op_on_other_connector_target_is_refused() -> None:
     with connector_limit(_ONLY_HOST):
         result = await _call("hostos.get_about", _Target("clusteros"))
         preview = await _preview("hostos.get_about", _Target("clusteros"))
-    _assert_refused(result, "clusteros-ssh-1.0")
-    assert "runs on connector clusteros-ssh-1.0" in result.error
+    _assert_refused(result)
+    assert "does not run on a connector in this agent's allowed connectors" in result.error
     assert preview["status"] == "error"
     assert preview["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
     assert await _audit_statuses("hostos.get_about") == [CONNECTOR_NOT_ALLOWED]
@@ -306,16 +308,47 @@ async def test_method_on_a_shared_base_class_is_refused_on_other_connector_targe
     with connector_limit(_ONLY_HOST):
         result = await _call("hostos.uptime", _Target("clusteros"))
         preview = await _preview("hostos.uptime", _Target("clusteros"))
-    _assert_refused(result, "clusteros-ssh-1.0")
+    _assert_refused(result)
     assert preview["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
     assert _RUNS == []
     assert await _audit_statuses("hostos.uptime") == [CONNECTOR_NOT_ALLOWED]
 
 
 @pytest.mark.asyncio
-async def test_method_only_on_the_own_class_keeps_the_mismatch_answer() -> None:
+async def test_method_only_on_the_own_class_gets_the_list_answer_first() -> None:
+    """With a list, the list check runs before the wrong-connector check.
+
+    The wrong-connector answer names the connector the target runs on. A
+    caller with a list gets the list answer, which names only the connectors
+    in its list.
+    """
     await _register("hostos.about", _HostConnector.about)
     with connector_limit(_ONLY_HOST):
+        result = await _call("hostos.about", _Target("clusteros"))
+        preview = await _preview("hostos.about", _Target("clusteros"))
+    _assert_refused(result)
+    assert preview["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
+    assert "clusteros-ssh" not in str(preview)
+    assert _RUNS == []
+    assert await _audit_statuses("hostos.about") == [CONNECTOR_NOT_ALLOWED]
+
+
+@pytest.mark.asyncio
+async def test_method_only_on_the_own_class_without_a_list_keeps_the_mismatch_answer() -> None:
+    await _register("hostos.about", _HostConnector.about)
+    result = await _call("hostos.about", _Target("clusteros"))
+    preview = await _preview("hostos.about", _Target("clusteros"))
+    assert result.extras["error_code"] == "target_connector_mismatch"
+    assert result.extras["target_connector_id"] == "clusteros-ssh-1.0"
+    assert preview["extras"]["error_code"] == "target_connector_mismatch"
+    assert _RUNS == []
+
+
+@pytest.mark.asyncio
+async def test_own_class_method_on_an_allowed_target_keeps_the_mismatch_answer() -> None:
+    """The target's connector is in the list: the wrong-connector answer comes as before."""
+    await _register("hostos.about", _HostConnector.about)
+    with connector_limit(frozenset({_HOST, "clusteros-ssh-1.0"})):
         result = await _call("hostos.about", _Target("clusteros"))
     assert result.extras["error_code"] == "target_connector_mismatch"
     assert _RUNS == []
@@ -327,7 +360,7 @@ async def test_module_level_function_is_refused_on_other_connector_target() -> N
     with connector_limit(_ONLY_HOST):
         result = await _call("hostos.module_op", _Target("clusteros"))
         preview = await _preview("hostos.module_op", _Target("clusteros"))
-    _assert_refused(result, "clusteros-ssh-1.0")
+    _assert_refused(result)
     assert preview["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
     assert _RUNS == []
 
@@ -337,7 +370,7 @@ async def test_target_with_no_connector_is_refused() -> None:
     await _register("hostos.module_op", _module_level_op)
     with connector_limit(_ONLY_HOST):
         result = await _call("hostos.module_op", _Target("unknownos"))
-    _assert_refused(result, None)
+    _assert_refused(result)
     assert "does not resolve to one connector" in result.error
     assert _RUNS == []
 
@@ -357,7 +390,7 @@ async def test_op_that_needs_approval_is_refused_before_any_approval_request() -
     await _register("hostos.reboot", _module_level_op, requires_approval=True)
     with connector_limit(_ONLY_HOST):
         result = await _call("hostos.reboot", _Target("clusteros"))
-    _assert_refused(result, "clusteros-ssh-1.0")
+    _assert_refused(result)
     assert await _approval_rows() == 0
     assert _RUNS == []
 

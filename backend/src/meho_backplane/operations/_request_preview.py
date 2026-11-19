@@ -364,7 +364,7 @@ async def _resolve_descriptor(
     when the target's connector cannot run the op (#5948); like
     ``dispatch``, this comes right after the target check, so it is never
     hidden by the catalog choice or by the op's check before the wait for
-    approval. Right after it comes the ``connector_not_allowed`` envelope
+    approval. Right before it comes the ``connector_not_allowed`` envelope
     of a hosted agent whose connector list does not hold the target's
     connector (:mod:`._target_connector_limit`). Returns the ``denied``
     envelope when the target's connector is outside the session's MCP
@@ -439,16 +439,16 @@ async def _target_check_envelope(
     *, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> dict[str, Any] | None:
     """The first refusal of the target checks, in the order ``dispatch`` runs them."""
-    mismatch = mismatch_preview_envelope(
-        descriptor=descriptor, connector_id=connector_id, target=target
-    )
-    if mismatch is not None:
-        return mismatch
     not_allowed = await not_allowed_preview_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )
     if not_allowed is not None:
         return not_allowed
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
     return version_range_preview_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )

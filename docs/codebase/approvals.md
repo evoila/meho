@@ -817,10 +817,15 @@ such an operation with the reason "A standing grant, an agent grant or a
 run approval never covers 'OP': it reads, writes or makes a credential, so
 a person approves each call. Leave it out." The call of an agent or a
 service login waits also at level `safe`. The approval of a parent
-multi-step run does not cover such a step: it waits for its own approval
-(`_covered_by_approved_run`). When the person approves it, the multi-step
-run goes on with this step cleared; when the person rejects it, the run
-ends and the step never runs. An install or tenant override does not turn
+multi-step run does not cover such a step or child call: it waits for its
+own approval (`_covered_by_approved_run`). This holds also when the person
+who approved an earlier step has the rights to run it, and whatever level
+the step declares (`composite.credential_step_waits_after_approval`). When
+the person approves the step, the multi-step run goes on with this step
+cleared; when the person rejects it, the run ends and the step never runs.
+A child call (`dispatch_child`) that waits is its own request. When a
+person approves it, only the child runs, and the multi-step run does not
+go on. An install or tenant override does not turn
 off the approval that the code turns on for an operation that writes or
 makes a credential. Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),
@@ -4826,7 +4831,10 @@ re-entry of an approved step). Then a step whose gate says
 holds for a child operation the composite runs through `dispatch_child`:
 the child's own `dispatch()` reads `approved_run_var` right after its
 policy gate and goes ahead on `NEEDS_APPROVAL` under the same three
-exceptions. A credential step or child waits for its own approval. This holds whoever runs the
+exceptions. A credential step or child waits for its own approval, also
+when the rights of the person who approved the run would let it run: the
+step's gate and the child's `dispatch()` turn an `AUTO_EXECUTE` into a wait
+(`credential_step_waits_after_approval`). This holds whoever runs the
 resume and however the approval was given: a web click, or the command
 line with a fresh sign-in (#3979). It matters since #3980: a reviewer's
 token, and a `dangerous` step in the web interface, would otherwise wait
@@ -4839,7 +4847,8 @@ finish in one resume is not `destructive` and not `requires_approval`**.
 A later step that is `destructive` or marked `requires_approval` waits for
 its own approval, also during a resume. The steps the run already did are
 stored with that new request, so its resume sends none of them again. See
-the next section.
+the next section. A child call that waits is its own request: its approval
+runs only the child, and the multi-step run does not go on.
 
 #### How a multi-step run goes on after an approval
 

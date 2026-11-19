@@ -235,6 +235,15 @@ requests, commit messages, code comments and docs.
   operation then edits the same line. Readers get the list from
   `list_operation_groups` and `search_operations`.
 
+## Internal names in your change
+
+A CI check, `Private name check`, fails a pull request when a line it adds
+holds a word of a private list of internal names. The list is a secret and
+is not in this repository. The log shows the file and the line number, but
+never the word. Ask a maintainer which word it is, then write the line
+again without it. A pull request from a fork is checked in the merge queue,
+because a fork gets no secrets.
+
 ## Developer Certificate of Origin
 
 Every commit must carry a `Signed-off-by: Your Name <your@email>`

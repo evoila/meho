@@ -515,7 +515,7 @@ def get_dispatch_child(
             if stop is not None:
                 return stop
             # The dispatcher checks a credential read's policy each time it
-            # is sent, so a resume may send it again.
+            # is sent, and marks it when a person's approval let it go ahead.
             entry = journal.start(
                 connector_id, op_id, effective_target, params, may_send_again=True
             )
@@ -541,6 +541,8 @@ def get_dispatch_child(
                 )
             return result
         finally:
+            if journal is not None:
+                journal.sending_again = None
             _composite_op_id_chain_var.reset(chain_token)
             composite_depth_var.reset(depth_token)
             parent_audit_id_var.reset(audit_token)
@@ -565,8 +567,10 @@ def _replayed_child(
 
     A step the earlier run finished returns its stored result. A credential
     write or make that ended well returns ``ok`` with no result
-    (``extras["result_kept"]`` is ``False``). A credential read runs again,
-    through the dispatcher and its policy check.
+    (``extras["result_kept"]`` is ``False``). A ``run_again`` credential read
+    runs again, through the dispatcher and its policy check; the approval of
+    the run does not cover it
+    (:func:`~meho_backplane.operations.composite_steps.child_read_sent_again`).
     A step the earlier run only started stops the run
     (``composite_resume_step_outcome_unknown``).
     Before the approved step, a step the earlier run did not do is refused
@@ -585,6 +589,7 @@ def _replayed_child(
             _log.info(
                 "composite_step_read_again", composite_op_id=journal.composite_op_id, op_id=op_id
             )
+            journal.sending_again = op_id
             return None
         if status in (STEP_DONE, STEP_DONE_NO_RESULT):
             _log.info(
@@ -867,8 +872,9 @@ async def enforce_subop_policy(
     the step is not sent again. A step that must be skipped on a resume, with
     its stored result, runs through :func:`run_governed_subop` instead.
 
-    A step that reads a credential is the exception. When its policy let it
-    go ahead with no person, a resume checks its policy again
+    A credential read on the list of reads that change nothing
+    (:mod:`~meho_backplane.operations.composite_steps`) is the exception.
+    When its policy let it go ahead with no person, a resume checks its policy again
     (:func:`_read_again_refusal`) and lets the same read (same target and
     params) go ahead again only when the policy still lets it go ahead with
     no person; otherwise the run stops with ``composite_resume_read_not_sent``.
@@ -953,12 +959,14 @@ async def run_governed_subop(
     ``replayed`` is ``True``. A step that writes or makes a credential and
     ended well gives ``value=None`` with ``replayed=True``: its result is
     never kept, so a handler that needs the made or written value in a later
-    step gets ``None`` on a resume and must not depend on it. A step that
-    reads a credential, and whose policy let it go ahead with no person, is
-    sent again when its policy, checked again, still lets it go ahead with no
-    person (:func:`_read_again_refusal`); a read changes nothing on the
-    target. Otherwise, and for a read that a person approved, the run stops
-    with ``composite_resume_read_not_sent`` and the read is not sent. A step
+    step gets ``None`` on a resume and must not depend on it. A credential
+    read on the list of reads that change nothing
+    (:mod:`~meho_backplane.operations.composite_steps`), whose policy let it
+    go ahead with no person, is sent again when its policy, checked again,
+    still lets it go ahead with no person (:func:`_read_again_refusal`).
+    Otherwise, for every other credential read and for a read that a person
+    approved, the run stops with ``composite_resume_read_not_sent`` and the
+    read is not sent. A step
     the earlier run started but did not finish, or whose result was not
     kept, stops the run with ``composite_resume_step_outcome_unknown``. An
     exception from *call* passes to the handler, and the step stays

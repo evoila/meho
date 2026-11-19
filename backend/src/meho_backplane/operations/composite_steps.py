@@ -32,15 +32,18 @@ A credential step keeps no result, so it has its own rules:
 * A step that writes or makes a credential and ended well becomes
   ``done_no_result``: the entry says only that the step is finished. On a
   resume the step is not sent again and gives back no result.
-* A step that reads a credential is ``run_again`` when its policy let it go
-  ahead with no person: on a resume MEHO checks its policy again and sends it
-  again, with the same target and params, only when the policy still lets it
-  go ahead with no person. A read changes nothing on the target, and its
+* A step that reads a credential is ``run_again`` when the read is on
+  :data:`_READS_SAFE_TO_SEND_AGAIN` and its policy let it go ahead with no
+  person: on a resume MEHO checks its policy again and sends it again, with
+  the same target and params, only when the policy still lets it go ahead
+  with no person. A read on that list changes nothing on any system, and its
   value is never stored.
-* A step that reads a credential and that a person approved (its own
-  approval, or the approval of the run) stays ``started``. A resume does not
-  send it again: a later step that would wait stops the run at once, with an
-  error that names the read.
+* Every other step that reads a credential stays ``started``: a read that
+  is not on the list (it may also store a value somewhere, for example a
+  read that copies a secret into Vault), and a read that a person approved
+  (its own approval, or the approval of the run, also for a read run through
+  ``dispatch_child``). A resume does not send it again: a later step that
+  would wait stops the run at once, with an error that names the read.
 * A step whose end MEHO does not know stays ``started`` and stops the run.
 """
 
@@ -68,10 +71,12 @@ __all__ = [
     "STEP_RUN_AGAIN",
     "STEP_STARTED",
     "StepJournal",
+    "child_read_sent_again",
     "composite_resume_steps",
     "composite_step_journal",
     "current_step_journal",
     "is_credential_read",
+    "mark_child_cleared_by_person",
     "step_target_key",
 ]
 
@@ -94,10 +99,20 @@ _FINISHED = frozenset({STEP_DONE, STEP_DONE_NO_RESULT, STEP_RUN_AGAIN})
 #: stores its result: it may hold a secret under any field name.
 _CREDENTIAL_CHANGE_CLASSES = frozenset({"credential_mint", "credential_write"})
 
+#: The credential reads a resume may send again: each one only reads, and
+#: changes and stores nothing on any system. A credential read that is not
+#: here is never sent again.
+_READS_SAFE_TO_SEND_AGAIN = frozenset({"vault.kv.read", "vault.kv.list", "vault.kv.compare"})
+
 
 def is_credential_read(op_id: str) -> bool:
     """True when *op_id* reads a credential: its class, or an answer that hides its values."""
     return classify_op(op_id) == "credential_read" or hides_secret_values(op_id)
+
+
+def _may_send_again(op_id: str) -> bool:
+    """True when a resume may send the credential read *op_id* again."""
+    return op_id in _READS_SAFE_TO_SEND_AGAIN and is_credential_read(op_id)
 
 
 def _is_credential_change(op_id: str) -> bool:
@@ -129,6 +144,8 @@ class StepJournal:
     entries: list[dict[str, Any]] = field(default_factory=list)
     #: Entries of the earlier run that this run has not reached yet.
     replay: list[dict[str, Any]] = field(default_factory=list)
+    #: The op id of the ``dispatch_child`` read a resume sends again right now.
+    sending_again: str | None = None
 
     def take(
         self, connector_id: str, op_id: str, target: Any, params: dict[str, Any]
@@ -144,7 +161,7 @@ class StepJournal:
         A ``run_again`` entry is taken off the earlier run's entries but not
         added to this run's: the caller checks the step's policy, sends it
         again and records it with :meth:`start`. A ``run_again`` entry whose
-        operation does not read a credential (any more) is given back as
+        operation is not a read a resume may send again is given back as
         ``started``, so the caller stops the run instead of sending it.
         """
         target_key = step_target_key(target)
@@ -156,7 +173,7 @@ class StepJournal:
                 and params_hash_matches(params, str(entry.get("params_hash", "")))
             ):
                 del self.replay[index]
-                if entry.get("status") == STEP_RUN_AGAIN and not is_credential_read(op_id):
+                if entry.get("status") == STEP_RUN_AGAIN and not _may_send_again(op_id):
                     entry["status"] = STEP_STARTED
                 if entry.get("status") != STEP_RUN_AGAIN:
                     self.entries.append(entry)
@@ -174,12 +191,15 @@ class StepJournal:
     ) -> dict[str, Any]:
         """Add an entry for a step that is about to run.
 
-        A step that reads a credential is ``run_again`` from the start when
-        *may_send_again* is ``True``: its policy let it go ahead with no
-        person, or the step runs through the dispatcher, which checks it
-        again. A read changes nothing on the target, so a resume may send it
-        again however it ended. Every other step is ``started``; a credential
-        read stays ``started`` too, and a resume does not send it again.
+        A credential read on :data:`_READS_SAFE_TO_SEND_AGAIN` is
+        ``run_again`` from the start when *may_send_again* is ``True``: its
+        policy let it go ahead with no person, or the step runs through the
+        dispatcher, which checks it again (and calls
+        :func:`mark_child_cleared_by_person` when a person's approval let it
+        go ahead). Such a read changes nothing, so a resume may send it again
+        however it ended. Every other step is ``started``; every other
+        credential read stays ``started`` too, and a resume does not send it
+        again.
         """
         entry: dict[str, Any] = {
             "connector_id": connector_id,
@@ -187,7 +207,7 @@ class StepJournal:
             "target": step_target_key(target),
             "params_hash": compute_params_hash(params),
             "status": (
-                STEP_RUN_AGAIN if may_send_again and is_credential_read(op_id) else STEP_STARTED
+                STEP_RUN_AGAIN if may_send_again and _may_send_again(op_id) else STEP_STARTED
             ),
         }
         self.entries.append(entry)
@@ -232,6 +252,17 @@ class StepJournal:
         entry["status"] = STEP_DONE
         entry["result"] = result
 
+    def mark_cleared_by_person(self, op_id: str) -> None:
+        """Mark the last entry, a ``run_again`` read *op_id*, as ``started``.
+
+        A person's approval let the read go ahead, so a resume does not send
+        it again.
+        """
+        if self.entries:
+            last = self.entries[-1]
+            if last.get("op_id") == op_id and last.get("status") == STEP_RUN_AGAIN:
+                last["status"] = STEP_STARTED
+
     def first_unfinished(self) -> str | None:
         """The op id of the first stored step with no stored end, or ``None``."""
         for entry in (*self.entries, *self.replay):
@@ -264,6 +295,28 @@ _resume_steps_var: ContextVar[_ResumeSteps | None] = ContextVar(
 def current_step_journal() -> StepJournal | None:
     """The journal of the composite whose handler body is running, or ``None``."""
     return _step_journal_var.get()
+
+
+def mark_child_cleared_by_person(op_id: str) -> None:
+    """A ``dispatch_child`` step *op_id* goes ahead under the approval of the run.
+
+    Called by the dispatcher. The step is the last entry of the composite's
+    journal: a credential read cleared this way is not sent again on a resume.
+    """
+    journal = current_step_journal()
+    if journal is not None:
+        journal.mark_cleared_by_person(op_id)
+
+
+def child_read_sent_again(op_id: str) -> bool:
+    """True when the ``dispatch_child`` step *op_id* is a read a resume sends again.
+
+    Called by the dispatcher before the approval of the run lets a child step
+    go ahead: such a read goes ahead again only when its own policy lets it go
+    ahead with no person.
+    """
+    journal = current_step_journal()
+    return journal is not None and journal.sending_again == op_id
 
 
 @contextmanager

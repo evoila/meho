@@ -21,6 +21,8 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+# Declares the class of the Kubernetes reads, so the read that stores a value is a credential read.
+import meho_backplane.connectors.kubernetes.op_classes  # noqa: F401
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations import DispatchChild, register_typed_operation
 from meho_backplane.operations.composite import run_governed_subop
@@ -49,6 +51,10 @@ CREDENTIAL_WRITE_STEP = "vault.kv.put"
 CREDENTIAL_READ_STEP = "vault.kv.read"
 #: Classed ``credential_write``; run through ``dispatch_child``.
 CREDENTIAL_WRITE_CHILD = "vault.kv.patch"
+#: Classed ``credential_read``, but it also stores the value it reads.
+STORING_READ_STEP = "k8s.secret.read_to_ref"
+#: A second step that waits, with its own approval.
+SECOND_WAIT_STEP = "POST:/v1/sys/things/{id}/unseal"
 
 WRITE_WAIT_WRITE_OP_ID = "vault.composite.write_wait_write"
 CREDENTIAL_WRITE_WAIT_CHANGE_OP_ID = "vault.composite.credential_write_wait_change"
@@ -57,6 +63,9 @@ APPROVED_READ_WAIT_CHANGE_OP_ID = "vault.composite.approved_credential_read_wait
 TWO_CREDENTIAL_WRITES_OP_ID = "vault.composite.two_credential_writes_each_waits"
 LOST_CREDENTIAL_WRITE_OP_ID = "vault.composite.credential_write_answer_lost_then_wait"
 CHILD_CREDENTIAL_WRITE_OP_ID = "vault.composite.child_credential_write_wait_change"
+STORING_READ_OP_ID = "vault.composite.change_storing_read_wait_change"
+CHILD_READ_UNDER_RUN_APPROVAL_OP_ID = "vault.composite.wait_child_read_wait_change"
+CHILD_READ_WAIT_CHANGE_OP_ID = "vault.composite.child_read_wait_change"
 
 
 def reset() -> None:
@@ -260,3 +269,87 @@ async def child_credential_write_wait_change_composite(
         if step.stopped is not None:
             return step.stopped
     return {"done": True, "child_result": written.result}
+
+
+async def change_storing_read_wait_change_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """A change, a credential read that also stores a value (no approval), a wait, a change."""
+
+    async def _read_and_store() -> dict[str, Any]:
+        sent.append(STORING_READ_STEP)
+        return {"ref": "kv/app#value"}
+
+    plan: tuple[tuple[str, dict[str, Any], bool, Callable[[], Awaitable[Any]] | None], ...] = (
+        (CHANGE_STEP, {"id": "t-1"}, False, None),
+        (STORING_READ_STEP, {"name": "app", "key": "value"}, False, _read_and_store),
+        (WAIT_STEP, {"id": "t-1"}, True, None),
+        (SECOND_CHANGE_STEP, {"id": "t-1"}, False, None),
+    )
+    for op_id, step_params, waits, call in plan:
+        step = await _step(operator, target, op_id, step_params, waits=waits, call=call)
+        if step.stopped is not None:
+            return step.stopped
+    return {"done": True}
+
+
+async def credential_read_child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Typed credential read run through ``dispatch_child``."""
+    sent.append(CREDENTIAL_READ_STEP)
+    return {"data": {"value": SECRET_VALUE}, "version": 1}
+
+
+async def register_credential_read_child(embedding: Any, safety_level: str = "dangerous") -> None:
+    """Register the credential read run through ``dispatch_child``.
+
+    ``dangerous``: a person's call waits, so only the approval of the run lets it go ahead.
+    ``safe``: it goes ahead with no person.
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=CREDENTIAL_READ_STEP,
+        handler=credential_read_child_handler,
+        summary="Read a secret.",
+        description="Read a secret.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        safety_level=safety_level,
+        embedding_service=embedding,
+    )
+
+
+async def child_read_wait_change_composite(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """A credential read through ``dispatch_child``, a wait, a change."""
+    read = await dispatch_child(
+        connector_id=h.CONNECTOR_ID, op_id=CREDENTIAL_READ_STEP, params={"path": "app"}
+    )
+    if read.status != "ok":
+        return read
+    for op_id, waits in ((WAIT_STEP, True), (CHANGE_STEP, False)):
+        step = await _step(operator, target, op_id, {"id": "t-1"}, waits=waits)
+        if step.stopped is not None:
+            return step.stopped
+    return {"done": True}
+
+
+async def wait_child_read_wait_change_composite(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """A wait, a credential read through ``dispatch_child``, a second wait, a change."""
+    first = await _step(operator, target, WAIT_STEP, {"id": "t-1"}, waits=True)
+    if first.stopped is not None:
+        return first.stopped
+    read = await dispatch_child(
+        connector_id=h.CONNECTOR_ID, op_id=CREDENTIAL_READ_STEP, params={"path": "app"}
+    )
+    if read.status != "ok":
+        return read
+    for op_id, waits in ((SECOND_WAIT_STEP, True), (CHANGE_STEP, False)):
+        step = await _step(operator, target, op_id, {"id": "t-1"}, waits=waits)
+        if step.stopped is not None:
+            return step.stopped
+    return {"done": True}

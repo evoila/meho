@@ -1020,30 +1020,31 @@ def result_composite_resume_read_not_sent(
     """Stop of a composite's run at a step that reads a credential.
 
     A run after an approval sends a credential read of the earlier run again
-    only when the read's policy lets it go ahead with no person
+    only when the read is on the short list of reads that change nothing and
+    its policy lets it go ahead with no person
     (:mod:`~meho_backplane.operations.composite_steps`). Returned when the
-    read's policy now says something else (it must wait, or it is denied),
-    or when a person approved the read in the earlier run. MEHO does not
-    send the read, and the run stops here.
+    read is not on that list, when its policy now says something else (it
+    must wait, or it is denied), or when a person approved the read in the
+    earlier run. MEHO does not send the read, and the run stops here.
 
     With *waiting_op_id*, the step *waiting_op_id* was about to wait for
-    approval after the read *step_op_id* that a person approved. The run
-    after that approval would stop at the read, so MEHO asks no person and
-    stops at once.
+    approval after such a read *step_op_id*. The run after that approval
+    would stop at the read, so MEHO asks no person and stops at once.
     """
     if waiting_op_id is None:
         error = (
             f"composite_resume_read_not_sent: the run of {composite_op_id!r} after the "
             f"approval reached the step {step_op_id!r}, which reads a credential; MEHO sends "
-            "such a read again only when its policy lets it go ahead with no person, so it "
-            "did not send it and the run stopped"
+            "such a read again only when it changes nothing and its policy lets it go ahead "
+            "with no person, so it did not send it and the run stopped"
         )
     else:
         error = (
             f"composite_resume_read_not_sent: the step {waiting_op_id!r} of "
-            f"{composite_op_id!r} needs approval, but a person approved the earlier step "
-            f"{step_op_id!r}, which reads a credential; the run after an approval would not "
-            "send that read again, so MEHO asked for no approval and the run stopped"
+            f"{composite_op_id!r} needs approval, but the earlier step {step_op_id!r} reads a "
+            "credential that the run after an approval would not send again (a person "
+            "approved it, or it may change something), so MEHO asked for no approval and "
+            "the run stopped"
         )
     return OperationResult(
         status="error",

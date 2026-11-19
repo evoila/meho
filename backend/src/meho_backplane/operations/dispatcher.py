@@ -489,6 +489,10 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     get_dispatch_child,
 )
+from meho_backplane.operations.composite_steps import (
+    child_read_sent_again,
+    mark_child_cleared_by_person,
+)
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
@@ -4436,7 +4440,8 @@ async def _dispatch_now(
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval.
+            # ``requires_approval`` step keeps its own approval. A credential
+            # read that a resume sends again is not covered: it is refused.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
@@ -4444,8 +4449,17 @@ async def _dispatch_now(
                 and descriptor.safety_level != "destructive"
                 and not descriptor.requires_approval
             ):
-                _log.info("composite_child_covered_by_approved_run", op_id=op_id)
-                verdict = PermissionVerdict.AUTO_EXECUTE
+                if child_read_sent_again(op_id):
+                    verdict = PermissionVerdict.DENY
+                    gate_reason = (
+                        f"composite_resume_read_not_sent: the step {op_id!r} reads a "
+                        "credential; the run after an approval sends it again only when "
+                        "its policy lets it go ahead with no person"
+                    )
+                else:
+                    _log.info("composite_child_covered_by_approved_run", op_id=op_id)
+                    mark_child_cleared_by_person(op_id)
+                    verdict = PermissionVerdict.AUTO_EXECUTE
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):

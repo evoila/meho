@@ -16,6 +16,15 @@ counts the requests that reached the target
   read's policy now says it must wait, it is not sent again and the run stops;
 * a credential read that a person approved, wait, change: the read is sent
   once, and MEHO asks for no second approval and stops at once, naming the read;
+* change, a credential read that also stores a value (no approval), wait,
+  change: the read is not on the list of reads a resume may send again, so
+  MEHO asks for no approval and stops at once, naming the read;
+* wait, a credential read through ``dispatch_child`` that the approval of the
+  run let go ahead, wait, change: the read is sent once, and MEHO asks for no
+  second approval and stops at once, naming the read;
+* a credential read through ``dispatch_child`` with no person, wait, change:
+  the read is sent again after the approval; when its policy now needs a
+  person, the approval of the run does not cover it and it is not sent;
 * two credential writes, each one waits: each write is sent once;
 * a credential write whose answer was lost, then a wait: MEHO asks for no
   approval and stops at once;
@@ -71,7 +80,12 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
     monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
     # No Vault here: skip the Vault permission check of a credential write before its wait.
-    for op_id in (c.CREDENTIAL_WRITE_STEP, c.CREDENTIAL_READ_STEP, c.CREDENTIAL_WRITE_CHILD):
+    for op_id in (
+        c.CREDENTIAL_WRITE_STEP,
+        c.CREDENTIAL_READ_STEP,
+        c.CREDENTIAL_WRITE_CHILD,
+        c.STORING_READ_STEP,
+    ):
         monkeypatch.delitem(_preview._PERMISSION_PREFLIGHTS, op_id, raising=False)
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
@@ -379,6 +393,103 @@ async def test_credential_read_a_person_approved_is_sent_once(
     assert c.sent == [c.CREDENTIAL_READ_STEP], "the read reaches the target once"
     (only,) = await _requests()
     assert only.op_id == c.CREDENTIAL_READ_STEP, "no approval is asked for the later step"
+
+
+async def test_credential_read_that_stores_a_value_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A read that also stores a value went ahead with no person: MEHO stops before the wait."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.STORING_READ_OP_ID,
+        "change_storing_read_wait_change_composite",
+    )
+
+    result = await h.run(c.STORING_READ_OP_ID)
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "composite_resume_read_not_sent"
+    assert result.extras["blocked_op_id"] == c.STORING_READ_STEP
+    assert c.WAIT_STEP in (result.error or "")
+    assert c.sent == [c.CHANGE_STEP, c.STORING_READ_STEP], "each step reaches the target once"
+    assert await _requests() == [], "no approval is asked for the later step"
+
+
+async def test_child_credential_read_under_the_approval_of_the_run_is_sent_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A child read the run's approval let go ahead is not sent again under a later approval."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.CHILD_READ_UNDER_RUN_APPROVAL_OP_ID,
+        "wait_child_read_wait_change_composite",
+    )
+    await c.register_credential_read_child(stub_embedding_service)
+
+    first = await h.run(c.CHILD_READ_UNDER_RUN_APPROVAL_OP_ID)
+    assert first.status == "awaiting_approval", first.error
+    assert c.sent == []
+
+    second = await _approve_and_resume(first)
+
+    assert second.status == "error", second
+    assert second.extras["error_code"] == "composite_resume_read_not_sent"
+    assert second.extras["blocked_op_id"] == c.CREDENTIAL_READ_STEP
+    assert c.SECOND_WAIT_STEP in (second.error or "")
+    assert c.sent == [c.WAIT_STEP, c.CREDENTIAL_READ_STEP], "the read reaches the target once"
+    (only,) = await _requests()
+    assert only.op_id == c.WAIT_STEP, "no approval is asked for the second wait"
+
+
+async def test_child_credential_read_is_sent_again_and_the_run_finishes(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A child read that needed no person is sent again after the approval; the run ends."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.CHILD_READ_WAIT_CHANGE_OP_ID,
+        "child_read_wait_change_composite",
+    )
+    await c.register_credential_read_child(stub_embedding_service, safety_level="safe")
+
+    first = await h.run(c.CHILD_READ_WAIT_CHANGE_OP_ID)
+    assert first.status == "awaiting_approval", first.error
+    (waiting,) = await _requests()
+    assert [(step["op_id"], step["status"]) for step in _steps(waiting)] == [
+        (c.CREDENTIAL_READ_STEP, STEP_RUN_AGAIN)
+    ]
+
+    second = await _approve_and_resume(first)
+
+    assert second.status == "ok", second.error
+    assert c.sent == [c.CREDENTIAL_READ_STEP, c.CREDENTIAL_READ_STEP, c.WAIT_STEP, c.CHANGE_STEP]
+
+
+async def test_child_credential_read_that_now_needs_a_person_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """The child read needed no person; now it does: the run's approval does not cover it."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.CHILD_READ_WAIT_CHANGE_OP_ID,
+        "child_read_wait_change_composite",
+    )
+    await c.register_credential_read_child(stub_embedding_service, safety_level="safe")
+    first = await h.run(c.CHILD_READ_WAIT_CHANGE_OP_ID)
+    assert c.sent == [c.CREDENTIAL_READ_STEP]
+    await c.register_credential_read_child(stub_embedding_service, safety_level="dangerous")
+    reset_dispatcher_caches()
+
+    second = await _approve_and_resume(first)
+
+    assert second.status == "denied", second
+    assert "composite_resume_read_not_sent" in (second.error or "")
+    assert c.sent == [c.CREDENTIAL_READ_STEP], "the read is not sent again"
+    assert len(await _requests()) == 1, "no approval request is made for the read"
 
 
 # ---------------------------------------------------------------------------

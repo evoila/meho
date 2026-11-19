@@ -3428,7 +3428,7 @@ tests and its <code>pyproject.toml</code>.</p>
 <p>Your package imports MEHO only through one module:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">meho_connector_kit</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">kit</span>
 </code></pre></div>
-<p>The kit version this page describes: <strong>1.4</strong>.</p>
+<p>The kit version this page describes: <strong>1.5</strong>.</p>
 <p>The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
 part that starts with an underscore is private by its name too.</p>
@@ -3475,6 +3475,16 @@ part that starts with an underscore is private by its name too.</p>
 <td>Register</td>
 <td><code>CALLER_ADDRESS_MARKER</code></td>
 <td>The schema keyword <code>x-meho-caller-address</code>. Put <code>CALLER_ADDRESS_MARKER: True</code> on each input that holds an address MEHO connects to. See "An input that holds an address" below.</td>
+</tr>
+<tr>
+<td>Register</td>
+<td><code>SWITCH_MARKER</code></td>
+<td>The schema keyword <code>x-meho-switch</code>. Put <code>SWITCH_MARKER: FILE_REF_PARAMS_SWITCH</code> on an input that stays hidden until a MEHO switch is on. While the switch is off, MEHO shows no trace of the input and refuses a call that gives it, like any unknown input.</td>
+</tr>
+<tr>
+<td>Register</td>
+<td><code>FILE_REF_PARAMS_SWITCH</code></td>
+<td>The name of the switch for the file inputs. It is the only switch name MEHO knows today. A keyword with another name stops the operation from registering.</td>
 </tr>
 <tr>
 <td>Register</td>
@@ -3723,6 +3733,15 @@ yourself too, so your code says what MEHO does. Do not mark an input
 that only stores or names an address and never connects to it, for
 example a host name written into an inventory record. MEHO's sensors run
 only <code>safe</code> operations, so a sensor cannot use a marked operation.</p>
+<p><strong>An input that waits behind a switch.</strong> Some inputs ship before MEHO
+shows them to agents. Mark such an input with
+<code>kit.SWITCH_MARKER: kit.FILE_REF_PARAMS_SWITCH</code>. While the switch is off,
+MEHO leaves the input out of every place that shows the operation and
+refuses a call that gives it, like any unknown input. When the switch is
+on, the input shows and works as usual. Any other switch name, or the
+keyword on something that is not an input (for example on <code>items</code>),
+stops the operation from registering. This needs kit 1.5 or higher:
+<code>meho-connector-kit&gt;=1.5,&lt;2</code>.</p>
 <p><strong>A preview for a change.</strong> Register a preview with
 <code>kit.register_preview_builder</code>. It shows the person who approves what the
 change will do. Every <code>destructive</code> operation needs one.</p>

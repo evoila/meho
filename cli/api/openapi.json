@@ -1891,7 +1891,7 @@
           "settings"
         ],
         "summary": "Import Settings",
-        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes.",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes. The same holds for a file\nthat turns on ``run_approval_target_kinds`` or turns off\n``announce_gate_enabled``.",
         "operationId": "import_settings_api_v1_settings_import_post",
         "parameters": [
           {

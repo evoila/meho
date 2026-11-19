@@ -1929,8 +1929,8 @@ async def take_approval_lock(session: AsyncSession, scope: str, key: str) -> Non
 
 
 def _is_destructive(request: ApprovalRequest) -> bool:
-    """Whether the parked operation is ``destructive`` (read off ``proposed_effect``)."""
-    return (request.proposed_effect or {}).get("safety_level") == "destructive"
+    """Whether the parked operation counts as ``destructive`` (:func:`approval_risk_level`)."""
+    return approval_risk_level(request) == "destructive"
 
 
 async def _check_sign_in_use(
@@ -3788,6 +3788,8 @@ def _check_reviewer_role(operator: Operator) -> None:
 #: approved only by the groups :func:`_check_approver_group` names.
 #: ``dangerous`` is here because a delete-class op can register on it.
 _HIGH_RISK_TIERS = frozenset({"dangerous", "destructive"})
+#: The four level names. Any other stored value counts as ``destructive``.
+_RISK_LEVELS = frozenset({"safe", "caution", "dangerous", "destructive"})
 
 
 def is_high_risk_level(level: str | None) -> bool:
@@ -3814,10 +3816,12 @@ def _request_safety_level(request: ApprovalRequest) -> str | None:
 def approval_risk_level(request: ApprovalRequest) -> str:
     """The risk level that decides who may approve *request*.
 
-    The stamped level, or ``destructive`` when the request has none: a
-    request with no level counts as the strictest level.
+    The stamped level, or ``destructive`` when the request has none or a
+    value that is not one of the four level names: such a request counts
+    as the strictest level.
     """
-    return _request_safety_level(request) or "destructive"
+    level = _request_safety_level(request)
+    return level if level in _RISK_LEVELS else "destructive"
 
 
 def request_waits_only_for_token_call(request: ApprovalRequest) -> bool:

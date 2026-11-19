@@ -899,9 +899,12 @@ model, or resume endpoint):
      `approval_group_required: <text>`).
    - Another person's lower-risk change keeps the reviewer rule
      (operator-or-higher, or the `approver` flag).
-   - A request without a stamped `safety_level` counts as `destructive`
-     (`approval_risk_level`): only a MEHO-SA-Operator or a tenant admin
-     may approve it, and break-glass never covers it.
+   - A request without a stamped `safety_level`, or with a value that is
+     not one of the four level names, counts as `destructive`
+     (`approval_risk_level`): only a person who may approve another
+     person's `destructive` change may approve it, and break-glass never
+     covers it. Its approval sign-in is single-use, as for any
+     `destructive` request (`_check_sign_in_use`).
 
    **When the preview fails.** At park time the dispatcher builds the
    approval card with `_build_proposed_effect`. When that build raises,

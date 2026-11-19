@@ -329,9 +329,12 @@ async def test_a_lower_risk_change_keeps_the_reviewer_rule(level: str, approver:
     ],
     ids=["operator", "approver"],
 )
-async def test_a_change_without_a_level_needs_a_destructive_approver(approver: Operator) -> None:
-    """A request with no stored risk level counts as ``destructive``."""
-    request_id = await _park(None)
+@pytest.mark.parametrize("level", [None, "", "not-a-level"], ids=["none", "empty", "unknown"])
+async def test_a_change_without_a_level_needs_a_destructive_approver(
+    approver: Operator, level: str | None
+) -> None:
+    """A request with no stored risk level, or an unknown one, counts as ``destructive``."""
+    request_id = await _park(level)
 
     with pytest.raises(ApprovalGroupForbiddenError) as exc:
         await _approve(request_id, approver)

@@ -1064,6 +1064,14 @@ lines (indented JSON, an error message) and keeps the line breaks.
   to its width. The `server_text_escape_test.go` file of each package
   lists these renderers and checks that ESC and BEL show as `\x1b` and
   `\x07`.
+- Not escaped yet (text from a target or an API description): the
+  success output of `meho operation call` and of every vendor command;
+  the `operation search` table of the vendor commands (vmware, nsx,
+  sddc-manager, vcf-automation, vcf-fleet, vcf-logs, vcf-operations,
+  harbor, hetzner-robot); `meho approvals result`; `meho operation
+  result-query` and `subops`; `meho targets probe`, `list`, `discover`
+  and `import`; `meho connector review`, `list` and `catalog`;
+  `meho topology`; `meho vcf-automation about`.
 
 ### Sensitive-data discipline
 

@@ -113,8 +113,9 @@ def _mount(
     clients: Any = None,
     config: Any = None,
     levels: Any = '{"meho-approve":2,"meho-touch":3}',
+    web_clients: Any = None,
 ) -> None:
-    """The realm: by default the flow of the realm file, bound to the client."""
+    """The realm: by default the flow of the realm file, bound to both approval clients."""
     mock.post(_TOKEN).respond(200, json={"access_token": "made-up-token"})
     mock.get(f"{_ADMIN}/authentication/flows").mock(
         return_value=flows
@@ -148,6 +149,12 @@ def _mount(
         return_value=clients
         if isinstance(clients, httpx.Response)
         else httpx.Response(200, json=clients if clients is not None else [_client()])
+    )
+    web_client = _client(id="uuid-web-approve", clientId="meho-web-approve")
+    mock.get(f"{_ADMIN}/clients", params={"clientId": "meho-web-approve"}).mock(
+        return_value=web_clients
+        if isinstance(web_clients, httpx.Response)
+        else httpx.Response(200, json=web_clients if web_clients is not None else [web_client])
     )
 
 

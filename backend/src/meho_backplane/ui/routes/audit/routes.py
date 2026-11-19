@@ -110,6 +110,7 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
+from meho_backplane.audit_query.approval_payload import approval_payload_view
 from meho_backplane.auth.client_identity import via_label
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
@@ -457,7 +458,13 @@ async def _build_drawer_context(
     request_payload = (
         {}
         if aggregate_only
-        else {k: v for k, v in row.payload.items() if k not in INTERNAL_PAYLOAD_KEYS}
+        else {
+            k: v
+            for k, v in approval_payload_view(
+                method=row.method, operator_sub=row.operator_sub, payload=row.payload
+            ).items()
+            if k not in INTERNAL_PAYLOAD_KEYS
+        }
     )
     references = await resolve_audit_references(
         db_session, row, op_id=op_id, op_class=op_class, is_admin=is_admin

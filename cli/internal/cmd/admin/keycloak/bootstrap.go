@@ -48,6 +48,12 @@ type BootstrapOptions struct {
 	// mapper.
 	WebClientID string
 
+	// WebApproveClientID is the console's approval sign-in client
+	// (#6282); defaults to "meho-web-approve". Must match the backplane's
+	// UI_KEYCLOAK_APPROVE_CLIENT_ID. The bootstrap does not make it. When
+	// the realm has it, it is bound to the approval sign-in flow.
+	WebApproveClientID string
+
 	// MCPClientID is the public authorization-code+PKCE client name
 	// used by browser-flow MCP clients — the mcp-remote stdio shim
 	// (Claude Desktop), MCP Inspector, and Claude Code / Cursor
@@ -155,6 +161,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if o.WebClientID == "" {
 		o.WebClientID = "meho-web"
+	}
+	if o.WebApproveClientID == "" {
+		o.WebApproveClientID = "meho-web-approve"
 	}
 	if o.BackplaneAudience == "" {
 		o.BackplaneAudience = "meho-backplane"
@@ -694,7 +703,9 @@ type Result struct {
 //     scopes, bound to its own login flow `meho approval sign-in level`
 //     (password form, then the one-time code when the person has one;
 //     made when missing). The flow gives the approval level, named
-//     `meho-approve` in the realm's acr.loa.map (#6281)
+//     `meho-approve` in the realm's acr.loa.map (#6281). The console's
+//     approval client (`meho-web-approve`, #6282) is bound to the same
+//     flow when the realm has it
 //  4. Public MCP browser-flow client (`meho-mcp`), and the clients of
 //     the AI tool kinds (`meho-mcp-code`, `meho-mcp-desktop`, #6210)
 //     with the same settings as `meho-mcp` (steps 4 and 5)
@@ -807,8 +818,10 @@ func Bootstrap(
 
 	// --- Approval sign-in client (#5515) ------------------------------------
 
-	if err := checkApprovalLevel(ctx, c, opts.CLIApproveClientID); err != nil {
-		return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+	for _, clientID := range []string{opts.CLIApproveClientID, opts.WebApproveClientID} {
+		if err := checkApprovalLevel(ctx, c, clientID); err != nil {
+			return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+		}
 	}
 	flowID, flowEvents, err := reconcileApprovalFlow(ctx, c)
 	if err != nil {
@@ -844,6 +857,11 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile approval client default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, approveScopeEvents...)
+	webApproveEvents, err := bindWebApproveClient(ctx, c, opts.WebApproveClientID, flowID)
+	if err != nil {
+		return nil, fmt.Errorf("bind console approval client %q: %w", opts.WebApproveClientID, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, webApproveEvents...)
 
 	// --- MCP browser-flow client --------------------------------------------
 

@@ -3868,6 +3868,9 @@ class WebSession(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Fernet ciphertext of the console approval sign-in's access token
+    # (#6282, migration 0176). NULL = no approval sign-in on this session.
+    approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(

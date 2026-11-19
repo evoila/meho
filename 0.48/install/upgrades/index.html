@@ -3891,6 +3891,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>Only a person can remove a <code>deny</code> grant or a <code>needs-approval</code> grant of an agent. A call that removes such a grant with a service, runner or agent login now gets 403 <code>human_principal_required</code>, and the grant stays. This holds for REST, MCP and the console. Over REST and MCP, any login that has the <code>tenant_admin</code> role can remove an <code>auto-execute</code> grant. On the unified console page, only a person can remove any grant.</td>
+<td>If a script removes <code>deny</code> or <code>needs-approval</code> grants, run it with a person's login. Scripts that only remove <code>auto-execute</code> grants need no change.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>The approval request of 8 more Keycloak changes of rights now shows the object as it is now (<code>role_mapping.assign</code>, <code>role_mapping.client.assign</code>, <code>group.member.add</code>, <code>user.reset_password</code>, <code>user.enable</code> and the three login flow writes), and MEHO reads it again right before the approved run. When it changed, or MEHO cannot read it, the run is refused. A request of these 8 operations that already waited before the upgrade has no such state, so it is refused when approved. For <code>group.member.add</code> the run compares only the group id and the roles the group gives, not the member list, so a big group still runs. The switch <code>KEYCLOAK_RIGHTS_CHANGE_CARDS</code> now also covers these 8 writes: it decides only whether <code>preview_operation</code>, <code>meho_approvals_get</code> and <code>meho_approvals_list</code> show the new card keys. The run check is always on.</td>
 <td>Send such a request again after the upgrade. No schema action.</td>
 </tr>

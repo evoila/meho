@@ -268,6 +268,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "topology_history_prune_interval_seconds",
         "topology_history_retention_days",
         "topology_refresh_interval_seconds",
+        "ui_keycloak_approve_client_id",
         "ui_keycloak_client_id",
         "ui_keycloak_client_secret",
         "ui_session_absolute_lifetime_seconds",

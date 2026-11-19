@@ -3186,10 +3186,11 @@ def composite_resume_binding(
       approved sub-op's ``(op_id, params_hash)``, so that one sub-op clears its
       gate instead of parking again. It also sets
       :data:`~meho_backplane.operations.composite.composite_resume_scope_var`,
-      which is never consumed, so a second governed sub-op that would need its
-      own approval fails closed (``composite_resume_multi_gate_unsupported``)
-      instead of parking (#3351 review B1). A step marked
-      ``after_main_effect`` is the exception: it may wait again (#4217).
+      which is never consumed, so the steps of the re-entry know they run
+      after an approval. It hands the steps the earlier run stored
+      (``resume_parent["steps"]``) to the composite, so a step that already
+      ran is not sent again
+      (:mod:`~meho_backplane.operations.composite_steps`).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
       nothing; the caller keeps its generic re-dispatch.
 
@@ -3248,6 +3249,7 @@ def _composite_parent_binding(
         composite_resume_state_var,
         composite_resume_var,
     )
+    from meho_backplane.operations.composite_steps import composite_resume_steps
 
     parent_op_id = str(resume_parent["op_id"])
     saved_state = resume_parent.get("state")
@@ -3265,7 +3267,8 @@ def _composite_parent_binding(
     )
     requester_token = resume_requester_var.set(requester)
     try:
-        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
+        with composite_resume_steps(parent_op_id, resume_parent.get("steps")):
+            yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
         resume_requester_var.reset(requester_token)
         composite_resume_state_var.reset(state_token)
@@ -3337,13 +3340,11 @@ async def _dispatch_resume_with_bound_context(
     auto-executes every governed sub-op (all ``dangerous`` +
     ``requires_approval=False``), so a shipped composite completes in this one
     pass. ``composite_resume_scope_var`` is bound too — unconsumed for the whole
-    re-entry — so :func:`~meho_backplane.operations.composite.enforce_subop_policy`
-    can fail closed (``composite_resume_multi_gate_unsupported``) if a second
-    governed sub-op would need its own approval, rather than re-park and
-    re-run the earlier legs on a second resume (#3351 review B1). The
-    exception is a step marked ``after_main_effect`` (#4217): it saved where
-    to continue, so it may wait again. That new request is saved for the
-    requester of *request*, not for the reviewer who runs this re-run.
+    re-entry. A later governed sub-op that needs its own approval waits for
+    it again; the steps this run already did are stored with that request
+    (:mod:`~meho_backplane.operations.composite_steps`), so its resume does
+    not send them again. That new request is saved for the requester of
+    *request*, not for the reviewer who runs this re-run.
 
     #3898: the requester (from the row) is bound for the run
     (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),

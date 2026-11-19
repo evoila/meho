@@ -85,9 +85,9 @@ __all__ = [
     "result_ambiguous_target",
     "result_audit_commit_failed",
     "result_awaiting_approval",
-    "result_composite_resume_multi_gate_unsupported",
     "result_composite_resume_repeats_write",
     "result_composite_resume_state_missing",
+    "result_composite_resume_step_outcome_unknown",
     "result_composite_terminal_error",
     "result_connector_auth_failed",
     "result_connector_error",
@@ -955,59 +955,40 @@ def result_audit_row_invalid(
     )
 
 
-def result_composite_resume_multi_gate_unsupported(
+def result_composite_resume_step_outcome_unknown(
     *,
     composite_op_id: str,
-    approved_op_id: str,
-    blocked_op_id: str,
+    step_op_id: str,
     duration_ms: float,
 ) -> OperationResult:
-    """Fail-closed abort of a composite resume that would open a second gate (#3351).
+    """Stop of a composite's run after an approval at a step whose end is not known.
 
-    Returned by
-    :func:`~meho_backplane.operations.composite.enforce_subop_policy` when,
-    during the approval-resume re-entry of a parent composite, a governed
-    sub-op **other** than the approved one reaches ``NEEDS_APPROVAL``. The
-    resume mechanism (#3351) clears exactly one approved sub-op and re-runs
-    the whole composite under the approving reviewer, relying on every other
-    governed sub-op being ``dangerous`` + ``requires_approval=False`` so the
-    reviewer auto-executes them in one pass. A sub-op that a reviewer would
-    *not* auto-execute (``destructive`` / ``requires_approval=True``) would
-    have to park a second request, whose own resume re-enters the composite
-    from the top and re-executes every earlier governed leg — there is no
-    completed-leg guard — silently double-executing writes. No shipped
-    composite hits this (all governed sub-ops satisfy the invariant); this
-    fails closed so a future connector author who breaks the invariant gets a
-    loud, distinct refusal instead of duplicate side effects.
-
-    ``op_id`` is set to the parent ``composite_op_id`` (the entity the resume
-    was re-entering); ``extras`` names the ``approved_op_id`` that cleared and
-    the ``blocked_op_id`` that would have parked, plus a ``remediation`` that
-    points the author at the unsupported multi-gate shape.
+    Returned when the run after an approval reaches a step that the earlier
+    run started but MEHO has no stored end or result for
+    (:mod:`~meho_backplane.operations.composite_steps`): a step checked only
+    by :func:`~meho_backplane.operations.composite.enforce_subop_policy`,
+    whose own call MEHO does not see, a step that raised, or a step whose
+    result could not be kept. MEHO does not know if the step's change
+    happened, so it does not send it again and the run stops here.
     """
     return OperationResult(
         status="error",
         op_id=composite_op_id,
         error=(
-            f"composite_resume_multi_gate_unsupported: resuming composite "
-            f"{composite_op_id!r} (approved sub-op {approved_op_id!r}) hit a second "
-            f"governed sub-op {blocked_op_id!r} that requires its own approval; this "
-            f"re-entry mechanism supports only one governed gate per composite and "
-            f"aborts rather than re-run the earlier legs on a second resume"
+            f"composite_resume_step_outcome_unknown: the run of {composite_op_id!r} after "
+            f"the approval reached the step {step_op_id!r}, which the earlier run started; "
+            "MEHO has no stored end for it, so it did not send it again and the run stopped"
         ),
         duration_ms=duration_ms,
         extras={
-            "error_code": "composite_resume_multi_gate_unsupported",
+            "error_code": "composite_resume_step_outcome_unknown",
             "composite_op_id": composite_op_id,
-            "approved_op_id": approved_op_id,
-            "blocked_op_id": blocked_op_id,
+            "blocked_op_id": step_op_id,
+            "execution_outcome": "uncertain",
+            "retry": False,
             "remediation": (
-                "a composite whose resume can re-park (a governed sub-op that a "
-                "reviewer does not auto-execute — safety_level=destructive or "
-                "requires_approval=True) is unsupported by the #3351 composite-child "
-                "resume path; keep every governed sub-op dangerous + "
-                "requires_approval=False, or add a completed-leg guard before "
-                "introducing a second gate"
+                f"Check on the target whether the step {step_op_id!r} made its change, "
+                "then finish the work by hand or start a new run."
             ),
         },
     )
@@ -1043,22 +1024,25 @@ def result_composite_resume_repeats_write(
     blocked_op_id: str,
     duration_ms: float,
 ) -> OperationResult:
-    """Refusal of an earlier write during a resume that must skip it (#4217).
+    """Refusal of an earlier step during a resume that must skip it.
 
-    Returned by
-    :func:`~meho_backplane.operations.composite.enforce_subop_policy` while a
-    composite resumes an approved step marked ``after_main_effect``: the
-    resume must go straight to that step, so a governed write before it
-    that is not itself ``after_main_effect`` is a write the first run already
-    did. It is refused before it runs, whatever the policy verdict.
+    Returned while a composite's run after an approval has not reached the
+    approved step yet. Every step before it is a step the earlier run did:
+    it comes back from the stored steps
+    (:mod:`~meho_backplane.operations.composite_steps`). A governed step
+    that is not among them, and is not itself ``after_main_effect``, is not
+    one the approver's run may add, so it is refused before it runs,
+    whatever the policy verdict. A ``dispatch_child`` step is refused the
+    same way, except while the approved step is ``after_main_effect``: such
+    a composite continues at that step on its own.
     """
     return OperationResult(
         status="error",
         op_id=composite_op_id,
         error=(
             f"composite_resume_repeats_write: resuming composite {composite_op_id!r} "
-            f"for the approved step {approved_op_id!r} reached the earlier write "
-            f"{blocked_op_id!r}; it did not run, because the first run already did it"
+            f"for the approved step {approved_op_id!r} reached the earlier step "
+            f"{blocked_op_id!r}, which is not a stored step of the earlier run; it did not run"
         ),
         duration_ms=duration_ms,
         extras={

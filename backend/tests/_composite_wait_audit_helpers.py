@@ -280,9 +280,14 @@ async def register_child(embedding: Any) -> None:
 
 
 async def register_composite(
-    session: AsyncSession, op_id: str, handler_name: str, *, safety_level: str = "safe"
+    session: AsyncSession,
+    op_id: str,
+    handler_name: str,
+    *,
+    safety_level: str = "safe",
+    module: str = "tests._composite_wait_audit_helpers",
 ) -> None:
-    """Insert one ``source_kind='composite'`` descriptor pointing at a handler here."""
+    """Insert one ``source_kind='composite'`` descriptor pointing at a handler in *module*."""
     session.add(
         EndpointDescriptor(
             id=uuid.uuid4(),
@@ -294,7 +299,7 @@ async def register_composite(
             source_kind="composite",
             method=None,
             path=None,
-            handler_ref=f"tests._composite_wait_audit_helpers.{handler_name}",
+            handler_ref=f"{module}.{handler_name}",
             summary=f"Composite {op_id}.",
             description=f"Composite {op_id}.",
             tags=[],

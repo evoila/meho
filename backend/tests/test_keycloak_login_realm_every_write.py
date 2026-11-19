@@ -21,15 +21,13 @@ run, in every realm. Fixture values are made up.
 from __future__ import annotations
 
 import copy
+import importlib
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.keycloak import (
-    KeycloakConnector,
-    ops_user_required_actions,  # noqa: F401 -- the card of the required actions write
-)
+from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write_login_realm_rule import (
     HARMLESS_KEYS,
     sets_only_harmless_keys,
@@ -68,6 +66,9 @@ from tests.test_approval_grant_to_self import (
     _row,
     _status,
 )
+
+# Loading this module adds the approval card of the required actions write.
+importlib.import_module("meho_backplane.connectors.keycloak.ops_user_required_actions")
 
 _OTHER_REALM = "team-realm"
 _GROUP_ID = "77777777-7777-7777-7777-777777777777"

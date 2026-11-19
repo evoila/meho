@@ -560,9 +560,13 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     place, and the `value` of a secret-named pair also when it is a list
     or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one
     line and keeps its anchor, so the text still reads as YAML. An alias
-    of an anchor inside a hidden value also becomes the marker (an empty
-    map under a merge key `<<`). A map an alias names in an SNMP place is
-    checked with the SNMP rule there. The audit copy
+    of an anchor inside a hidden value also becomes the marker. An alias
+    that a merge key uses (`<<: *name`, or each alias of a merge list
+    `<<: [*name]`) becomes an empty map `{}` when it names a hidden value
+    or a value inside one. A map an alias names in an SNMP place is
+    checked with the SNMP rule there. The dispatcher builds this view in a
+    worker thread, like the redaction pass of a script, so a large text
+    value does not hold up other requests. The audit copy
     then holds a fingerprint of the whole text. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.

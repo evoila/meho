@@ -25,9 +25,11 @@ default view does not see it. This module hides it in the text.
    type. A hidden value is written as ``key: "<marker>"`` on one line, with
    its anchor and the white space after it kept, so the text still reads
    as YAML. An alias of an anchor inside a hidden value gets the marker
-   too. A map an alias names is checked again in each SNMP place it is
-   used. A string value inside the YAML is read again as text,
-   so a YAML file inside a JSON note is covered too; such a value is written
+   too. An alias that a merge key uses (``<<: *name`` or ``<<: [*name]``)
+   and that names a hidden value or a value inside one gets an empty map.
+   A map an alias names is checked again in each SNMP place it is used.
+   A string value inside the YAML is read again as text, so a YAML file
+   inside a JSON note is covered too; such a value is written
    back as a JSON string. Text that is not YAML keeps what step 1 made of it.
 
 The name rule is the shared
@@ -43,6 +45,7 @@ as plain as they are.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -97,10 +100,10 @@ def _is_secret_pair(node: Mapping[str, Any]) -> bool:
     return is_secret_name_value_pair(node)
 
 
-def _is_snmp_community(names: list[str], name: str, *, in_snmp: bool) -> bool:
+def _is_snmp_community(entries: Mapping[str, Any], name: str, *, in_snmp: bool) -> bool:
     from meho_backplane.broadcast.events import is_snmp_community_key
 
-    return is_snmp_community_key(dict.fromkeys(names), name, in_snmp=in_snmp)
+    return is_snmp_community_key(entries, name, in_snmp=in_snmp)
 
 
 def _has_snmp_word(name: str) -> bool:
@@ -189,13 +192,18 @@ class _Finder:
             if (name := _key_name(key)) is not None
         }
         pair = _is_secret_pair(entries)
-        names = list(entries)
+        # Every ``community`` key of one map gets the same answer: the
+        # siblings are read once, not once per key.
+        community: bool | None = None
         for key, value in node.value:
             name = _key_name(key)
+            is_community = False
+            if name is not None and name.lower() == "community":
+                if community is None:
+                    community = _is_snmp_community(entries, name, in_snmp=in_snmp)
+                is_community = community
             if name is not None and (
-                _is_secret_name(name)
-                or _is_snmp_community(names, name, in_snmp=in_snmp)
-                or (pair and name == "value")
+                _is_secret_name(name) or is_community or (pair and name == "value")
             ):
                 self.seen.update({(id(value), False), (id(value), True)})
                 if not _nothing_to_hide(value):
@@ -204,31 +212,89 @@ class _Finder:
                 self.walk(value, in_snmp=in_snmp or (name is not None and _has_snmp_word(name)))
 
 
-def _is_removed(index: int, removed: list[tuple[int, int]]) -> bool:
-    return any(start < index < end for start, end in removed)
+class _Removed:
+    """The replaced spans, for a quick look-up of where an anchor stands."""
+
+    def __init__(self, removed: list[tuple[int, int]]) -> None:
+        # Spans that overlap are joined, so each index falls in at most one.
+        # Spans that only touch stay apart: an index where one ends and the
+        # next starts is inside neither.
+        merged: list[list[int]] = []
+        for start, end in sorted(removed):
+            if merged and start < merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        self.starts = [start for start, _ in merged]
+        self.ends = [end for _, end in merged]
+        self.exact = {start for start, _ in removed}
+
+    def inside(self, index: int) -> bool:
+        """True when *index* stands inside a replaced span, after its start."""
+        at = bisect.bisect_left(self.starts, index) - 1
+        return at >= 0 and index < self.ends[at]
+
+    def replaced(self, index: int) -> bool:
+        """True when *index* is inside a replaced span or starts one."""
+        return index in self.exact or self.inside(index)
+
+
+def _in_merge(stack: list[list[bool]], event: Any) -> bool:
+    """Note *event* in its open map or list; True when a merge uses it.
+
+    A merge uses the value of a ``<<`` key and each item of a list that is
+    that value. A map entry is ``[next node is a key, the last key is <<]``,
+    a list entry is ``[the list is a merge list]``.
+    """
+    if not stack:
+        return False
+    top = stack[-1]
+    if len(top) == 1:
+        return top[0]
+    if top[0]:
+        top[0] = False
+        top[1] = isinstance(event, yaml.ScalarEvent) and event.value == "<<" and event.implicit[0]
+        return False
+    top[0] = True
+    return top[1]
 
 
 def _orphan_alias_spans(text: str, removed: list[tuple[int, int]]) -> list[tuple[int, int, str]]:
     """Spans that replace each alias whose anchor stands in a hidden value.
 
     The alias gets the marker, so the text still reads as YAML and the
-    value stays hidden. An alias under a merge key (``<<: *name``) gets an
-    empty map, which a merge accepts.
+    value stays hidden. An alias that a merge key uses (``<<: *name``, or
+    each alias of a merge list ``<<: [*name]``) gets an empty map, which a
+    merge accepts. Such an alias also gets an empty map when its anchor
+    names the hidden value itself: that anchor stays, but on the marker,
+    which a merge does not accept.
     """
     spans: list[tuple[int, int, str]] = []
-    gone: dict[str, bool] = {}
-    previous: Any = None
+    look_up = _Removed(removed)
+    #: Per anchor: (stands inside a hidden value, names a hidden value or
+    #: stands inside one).
+    gone: dict[str, tuple[bool, bool]] = {}
+    stack: list[list[bool]] = []
     for event in yaml.parse(text, Loader=_LOADER):
         if isinstance(event, yaml.DocumentStartEvent):
-            gone = {}
-        elif isinstance(event, yaml.AliasEvent):
-            if gone.get(event.anchor):
-                merge = isinstance(previous, yaml.ScalarEvent) and previous.value == "<<"
-                new = "{}" if merge else _QUOTED_MARKER
-                spans.append((event.start_mark.index, event.end_mark.index, new))
-        elif isinstance(event, yaml.NodeEvent) and event.anchor is not None:
-            gone[event.anchor] = _is_removed(event.start_mark.index, removed)
-        previous = event
+            gone, stack = {}, []
+        elif isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+            stack.pop()
+        elif isinstance(event, yaml.NodeEvent):
+            merge = _in_merge(stack, event)
+            if isinstance(event, yaml.AliasEvent):
+                inside, replaced = gone.get(event.anchor, (False, False))
+                new = "{}" if merge and replaced else _QUOTED_MARKER if inside else None
+                if new is not None:
+                    spans.append((event.start_mark.index, event.end_mark.index, new))
+                continue
+            if event.anchor is not None:
+                index = event.start_mark.index
+                gone[event.anchor] = (look_up.inside(index), look_up.replaced(index))
+            if isinstance(event, yaml.MappingStartEvent):
+                stack.append([True, False])
+            elif isinstance(event, yaml.SequenceStartEvent):
+                stack.append([merge])
     return spans
 
 

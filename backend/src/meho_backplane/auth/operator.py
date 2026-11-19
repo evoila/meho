@@ -382,6 +382,10 @@ class Operator(BaseModel):
     #: no such claim, which a service token never has. Read by the fresh
     #: sign-in check (:mod:`meho_backplane.auth.fresh_sign_in`).
     auth_time: int | None = None
+    #: The ``exp`` claim: when the token expires (seconds since the epoch).
+    #: ``None`` for an Operator that MEHO builds without a token. An open
+    #: ``GET /api/v1/feed`` stream ends at this time (plus the JWT leeway).
+    token_exp: int | None = None
     #: Every tenant the person is in, with the login group in each, in
     #: token order (#5236). Empty when the token has no ``meho_tenants``
     #: claim, and always empty for a machine login. The current tenant is

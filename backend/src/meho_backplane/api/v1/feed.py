@@ -59,6 +59,20 @@ The tenant comes from the validated JWT; there is no tenant parameter.
 Checkpoints are bound to the tenant that issued them. ``operator`` role
 minimum (``read_only`` → 403).
 
+Stream end
+==========
+
+A stream ends when the login that opened it ends. The caller passes a
+:class:`StreamLiveness`; the generator asks it before each frame, each
+heartbeat and each wait. ``/api/v1/feed`` ends the stream at the token's
+``exp`` plus the JWT leeway, and after ``feed_stream_max_seconds`` at
+the latest (:func:`token_liveness`). That end also stops an archive
+read that is still running, so a slow Valkey or database call does not
+keep the stream open. The console bridge checks its
+session again (``ui/routes/broadcast/stream.py``). The client opens a
+new stream with a fresh login and ``Last-Event-Id``, so it misses no
+announcement.
+
 Heartbeat and errors
 ====================
 
@@ -83,8 +97,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -108,13 +123,16 @@ from meho_backplane.broadcast.archive_reader import (
     latest_announcements,
     watch_announcement_rows,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "FeedStart",
+    "StreamLiveness",
     "announcement_feed_frames",
     "feed_response",
     "resolve_feed_start",
     "router",
+    "token_liveness",
 ]
 
 router = APIRouter(prefix="/api/v1", tags=["feed"])
@@ -151,6 +169,81 @@ class FeedStart:
 
     after: int | None = None
     since: datetime | None = None
+
+
+@dataclass(frozen=True)
+class StreamLiveness:
+    """When an open feed stream must end.
+
+    ``ends_at`` is a :func:`time.monotonic` instant: the stream ends there
+    at the latest (``math.inf`` for no fixed end). ``still_valid``, when
+    set, checks the login again; the stream ends when it returns ``False``.
+    """
+
+    ends_at: float
+    still_valid: Callable[[], Awaitable[bool]] | None = None
+
+    async def alive(self) -> bool:
+        """``True`` while the stream may send another frame."""
+        if self.ended():
+            return False
+        return self.still_valid is None or await self.still_valid()
+
+    def wait_ms(self) -> int:
+        """The next archive wait: at most :data:`_WAIT_MS`, never past ``ends_at``."""
+        left_ms = (self.ends_at - time.monotonic()) * 1000
+        return max(1, int(min(float(_WAIT_MS), left_ms)))
+
+    def seconds_left(self) -> float | None:
+        """Seconds until ``ends_at`` (``0`` when past it), or ``None`` for no fixed end."""
+        if math.isinf(self.ends_at):
+            return None
+        return max(0.0, self.ends_at - time.monotonic())
+
+    def ended(self) -> bool:
+        """``True`` once ``ends_at`` has passed."""
+        return time.monotonic() >= self.ends_at
+
+
+class _StreamEndedError(Exception):
+    """An archive read was stopped because the stream reached ``ends_at``."""
+
+
+async def _read_until_end[T](liveness: StreamLiveness, read: Awaitable[T]) -> T:
+    """Await *read*, but stop it at ``liveness.ends_at``.
+
+    A Valkey or database call that hangs does not keep the stream open
+    past the end of its login: the read is cancelled at ``ends_at`` and
+    :class:`_StreamEndedError` is raised. A read error once ``ends_at``
+    has passed raises :class:`_StreamEndedError` too.
+    """
+    timeout = asyncio.timeout(liveness.seconds_left())
+    try:
+        async with timeout:
+            return await read
+    except (SQLAlchemyError, OSError):
+        # TimeoutError is an OSError. A read that fails once the end has
+        # passed (also one that turns the cancel into its own error) ends
+        # the stream too, without an error frame.
+        if timeout.expired() or liveness.ended():
+            raise _StreamEndedError from None
+        raise
+
+
+def token_liveness(operator: Operator) -> StreamLiveness:
+    """The end of a ``GET /api/v1/feed`` stream: token expiry or the longest time.
+
+    The stream ends at the token's ``exp`` plus the JWT leeway, the same
+    leeway the token check allows, and after ``feed_stream_max_seconds``
+    at the latest.
+    """
+    settings = get_settings()
+    now = time.monotonic()
+    ends_at = now + settings.feed_stream_max_seconds
+    if operator.token_exp is not None:
+        left = operator.token_exp + settings.keycloak_jwt_leeway_seconds - time.time()
+        ends_at = min(ends_at, now + left)
+    return StreamLiveness(ends_at=ends_at)
 
 
 def _parse_iso(raw: str) -> datetime | None:
@@ -241,39 +334,53 @@ async def _start_position(
     return [_format_event(operator, item) for item in latest.events], latest.watermark
 
 
+async def _next_batch(
+    operator: Operator, after: int, flt: AnnouncementFilter, timeout_ms: int
+) -> tuple[list[str], int]:
+    """Wait for new announcements; return their frames and the sequence number to resume after."""
+    found = await watch_announcement_rows(operator, after=after, flt=flt, timeout_ms=timeout_ms)
+    batch = [_format_gap(found.gap)] if found.gap is not None else []
+    batch.extend(_format_event(operator, item) for item in found.events)
+    return batch, found.after
+
+
 async def announcement_feed_frames(
     operator: Operator,
     *,
     start: FeedStart,
     flt: AnnouncementFilter,
     surface: str,
+    liveness: StreamLiveness,
 ) -> AsyncIterator[str]:
     """SSE frames of the tenant's stored announcements, then live ones.
 
-    *surface* names the caller (``api`` / ``ui``) on the log lines.
+    *surface* names the caller (``api`` / ``ui``) on the log lines. The
+    stream ends when *liveness* says the login ended: it is asked before
+    each frame, each heartbeat and each wait. Each archive read stops at
+    ``liveness.ends_at``; a read error after that time ends the stream
+    without an ``event: feed_error`` frame.
     """
     last_out = time.monotonic()
     try:
-        frames, after = await _start_position(operator, start, flt)
-        for frame in frames:
-            yield frame
-        if frames:
-            last_out = time.monotonic()
+        batch, after = await _read_until_end(liveness, _start_position(operator, start, flt))
         while True:
-            found = await watch_announcement_rows(
-                operator, after=after, flt=flt, timeout_ms=_WAIT_MS
-            )
-            after = found.after
-            out = [_format_gap(found.gap)] if found.gap is not None else []
-            out.extend(_format_event(operator, item) for item in found.events)
-            for frame in out:
+            for frame in batch:
+                if not await liveness.alive():
+                    _log_login_ended(surface, operator)
+                    return
                 yield frame
-            now = time.monotonic()
-            if out:
-                last_out = now
-            elif now - last_out >= _HEARTBEAT_INTERVAL_SECONDS:
-                yield ": heartbeat\n\n"
-                last_out = now
+            if batch:
+                last_out = time.monotonic()
+            if not await liveness.alive():
+                _log_login_ended(surface, operator)
+                return
+            batch, after = await _read_until_end(
+                liveness, _next_batch(operator, after, flt, liveness.wait_ms())
+            )
+            if not batch and time.monotonic() - last_out >= _HEARTBEAT_INTERVAL_SECONDS:
+                batch = [": heartbeat\n\n"]
+    except _StreamEndedError:
+        _log_login_ended(surface, operator)
     except asyncio.CancelledError:
         _log.info("feed_subscriber_disconnected", surface=surface, operator_sub=operator.sub)
         raise
@@ -286,6 +393,11 @@ async def announcement_feed_frames(
             exc_info=True,
         )
         yield _format_feed_error(type(exc).__name__)
+
+
+def _log_login_ended(surface: str, operator: Operator) -> None:
+    """Log that a stream ended because its login ended; the client reconnects."""
+    _log.info("feed_stream_login_ended", surface=surface, operator_sub=operator.sub)
 
 
 def feed_response(frames: AsyncIterator[str]) -> StreamingResponse:
@@ -323,4 +435,12 @@ async def feed_endpoint(
     """
     start = resolve_feed_start(operator, request.headers.get("Last-Event-Id"), since)
     flt = AnnouncementFilter(op_class=op_class, principal=principal, target=target)
-    return feed_response(announcement_feed_frames(operator, start=start, flt=flt, surface="api"))
+    return feed_response(
+        announcement_feed_frames(
+            operator,
+            start=start,
+            flt=flt,
+            surface="api",
+            liveness=token_liveness(operator),
+        )
+    )

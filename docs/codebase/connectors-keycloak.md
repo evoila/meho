@@ -573,9 +573,24 @@ When MEHO cannot read what decides, a platform admin must approve. The
 card says why in `platform_admin_reason`, and the console shows it in the
 row "Platform admin must approve". The approved run builds the card again
 and is refused when the write now needs a platform admin and did not get
-one. The agent's own `preview_operation` gets the `grant` block of
-these writes only while `KEYCLOAK_RIGHTS_CHANGE_CARDS` is on (never for
-`user.create`, `client_scope.protocol_mapper.update` and `secret.move`).
+one.
+
+The approval request a person reads always holds these facts. A caller
+(the agent's own `preview_operation`, and `meho_approvals_get` /
+`meho_approvals_list`) reads them only while `KEYCLOAK_RIGHTS_CHANGE_CARDS`
+is on. Off, a caller gets what it gets for a write without them: no
+`grant` block for `user.create`, `user.reset_password`,
+`client_scope.protocol_mapper.update` and `secret.move`; and in the
+`grant` block of the other writes of one login or one group, no
+`platform_admin_reason` and, for `user.update` and
+`user.credential.delete`, the `platform_admin` fact of the roles in the
+call only. The agent's own `preview_operation` with the switch off reads
+nothing more from Keycloak for it. The approval checks use the request a
+person reads, so the switch does not change who must approve.
+
+A `secret.move` ref is a client-secret source or a user-password sink by
+its address shape, the same way as `build_keycloak_secret_endpoint`: a
+sink in a realm named `clients` is still a sink.
 
 The other Keycloak writes do not give platform admin rights: the writes in
 `NOT_RIGHTS_CHANGE_OPS` only take away; `realm.create` makes a new realm,

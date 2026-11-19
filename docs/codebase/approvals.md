@@ -2792,8 +2792,12 @@ The per-op preview is opt-in via a builder registry in
   `meho_approvals_get` and `meho_approvals_list` read the stored request
   through `proposed_effect_for_agent`: with the switch off, an op behind
   a builder switch shows the generic params echo of its stored params,
-  and an op with person-only keys shows its preview without them. So the
-  caller gets the same answer there as from `preview_operation`. The REST
+  and an op with person-only keys shows its preview without them.
+  `register_agent_preview_filter(op_id, filter)` gives a caller the
+  stored preview as the filter returns it, for fields deeper than the
+  top-level keys; it runs after the person-only keys are gone, so an op
+  can have both. So the caller gets the same answer there as from
+  `preview_operation`. The REST
   approvals API and the console show the stored card.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls

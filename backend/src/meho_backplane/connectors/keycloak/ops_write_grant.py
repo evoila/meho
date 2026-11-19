@@ -48,6 +48,7 @@ rules that use these facts are in
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import (
@@ -67,12 +68,19 @@ from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
 )
 from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     REASON_LOGIN,
+    REASON_LOGIN_UNREAD,
+    REASON_UNREAD,
+    agent_cards_on,
     login_has_platform_admin,
     platform_fields,
 )
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
-from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
+from meho_backplane.operations._preview import (
+    PreviewBuilder,
+    PreviewContext,
+    register_agent_preview_filter,
+)
 from meho_backplane.operations.grant_approval import register_grant_op
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.keycloak_realm_warnings import (
@@ -135,6 +143,10 @@ _LOGIN_OPS: Final[frozenset[str]] = frozenset(
     {"keycloak.user.update", "keycloak.user.credential.delete", "keycloak.user.reset_password"}
 )
 
+#: The ops whose preview a caller reads without a ``grant`` block while
+#: ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off.
+_AGENT_NO_GRANT: Final[frozenset[str]] = frozenset({"keycloak.user.reset_password"})
+
 #: Why a group or role change needs a platform admin.
 REASON_GROUP_OR_ROLE: Final[str] = (
     "The group or role gives platform admin rights, or lets a login manage the realm."
@@ -151,6 +163,37 @@ def register_grant_ops() -> None:
             bound_ids=_BOUND_IDS.get(op_id),
             bound_ids_missing=ROLE_PARTS_NOT_READ if op_id in _ROLE_OPS else None,
         )
+        register_agent_preview_filter(op_id, _grant_as_agent_reads(op_id))
+
+
+def _agent_grant(grant: Any) -> Any:
+    """The ``grant`` block as a caller reads it while ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off.
+
+    No reason, and for a sign-in change the ``platform_admin`` fact of the
+    roles in the call only (not the one MEHO read from the login).
+    """
+    if not isinstance(grant, dict):
+        return grant
+    shown = dict(grant)
+    if shown.pop("platform_admin_reason", None) in {REASON_LOGIN, REASON_LOGIN_UNREAD}:
+        shown["platform_admin"] = False
+    return shown
+
+
+def _grant_as_agent_reads(op_id: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """The stored preview of *op_id* as a caller reads it (:func:`_agent_grant`)."""
+
+    def _filter(preview: dict[str, Any]) -> dict[str, Any]:
+        if agent_cards_on() or "grant" not in preview:
+            return preview
+        shown = dict(preview)
+        if op_id in _AGENT_NO_GRANT:
+            del shown["grant"]
+        else:
+            shown["grant"] = _agent_grant(shown["grant"])
+        return shown
+
+    return _filter
 
 
 def _text(value: Any) -> str | None:
@@ -350,15 +393,18 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
         preview = await builder(ctx)
         if preview is None:
             return None
+        agent_off = ctx.agent_preview and not agent_cards_on()
+        if agent_off and op_id in _AGENT_NO_GRANT:
+            return preview
         login_realm = await is_login_realm(ctx)
         user_id = await _user_id(ctx, user_params)
         group_id: str | None = None
-        reason = REASON_GROUP_OR_ROLE
+        reason, unread = REASON_GROUP_OR_ROLE, REASON_UNREAD
         if op_id in _LOGIN_OPS:
             platform: bool | None = _roles_include_platform_admin(ctx)
-            if platform is False and login_realm:
+            if platform is False and login_realm and not agent_off:
                 platform = await _login_platform(ctx, user_id)
-                reason = REASON_LOGIN
+                reason, unread = REASON_LOGIN, REASON_LOGIN_UNREAD
         elif op_id == _CLIENT_ASSIGN and is_realm_management(ctx.params):
             platform = True
         elif group_id_param is None or group_name_param is None:
@@ -374,7 +420,11 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
             "user_id": user_id,
             "group_id": group_id,
             "login_realm": login_realm,
-            **platform_fields(platform, reason),
+            **(
+                {"platform_admin": platform}
+                if agent_off
+                else platform_fields(platform, reason, unread)
+            ),
         }
         if not user_params:
             grant["members"] = (

@@ -73,6 +73,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_no
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     REASON_MAPPER,
+    hide_grant_from_agent,
     mapper_sets_platform_admin,
     with_platform_facts,
 )
@@ -469,3 +470,4 @@ register_preview_builder(
     _OP_ID,
     with_platform_facts(_OP_ID, _scope_mapper_preview, (_sets_platform_admin, REASON_MAPPER)),
 )
+hide_grant_from_agent(_OP_ID)

@@ -146,7 +146,10 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     find_user,
 )
 from meho_backplane.connectors.keycloak.ops_write_grant import register_grant_ops, with_grant_facts
-from meho_backplane.connectors.keycloak.ops_write_platform_reach import with_platform_facts
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    hide_grant_from_agent,
+    with_platform_facts,
+)
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
     check_realm_guards,
     realm_blast_radius,
@@ -607,6 +610,7 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder(
         "keycloak.user.create", with_platform_facts("keycloak.user.create", _user_create_preview)
     )
+    hide_grant_from_agent("keycloak.user.create")
     register_grant_ops()
     register_park_check(
         "keycloak.role_mapping.assign", refuse_other_user_check("keycloak.role_mapping.assign")

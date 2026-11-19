@@ -37,6 +37,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write_grant import REASON_GROUP_OR_ROLE
 from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     REASON_LOGIN,
+    REASON_LOGIN_UNREAD,
     REASON_MAPPER,
     REASON_NEW_USER,
     REASON_REALM_DEFAULTS,
@@ -473,7 +474,8 @@ async def test_a_failed_read_refuses_a_tenant_admin(
 
     grant = _grant(effect)
     assert grant["platform_admin"] is None
-    assert grant["platform_admin_reason"] == REASON_UNREAD
+    unread = REASON_LOGIN_UNREAD if case.reason == REASON_LOGIN else REASON_UNREAD
+    assert grant["platform_admin_reason"] == unread
     request_id = await _park(params, effect, op_id=case.op_id)
     reason = await _refused_for_a_tenant_admin(request_id, params)
     assert "could not read" in reason

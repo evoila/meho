@@ -128,7 +128,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.keycloak.ops_write_platform_reach import secret_move_grant
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    agent_cards_on,
+    secret_move_grant,
+)
 from meho_backplane.connectors.keycloak.secret_move_target import keycloak_side_card
 from meho_backplane.connectors.linux.secret_endpoint import (
     LinuxSecretRefError,
@@ -204,13 +207,16 @@ def _linux_card_on() -> bool:
 def _hide_target_cards(preview: dict[str, Any]) -> dict[str, Any]:
     """The stored preview as a caller reads it.
 
-    No ``keycloak:`` target fields, and no ``linux:`` target fields with
-    ``SECRET_MOVE_LINUX_TARGET_CARD`` off.
+    No ``keycloak:`` target fields, no ``linux:`` target fields with
+    ``SECRET_MOVE_LINUX_TARGET_CARD`` off, and no ``grant`` block with
+    ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` off.
     """
     hidden = {_KEYCLOAK_KIND: _KEYCLOAK_CARD_KEYS}
     if not _linux_card_on():
         hidden[_LINUX_KIND] = _LINUX_CARD_KEYS
     shown = dict(preview)
+    if not agent_cards_on():
+        shown.pop("grant", None)
     for side in ("source", "sink"):
         summary = shown.get(side)
         if not isinstance(summary, dict):

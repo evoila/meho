@@ -40,6 +40,12 @@ approved change runs; when the change now needs a stricter approval, the
 run is refused (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
 
 Outside the login realm none of this applies, and MEHO reads nothing for it.
+
+The approval request a person reads always holds the ``grant`` block. A
+caller (``preview_operation``, ``meho_approvals_get`` and
+``meho_approvals_list``) reads it only while ``KEYCLOAK_RIGHTS_CHANGE_CARDS``
+(``Settings.keycloak_rights_change_cards``) is on
+(:func:`hide_grant_from_agent`).
 """
 
 from __future__ import annotations
@@ -64,7 +70,9 @@ from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
     under_platform_group,
 )
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.operations._preview import register_person_only_preview_keys
 from meho_backplane.operations.grant_approval import register_grant_op
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
@@ -75,11 +83,14 @@ __all__ = [
     "GROUP_CAP",
     "PLATFORM_OPS",
     "REASON_LOGIN",
+    "REASON_LOGIN_UNREAD",
     "REASON_MAPPER",
     "REASON_NEW_USER",
     "REASON_REALM_DEFAULTS",
     "REASON_UNREAD",
+    "agent_cards_on",
     "group_paths_give_platform_admin",
+    "hide_grant_from_agent",
     "login_has_platform_admin",
     "mapper_sets_platform_admin",
     "platform_fields",
@@ -96,6 +107,10 @@ REASON_NEW_USER: Final[str] = (
 REASON_LOGIN: Final[str] = (
     "This login has platform admin rights. The change sets how it signs in, so it "
     "can hand that login, and its rights, to someone else."
+)
+REASON_LOGIN_UNREAD: Final[str] = (
+    "MEHO could not read whether this login has platform admin rights, so it counts "
+    "as a login that has them."
 )
 REASON_MAPPER: Final[str] = (
     "A protocol mapper in this change can put the platform admin claim or role into login tokens."
@@ -129,12 +144,27 @@ def _any(facts: list[bool | None]) -> bool | None:
     return None if any(fact is None for fact in facts) else False
 
 
-def platform_fields(platform: bool | None, reason: str) -> dict[str, Any]:
-    """The ``platform_admin`` fact for the ``grant`` block, with a reason unless it is ``False``."""
+def platform_fields(
+    platform: bool | None, reason: str, unread: str = REASON_UNREAD
+) -> dict[str, Any]:
+    """The ``platform_admin`` fact for the ``grant`` block, with a reason unless it is ``False``.
+
+    *unread* is the reason when the fact is ``None``.
+    """
     fields: dict[str, Any] = {"platform_admin": platform}
     if platform is not False:
-        fields["platform_admin_reason"] = reason if platform else REASON_UNREAD
+        fields["platform_admin_reason"] = reason if platform else unread
     return fields
+
+
+def agent_cards_on() -> bool:
+    """Whether a caller reads the ``grant`` block (``KEYCLOAK_RIGHTS_CHANGE_CARDS``)."""
+    return get_settings().keycloak_rights_change_cards
+
+
+def hide_grant_from_agent(op_id: str) -> None:
+    """A caller reads the stored request of *op_id* without ``grant`` while the switch is off."""
+    register_person_only_preview_keys(op_id, agent_cards_on, frozenset({"grant"}))
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +466,14 @@ def with_platform_facts(
 
 
 def _keycloak_sides(params: dict[str, Any]) -> tuple[tuple[str, str, str] | None, str | None]:
-    """The user-password sink ``(target, realm, username)``, and the realm of a client source."""
+    """The user-password sink ``(target, realm, username)``, and the realm of a client source.
+
+    A ref is a client source or a sink by the same address shape as the
+    endpoint factory (:func:`~.secret_endpoint.build_keycloak_secret_endpoint`),
+    so a realm named ``clients`` still holds a sink.
+    """
     from meho_backplane.connectors.keycloak.secret_endpoint import (
+        _looks_like_client_secret_ref,
         _parse_keycloak_client_ref,
         _parse_keycloak_ref,
     )
@@ -451,7 +487,7 @@ def _keycloak_sides(params: dict[str, Any]) -> tuple[tuple[str, str, str] | None
             spec = parse_secret_ref(raw) if isinstance(raw, str) else None
             if spec is None or spec.kind != "keycloak":
                 continue
-            if "/clients/" in spec.ref:
+            if _looks_like_client_secret_ref(spec.ref):
                 source_realm = _parse_keycloak_client_ref(spec.ref)[1]
             else:
                 sink = _parse_keycloak_ref(spec.ref)
@@ -473,7 +509,7 @@ async def _sink_login_platform(ctx: PreviewContext, sink: tuple[str, str, str]) 
         if not isinstance(connector, KeycloakConnector):
             return {"user_id": None, "platform_admin": None}
         async with get_sessionmaker()() as session:
-            row = cast(
+            row: KeycloakTargetLike = cast(
                 "KeycloakTargetLike",
                 await resolve_target(session, ctx.operator.tenant_id, target_name),
             )
@@ -510,7 +546,7 @@ async def secret_move_grant(ctx: PreviewContext) -> dict[str, Any] | None:
         return grant
     found = await _sink_login_platform(ctx, sink)
     grant["user_id"] = found["user_id"]
-    grant.update(platform_fields(found["platform_admin"], REASON_LOGIN))
+    grant.update(platform_fields(found["platform_admin"], REASON_LOGIN, REASON_LOGIN_UNREAD))
     return grant
 
 

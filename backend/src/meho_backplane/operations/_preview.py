@@ -521,7 +521,8 @@ def proposed_effect_for_agent(
     * the preview without the person-only keys
       (:func:`register_person_only_preview_keys`);
     * the preview as the op's filter gives it back
-      (:func:`register_agent_preview_filter`).
+      (:func:`register_agent_preview_filter`), after the person-only keys
+      are gone.
 
     Every other ``proposed_effect`` comes back unchanged.
     """
@@ -547,12 +548,12 @@ def proposed_effect_for_agent(
         return effect
     person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
     preview_filter = _AGENT_PREVIEW_FILTERS.get(op_id)
+    if person_only is None and preview_filter is None:
+        return effect
     if person_only is not None and not person_only[0]():
         preview = {key: value for key, value in preview.items() if key not in person_only[1]}
-    elif preview_filter is not None:
+    if preview_filter is not None:
         preview = preview_filter(preview)
-    else:
-        return effect
     return {**effect, "preview": preview}
 
 

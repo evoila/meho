@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.4",
+  "kit_version": "1.5",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -25,6 +25,10 @@
     },
     "EmbeddingService": {
       "kind": "class"
+    },
+    "FILE_REF_PARAMS_SWITCH": {
+      "kind": "value",
+      "type": "str"
     },
     "FingerprintResult": {
       "kind": "class"
@@ -136,6 +140,10 @@
     },
     "RetiredOp": {
       "kind": "class"
+    },
+    "SWITCH_MARKER": {
+      "kind": "value",
+      "type": "str"
     },
     "Target": {
       "kind": "class",

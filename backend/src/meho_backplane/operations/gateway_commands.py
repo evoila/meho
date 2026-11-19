@@ -94,6 +94,7 @@ from meho_backplane.operations.approval_queue import (
     end_run_input,
     find_remote_write_approval,
 )
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
@@ -283,7 +284,7 @@ def _refuse_unvalidatable_params(
       remediation (re-ingest the spec) rides in the refusal reason.
     """
     try:
-        validation_errors = validate_params(descriptor.parameter_schema, params)
+        validation_errors = validate_params(schema_for_checks(descriptor), params)
     except InvalidOpSchemaError as exc:
         structlog.get_logger(__name__).info(
             "gateway_command_mint_refused",

@@ -519,6 +519,7 @@ from meho_backplane.operations.shutdown_drain import (
     shutting_down_result,
     track_operation,
 )
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.uncertain_outcome import (
     changes_target,
     connection_lost_after_send,
@@ -3492,6 +3493,57 @@ async def _build_proposed_effect(
         return None
 
 
+def _preview_failed_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> dict[str, Any]:
+    """The ``proposed_effect`` of a request whose preview build raised.
+
+    Keeps the op identity and the risk level and class from the catalog,
+    so the approval rules read the operation's real level. The
+    ``preview_failed`` key lets the approval card say that MEHO could not
+    build the preview.
+    """
+    effect = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+    effect["op_class"] = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
+    effect["safety_level"] = descriptor.safety_level
+    effect["preview_populated"] = False
+    effect["preview_failed"] = True
+    return effect
+
+
+async def _build_park_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``proposed_effect`` a parked request stores; never ``None``.
+
+    :func:`_build_proposed_effect`, or :func:`_preview_failed_effect` when
+    that build raised.
+    """
+    effect = await _build_proposed_effect(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+    if effect is not None:
+        return effect
+    return _preview_failed_effect(
+        op_id=op_id, connector_id=connector_id, descriptor=descriptor, target=target
+    )
+
+
 async def _destructive_binding_refusal(
     *,
     op_id: str,
@@ -3798,8 +3850,9 @@ async def _handle_needs_approval(
     # secret-free result under ``proposed_effect["permission_preflight"]``
     # so a write Vault would deny surfaces a "this write will be denied"
     # banner at park time instead of failing only after a four-eyes
-    # approval. Fail-soft too: a probe fault degrades to no banner.
-    proposed_effect = await _build_proposed_effect(
+    # approval. Fail-soft too: a probe fault degrades to no banner. When the
+    # build raises, the request still stores the catalog risk level.
+    proposed_effect = await _build_park_effect(
         op_id=op_id,
         connector_id=connector_id,
         descriptor=descriptor,
@@ -3955,9 +4008,9 @@ def _params_error(
     param is rejected as ``invalid_params`` here rather than defaulting
     onto the vendor query string in ``_split_ingested_params``.
     """
-    schema_to_validate = descriptor.parameter_schema
+    schema_to_validate = schema_for_checks(descriptor)
     if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+        schema_to_validate = ingested_schema_for_validation(schema_to_validate)
     try:
         validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:

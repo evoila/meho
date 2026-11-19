@@ -42,7 +42,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
@@ -3994,6 +3994,58 @@ async def test_park_without_builder_uses_identifier_default(
             "preview_reason": "connector_did_not_populate",
         }
         assert "preview" not in row.proposed_effect
+
+
+@pytest.mark.asyncio
+async def test_park_keeps_the_catalog_risk_level_when_the_preview_build_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A preview build that raises still stores the op's risk level and class."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.failing_preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op whose preview build fails.",
+        description="Parks for approval; the preview build raises.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    with patch(
+        "meho_backplane.operations.dispatcher.build_proposed_effect",
+        new_callable=AsyncMock,
+        side_effect=RecursionError("too deep"),
+    ):
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.failing_preview_op",
+            target=target,
+            params={"note": "x"},
+        )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    async with get_sessionmaker()() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        assert row.proposed_effect == {
+            "op_id": "vault.kv.failing_preview_op",
+            "connector_id": "vault-1.x",
+            "target_id": str(target.id),
+            "op_class": "other",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
 
 
 @pytest.mark.asyncio

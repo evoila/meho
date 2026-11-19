@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0176_clear_push_subscription_approval_flags``.
+"""Behavioural tests for ``0177_clear_push_subscription_approval_flags``.
 
 The migration sets ``approver`` and ``self_approver`` to false on every
 ``push_subscription`` row and keeps the other login facts. A person gets
 the flag back at the next sign-in, when their login still gives it.
 
-Every step targets this migration's own revision (``0176``) and its
-``down_revision`` (``0175``), never ``head``.
+Every step targets this migration's own revision (``0177``) and its
+``down_revision`` (``0176``), never ``head``.
 """
 
 from __future__ import annotations
@@ -26,15 +26,15 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0176"
-_DOWN_REVISION = "0175"
+_REVISION = "0177"
+_DOWN_REVISION = "0176"
 _TENANT_ID = "b" * 32
 _READ_AT = "2026-11-15 12:00:00.000000"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0176.db"
+    db_path = tmp_path / "migration_0177.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

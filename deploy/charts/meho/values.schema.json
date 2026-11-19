@@ -521,6 +521,11 @@
           "enum": ["true", "false"],
           "description": "Check a new knowledge entry for similar entries first; when some exist, nothing is written and the writer gets the list. Rendered into `KB_SIMILAR_CHECK`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/kb.md`."
         },
+        "fileRefParams": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Show the operation parameters that wait behind this switch, and accept them. Rendered into `FILE_REF_PARAMS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
         "mcpShortToolTexts": {
           "type": "string",
           "enum": ["true", "false"],

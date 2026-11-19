@@ -3,8 +3,8 @@
 
 """Clear the approval flags that ``push_subscription`` rows keep.
 
-Revision ID: 0176
-Revises: 0175
+Revision ID: 0177
+Revises: 0176
 
 Each push subscription keeps the person's login facts, read at their
 last sign-in (migration ``0161``). MEHO reads the groups
@@ -29,8 +29,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0176"
-down_revision: str | None = "0175"
+revision: str = "0177"
+down_revision: str | None = "0176"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

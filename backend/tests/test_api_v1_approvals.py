@@ -448,6 +448,7 @@ async def test_approve_async_returns_202_and_run_handle(
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
         request_id = request.id
@@ -505,6 +506,7 @@ async def _park_for_decide() -> uuid.UUID:
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
         return request.id
@@ -954,7 +956,11 @@ def _seed_pending_request() -> uuid.UUID:
                     target_id=None,
                     params_hash=compute_params_hash({}),
                     params={},
-                    proposed_effect={"op_id": "vault.kv.put", "connector_id": "vault-1.x"},
+                    proposed_effect={
+                        "op_id": "vault.kv.put",
+                        "connector_id": "vault-1.x",
+                        "safety_level": "caution",
+                    },
                     status=ApprovalRequestStatus.PENDING.value,
                 )
             )

@@ -354,6 +354,11 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
+from meho_backplane.operations._composite_steps import (
+    mark_when_a_step_is_unknown,
+    recording_steps,
+    track_composite_steps,
+)
 from meho_backplane.operations._errors import (
     MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
@@ -515,7 +520,11 @@ from meho_backplane.operations.shutdown_drain import (
     track_operation,
 )
 from meho_backplane.operations.switch_params import schema_for_checks
-from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.operations.uncertain_outcome import (
+    changes_target,
+    connection_lost_after_send,
+    with_uncertain_outcome,
+)
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
@@ -865,12 +874,15 @@ async def _run_source_kind_branch(
         # raise :class:`CompositeRecursionLimitExceeded` *before* a
         # rogue recursive dispatch fires (handled by the surrounding
         # exception branch in :func:`_execute_and_audit`).
-        dispatch_child = get_dispatch_child(
-            dispatch=dispatch,
-            parent_operator=operator,
-            parent_target=target,
-            parent_audit_id=audit_id,
-            parent_op_id=descriptor.op_id,
+        dispatch_child = recording_steps(
+            get_dispatch_child(
+                dispatch=dispatch,
+                parent_operator=operator,
+                parent_target=target,
+                parent_audit_id=audit_id,
+                parent_op_id=descriptor.op_id,
+            ),
+            audit_id,
         )
         return await dispatch_composite(
             handler=handler,
@@ -979,21 +991,27 @@ async def _execute_and_audit(
         target=target,
         descriptor=descriptor,
         connector_id=connector_id,
+        # An approved call runs under the approver, but the trace belongs to
+        # the requester, the same owner as its result handle.
+        owner_sub=handle_owner_sub_var.get(),
     )
     try:
-        result = await _execute_and_audit_inner(
-            op_id=op_id,
-            connector_id=connector_id,
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            started=started,
-            secret_view=secret_view,
-        )
+        # A multi-step run keeps a log of its steps, so its error result is
+        # stored as uncertain when a step ended uncertain (_composite_steps).
+        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
+            result = await _execute_and_audit_inner(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                started=started,
+                secret_view=secret_view,
+            )
     finally:
         # Persists the trace via record_trace on the recorder's best-effort
         # path (owning root only); never raises (F7).
@@ -2098,11 +2116,18 @@ async def _run_branch_with_error_handling(
         # importing ``connectors.net`` at module scope would close a cycle
         # back through ``operations/__init__``. A probe refused because its
         # tenant's share of the probe pool was in use is narrowed the same way.
+        #
+        # A change whose call timed out or lost its connection on a client
+        # library that is not httpx (an SSH command under ``wait_for``, the
+        # Kubernetes client, a database driver) may have reached the target.
+        # It is stored as uncertain, like the httpx arms above do.
         duration_ms = _elapsed_ms(started)
         if is_probe_refused(exc):
             exc_result = result_connector_probe_refused(op_id, exc, duration_ms)
         elif is_probe_pool_busy(exc):
             exc_result = result_probe_pool_busy(op_id, exc, duration_ms)
+        elif changes_target(descriptor.safety_level) and connection_lost_after_send(exc):
+            exc_result = with_uncertain_outcome(result_connector_error(op_id, exc, duration_ms))
         else:
             exc_result = result_connector_error(op_id, exc, duration_ms)
         return await _audit_error_and_return(
@@ -2293,6 +2318,7 @@ async def _audit_error_and_return(
     secret-named fields and Tier-1 shapes in every string of ``error``,
     ``extras`` and ``result``.
     """
+    result = mark_when_a_step_is_unknown(result, audit_id)
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)
     receipt = await audit_safe(

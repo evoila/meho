@@ -2042,7 +2042,7 @@ class EndpointDescriptor(Base):
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
-    #: ``apply_step_classification`` returned. ``None``, empty and ``None``
+    #: ``apply_step_policy`` returned. ``None``, empty and ``None``
     #: otherwise. Search, the call contract and the approval request show them.
     #: Approver routing matches a ``routing`` entry's ``category`` on
     #: ``policy_category``; the install's entries match on

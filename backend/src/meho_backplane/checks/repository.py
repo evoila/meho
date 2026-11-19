@@ -217,8 +217,10 @@ async def _commit_through_confirmation_gate(
     returns ``True`` iff the committed state changed.
 
     A first result equal to the initial ``unknown`` changes nothing, but it
-    sets ``state_since``: from then on the Sensor has a confirmed state, so
-    the Dashboard alert does not treat it as still waiting for one.
+    sets ``state_since`` to the Sensor's ``created_at`` (the ``unknown`` has
+    held since then): from then on the Sensor has a confirmed state, so the
+    Dashboard alert does not treat it as still waiting for one, and a
+    ``for_seconds`` hold does not start again.
     """
     if state == row.last_state:
         # The committed state re-confirmed itself; any half-open confirmation
@@ -226,9 +228,9 @@ async def _commit_through_confirmation_gate(
         row.pending_state = None
         row.pending_count = 0
         if row.state_since is None:
-            # A first result equal to the initial ``unknown`` confirms it:
-            # record when, so the Sensor no longer counts as never confirmed.
-            row.state_since = evaluated_at
+            # A first result equal to the initial ``unknown`` confirms it. It
+            # has held since the Sensor was made, so a hold counts from then.
+            row.state_since = row.created_at
         await session.flush()
         return False
     if row.retry_times > 0:

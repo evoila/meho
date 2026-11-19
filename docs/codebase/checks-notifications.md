@@ -51,7 +51,9 @@ The member memos stay as they are. Only a Sensor that never had a
 confirmed state (`state_since` is empty) can wait. A Sensor that had one
 and now reports `unknown` alerts at once, also while new results wait for
 confirmation. A first result of `unknown` counts as a confirmed state too:
-it changes no state, but result recording sets `state_since` for it.
+it changes no state, but result recording sets `state_since` to the
+Sensor's `created_at`. With a `for_seconds` hold, such a Sensor alerts as
+`degraded` once `created_at` plus `for_seconds` has passed.
 
 The wait has a limit. It ends at the first of these two times:
 
@@ -59,8 +61,13 @@ The wait has a limit. It ends at the first of these two times:
   the rollup uses (`_STALE_GRACE_SECONDS`). This catches a Sensor that
   never runs.
 - A fixed time that a running Sensor cannot move: its first due time after
-  `created_at`, plus one full confirmation window (`retry_times` + 1 times
-  `retry_backoff_seconds`), plus the same 60 seconds. This catches a
+  `created_at`, plus one full confirmation window, plus the same 60
+  seconds. The first due time counts at most one day after `created_at`,
+  so a rare cron (for example once a year) does not move the end far out.
+  The window has `retry_times` + 1 steps. Each step is
+  `retry_backoff_seconds`, plus the 30-second run time limit, plus one
+  runner tick (`SENSOR_RUNNER_TICK_INTERVAL_SECONDS`), so slow runs do not
+  end the wait before a healthy result is confirmed. This catches a
   Sensor that runs but never gets a confirmed result, for example when
   its results flip between `degraded` and `critical`.
 

@@ -1986,6 +1986,123 @@ async def test_member_with_recorded_unknown_results_alerts_at_once(
     assert await _rollup_memo(dash) == "degraded"
 
 
+async def _make_yearly_cron(sensor_id: UUID) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(Sensor, sensor_id)
+        assert row is not None
+        row.cadence_kind = "cron"
+        row.interval_seconds = None
+        row.cron_expr = "0 0 1 1 *"
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_new_member_with_a_yearly_cron_alerts_after_one_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: a rare cron does not move the end of the wait far out.
+
+    The first due time of a yearly cron can be months after ``created_at``.
+    The wait counts from that time, but at most one day after ``created_at``.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", evaluated=False, state_since=None, retry_times=2
+    )
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+    await _make_yearly_cron(sid_b)
+    await _make_old(sid_b, hours=30)
+
+    start = datetime.now(UTC) - timedelta(hours=5)
+    for tick in range(20):
+        state = "degraded" if tick % 2 == 0 else "critical"
+        await _record(sid_b, state, start + timedelta(minutes=tick * 15))
+        await _evaluate(sid_b)
+
+    assert len(fake.calls) == 1
+    assert "ok -> degraded" in fake.calls[0]["subject"]
+    assert await _rollup_memo(dash) == "degraded"
+
+
+def test_wait_limit_counts_run_time_and_runner_tick() -> None:
+    """#6711: each step of the confirmation window adds the run time limit and a tick."""
+    created = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+    sensor = Sensor(
+        cadence_kind="interval",
+        interval_seconds=60,
+        cron_expr=None,
+        timezone="UTC",
+        next_fire_at=None,
+        retry_times=5,
+        retry_backoff_seconds=10,
+        created_at=created,
+    )
+    tick = inv.get_settings().sensor_runner_tick_interval_seconds
+    step = 10 + inv._RUN_TIME_LIMIT_SECONDS + tick
+    limit = created + timedelta(seconds=60 + 6 * step + inv._STALE_GRACE_SECONDS)
+
+    assert not inv._wait_is_over(sensor, created + timedelta(seconds=60 + 6 * 10 + 61))
+    assert not inv._wait_is_over(sensor, limit)
+    assert inv._wait_is_over(sensor, limit + timedelta(seconds=1))
+
+
+def test_run_time_limit_matches_the_runner() -> None:
+    """The wait uses the same run time limit as the check runner."""
+    from meho_backplane.checks import runner
+
+    assert inv._RUN_TIME_LIMIT_SECONDS == runner._EVAL_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_first_unknown_result_keeps_the_hold_of_an_old_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: a first ``unknown`` result does not start a ``for_seconds`` hold again.
+
+    An old member reported only ``unknown`` and has no ``state_since``. Its
+    next ``unknown`` result sets ``state_since`` to ``created_at``, so the
+    hold has long passed and the ``degraded`` Dashboard stays as it is: no
+    all-clear mail, and later no new alert.
+    """
+    fake = _install_transport(monkeypatch)
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", state_since=None, for_seconds=600
+    )
+    await _make_old(sid_b, hours=10)
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="degraded",
+        notify_min_state="degraded",
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        link = await session.get(CheckDashboardSensor, (dash, sid_b))
+        assert link is not None
+        link.last_member_state = "degraded"
+        await session.commit()
+
+    await _record(sid_b, "unknown", datetime.now(UTC))
+    await _evaluate(sid_b)
+
+    assert fake.calls == []
+    assert fired == []
+    assert await _rollup_memo(dash) == "degraded"
+
+
 @pytest.mark.asyncio
 async def test_member_added_to_a_degraded_dashboard_keeps_member_memos(
     monkeypatch: pytest.MonkeyPatch,

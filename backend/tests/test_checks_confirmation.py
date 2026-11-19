@@ -390,18 +390,25 @@ async def test_gate_unknown_participates_like_any_state() -> None:
 
 @pytest.mark.asyncio
 async def test_gate_first_unknown_result_sets_state_since() -> None:
-    """A first ``unknown`` result changes no state but records when it was confirmed."""
+    """A first ``unknown`` result changes no state; ``state_since`` becomes ``created_at``.
+
+    The initial ``unknown`` has held since the Sensor was made, so a
+    ``for_seconds`` hold counts from then, not from this result.
+    """
     sensor_id = await _create_sensor(retry_times=2)
-    assert (await _get_sensor(sensor_id)).state_since is None
-    at = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+    created = await _get_sensor(sensor_id)
+    assert created.state_since is None
+    at = _aware(created.created_at) + timedelta(hours=5)
 
     assert await _record(sensor_id, "unknown", at) is False
     row = await _get_sensor(sensor_id)
     assert row.last_state == "unknown"
-    assert _aware(row.state_since) == at
+    assert _aware(row.state_since) == _aware(row.created_at)
 
     assert await _record(sensor_id, "unknown", at + timedelta(seconds=10)) is False
-    assert _aware((await _get_sensor(sensor_id)).state_since) == at, "a repeat does not move it"
+    assert _aware((await _get_sensor(sensor_id)).state_since) == _aware(row.created_at), (
+        "a repeat does not move it"
+    )
 
 
 @pytest.mark.asyncio

@@ -616,6 +616,15 @@ def _is_waiting_first_state(
     return not any(_wait_is_over(s, now) for s, _ in failing)
 
 
+#: The run time limit of one check run, the same value as the runner's
+#: ``_EVAL_TIMEOUT_SECONDS`` (the runner imports this module, so it cannot be
+#: imported here; a test keeps the two equal).
+_RUN_TIME_LIMIT_SECONDS = 30
+
+#: The latest first due time the wait for a new member counts from.
+_FIRST_DUE_CAP = timedelta(days=1)
+
+
 def _wait_is_over(sensor: Sensor, now: datetime) -> bool:
     """True when a member may no longer wait for its first confirmed result.
 
@@ -623,26 +632,40 @@ def _wait_is_over(sensor: Sensor, now: datetime) -> bool:
     plus the rollup's grace, for a check that does not run. The other is a
     fixed limit that a running check cannot move (the runner moves
     ``next_fire_at`` before each run): the first due time after
-    ``created_at``, plus a full confirmation window
-    (``retry_times + 1`` times ``retry_backoff_seconds``), plus the grace.
+    ``created_at``, plus a full confirmation window, plus the grace. The
+    window has ``retry_times + 1`` steps. Each step is
+    ``retry_backoff_seconds`` plus the run time limit plus one runner tick,
+    so slow runs do not end the wait before a healthy result is confirmed.
     """
     grace = timedelta(seconds=_STALE_GRACE_SECONDS)
     at = _as_utc(now)
     if sensor.next_fire_at is not None and at > _as_utc(sensor.next_fire_at) + grace:
         return True
-    window = timedelta(seconds=(sensor.retry_times + 1) * sensor.retry_backoff_seconds)
+    step = (
+        sensor.retry_backoff_seconds
+        + _RUN_TIME_LIMIT_SECONDS
+        + get_settings().sensor_runner_tick_interval_seconds
+    )
+    window = timedelta(seconds=(sensor.retry_times + 1) * step)
     return at > _first_due_at(sensor) + window + grace
 
 
 def _first_due_at(sensor: Sensor) -> datetime:
-    """The first due time of a Sensor, counted from its ``created_at``."""
+    """The first due time of a Sensor after its ``created_at``, at most one day later.
+
+    The cap keeps a rare cron (for example once a year), or an edit to one,
+    from moving the end of the wait far out.
+    """
     created = _as_utc(sensor.created_at)
+    cap = created + _FIRST_DUE_CAP
     if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
         try:
-            return next_fire_after(sensor.cron_expr, created, sensor.timezone)
+            due = next_fire_after(sensor.cron_expr, created, sensor.timezone)
         except (InvalidCronExpressionError, InvalidTimezoneError):
             return created
-    return created + timedelta(seconds=sensor.interval_seconds or 0)
+    else:
+        due = created + timedelta(seconds=sensor.interval_seconds or 0)
+    return min(due, cap)
 
 
 def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:

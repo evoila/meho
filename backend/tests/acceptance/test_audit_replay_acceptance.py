@@ -1089,31 +1089,32 @@ async def test_unit_edge_depth_cap_truncates_deep_chain(sqlite_session: AsyncSes
     assert node.children == []
 
 
-def test_unit_edge_query_audit_tree_foreign_session_returns_invalid_params() -> None:
-    """``query_audit(shape="tree")`` self-session-only: a foreign id → -32602.
+@pytest.mark.asyncio
+async def test_unit_edge_query_audit_tree_needs_a_row_of_the_caller(
+    sqlite_session: AsyncSession,
+) -> None:
+    """``query_audit(shape="tree")`` replays only a session that holds a row of the caller.
 
-    The ``shape="tree"`` path on the operator-role ``query_audit`` tool
-    replays ONLY the caller's own bound MCP session, enforced by
-    :func:`~meho_backplane.mcp.tools.audit._resolve_self_session_id`. A
-    request naming a different ``agent_session_id`` than the caller's bound
-    MCP session id is rejected with ``McpInvalidParamsError`` (JSON-RPC
-    -32602) — even though the flat path would return other in-tenant
-    principals' rows. Exercised directly (no DB / Operator) since the
-    self-session gate is a pure contextvar + arguments check.
+    The check reads the stored rows
+    (:func:`~meho_backplane.audit_query.session_has_rows_of`), never the
+    ``Mcp-Session-Id`` header. A session with rows of another login only, or
+    with no rows, is not the caller's.
     """
-    import structlog
+    from meho_backplane.audit_query import session_has_rows_of
 
-    from meho_backplane.mcp.server import McpInvalidParamsError
-    from meho_backplane.mcp.tools.audit import _resolve_self_session_id
+    tenant_id = uuid.uuid4()
+    sess = uuid.uuid4()
+    await _seed_sqlite_anchor(sqlite_session, tenant_id=tenant_id, second=0, agent_session_id=sess)
+    await sqlite_session.commit()
 
-    own_session = uuid.uuid4()
-    foreign_session = uuid.uuid4()
-    # Bind the caller's own MCP session id the way the transport would.
-    with (
-        structlog.contextvars.bound_contextvars(mcp_session_id=str(own_session)),
-        pytest.raises(McpInvalidParamsError, match="own session"),
-    ):
-        _resolve_self_session_id({"agent_session_id": str(foreign_session)})
+    async def has(sub: str, session_id: uuid.UUID = sess) -> bool:
+        return await session_has_rows_of(
+            session_id, tenant_id=tenant_id, principal_sub=sub, session=sqlite_session
+        )
+
+    assert await has("op") is True
+    assert await has("someone-else") is False
+    assert await has("op", uuid.uuid4()) is False
 
 
 # ---------------------------------------------------------------------------

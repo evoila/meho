@@ -280,7 +280,8 @@ async def forget_target_if_changed(target: Any) -> bool:
     that serves the PATCH. Every other backplane server, and every satellite
     runner, keeps its own connector caches. So every execution path calls
     this with the target it just read, before a connector reuses a login:
-    the dispatcher does, and so does the runner executor. A change shows as
+    the dispatcher, the runner executor, the topology refresh and the other
+    paths that take a cached connector for a stored target. A change shows as
     a new ``connection_changed_at`` on the row (the update route always sets
     it, also when the same ``secret_ref`` is sent again), or as another
     connector serving the target (see :func:`_target_version`), or as a
@@ -294,9 +295,12 @@ async def forget_target_if_changed(target: Any) -> bool:
     sees the version as handled. Without the lock, it would see the version
     as handled while a hook still runs, and reuse the old login.
 
-    The first sighting only records the value: nothing was kept for the
-    target by a dispatch yet. A target object with no change time (a test
-    double) is never treated as changed. Returns ``True`` when a drop ran.
+    The first sighting drops too: a login this process keeps for the target
+    may come from a path that did not record the version, so this process
+    cannot tell which target values that login used. The hooks only remove
+    what is kept, so on a target with nothing kept the drop does nothing.
+    A target object with no change time (a test double) is never treated as
+    changed. Returns ``True`` when a drop ran.
     """
     version = _target_version(target)
     if version is None:
@@ -304,8 +308,9 @@ async def forget_target_if_changed(target: Any) -> bool:
     key = target_cache_key(target)
     async with _forget_lock(target):
         if key not in _SEEN_TARGET_VERSIONS:
+            await _run_forget_hooks(target)
             _SEEN_TARGET_VERSIONS[key] = version
-            return False
+            return True
         if _SEEN_TARGET_VERSIONS[key] == version:
             return False
         _log.info(

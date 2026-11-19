@@ -16,6 +16,10 @@ user. This module is the one place that checks it, for these ops:
 ``keycloak.user.delete`` keeps its own approval card and lookup, and uses
 :func:`card_user_id` and :func:`check_card_username` for its approved run.
 
+The writes that can lock the target out also refuse the user the target
+signs in with, before approval and when the call runs
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`).
+
 Three pieces, used at three moments:
 
 * :func:`refuse_other_user_check` runs before the request waits for
@@ -39,6 +43,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_user_login_guard import (
+    login_user_park_reason,
+    refuse_login_user_of_write,
+)
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import ParkCheck, register_park_check
@@ -159,13 +167,18 @@ async def read_user_for_write(
     *,
     op_id: str,
     id_key: str = "id",
+    check_login_user: bool = True,
 ) -> UserOfWrite:
     """Find the user of a write and read it from Keycloak.
 
     Raises :exc:`KeycloakUserNotFoundError` for a user that does not exist,
     and :exc:`ValueError` when the request names no user, or its ``username``
     (or, in the approved run, the card's ``username``) is not the one stored
-    for the user.
+    for the user. Raises
+    :exc:`~meho_backplane.connectors.keycloak.ops_write_delete_lookup.KeycloakDeleteRefusedError`
+    when *op_id* must not touch the user the target signs in with and this
+    is that user. A card builder that only reads passes
+    ``check_login_user=False``.
     """
     # Imported late: ``ops_write`` imports this module for its handlers.
     from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
@@ -194,6 +207,8 @@ async def read_user_for_write(
     # A request by id alone sends no username, so compare with the card too.
     if card is not None:
         check_card_username(op_id, card, user)
+    if check_login_user:
+        await refuse_login_user_of_write(connector, operator, target, params, user, op_id=op_id)
     return UserOfWrite(uuid=uuid, path=path, user=user)
 
 
@@ -207,15 +222,19 @@ def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
     return connector
 
 
-def refuse_other_user_check(op_id: str, id_key: str = "id") -> ParkCheck:
+def refuse_other_user_check(
+    op_id: str, id_key: str = "id", *, then: ParkCheck | None = None
+) -> ParkCheck:
     """The check before the wait for approval: an id and a username of one user.
 
     A user id that does not exist is let through: the run then fails with
     "not found". MEHO cannot check without a live Keycloak connector, so it
-    refuses then.
+    refuses then. A write that must not touch the user the target signs in
+    with refuses that user too; without a live connector that check is left
+    to the run. *then* is an op's own check; it runs last.
     """
 
-    async def _check(ctx: PreviewContext) -> str | None:
+    async def _same_user(ctx: PreviewContext) -> str | None:
         uuid = _opt_str(ctx.params.get(id_key))
         if uuid is None or _opt_str(ctx.params.get("username")) is None:
             return None
@@ -231,6 +250,19 @@ def refuse_other_user_check(op_id: str, id_key: str = "id") -> ParkCheck:
         if user is None or user_matches_username(ctx.params, user):
             return None
         return other_user_reason(op_id, id_key)
+
+    async def _check(ctx: PreviewContext) -> str | None:
+        reason = await _same_user(ctx)
+        if reason is not None:
+            return reason
+        connector = _live_connector(ctx)
+        if connector is not None:
+            reason = await login_user_park_reason(
+                connector, ctx.operator, ctx.target, ctx.params, op_id=op_id, id_key=id_key
+            )
+            if reason is not None:
+                return reason
+        return None if then is None else await then(ctx)
 
     return _check
 

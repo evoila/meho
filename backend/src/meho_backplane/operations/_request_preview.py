@@ -85,7 +85,10 @@ from meho_backplane.operations._errors import (
     result_target_required,
     result_unqualified_target_version,
 )
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.operations._ingested_owner import (
     INGESTED_OPS_NOT_ACCEPTED,
     accepts_ingested_operations,
@@ -815,6 +818,8 @@ async def _build_ingested_preview(
             "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
         }
     connector_instance = get_or_create_connector_instance(cls)
+    if target is not None:
+        await forget_target_if_changed(target)
 
     # The literal request, resolved through the SAME code path
     # ``dispatch_ingested`` sends through -- no drift.

@@ -9,12 +9,14 @@ short handshake to the target's own host and port and reads the leaf
 certificate. It sends no request and trusts nothing: the handshake does
 not verify, because its only job is to show the certificate.
 
-The destination goes through the same target address check as the
-connector path first. That check looks up DNS, so it runs in a worker
-thread, inside the same timeout as the connect and the handshake. The
-probe dials the screened address and offers
-the target name as the TLS server name. A refused destination is not
-dialed.
+The destination goes through the same connect-time address check as the
+connector connections first (:func:`screen_dial_addresses`), with the port
+the probe dials. That check looks up DNS, so it runs in a worker thread,
+inside the same timeout as the connect and the handshake. The probe dials
+the checked address and offers the target name as the TLS server name. A
+host name that does not resolve is refused, unless it is listed exactly on
+the allowlist; then the probe dials that name. A refused destination is
+not dialed.
 
 It never raises. Any failure returns ``None`` and the error message then
 says the certificate could not be read.
@@ -29,7 +31,8 @@ from typing import Any
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
-from meho_backplane.targets.ssrf_guard import _dialed_host, screen_and_resolve
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.targets.ssrf_guard import _dialed_host
 
 #: Seconds for the DNS lookup, the connect and the handshake together.
 PROBE_TIMEOUT_S: float = 3.0
@@ -60,15 +63,20 @@ async def probe_presented_leaf(
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
+    dial_port = port or _DEFAULT_PORT
+
     async def _screen_and_open() -> asyncio.StreamWriter:
-        # Same check as the connector path. Refused targets raise here
-        # and are not dialed. The DNS lookup blocks, so it runs in a
-        # worker thread. Dial the screened address, not the name.
-        addrs = await asyncio.to_thread(screen_and_resolve, host)
+        # Same check as the connector connections. Refused targets raise
+        # here and are not dialed. The DNS lookup blocks, so it runs in a
+        # worker thread. Dial the checked address, not the name. ``None``
+        # means the exact name is on the allowlist: dial it by name.
+        addrs = await asyncio.to_thread(
+            screen_dial_addresses, host, dial_port, use_embedded_port=False
+        )
         dial_host = addrs[0] if addrs else _dialed_host(host)
         _reader, opened = await asyncio.open_connection(
             dial_host,
-            port or _DEFAULT_PORT,
+            dial_port,
             ssl=ctx,
             server_hostname=server_name or host,
             ssl_handshake_timeout=timeout,

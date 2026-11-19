@@ -3798,7 +3798,7 @@ a <strong>satellite gateway</strong> inside each enclave it cannot.</p>
   bp --&gt;|"governed operations"| ta
   bp --&gt;|"governed operations"| tb
   runner --&gt;|"outbound-only poll and report"| bp
-  runner --&gt;|"safe operations, approved caution changes"| tc</code></pre>
+  runner --&gt;|"safe reads only"| tc</code></pre>
 <p><strong>Pick this shape when:</strong></p>
 <ul>
 <li>Two or more network segments sit between the cluster and the targets.</li>
@@ -3818,14 +3818,13 @@ connector surface, and reports results back. All authorisation,
 approval, and audit stay central; a gateway never self-authorises.</p>
 <p>The consequence is worth stating plainly to whoever is planning the
 rollout: <strong>an enclave served only by a satellite gateway gets
-observation and, at most, small approved changes.</strong> A tenant admin can
-turn on a write tier for one runner. Then <code>caution</code> operations on that
-runner's allowlist run there, each after a person approves it.
-<code>dangerous</code> and <code>destructive</code> operations never run on a satellite: they
-need the central backplane to reach the target itself. Design the
-segment map around that before anyone promises otherwise. How the write
-tier works:
-<a href="../guides/satellite-gateway/#writes-through-a-satellite">Writes through a satellite</a>.
+observation only.</strong> A satellite runs <code>safe</code> reads. Changes through a
+satellite are not built yet. <code>dangerous</code> and <code>destructive</code> operations never
+run on a satellite: they need the central backplane to reach the target
+itself. Design the
+segment map around that before anyone promises otherwise. How a
+satellite works today:
+<a href="../guides/satellite-gateway/#what-is-not-built-yet">What is not built yet</a>.
 Implementation detail:
 <a href="https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md"><code>docs/codebase/satellite-runner.md</code></a>.
 The satellite gateway is a <strong>Beta</strong> feature — see the

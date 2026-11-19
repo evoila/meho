@@ -2042,7 +2042,7 @@ class EndpointDescriptor(Base):
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
-    #: ``apply_step_classification`` returned. ``None``, empty and ``None``
+    #: ``apply_step_policy`` returned. ``None``, empty and ``None``
     #: otherwise. Search, the call contract and the approval request show them.
     #: Approver routing matches a ``routing`` entry's ``category`` on
     #: ``policy_category``; the install's entries match on
@@ -7325,6 +7325,14 @@ class ApprovalRequest(Base):
       write, whose encrypted input the first run deleted. ``false`` on rows
       saved before this column. Added by migration ``0131``.
 
+    * ``allowed_connectors`` -- JSON nullable. The connector ids a hosted
+      agent with a connector list could use when its call started to wait
+      (:mod:`~meho_backplane.operations._target_connector_limit`). The run
+      after the approval binds the list again, so the call and every step
+      of a multi-step operation stay on targets of those connectors. NULL
+      for a caller without a connector list and on rows saved before this
+      column. Added by migration ``0175``.
+
     Indexes
     -------
 
@@ -7578,6 +7586,9 @@ class ApprovalRequest(Base):
     # migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     approver_install_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The connector list of the hosted agent that asked. See the class
+    # docstring. Added by migration ``0175``.
+    allowed_connectors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until

@@ -609,7 +609,9 @@ The dispatcher is the **event drain's subscription matcher**
 [events.md](events.md)). For each drained `event_outbox` row it fires
 every active `kind=event` trigger in that tenant whose `event_filter`
 the event `payload` contains (`payload @> event_filter`), through the
-same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. The
+same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. An
+external (webhook) event fires only a trigger whose filter names its
+event source by slug or id. The
 fired run's work_ref is `event:{event_id}:{trigger_id}`, which dedupes a
 redelivered event so it never double-fires.
 

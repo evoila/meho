@@ -544,6 +544,18 @@ the login is never its own approver" in [approvals.md](approvals.md)).
 Both functions add the per-call mark, so no connector has to set it a
 second time.
 
+**How MEHO decides that a group change gives platform admin rights.**
+`group.member.add` and `group.update_attributes` count as "gives platform
+admin" (the grant fact `platform_admin`) when the group or a parent group
+has the attribute `platform_admin=true`, when the group is
+`MEHO-Platform-Admins` or its path is under `/MEHO-Platform-Admins/`, when
+the group gives the realm role named exactly as in `JWT_PLATFORM_ADMIN_ROLE_NAME`, with the same letter case (when set,
+read from `role-mappings/realm/composite`), or when the new attributes of
+`group.update_attributes` set `platform_admin`. The name alone never
+decides. When MEHO cannot read the group, a parent group or its roles, the
+fact is unknown and a platform admin must approve. The run reads the group
+again with the same rule (`ops_write_grant_platform.py`).
+
 **The approval card.** `connectors/keycloak/ops_write_rights_card.py`
 shows the object as it is now next to the new values:
 

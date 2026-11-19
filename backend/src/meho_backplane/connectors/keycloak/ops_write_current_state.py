@@ -327,7 +327,7 @@ async def _read_group(ctx: PreviewContext, card: dict[str, Any]) -> dict[str, An
     connector = _live_connector(ctx)
     if connector is None:
         return None
-    group_id, _name = await _group(ctx, "group_id", "group_name")
+    group_id = await _group(ctx, "group_id", "group_name")
     if group_id is None:
         return None
     realm = resolve_realm_config(ctx.target).managed_realm

@@ -183,6 +183,11 @@ class ImportedSensor(BaseModel):
     action: ImportAction
     #: The fields that change on an update; empty for create and unchanged.
     changed_fields: list[str] = Field(default_factory=list)
+    #: Set only when the update changes what the Sensor runs and the Sensor
+    #: ran as another person: the ``identity_sub`` before and after. After is
+    #: always ``__sensor__``, the Sensor's own identity.
+    identity_sub_before: str | None = None
+    identity_sub_after: str | None = None
 
 
 class DashboardImportResult(BaseModel):

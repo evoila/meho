@@ -25,7 +25,9 @@ import (
 // POST /api/v1/agents/runs/{handle}/cancel. The run transitions to
 // cancelled and the updated summary is rendered. A 404 means no such run
 // in your tenant; a 409 means the run already reached a terminal state
-// (succeeded / failed / cancelled) and cannot be cancelled.
+// (succeeded / failed / cancelled) and cannot be cancelled. A 403 means
+// another login started the run: only that login, a tenant admin or a
+// platform admin may stop it, and the run goes on.
 func newRunCancelCmd() *cobra.Command {
 	var (
 		jsonOut           bool
@@ -40,7 +42,9 @@ func newRunCancelCmd() *cobra.Command {
 			"The handle is the run id printed by `meho agent run`. A 404 " +
 			"means no such run in your tenant; a 409 means the run already " +
 			"reached a terminal state (succeeded / failed / cancelled) and " +
-			"cannot be cancelled. --json emits the raw " +
+			"cannot be cancelled. A 403 means another login started the " +
+			"run: only that login, a tenant admin or a platform admin may " +
+			"stop it, and the run goes on. --json emits the raw " +
 			"AgentRunSummaryResponse for scripting.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,

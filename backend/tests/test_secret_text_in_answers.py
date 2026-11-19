@@ -55,6 +55,8 @@ _FAKE_YAML = "FAKE" + "-made-up-yaml-2209"
 _FAKE_SNMP = "FAKE" + "-made-up-snmp-3318"
 _FAKE_LIST = "FAKE" + "-made-up-list-5527"
 _FAKE_MAP = "FAKE" + "-made-up-map-6636"
+_FAKE_SHARED = "FAKE" + "-made-up-shared-7745"
+_FAKE_INNER = "FAKE" + "-made-up-inner-8854"
 _MARKER = "[REDACTED:param_name]"
 _FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
@@ -68,14 +70,27 @@ _PAIRS_YAML = (
     f"- name: API_TOKEN\n  value:\n    current: {_FAKE_MAP}\n"
     "- name: LOG_LEVEL\n  value: [info]\n"
 )
+_SHARED_SNMP_YAML = f"defaults: &defaults {{community: {_FAKE_SHARED}}}\nsnmp: *defaults\n"
+_INNER_ANCHOR_YAML = f"credentials: {{user: &u app, password: {_FAKE_INNER}}}\nuser: *u\n"
 _DATA = {
     "config.json": _CONFIG_JSON,
     "app.yaml": _APP_YAML,
     "env.yaml": _ENV_YAML,
     "snmp.yaml": _SNMP_YAML,
     "pairs.yaml": _PAIRS_YAML,
+    "shared-snmp.yaml": _SHARED_SNMP_YAML,
+    "inner-anchor.yaml": f"credentials:\n  user: &u app\n  dbPass: {_FAKE_INNER}\nuser: *u\n",
 }
-_FAKES = (_FAKE, _FAKE_ENV, _FAKE_YAML, _FAKE_SNMP, _FAKE_LIST, _FAKE_MAP)
+_FAKES = (
+    _FAKE,
+    _FAKE_ENV,
+    _FAKE_YAML,
+    _FAKE_SNMP,
+    _FAKE_LIST,
+    _FAKE_MAP,
+    _FAKE_SHARED,
+    _FAKE_INNER,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -271,6 +286,43 @@ def test_yaml_snmp_community_is_hidden_in_an_snmp_place_only() -> None:
     assert _FAKE_SNMP not in hide_secret_text(listed)
     other = "team:\n  community: platform\n"
     assert hide_secret_text(other) == other
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _SHARED_SNMP_YAML,
+        f"defaults: &d\n  community: {_FAKE_SHARED}\n  port: 161\nsnmp: *d\n",
+        f"defaults: &d\n  community: {_FAKE_SHARED}\nsnmp:\n  - *d\n",
+    ],
+)
+def test_yaml_snmp_community_in_a_map_an_alias_names_is_hidden(text: str) -> None:
+    shown = hide_secret_text(text)
+    assert _FAKE_SHARED not in shown
+    assert _FAKE_SHARED not in json.dumps(yaml.safe_load(shown))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (_INNER_ANCHOR_YAML, {"credentials": _MARKER, "user": _MARKER}),
+        (
+            f"credentials:\n  base: &b {{host: h, pass: {_FAKE_INNER}}}\n  user: &u app\n"
+            "user: *u\nother:\n  <<: *b\n  port: 1\ncopy: [*b]\n",
+            {"credentials": _MARKER, "user": _MARKER, "other": {"port": 1}, "copy": [_MARKER]},
+        ),
+        (
+            f"credentials: {{pass: &p {_FAKE_INNER}}}\nother: *p\n",
+            {"credentials": _MARKER, "other": _MARKER},
+        ),
+    ],
+)
+def test_yaml_alias_of_an_anchor_inside_a_hidden_value_still_reads(
+    text: str, expected: dict[str, Any]
+) -> None:
+    shown = hide_secret_text(text)
+    assert _FAKE_INNER not in shown
+    assert yaml.safe_load(shown) == expected
 
 
 def test_yaml_pair_value_that_is_a_list_or_a_map_is_hidden() -> None:

@@ -24,7 +24,9 @@ default view does not see it. This module hides it in the text.
    SNMP place is hidden, and the ``value`` of a pair is hidden whatever its
    type. A hidden value is written as ``key: "<marker>"`` on one line, with
    its anchor and the white space after it kept, so the text still reads
-   as YAML. A string value inside the YAML is read again as text,
+   as YAML. An alias of an anchor inside a hidden value gets the marker
+   too. A map an alias names is checked again in each SNMP place it is
+   used. A string value inside the YAML is read again as text,
    so a YAML file inside a JSON note is covered too; such a value is written
    back as a JSON string. Text that is not YAML keeps what step 1 made of it.
 
@@ -139,7 +141,12 @@ class _Finder:
         self.text = text
         self.depth = depth
         self.spans: list[tuple[int, int, str]] = []
-        self.seen: set[int] = set()
+        #: The text of each replaced node after its own anchor: anchors
+        #: that stand there are gone from the text.
+        self.removed: list[tuple[int, int]] = []
+        #: Each node is walked once outside and once inside an SNMP place:
+        #: a map an alias names can be both.
+        self.seen: set[tuple[int, bool]] = set()
 
     def _replace(self, node: Any, new: str, *, key: Any = None) -> None:
         """Replace the text of *node* by *new*.
@@ -154,14 +161,15 @@ class _Finder:
         start, end = node.start_mark.index, node.end_mark.index
         span = self.text[start:end]
         new = _anchors(span) + new + span[len(span.rstrip()) :]
+        self.removed.append((start, end))
         if key is not None and key.end_mark.index <= start:
             start, new = key.end_mark.index, ": " + new
         self.spans.append((start, end, new))
 
     def walk(self, node: Any, *, in_snmp: bool = False) -> None:
-        if id(node) in self.seen:
+        if (id(node), in_snmp) in self.seen:
             return
-        self.seen.add(id(node))
+        self.seen.add((id(node), in_snmp))
         if isinstance(node, yaml.MappingNode):
             self._walk_mapping(node, in_snmp=in_snmp)
         elif isinstance(node, yaml.SequenceNode):
@@ -189,11 +197,39 @@ class _Finder:
                 or _is_snmp_community(names, name, in_snmp=in_snmp)
                 or (pair and name == "value")
             ):
-                self.seen.add(id(value))
+                self.seen.update({(id(value), False), (id(value), True)})
                 if not _nothing_to_hide(value):
                     self._replace(value, _QUOTED_MARKER, key=key)
             else:
                 self.walk(value, in_snmp=in_snmp or (name is not None and _has_snmp_word(name)))
+
+
+def _is_removed(index: int, removed: list[tuple[int, int]]) -> bool:
+    return any(start < index < end for start, end in removed)
+
+
+def _orphan_alias_spans(text: str, removed: list[tuple[int, int]]) -> list[tuple[int, int, str]]:
+    """Spans that replace each alias whose anchor stands in a hidden value.
+
+    The alias gets the marker, so the text still reads as YAML and the
+    value stays hidden. An alias under a merge key (``<<: *name``) gets an
+    empty map, which a merge accepts.
+    """
+    spans: list[tuple[int, int, str]] = []
+    gone: dict[str, bool] = {}
+    previous: Any = None
+    for event in yaml.parse(text, Loader=_LOADER):
+        if isinstance(event, yaml.DocumentStartEvent):
+            gone = {}
+        elif isinstance(event, yaml.AliasEvent):
+            if gone.get(event.anchor):
+                merge = isinstance(previous, yaml.ScalarEvent) and previous.value == "<<"
+                new = "{}" if merge else _QUOTED_MARKER
+                spans.append((event.start_mark.index, event.end_mark.index, new))
+        elif isinstance(event, yaml.NodeEvent) and event.anchor is not None:
+            gone[event.anchor] = _is_removed(event.start_mark.index, removed)
+        previous = event
+    return spans
 
 
 def _apply(text: str, spans: list[tuple[int, int, str]]) -> str:
@@ -220,12 +256,17 @@ def _hide_yaml(text: str, depth: int) -> str:
         for document in documents:
             if document is not None:
                 finder.walk(document)
+        if not finder.spans:
+            return text
+        spans = finder.spans
+        if "&" in text:
+            spans = spans + _orphan_alias_spans(text, finder.removed)
     except yaml.YAMLError:
         return text
     except RecursionError:
         # Too deep to read: hide the whole text rather than show it unread.
         return SECRET_FIELD_MARKER
-    return _apply(text, finder.spans) if finder.spans else text
+    return _apply(text, spans)
 
 
 def _hide_text(text: str, depth: int) -> str:

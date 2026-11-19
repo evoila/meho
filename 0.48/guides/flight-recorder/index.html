@@ -3448,9 +3448,16 @@ Two things worth knowing:</p>
   <code>redaction_uncertain</code> field in the REST body, so you can see when a
   trace was withheld from agents.</li>
 <li><strong>An agent login on the same REST route gets the agent rules.</strong> It
-  gets a trace only when the tenant lets agents read traces
-  (<code>--agent-readable</code>, below), and never a redaction-uncertain trace.
-  In both cases the answer is the <code>200</code> empty state.</li>
+  gets only the trace of a call the agent made itself, only when the
+  tenant lets agents read traces (<code>--agent-readable</code>, below), and never
+  a redaction-uncertain trace. In each case the answer is the <code>200</code>
+  empty state.</li>
+<li><strong>A service login gets only the trace of a call it made itself.</strong> A
+  paired add-on logs in as a service login, so this rule holds for it
+  too.</li>
+<li><strong>A call that ran after a person approved it belongs to the login
+  that asked for it.</strong> The person who approved runs the call, but the
+  agent or service login that asked still reads its trace.</li>
 <li><strong>Absence is unambiguous.</strong> An audit row that does not exist, or lives
   in another tenant, returns <code>404</code> (never <code>403</code> — existence never leaks
   across tenants). An audit row that exists but has no captured trace —

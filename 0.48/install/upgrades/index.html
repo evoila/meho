@@ -3906,6 +3906,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>An agent login and a service login now see only the stored call traces (flight recorder) of their own calls, on <code>GET /api/v1/audit/{audit_id}/trace</code> and <code>GET /api/v1/audit/traces</code>. This holds for a paired add-on, because it logs in as a service login. It also holds for a client-credentials login whose token has no <code>principal_kind</code> claim: MEHO treats such a login as a service login. People still see every trace of their tenant.</td>
+<td>If a paired add-on or another client-credentials login must read the traces of calls that a person or another login made, give that work to a person login. A trace that such a login may not read answers <code>trace_present=false</code> on the single read, and is left out of the list on the search.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>The approval card of a <code>secret.move</code> to a <code>linux:</code> place now names the Linux target, its host and its SSH port. The approved run writes only to that target, host and port. A move that waits for approval from before the upgrade has no such card, and MEHO refuses it when it runs: nothing is read or written. <code>preview_operation</code>, <code>meho_approvals_get</code> and <code>meho_approvals_list</code> show the target, host and port only when the new setting <code>SECRET_MOVE_LINUX_TARGET_CARD</code> is on (off by default).</td>
 <td>Send such a waiting move again after the upgrade. No schema action.</td>
 </tr>

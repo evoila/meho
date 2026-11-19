@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Keeps internal names out of public text.
+#
+# `scripts/ci/check_private_names.py` reads only the lines a pull request
+# adds (every file except CHANGELOG.md) and compares them with a list of
+# names. The list is not in this repository. It is the repository secret
+# PRIVATE_NAME_LIST: one pattern per line, case does not matter. The job
+# never prints the list. On a hit it prints the file and the line number
+# and one fixed sentence.
+#
+# Triggers:
+#   pull_request  — a pull request from a fork gets no secrets, so the job
+#                   only prints a note and passes. The merge queue checks
+#                   the same lines before the merge.
+#   merge_group   — the real merge-queue commit. Here a missing secret
+#                   fails the job, so the check cannot go quiet unnoticed.
+#
+# On a pull request of this repository a missing secret gives a warning
+# and a pass. Outside this repository (a fork's own CI) it never fails.
+#
+# No `paths:` filter: a required check skipped by a path filter stays
+# Pending and blocks the merge (see docs/codebase/devops.md, "Merge queue").
+# The job is short, so it stays hosted in the merge queue too.
+
+name: private-names-check
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-names-check-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+jobs:
+  check:
+    name: Private name check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      IS_QUEUE: ${{ github.event_name == 'merge_group' }}
+      IS_THIS_REPO: ${{ github.repository == 'evoila/meho' }}
+    steps:
+      - name: Note for a pull request from a fork
+        if: env.IS_FORK == 'true'
+        run: echo "::notice::A pull request from a fork gets no secrets, so the private name check is skipped here. The merge queue checks the same lines before the merge."
+
+      - name: Checkout
+        if: env.IS_FORK != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Check the lines this change adds
+        if: env.IS_FORK != 'true'
+        env:
+          PRIVATE_NAME_LIST: ${{ secrets.PRIVATE_NAME_LIST }}
+          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          require=()
+          if [ "$IS_QUEUE" = "true" ]; then
+            # The queue commit can hold several changes, so the base is the
+            # commit the queue gives, fetched by its id.
+            git fetch --no-tags --depth=1 origin "$QUEUE_BASE_SHA"
+            base="$QUEUE_BASE_SHA"
+            if [ "$IS_THIS_REPO" = "true" ]; then
+              require=(--require-list)
+            fi
+          else
+            # A pull request is checked as its merge result: the first parent
+            # of the checked-out commit is the tip of main.
+            base="HEAD^1"
+          fi
+          python3 scripts/ci/check_private_names.py --base "$base" "${require[@]}"

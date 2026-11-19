@@ -17,6 +17,12 @@ Copyright (c) 2026 evoila Group
 > lives here is the recipe the operator follows and the verification
 > commands either side can run to prove the contract holds.
 
+**The console approval client.** The console also needs a second client,
+`meho-web-approve`, with the same secret as `meho-web`, used only for
+the sign-in before an approve. Its settings are in
+[the Keycloak realm guide](../../docs-site/install/keycloak-realm.md#the-console-approval-client-meho-web-approve).
+The built-in Keycloak has it already.
+
 **Built-in Keycloak.** With the built-in Keycloak
 (`coreKeycloak.enabled: true`, the chart default since 0.45.0), skip the
 recipe below. The realm file already has the `meho-web` client, with the

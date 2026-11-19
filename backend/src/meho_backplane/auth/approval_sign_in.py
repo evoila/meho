@@ -59,8 +59,20 @@ refuses it with the same ``401`` and one more sentence that names
 that the realm does not give the level, else ``required`` (also when the
 check failed); the routes resolve it with
 :func:`~meho_backplane.auth.approval_sign_in_flow.sign_in_level_in_force`.
-The web interface does not use the approval client, so the level is not
-checked there.
+
+The console's approval sign-in (#6282). The console has its own approval
+client
+(:attr:`~meho_backplane.settings.Settings.ui_keycloak_approve_client_id`,
+default ``meho-web-approve``), bound to the same approval sign-in flow.
+The console's normal login does not use it. When the level is required,
+the console sends the person to a sign-in with this client and keeps the
+token of that sign-in on the session row. An approve then needs that
+token
+(:func:`~meho_backplane.auth.web_approval_sign_in.check_web_approval_sign_in`):
+the same person as the session, the console's approval client, credentials asked, recent, and
+the approval level. A normal console session, also a fresh one, never
+carries the level. With ``observe`` or ``off`` the console approves as
+before on the session's own sign-in; ``observe`` records the level it saw.
 
 A refreshed token keeps the time of the first sign-in (RFC 9470 §6.1), so
 renewing a token never makes the window longer. The refusal is ``401``
@@ -90,6 +102,7 @@ __all__ = [
     "LEVEL_MISSING_REMEDIATION",
     "LEVEL_UNCHECKED_REMEDIATION",
     "WEB_FRESH_SIGN_IN_REMEDIATION",
+    "WEB_LEVEL_MISSING_REMEDIATION",
     "ApprovalAuth",
     "TouchBinding",
     "TouchPresence",
@@ -128,6 +141,12 @@ FRESH_SIGN_IN_REMEDIATION: Final[str] = (
 LEVEL_MISSING_REMEDIATION: Final[str] = (
     "Your sign-in did not reach the approval level. "
     "An admin must check approvals.sign_in in /api/v1/health."
+)
+
+#: The same sentence for a console approve: it names the console's approval client (#6282).
+WEB_LEVEL_MISSING_REMEDIATION: Final[str] = (
+    "Your sign-in did not reach the approval level. "
+    "An admin must check approvals.web_sign_in in /api/v1/health."
 )
 
 #: The sentence instead, when the level is required because MEHO's check of the realm failed.

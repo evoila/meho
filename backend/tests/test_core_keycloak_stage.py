@@ -888,15 +888,18 @@ def _without_flows(realm: dict[str, Any]) -> dict[str, Any]:
     """*realm* as a realm made before the file had login flows: no flow binds a client."""
     del realm["authenticationFlows"]
     del realm["authenticatorConfig"]
-    web = next(c for c in realm["clients"] if c["clientId"] == "meho-web")
-    del web["authenticationFlowBindingOverrides"]
+    for client in realm["clients"]:
+        if client["clientId"] in ("meho-web", "meho-web-approve"):
+            del client["authenticationFlowBindingOverrides"]
     return realm
 
 
 def _realm_before_the_approval_flow() -> dict[str, Any]:
     old = _without_flows(_realm_as_imported())
     del old["attributes"]["acr.loa.map"]
-    old["clients"] = [c for c in old["clients"] if c["clientId"] != "meho-cli-approve"]
+    old["clients"] = [
+        c for c in old["clients"] if c["clientId"] not in ("meho-cli-approve", "meho-web-approve")
+    ]
     return old
 
 
@@ -931,6 +934,13 @@ async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFix
     assert f"login flow {_APPROVAL_FLOW}: created" in out
     assert "sign-in levels: set (meho-approve)" in out
     assert "client meho-cli-approve: created" in out
+    # The console's approval client comes with it, bound to the same flow (#6282).
+    console = kc.clients["meho-web-approve"]
+    assert console["publicClient"] is False
+    assert console["authenticationFlowBindingOverrides"] == {
+        "browser": kc.flows[_APPROVAL_FLOW]["id"]
+    }
+    assert "client meho-web-approve: created" in out
 
 
 async def test_upgrade_adds_the_clients_of_the_ai_tools(capfd: pytest.CaptureFixture[str]) -> None:

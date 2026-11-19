@@ -90,6 +90,132 @@ across every cut:
   backstop a PR cannot edit. The full enforcement map is in
   [`docs/codebase/devops.md` § Untrusted pull-request isolation](codebase/devops.md).
 
+## Appliance release files
+
+The appliance build (`appliance-build.yml`, run by hand with a release tag)
+makes two files and a checksum list for a release:
+
+- `meho-appliance-X.Y.Z.ova`: the appliance.
+- `meho-appliance-X.Y.Z-os-packages.tar`: the OS updates for an update of
+  the appliance, a signed flat apt repository. `deploy/appliance/os-packages.sh`
+  makes it. `install.sh --os-packages` checks its signature with the key
+  file `/etc/apt/keyrings/meho-os-packages.gpg`.
+- `SHA256SUMS` lists both files. `SHA256SUMS.cosign.bundle` is its cosign
+  signature, keyless, as for `SHA256SUMS-linux`. The signature names
+  `appliance-build.yml` and the ref the workflow ran on.
+
+The files go to Google Cloud Storage, one folder per release:
+`gs://<bucket>/X.Y.Z/`. The OVA is too big for a GitHub release file.
+
+**Who.** One release owner and one backup person start and approve the
+publish run. The backup acts only when the release owner is away. This
+public repository names no people: the team keeps the two names outside
+the repository, and both are required reviewers of the
+environment `release` (below).
+
+**When and how to start the publish run.** After the tag is pushed and
+`linux-download.yml` has put the form-2 download on the GitHub release,
+the release owner starts `appliance-build.yml` by hand:
+
+- "Use workflow from": the tag `vX.Y.Z` itself, not a branch;
+- input `tag`: `vX.Y.Z`;
+- input `publish`: on.
+
+The workflow has two jobs:
+
+1. `build` runs on the lab's runner with read rights only. It builds the
+   OVA and keeps it, its checksum and the OS update packages as workflow
+   artifacts.
+2. `publish` runs on a GitHub-hosted runner. It checks the OVA checksum,
+   makes and signs the OS-package file, writes `SHA256SUMS`, signs it with
+   cosign and checks the signature, signs in to Google Cloud and uploads
+   the files. Only this job may get a GitHub sign-in token.
+
+A release run is a run with `publish` on that started from the tag. Only a
+release run uses the GitHub environment `release`, so the job waits until
+the release owner approves it. Any other run (for example from a branch)
+signs `SHA256SUMS` with cosign and checks it, but never reads the signing
+key and never uploads.
+
+**The environment `release`.** Set it up once in the repository settings:
+
+- deployment rule: tags `v*` only;
+- required reviewer: the release owner (and the backup person);
+- the secret `MEHO_OS_PACKAGES_SIGNING_KEY`: the signing key, an armored
+  secret key without a passphrase. It is an environment secret, not a
+  repository secret, so no other run can read it.
+- the secrets `MEHO_RELEASE_GCP_WIF_PROVIDER` and
+  `MEHO_RELEASE_GCP_SERVICE_ACCOUNT` for the Google Cloud sign-in (see
+  below).
+
+Both the tag rule and the required reviewers are needed. The workflow
+cannot set or enforce them; only the repository settings can.
+
+- Without the tag rule, a run from a branch can use the environment and
+  read the signing key.
+- Without a required reviewer, anyone with write access can start a
+  release run from an existing tag.
+
+So the first step of a release run, "Check the settings of the
+environment release", reads the environment through the GitHub API. It
+stops the run, before the key is read, when the environment has no
+required reviewer, or when its deployment rule is not "tags `v*` only".
+
+**Signing the OS-package file.** A release run (`MEHO_RELEASE=1`) reads the
+key only from `MEHO_OS_PACKAGES_SIGNING_KEY`, never from a file. It stops
+with a plain message when the secret is empty. It stops when the key's
+user id holds `TEST KEY`: the test key of the tests can never sign a
+release. It also stops when the key's fingerprint is not the repository
+variable `MEHO_OS_PACKAGES_KEY_FINGERPRINT` (40 hex digits), so no key
+other than the real one can sign.
+
+**Google Cloud sign-in.** The publish job signs in with workload identity
+federation (`google-github-actions/auth`): GitHub's sign-in token, no
+stored key file. Two secrets of the environment `release` name them:
+`MEHO_RELEASE_GCP_WIF_PROVIDER` (the workload identity provider) and
+`MEHO_RELEASE_GCP_SERVICE_ACCOUNT` (the service account). They are
+secrets, not variables: the job log is public and shows the inputs of
+each step, and GitHub hides only secrets there. The service account may
+only create and read objects in the release bucket (for example the role
+"Storage Object Creator" plus "Storage Object Viewer" on that bucket
+only), nothing else.
+
+Set the condition of the workload identity provider to this repository
+and the environment `release`, for example:
+
+```text
+assertion.repository == 'evoila/meho' && assertion.environment == 'release'
+```
+
+Without this condition, any workflow run of this repository could sign in
+as the upload account.
+
+**The upload step.** `deploy/appliance/upload-release.sh` copies the OVA,
+the OS-package file, `SHA256SUMS` and its bundle to the folder of the
+version. The bucket name is the repository variable `MEHO_RELEASE_BUCKET`.
+When it is empty, or the bucket does not exist, the step stops with a
+plain message. Any other `gcloud` error stops it too. The step never
+creates a bucket, never changes who can read it and never overwrites a
+file. A second run of the same release with the same content does nothing.
+A second run with other content stops.
+
+**Check the signature** of a published release:
+
+```bash
+cosign verify-blob \
+  --certificate-identity "https://github.com/evoila/meho/.github/workflows/appliance-build.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle SHA256SUMS.cosign.bundle \
+  SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+**The release owner sets up** the signing key (made once, with a backup
+copy in the team password manager, never on a laptop) and its fingerprint
+variable, the environment `release`, the bucket and its public read
+access, and the workload identity provider and service account. No key,
+no bucket name and no account name is in the repository.
+
 ## Versioning
 
 [SemVer](https://semver.org). The version lives **only in the git tag** —
@@ -615,7 +741,7 @@ Walk the gates in the order an operator hits them:
   default fail-closed posture, `"single_operator_break_glass"` when
   the deploy set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true`
   escape (see `docs/codebase/approvals.md` — the endorsed
-  single-operator answer is an agent-requester, not the flag).
+  single-operator answer is the MEHO-SA-Operators group, not the flag).
 
 - [ ] **Approval custody** (required wherever a credential-write
   operation may wait for approval). Set

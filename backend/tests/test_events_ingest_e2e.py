@@ -99,7 +99,12 @@ def _stub_ingest_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
+
+    async def _no_slot(*_a: object, **_k: object) -> None:
+        return None
+
     monkeypatch.setattr("meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _no_op)
+    monkeypatch.setattr("meho_backplane.events.ingest.service.take_check_slot", _no_slot)
     yield
 
 

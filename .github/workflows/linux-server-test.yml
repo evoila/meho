@@ -30,7 +30,8 @@
 # small flat apt repository that the test signs, so the signature check and
 # the format of the OS-package file are proven with the apt of the runner.
 # MEHO_REQUIRE_APT_CHECK=1 makes those tests fail, not skip, when apt-get,
-# gpg or gpgv is missing.
+# gpg or gpgv is missing. The appliance's release file tests also need
+# apt-ftparchive (from apt-utils) and dpkg-deb, and the same setting.
 #
 # The chart is a trigger too: a test checks that every image repository of
 # the chart has a licence line for the download
@@ -71,7 +72,7 @@ concurrency:
 jobs:
   test:
     name: Run shellcheck and the install script tests
-    # Untrusted-PR runner isolation (F06, meho-internal#268). The job runs
+    # Untrusted-PR runner isolation. The job runs
     # PR-controlled scripts. It needs no internal route, deployment
     # credential or build cache, so a fork PR runs on a disposable
     # GitHub-hosted runner, and same-repo PRs stay on the internal pool.
@@ -182,7 +183,7 @@ jobs:
             exit 1
           fi
 
-      - name: Install nftables and iproute2 for the firewall file check
+      - name: Install nftables, iproute2 and apt-utils for the tests
         # Same `sudo -n apt-get` pattern as the php-cli step in ci.yml. A
         # failed index refresh is a warning: the install below fails on its
         # own when the Ubuntu indexes are missing. nft and ip are in
@@ -197,6 +198,9 @@ jobs:
           fi
           if ! command -v ip >/dev/null 2>&1 && [ ! -x /usr/sbin/ip ]; then
             packages+=(iproute2)
+          fi
+          if ! command -v apt-ftparchive >/dev/null 2>&1; then
+            packages+=(apt-utils)
           fi
           if ((${#packages[@]} > 0)); then
             if ! sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y; then
@@ -225,5 +229,8 @@ jobs:
       - name: Run the appliance build unit tests
         # The clean script against a fake build VM, the OVF rewrite against
         # the Ubuntu cloud image's descriptor, and build.sh against a stub
-        # govc. No vCenter.
+        # govc. No vCenter. The release file tests sign a real apt
+        # repository; they must run here, not skip.
+        env:
+          MEHO_REQUIRE_APT_CHECK: '1'
         run: python -m unittest discover -s deploy/appliance/tests -v

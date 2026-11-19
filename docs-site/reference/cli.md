@@ -126,6 +126,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
 - `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
 - `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
+- `--web-approve-client-id` — the console's approval sign-in client_id (matches the backplane's UI_KEYCLOAK_APPROVE_CLIENT_ID); when the realm has it, it is bound to the approval sign-in flow
 - `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
 
 ### `meho admin tools`
@@ -612,6 +613,7 @@ meho approvals show <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON instead of the human-readable view
+- `--script-page` — print this page (from 1) of the script of a linux.script.run request
 
 ### `meho approvals withdraw`
 
@@ -3929,6 +3931,9 @@ meho operation groups <connector_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cursor` — the next_cursor of the previous page, to list the next page
+- `--group` — list only this group (matters only while the backplane switch GROUP_LISTING_OPERATIONS is on)
+- `--include-raw` — also count raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 
 ### `meho operation preview`
@@ -3986,6 +3991,7 @@ meho operation search <connector_id> [query] [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
+- `--include-raw` — also show raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits
@@ -4605,7 +4611,7 @@ meho scheduler create [flags]
 - `--agent-definition` — UUID of the agent definition to fire
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cron-expr` — 5-field cron expression (required when --kind=cron)
-- `--event-filter` — event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-)
+- `--event-filter` — event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-); for webhook events it must name the event source (source.slug or source.id)
 - `--fire-at` — ISO 8601 fire time (required when --kind=one_off)
 - `--identity-sub` — identity sub the scheduler impersonates at fire time (default '__scheduler__')
 - `--in-flight-policy` — killed-mid-flight policy: fail_into_audit | resume (default fail_into_audit)
@@ -4898,7 +4904,7 @@ meho secret read <mount> <path> | read --approval <id> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)
+Manage deterministic-check sensors (list / create / edit / pause / resume / run / delete / results / ack)
 
 ```
 meho sensor
@@ -5035,6 +5041,18 @@ meho sensor resume <sensor_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw Sensor JSON instead of the human summary
 - `--tenant` — target tenant UUID (platform_admin cross-tenant change)
+
+### `meho sensor run`
+
+Run one sensor once now (tenant_admin)
+
+```
+meho sensor run <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit a structured JSON result instead of plain text
+- `--tenant` — target tenant UUID (platform_admin cross-tenant run)
 
 ## `meho service-principals`
 

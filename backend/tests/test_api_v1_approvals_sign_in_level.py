@@ -68,7 +68,7 @@ def _set_mode(monkeypatch: pytest.MonkeyPatch, mode: str | None) -> None:
 def _sign_in_state(monkeypatch: pytest.MonkeyPatch, state: str, detail: str | None = None) -> None:
     """Make MEHO's check of the approval sign-in answer *state* (and *detail*)."""
 
-    async def read(_settings: Any = None) -> ApprovalSignInStatus:
+    async def read(_settings: Any = None, **_kwargs: Any) -> ApprovalSignInStatus:
         return ApprovalSignInStatus(state=state, client="meho-cli-approve", detail=detail)  # type: ignore[arg-type]
 
     monkeypatch.setattr(approval_sign_in_flow, "read_approval_sign_in", read)

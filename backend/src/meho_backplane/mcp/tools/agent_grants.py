@@ -70,8 +70,12 @@ from meho_backplane.agents.grant_schemas import (
     GrantPrincipalKind,
     GrantVerdict,
 )
-from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.agents.grants import (
+    AgentGrantService,
+    GrantRevokeNeedsPersonError,
+    GrantValidationError,
+)
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -342,7 +346,20 @@ async def _revoke_grant_handler(
         audit_op_class="write",
     )
     service = AgentGrantService()
-    deleted = await service.revoke(operator.tenant_id, grant_id)
+    try:
+        deleted = await service.revoke(
+            operator.tenant_id, grant_id, auto_execute_only=not is_human_principal(operator)
+        )
+    except GrantRevokeNeedsPersonError:
+        # A deny or needs-approval row limits the agent; only a person removes it.
+        ensure_human_mcp_caller(
+            operator,
+            "meho_agents_grant_revoke",
+            "A machine login may remove only an auto-execute grant. A person removes a "
+            "deny or needs-approval grant in the operator console, or with the CLI: "
+            "`meho agent grant revoke <grant-id>`.",
+        )
+        raise
     if not deleted:
         raise McpInvalidParamsError(f"grant {grant_id!s} not found")
     return {"revoked": str(grant_id)}

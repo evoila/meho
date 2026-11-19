@@ -46,8 +46,7 @@ CONNECTOR_ID = "vault-1.x"
 # composite: the approval request stores this connector id, and the resume
 # re-dispatches the parent composite under it.
 STEP_CONNECTOR_ID = CONNECTOR_ID
-# A plain read. MEHO stores no result of a credential read (such as
-# ``vault.kv.list``), so a later step of the run could not wait.
+# A plain read: MEHO stores its result, so a resume does not send it again.
 CHILD_OP_ID = "vault.things.list"
 WAIT_OP_ID = "vault.composite.step_waits"
 DENY_OP_ID = "vault.composite.step_denied"

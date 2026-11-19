@@ -489,6 +489,10 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     get_dispatch_child,
 )
+from meho_backplane.operations.composite_steps import (
+    child_read_sent_again,
+    mark_child_cleared_by_person,
+)
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
@@ -4437,16 +4441,26 @@ async def _dispatch_now(
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval.
+            # ``requires_approval`` step keeps its own approval. A credential
+            # read that a resume sends again is refused whenever it would wait,
+            # also when it is destructive or needs its own approval: an
+            # approval request for it alone cannot finish the waiting run.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
                 and approved_run_var.get()
-                and descriptor.safety_level != "destructive"
-                and not descriptor.requires_approval
             ):
-                _log.info("composite_child_covered_by_approved_run", op_id=op_id)
-                verdict = PermissionVerdict.AUTO_EXECUTE
+                if child_read_sent_again(op_id):
+                    verdict = PermissionVerdict.DENY
+                    gate_reason = (
+                        f"composite_resume_read_not_sent: the step {op_id!r} reads a "
+                        "credential; the run after an approval sends it again only when "
+                        "its policy lets it go ahead with no person"
+                    )
+                elif descriptor.safety_level != "destructive" and not descriptor.requires_approval:
+                    _log.info("composite_child_covered_by_approved_run", op_id=op_id)
+                    mark_child_cleared_by_person(op_id)
+                    verdict = PermissionVerdict.AUTO_EXECUTE
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):
@@ -4706,7 +4720,8 @@ async def _dispatch_now(
 
         # #3879: a target changed on another server (or by this one, before
         # this process saw it) must not be served with the login kept for its
-        # old values. One dict lookup per dispatch; a drop only on a change.
+        # old values. One dict lookup per dispatch; a drop only on a change,
+        # and also the first time this process sees the target.
         if target is not None:
             await forget_target_if_changed(target)
 

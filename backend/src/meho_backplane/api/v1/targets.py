@@ -200,6 +200,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
 from meho_backplane.operations._errors_target_secret import target_secret_error_detail
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     forget_target_in_connectors,
     get_or_create_connector_instance,
 )
@@ -1367,6 +1368,10 @@ async def discover_targets(
         # resolve_target raises HTTPException(404/409) directly and
         # binds target_id into contextvars for the audit row.
         seed = await resolve_target(session, operator.tenant_id, seed_target)
+        # A connector may log in to the seed below. When a person changed the
+        # seed since this process last saw it, drop the logins kept for its
+        # old values first, the same as a dispatch does.
+        await forget_target_if_changed(seed)
 
     # Enumerate every connector implementation registered for the
     # product. The v2 registry keys on (product, version, impl_id) and

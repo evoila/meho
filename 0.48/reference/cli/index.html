@@ -8372,6 +8372,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#meho-sensor-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sensor run
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -15881,6 +15892,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#meho-sensor-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho sensor run
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -21548,7 +21570,7 @@
 <li><code>--target</code> — Vault target slug to dispatch against (resolved server-side)</li>
 </ul>
 <h2 id="meho-sensor"><code>meho sensor</code><a class="headerlink" href="#meho-sensor" title="Permanent link">&para;</a></h2>
-<p>Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)</p>
+<p>Manage deterministic-check sensors (list / create / edit / pause / resume / run / delete / results / ack)</p>
 <div class="highlight"><pre><span></span><code>meho sensor
 </code></pre></div>
 <h3 id="meho-sensor-ack"><code>meho sensor ack</code><a class="headerlink" href="#meho-sensor-ack" title="Permanent link">&para;</a></h3>
@@ -21658,6 +21680,15 @@
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit raw Sensor JSON instead of the human summary</li>
 <li><code>--tenant</code> — target tenant UUID (platform_admin cross-tenant change)</li>
+</ul>
+<h3 id="meho-sensor-run"><code>meho sensor run</code><a class="headerlink" href="#meho-sensor-run" title="Permanent link">&para;</a></h3>
+<p>Run one sensor once now (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho sensor run &lt;sensor_id&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — emit a structured JSON result instead of plain text</li>
+<li><code>--tenant</code> — target tenant UUID (platform_admin cross-tenant run)</li>
 </ul>
 <h2 id="meho-service-principals"><code>meho service-principals</code><a class="headerlink" href="#meho-service-principals" title="Permanent link">&para;</a></h2>
 <p>Manage service-principal operator surfaces</p>

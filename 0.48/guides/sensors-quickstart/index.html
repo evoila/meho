@@ -2268,6 +2268,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-a-sensor-once-now" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run a sensor once now
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#change-a-sensor-or-a-dashboard" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3412,6 +3423,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-a-sensor-once-now" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run a sensor once now
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#change-a-sensor-or-a-dashboard" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3763,6 +3785,19 @@ deployment at a nonexistent image tag (it schedules, then sticks in
 history with <code>meho sensor results &lt;sensor_id&gt;</code> (filters <code>--from</code>,
 <code>--to</code>, <code>--state</code>). MEHO keeps this history for 7 days by default
 (<code>CHECKS_EVIDENCE_RETENTION_DAYS</code>).</p>
+<h2 id="run-a-sensor-once-now">Run a sensor once now<a class="headerlink" href="#run-a-sensor-once-now" title="Permanent link">&para;</a></h2>
+<p>A new sensor waits one full interval for its first run. To see a result
+sooner, or to check a sensor again between two scheduled runs, ask MEHO
+to run it now:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>sensor<span class="w"> </span>run<span class="w"> </span>&lt;sensor_id&gt;
+meho<span class="w"> </span>sensor<span class="w"> </span>results<span class="w"> </span>&lt;sensor_id&gt;
+</code></pre></div>
+<p>MEHO does not run the check inside the command. It makes the sensor due
+at once, and the runner runs it at its next tick (10 seconds by default),
+with its normal login and rules. Read the new result with
+<code>meho sensor results</code>. A paused sensor is refused: run
+<code>meho sensor resume &lt;sensor_id&gt;</code> first. Sending the command twice is safe.
+It needs the <code>tenant_admin</code> role.</p>
 <h2 id="change-a-sensor-or-a-dashboard">Change a sensor or a dashboard<a class="headerlink" href="#change-a-sensor-or-a-dashboard" title="Permanent link">&para;</a></h2>
 <p>You can change a sensor or a dashboard in place. Its id stays. A sensor
 also keeps its result history and its place in every dashboard. Only the

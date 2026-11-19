@@ -163,6 +163,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
         ├─ params_check_errors → a problem ? → status=error error_code=invalid_params
         │       (the op's own check from register_params_check; validator=params_check)
+        │       (params_errors: when only maxLength failed, the check runs too and
+        │       its problem replaces the length error on the same field)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
         ├─ source_kind != 'ingested' (governed tier) ? → build_composite_preview:
@@ -406,7 +408,8 @@ hash by building the preview again, so they stay in step.
   `count_known_ops`.
 - `operations._validate` — `validate_params`, `params_check_errors` (the
   op's own params check, registered with `register_params_check`; the
-  dispatcher runs the same check before its policy gate), `policy_gate`
+  dispatcher runs the same check before its policy gate), `params_errors`
+  (puts the two together), `policy_gate`
   (decide-only).
 - `operations._handler_resolve` — `get_or_create_connector_instance`.
 - `connectors.resolve_connector_or_label` — the same yes/no/ambiguous

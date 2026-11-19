@@ -132,6 +132,11 @@ Detail payloads land in ``extras``. Codes:
   that method (a linux op on an rke2 target). Refused right after the
   target check, before the policy gate and any wait for approval, with
   one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
+* ``connector_not_allowed`` -- a hosted agent with a connector list called
+  an op on a target whose connector is not in the list, or that resolves
+  no single connector. Refused right after the mismatch check, before the
+  policy gate, with one audit row and no approval request
+  (:mod:`~meho_backplane.operations._target_connector_limit`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -349,6 +354,11 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._catalog_guard import select_catalog_for_target
+from meho_backplane.operations._composite_steps import (
+    mark_when_a_step_is_unknown,
+    recording_steps,
+    track_composite_steps,
+)
 from meho_backplane.operations._errors import (
     MESSAGE_SOURCE_KEY,
     is_auth_failed_status,
@@ -447,6 +457,9 @@ from meho_backplane.operations._session_expired_hook import (
     session_expired_by_hook,
     with_refused_signin_remediation,
 )
+from meho_backplane.operations._target_connector_limit import (
+    refuse_target_connector_not_allowed,
+)
 from meho_backplane.operations._target_connector_match import refuse_target_connector_mismatch
 from meho_backplane.operations._target_version_range import refuse_version_outside_range
 from meho_backplane.operations._tls_presented import probe_presented_leaf
@@ -456,7 +469,7 @@ from meho_backplane.operations._validate import (
     compute_audit_params_hash,
     compute_params_hash,
     ingested_schema_for_validation,
-    params_check_errors,
+    params_errors,
     policy_gate,
     validate_params,
     waits_only_for_token_call,
@@ -506,7 +519,12 @@ from meho_backplane.operations.shutdown_drain import (
     shutting_down_result,
     track_operation,
 )
-from meho_backplane.operations.uncertain_outcome import changes_target
+from meho_backplane.operations.switch_params import schema_for_checks
+from meho_backplane.operations.uncertain_outcome import (
+    changes_target,
+    connection_lost_after_send,
+    with_uncertain_outcome,
+)
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import (
@@ -856,12 +874,15 @@ async def _run_source_kind_branch(
         # raise :class:`CompositeRecursionLimitExceeded` *before* a
         # rogue recursive dispatch fires (handled by the surrounding
         # exception branch in :func:`_execute_and_audit`).
-        dispatch_child = get_dispatch_child(
-            dispatch=dispatch,
-            parent_operator=operator,
-            parent_target=target,
-            parent_audit_id=audit_id,
-            parent_op_id=descriptor.op_id,
+        dispatch_child = recording_steps(
+            get_dispatch_child(
+                dispatch=dispatch,
+                parent_operator=operator,
+                parent_target=target,
+                parent_audit_id=audit_id,
+                parent_op_id=descriptor.op_id,
+            ),
+            audit_id,
         )
         return await dispatch_composite(
             handler=handler,
@@ -970,21 +991,27 @@ async def _execute_and_audit(
         target=target,
         descriptor=descriptor,
         connector_id=connector_id,
+        # An approved call runs under the approver, but the trace belongs to
+        # the requester, the same owner as its result handle.
+        owner_sub=handle_owner_sub_var.get(),
     )
     try:
-        result = await _execute_and_audit_inner(
-            op_id=op_id,
-            connector_id=connector_id,
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            started=started,
-            secret_view=secret_view,
-        )
+        # A multi-step run keeps a log of its steps, so its error result is
+        # stored as uncertain when a step ended uncertain (_composite_steps).
+        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
+            result = await _execute_and_audit_inner(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                audit_id=audit_id,
+                started=started,
+                secret_view=secret_view,
+            )
     finally:
         # Persists the trace via record_trace on the recorder's best-effort
         # path (owning root only); never raises (F7).
@@ -2089,11 +2116,18 @@ async def _run_branch_with_error_handling(
         # importing ``connectors.net`` at module scope would close a cycle
         # back through ``operations/__init__``. A probe refused because its
         # tenant's share of the probe pool was in use is narrowed the same way.
+        #
+        # A change whose call timed out or lost its connection on a client
+        # library that is not httpx (an SSH command under ``wait_for``, the
+        # Kubernetes client, a database driver) may have reached the target.
+        # It is stored as uncertain, like the httpx arms above do.
         duration_ms = _elapsed_ms(started)
         if is_probe_refused(exc):
             exc_result = result_connector_probe_refused(op_id, exc, duration_ms)
         elif is_probe_pool_busy(exc):
             exc_result = result_probe_pool_busy(op_id, exc, duration_ms)
+        elif changes_target(descriptor.safety_level) and connection_lost_after_send(exc):
+            exc_result = with_uncertain_outcome(result_connector_error(op_id, exc, duration_ms))
         else:
             exc_result = result_connector_error(op_id, exc, duration_ms)
         return await _audit_error_and_return(
@@ -2284,6 +2318,7 @@ async def _audit_error_and_return(
     secret-named fields and Tier-1 shapes in every string of ``error``,
     ``extras`` and ``result``.
     """
+    result = mark_when_a_step_is_unknown(result, audit_id)
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)
     receipt = await audit_safe(
@@ -3458,6 +3493,57 @@ async def _build_proposed_effect(
         return None
 
 
+def _preview_failed_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> dict[str, Any]:
+    """The ``proposed_effect`` of a request whose preview build raised.
+
+    Keeps the op identity and the risk level and class from the catalog,
+    so the approval rules read the operation's real level. The
+    ``preview_failed`` key lets the approval card say that MEHO could not
+    build the preview.
+    """
+    effect = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+    effect["op_class"] = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
+    effect["safety_level"] = descriptor.safety_level
+    effect["preview_populated"] = False
+    effect["preview_failed"] = True
+    return effect
+
+
+async def _build_park_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``proposed_effect`` a parked request stores; never ``None``.
+
+    :func:`_build_proposed_effect`, or :func:`_preview_failed_effect` when
+    that build raised.
+    """
+    effect = await _build_proposed_effect(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+    if effect is not None:
+        return effect
+    return _preview_failed_effect(
+        op_id=op_id, connector_id=connector_id, descriptor=descriptor, target=target
+    )
+
+
 async def _destructive_binding_refusal(
     *,
     op_id: str,
@@ -3764,8 +3850,9 @@ async def _handle_needs_approval(
     # secret-free result under ``proposed_effect["permission_preflight"]``
     # so a write Vault would deny surfaces a "this write will be denied"
     # banner at park time instead of failing only after a four-eyes
-    # approval. Fail-soft too: a probe fault degrades to no banner.
-    proposed_effect = await _build_proposed_effect(
+    # approval. Fail-soft too: a probe fault degrades to no banner. When the
+    # build raises, the request still stores the catalog risk level.
+    proposed_effect = await _build_park_effect(
         op_id=op_id,
         connector_id=connector_id,
         descriptor=descriptor,
@@ -3921,9 +4008,9 @@ def _params_error(
     param is rejected as ``invalid_params`` here rather than defaulting
     onto the vendor query string in ``_split_ingested_params``.
     """
-    schema_to_validate = descriptor.parameter_schema
+    schema_to_validate = schema_for_checks(descriptor)
     if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+        schema_to_validate = ingested_schema_for_validation(schema_to_validate)
     try:
         validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:
@@ -3931,12 +4018,10 @@ def _params_error(
         # the descriptor is at fault, not the caller. Structured error
         # instead of letting PointerToNowhere escape as a 500.
         return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
-    if validation_errors:
-        return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
     # The op's own params check (``register_params_check``): a problem the
     # schema cannot say, refused here, before the policy gate can park the
     # call with its params in the approval queue.
-    problems = params_check_errors(op_id, params)
+    problems = params_errors(op_id, params, validation_errors)
     if problems:
         return result_invalid_params(op_id, problems, _elapsed_ms(started))
     return None
@@ -4133,6 +4218,17 @@ async def _dispatch_now(
     )
     if mismatch is not None:
         return mismatch
+    # A hosted agent with a connector list may use only targets whose
+    # connector is in the list. Refused here too, before the policy gate.
+    not_allowed = await refuse_target_connector_not_allowed(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if not_allowed is not None:
+        return not_allowed
     # A target whose known version is outside the range of the connector
     # picked for it (through the fallback entry) is refused the same way.
     outside = await refuse_version_outside_range(

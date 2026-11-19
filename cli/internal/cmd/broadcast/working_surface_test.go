@@ -144,7 +144,7 @@ func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 
 func TestRenderBroadcastSSEEmitsWireData(t *testing.T) {
 	cmd, stdout, _ := newRunCmd(t)
-	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: {\"kind\":\"announcement\"}\n\n"), cmd.OutOrStdout(), true); err != nil {
+	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: {\"kind\":\"announcement\"}\n\n"), cmd.OutOrStdout(), true, nil); err != nil {
 		t.Fatalf("renderBroadcastSSE: %v", err)
 	}
 	if got := stdout.String(); got != "{\"kind\":\"announcement\"}\n" {
@@ -162,7 +162,7 @@ func TestRenderBroadcastSSEEscapesControlCharacters(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	cmd, stdout, _ := newRunCmd(t)
-	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: "+string(event)+"\n\n"), cmd.OutOrStdout(), false); err != nil {
+	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: "+string(event)+"\n\n"), cmd.OutOrStdout(), false, nil); err != nil {
 		t.Fatalf("renderBroadcastSSE: %v", err)
 	}
 	got := stdout.String()
@@ -181,7 +181,7 @@ func TestRenderBroadcastSSEEscapesControlCharacters(t *testing.T) {
 func TestRenderBroadcastSSEJSONKeepsWireData(t *testing.T) {
 	raw := `{"activity":"a\u001b[2Kb"}`
 	cmd, stdout, _ := newRunCmd(t)
-	if err := renderBroadcastSSE(strings.NewReader("data: "+raw+"\n\n"), cmd.OutOrStdout(), true); err != nil {
+	if err := renderBroadcastSSE(strings.NewReader("data: "+raw+"\n\n"), cmd.OutOrStdout(), true, nil); err != nil {
 		t.Fatalf("renderBroadcastSSE: %v", err)
 	}
 	if got := stdout.String(); got != raw+"\n" {

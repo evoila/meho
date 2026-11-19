@@ -113,6 +113,7 @@ async def _park(
             target=None,
             params=_PARAMS,
             params_hash=compute_params_hash(_PARAMS),
+            proposed_effect={"safety_level": "caution"},
         )
         if status is not None:
             request.status = status

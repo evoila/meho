@@ -67,6 +67,14 @@ command line holds only the script's byte count. The adapter's log events and
 every error text hold only the target name, the path and the owner. An error
 names a marker from the script, never the host's error output.
 
+The approved run
+================
+
+The approval card of a ``secret.move`` names the target of a ``linux:``
+side, its host and its port. The approved run compares them with the target
+it finds (:mod:`~meho_backplane.connectors.linux.secret_sink_target`), before
+the sudo password lookup, before the source is read and before any SSH call.
+
 Reading a secret from a ``linux:`` ref is not supported. It fails with an error
 that names no value.
 """
@@ -84,15 +92,20 @@ import structlog
 from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.linux.connector import LinuxSshConnector
 from meho_backplane.connectors.linux.ops_write import _resolve_sudo_password
+from meho_backplane.connectors.linux.secret_sink_target import check_approved_sink_target
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.targets.resolver import resolve_target
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.linux.connector import Target
     from meho_backplane.connectors.secret.endpoints import SecretEndpoint
+    from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
     "LinuxSecretRefError",
@@ -466,14 +479,21 @@ class LinuxSecretSinkEndpoint:
             "'linux:' ref, so it cannot be a move source"
         )
 
-    async def write_secret(self, operator: Operator, material: SecretMaterial) -> None:
-        """Write *material* to the file on the host as the owner, mode 0600."""
-        connector = get_or_create_connector_instance(LinuxSshConnector)
-        if not isinstance(connector, LinuxSshConnector):  # pragma: no cover -- registry invariant
-            raise TypeError(
-                "secret broker linux sink resolved a non-LinuxSshConnector instance; "
-                "the connector instance cache is misconfigured"
-            )
+    @property
+    def target_name(self) -> str:
+        """The target name (or alias) the ref names."""
+        return self._target_name
+
+    async def check_target(self, operator: Operator) -> TargetORM:
+        """Find the named target in the caller's tenant and check it. No SSH call.
+
+        Refuses a target that is not a Linux SSH target
+        (:class:`LinuxSecretRefError`), before MEHO reads any credential.
+        During the approved run of a ``secret.move``, the target, its host
+        and its port must be the ones on the approval card
+        (:class:`~meho_backplane.connectors.linux.secret_sink_target.LinuxTargetChangedError`).
+        ``secret.move`` calls this before it reads the source.
+        """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
@@ -484,7 +504,28 @@ class LinuxSecretSinkEndpoint:
                 f"linux secret ref names target {self._target_name!r} of kind {product!r}; "
                 f"the linux store writes only to a {LinuxSshConnector.product!r} target"
             )
-        target = cast("Target", row)
+        check_approved_sink_target(self._target_name, row)
+        return row
+
+    async def write_secret(self, operator: Operator, material: SecretMaterial) -> None:
+        """Write *material* to the file on the host as the owner, mode 0600.
+
+        Checks the target first (:meth:`check_target`), before the sudo
+        password lookup and before any SSH call. Then drops the SSH logins
+        this process keeps for the target when a person changed it since this
+        process last saw it (:func:`forget_target_if_changed`), so the script
+        goes to the host and port the row holds now.
+        """
+        connector = get_or_create_connector_instance(LinuxSshConnector)
+        if not isinstance(connector, LinuxSshConnector):  # pragma: no cover -- registry invariant
+            raise TypeError(
+                "secret broker linux sink resolved a non-LinuxSshConnector instance; "
+                "the connector instance cache is misconfigured"
+            )
+        target = cast("Target", await self.check_target(operator))
+        # secret.move carries no top-level target, so the dispatcher does not
+        # run this check for the sink.
+        await forget_target_if_changed(target)
 
         sudo_password = await _resolve_sudo_password(connector, target, operator)
         await self._check_home(connector, target, operator, sudo_password)

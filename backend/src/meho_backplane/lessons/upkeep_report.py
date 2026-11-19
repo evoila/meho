@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.lessons.metrics import LearningMetrics
 
-__all__ = ["MergedEntry", "RefreshedEntry", "ReviewCandidate", "UpkeepReport"]
+__all__ = ["MergeForReview", "MergedEntry", "RefreshedEntry", "ReviewCandidate", "UpkeepReport"]
 
 
 class MergedEntry(BaseModel):
@@ -22,6 +22,21 @@ class MergedEntry(BaseModel):
 
     slug: str
     into: str
+
+
+class MergeForReview(BaseModel):
+    """Two knowledge entries with the same body that the job did not merge.
+
+    The job merges a pair only when the kept entry is ``confirmed`` or
+    both entries have the same creator. Any other pair waits here for a
+    reviewer: *slug* has the same body as *same_as*, the entry the job
+    would keep. Neither entry is changed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    same_as: str
 
 
 class RefreshedEntry(BaseModel):
@@ -65,8 +80,10 @@ class UpkeepReport(BaseModel):
     retired_count: int = 0
     refreshed_count: int = 0
     for_review_count: int = 0
+    merge_for_review_count: int = 0
     merged: list[MergedEntry] = []
     retired: list[str] = []
     refreshed: list[RefreshedEntry] = []
     for_review: list[ReviewCandidate] = []
+    merge_for_review: list[MergeForReview] = []
     numbers: LearningMetrics | None = None

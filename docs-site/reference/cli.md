@@ -4903,7 +4903,7 @@ meho secret read <mount> <path> | read --approval <id> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)
+Manage deterministic-check sensors (list / create / edit / pause / resume / run / delete / results / ack)
 
 ```
 meho sensor
@@ -5040,6 +5040,18 @@ meho sensor resume <sensor_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw Sensor JSON instead of the human summary
 - `--tenant` — target tenant UUID (platform_admin cross-tenant change)
+
+### `meho sensor run`
+
+Run one sensor once now (tenant_admin)
+
+```
+meho sensor run <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit a structured JSON result instead of plain text
+- `--tenant` — target tenant UUID (platform_admin cross-tenant run)
 
 ## `meho service-principals`
 

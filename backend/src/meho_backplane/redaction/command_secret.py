@@ -590,9 +590,12 @@ def _quoted_connection_value(text: str, start: int, marks: _ClosingMarks) -> tup
     ``_closes_value``), ends at the end of its line.
     """
     end = marks.end(start)
-    if end is not None and _closes_value(text, start, end, marks.lines_between(start, end)):
+    line_end = text.find("\n", start, len(text) if end is None else end)
+    if end is not None and (
+        line_end == -1
+        or (_ends_string(text, end) and marks.lines_between(start, end) <= _MAX_VALUE_LINES)
+    ):
         return start, end
-    line_end = text.find("\n", start)
     return start, len(text) if line_end < 0 else line_end
 
 

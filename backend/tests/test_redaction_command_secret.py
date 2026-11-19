@@ -639,15 +639,22 @@ def test_an_800000_character_text_of_secret_elements_is_read_in_under_a_second(
     "unit",
     ["Pwd={a\n", "a;Password='a\n", 'a;pw="a\n', "Pwd={a}}\n", "x;Pwd={"],
 )
-def test_a_1600000_character_text_of_unclosed_connection_values_is_read_in_under_a_second(
+def test_a_1600000_character_text_of_unclosed_connection_values_is_read_in_linear_time(
     unit: str,
 ) -> None:
     # Each line opens a quoted or braced value that is never closed. A search
-    # for its closing mark that runs to the end of the text takes square time.
-    text = unit * (1_600_000 // len(unit))
-    started = time.perf_counter()
-    COMMAND_SECRET.secret_spans(text)
-    assert time.perf_counter() - started < 1.0
+    # for its closing mark that runs to the end of the text takes square time:
+    # then four times the text takes about sixteen times as long.
+    def seconds(size: int) -> float:
+        text = unit * (size // len(unit))
+        started = time.perf_counter()
+        COMMAND_SECRET.secret_spans(text)
+        return time.perf_counter() - started
+
+    quarter = seconds(400_000)
+    whole = seconds(1_600_000)
+    assert whole < 8 * quarter + 0.2
+    assert whole < 5.0
 
 
 # -- through the three operations ----------------------------------------------------

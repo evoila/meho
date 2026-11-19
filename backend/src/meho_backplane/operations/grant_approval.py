@@ -28,6 +28,9 @@ For these, MEHO checks when a person approves:
   and the approval card say why (:func:`platform_admin_reason`).
 * An operation registered with ``applies`` is a change of rights here only
   when its params pass that check (``secret.move`` with a Keycloak side).
+* An operation registered with ``per_call=False`` is checked here too, but
+  it is not marked for per-call approval, and outside the login realm it
+  is not a change of rights.
 
 The connector describes each parked request in
 ``proposed_effect["preview"]["grant"]``: ``user_id`` (the login the change
@@ -56,6 +59,10 @@ they also bind the run:
 * A change that acts on a list of objects shown on the card (for example
   the credentials a credential delete removes, registered with
   ``bound_ids``) does not run when the live card lists other ids.
+* For an operation registered with :func:`register_harmless_keys_rule`,
+  a request whose approved card has no :data:`HARMLESS_KEYS_ONLY` fact
+  does not run (:data:`GRANT_REASON_OLD_CARD`): the card was made before
+  MEHO decided its approver with that rule. This holds in every realm.
 
 The decision audit row names the login the change is for and says whether
 it is the approver (:func:`grant_audit_fields`).
@@ -104,8 +111,10 @@ if TYPE_CHECKING:
 __all__ = [
     "GRANT_REASON_APPROVER_IN_GROUP",
     "GRANT_REASON_CHANGED",
+    "GRANT_REASON_OLD_CARD",
     "GRANT_REASON_STRICTER",
     "GRANT_REASON_UNREADABLE",
+    "HARMLESS_KEYS_ONLY",
     "PLATFORM_ADMIN_REASON_DEFAULT",
     "RIGHTS_CHANGE_REFUSAL",
     "GrantFacts",
@@ -118,6 +127,7 @@ __all__ = [
     "is_rights_change_op",
     "platform_admin_reason",
     "register_grant_op",
+    "register_harmless_keys_rule",
     "register_rights_change_check",
     "register_rights_change_op",
 ]
@@ -155,6 +165,17 @@ GRANT_REASON_STRICTER: Final[str] = (
 )
 
 
+#: Why a run was refused: the approved card was made before the harmless keys rule.
+GRANT_REASON_OLD_CARD: Final[str] = (
+    "This request was approved before MEHO changed who must approve this Keycloak "
+    "write. The operation did not run. Send a new request."
+)
+
+#: The fact on the ``grant`` block that the call sets only harmless keys
+#: (:func:`register_harmless_keys_rule`).
+HARMLESS_KEYS_ONLY: Final[str] = "harmless_keys_only"
+
+
 @dataclass(frozen=True)
 class _GrantOp:
     #: The params that can hold the id of the login the change is for.
@@ -170,6 +191,8 @@ class _GrantOp:
     #: A check of the params (no I/O): the request is a change of rights only
     #: when it passes. ``None``: every request of the op is one.
     applies: Callable[[dict[str, Any]], bool] | None = None
+    #: A person approves each call (:func:`declare_per_call_approval`).
+    per_call: bool = True
 
 
 #: op_id -> where its params carry the login and the group.
@@ -184,6 +207,7 @@ def register_grant_op(
     bound_ids: tuple[str, str] | None = None,
     bound_ids_missing: str | None = None,
     applies: Callable[[dict[str, Any]], bool] | None = None,
+    per_call: bool = True,
 ) -> None:
     """Record that *op_id* changes the rights of a login or a group.
 
@@ -196,12 +220,26 @@ def register_grant_op(
     under that key at all: the request is older than the list. *applies*
     checks the params of a request (no I/O): only a request that passes it
     is a change of rights here. A person approves each call of *op_id*
-    (:func:`declare_per_call_approval`).
+    (:func:`declare_per_call_approval`), unless *per_call* is ``False``.
     """
     _GRANT_OPS[op_id] = _GrantOp(
-        user_id_params, group_id_params, bound_ids, bound_ids_missing, applies
+        user_id_params, group_id_params, bound_ids, bound_ids_missing, applies, per_call
     )
-    declare_per_call_approval((op_id,))
+    if per_call:
+        declare_per_call_approval((op_id,))
+
+
+#: Operations whose approval card must carry :data:`HARMLESS_KEYS_ONLY`.
+_HARMLESS_KEYS_RULE_OPS: set[str] = set()
+
+
+def register_harmless_keys_rule(op_id: str) -> None:
+    """Record that the ``grant`` block of *op_id* carries :data:`HARMLESS_KEYS_ONLY`.
+
+    The connector sets it on every card it builds. A request whose approved
+    card does not have it does not run (:data:`GRANT_REASON_OLD_CARD`).
+    """
+    _HARMLESS_KEYS_RULE_OPS.add(op_id)
 
 
 #: Operations that are always a change of rights, but not of one login or
@@ -300,10 +338,11 @@ def is_rights_change_op(op_id: str) -> bool:
     approval list). The login realm is not known there, so every
     registered operation counts. An operation registered with a params
     check (``applies``) does not: only some of its requests are changes of
-    rights.
+    rights. Nor does one registered with ``per_call=False``: it is a change
+    of rights only in the login realm.
     """
     op = _GRANT_OPS.get(op_id)
-    return (op is not None and op.applies is None) or op_id in _RIGHTS_CHANGE_OPS
+    return (op is not None and op.applies is None and op.per_call) or op_id in _RIGHTS_CHANGE_OPS
 
 
 def is_rights_change(request: ApprovalRequest) -> bool:
@@ -488,7 +527,9 @@ async def grant_changed_since_request(
     and compares the login and the group it names with the ones the
     approver saw. Returns :data:`GRANT_REASON_UNREADABLE` when the card
     does not build, names no login or group, or cannot say who is in the
-    group, :data:`GRANT_REASON_CHANGED` when a name now names another id,
+    group, :data:`GRANT_REASON_OLD_CARD` when the approved card has no
+    :data:`HARMLESS_KEYS_ONLY` fact that its operation needs,
+    :data:`GRANT_REASON_CHANGED` when a name now names another id,
     :data:`GRANT_REASON_STRICTER` when the change now needs a stricter
     approval, :data:`GRANT_REASON_APPROVER_IN_GROUP` when the approver is
     now in the group the change is for, and ``None`` for a request that
@@ -497,6 +538,14 @@ async def grant_changed_since_request(
     facts = grant_facts(request)
     if facts is None:
         return None
+    log_fields = {
+        "approval_request_id": str(request.id),
+        "op_id": request.op_id,
+        "connector_id": request.connector_id,
+    }
+    if request.op_id in _HARMLESS_KEYS_RULE_OPS and HARMLESS_KEYS_ONLY not in _stamp(request):
+        _log.warning("approval_resume_grant_old_card", **log_fields)
+        return GRANT_REASON_OLD_CARD
     from meho_backplane.operations.approval_object_check import live_card
 
     card = await live_card(
@@ -508,11 +557,6 @@ async def grant_changed_since_request(
     )
     preview = card.get("preview") if isinstance(card, dict) else None
     live = preview.get("grant") if isinstance(preview, dict) else None
-    log_fields = {
-        "approval_request_id": str(request.id),
-        "op_id": request.op_id,
-        "connector_id": request.connector_id,
-    }
     if not isinstance(live, dict):
         _log.warning("approval_resume_grant_unreadable", **log_fields)
         return GRANT_REASON_UNREADABLE

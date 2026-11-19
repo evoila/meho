@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A Keycloak write in the login realm that reaches platform admin rights needs a platform admin.
+"""What a Keycloak write in the login realm gives decides the reason on its card.
 
-For each write below, in MEHO's own login realm:
+In MEHO's own login realm a platform admin approves every Keycloak write
+that sets more than the harmless keys
+(``tests/test_keycloak_login_realm_every_write.py``). For each write below,
+MEHO also reads what it gives, and the card names the exact reason:
 
-* a tenant admin's approval is refused and a platform admin's approval
-  goes through when the write can give platform admin rights, or acts on
-  the login of a person who has them;
-* a tenant admin approves the same write when it does not;
-* when the read that decides fails, a tenant admin's approval is refused;
-* when the object changes while the request waits, so that the write now
-  gives platform admin rights, the approved run is refused.
+* the write can give platform admin rights, or acts on the login of a
+  person who has them: a tenant admin's approval is refused with that
+  reason, and a platform admin's approval goes through;
+* the write gives none of that: the card names the harmless keys rule;
+* the read that decides fails: the card says MEHO could not read it.
 
 The writes: ``keycloak.user.create``, ``keycloak.user.reset_password``,
-``keycloak.user.update``, ``secret.move`` with a Keycloak user as sink,
-``keycloak.protocol_mapper.create``,
+``keycloak.user.update``, ``keycloak.protocol_mapper.create``,
 ``keycloak.client_scope.protocol_mapper.update``, ``keycloak.client.update``,
 ``keycloak.client.create``, ``keycloak.client_scope.create`` and
 ``keycloak.realm.update``.
@@ -36,12 +36,14 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write_grant import REASON_GROUP_OR_ROLE
 from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    REASON_KEYS,
     REASON_LOGIN,
     REASON_LOGIN_UNREAD,
     REASON_MAPPER,
     REASON_NEW_USER,
     REASON_REALM_DEFAULTS,
     REASON_UNREAD,
+    mapper_sets_platform_admin,
 )
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.operations._preview import build_proposed_effect
@@ -218,8 +220,6 @@ class _Case:
     platform: Callable[[_Keycloak, pytest.MonkeyPatch], dict[str, Any]]
     normal: Callable[[_Keycloak, pytest.MonkeyPatch], dict[str, Any]]
     unread: Callable[[_Keycloak, pytest.MonkeyPatch], dict[str, Any]]
-    #: Turn the normal state into one where the write gives platform admin rights.
-    change: Callable[[_Keycloak, pytest.MonkeyPatch], None]
 
 
 _CREATE_PARAMS = {
@@ -249,18 +249,12 @@ def _login_case(op_id: str, params: dict[str, Any]) -> _Case:
         state.failing = ("/groups",)
         return copy.deepcopy(params)
 
-    def _change(state: _Keycloak, mp: pytest.MonkeyPatch) -> None:
-        state.lists[f"/users/{_OTHER_USER}/groups"] = [
-            {"id": _GROUP_ID, "name": "oncall", "path": "/MEHO-Platform-Admins/oncall"}
-        ]
-
     return _Case(
         op_id,
         REASON_LOGIN,
         lambda s, mp: _setup(s, mp, platform=True),
         lambda s, mp: _setup(s, mp, platform=False),
         _unread,
-        _change,
     )
 
 
@@ -277,10 +271,7 @@ def _mapper_case(op_id: str, wrap: Callable[[dict[str, Any]], dict[str, Any]]) -
         _settings_fail(mp)
         return wrap(_role_mapper())
 
-    def _change(state: _Keycloak, mp: pytest.MonkeyPatch) -> None:
-        _set_platform_role(mp)
-
-    return _Case(op_id, REASON_MAPPER, _platform, _normal, _unread, _change)
+    return _Case(op_id, REASON_MAPPER, _platform, _normal, _unread)
 
 
 def _scope_mapper_params() -> dict[str, Any]:
@@ -305,16 +296,12 @@ def _scope_mapper_case() -> _Case:
         state.failing = ("/protocol-mappers/",)
         return _scope_mapper_params()
 
-    def _change(state: _Keycloak, mp: pytest.MonkeyPatch) -> None:
-        _scope_mapper(state, claim="platform_admin")
-
     return _Case(
         "keycloak.client_scope.protocol_mapper.update",
         REASON_MAPPER,
         _platform,
         _normal,
         _unread,
-        _change,
     )
 
 
@@ -336,7 +323,6 @@ def _realm_update_case() -> _Case:
         lambda s, mp: _setup(s, mp, platform=True),
         lambda s, mp: _setup(s, mp, platform=False),
         _unread,
-        lambda s, mp: _ops_group(s, platform=True),
     )
 
 
@@ -347,16 +333,11 @@ _CASES = [
         lambda s, mp: _user_create(s, mp, platform=True),
         lambda s, mp: _user_create(s, mp, platform=False),
         _user_create_unread,
-        lambda s, mp: _ops_group(s, platform=True),
     ),
     _login_case(
         "keycloak.user.reset_password", {"id": _OTHER_USER, "password_secret_ref": _VAULT_REF}
     ),
     _login_case("keycloak.user.update", {"id": _OTHER_USER, "changes": {"email": "a@b.example"}}),
-    _login_case(
-        "secret.move",
-        {"from": f"vault:{_VAULT_REF}", "to": f"keycloak:kc/{_REALM}/alice#password"},
-    ),
     _mapper_case(
         "keycloak.protocol_mapper.create",
         lambda mapper: {"client_id": "meho-console", "representation": mapper},
@@ -450,18 +431,18 @@ async def test_a_tenant_admin_is_refused_and_a_platform_admin_approves(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", _CASES, ids=_IDS)
-async def test_a_write_that_gives_no_platform_admin_rights_needs_a_tenant_admin(
+async def test_a_write_that_gives_no_platform_admin_rights_names_the_harmless_keys_rule(
     case: _Case, keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     params = case.normal(keycloak, monkeypatch)
     effect = await _effect(keycloak, case.op_id, params)
 
     grant = _grant(effect)
-    assert grant["platform_admin"] is False
-    assert "platform_admin_reason" not in grant
+    assert grant["platform_admin"] is True
+    assert grant["platform_admin_reason"] == REASON_KEYS
     request_id = await _park(params, effect, op_id=case.op_id)
-    await _approve(request_id, _person("person-admin"), params)
-    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+    reason = await _refused_for_a_tenant_admin(request_id, params)
+    assert REASON_KEYS.rstrip(".") in reason
 
 
 @pytest.mark.asyncio
@@ -482,15 +463,19 @@ async def test_a_failed_read_refuses_a_tenant_admin(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", _CASES, ids=_IDS)
-async def test_the_run_is_refused_when_the_object_changed_while_the_request_waited(
-    case: _Case, keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
+async def test_the_run_is_refused_when_the_login_got_platform_admin_rights_while_it_waited(
+    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    params = case.normal(keycloak, monkeypatch)
-    request_id = await _park(params, await _effect(keycloak, case.op_id, params), op_id=case.op_id)
+    """A change of harmless keys needs a tenant admin until the login gets platform admin rights."""
+    _login(keycloak)
+    params = {"id": _OTHER_USER, "changes": {"firstName": "Alice"}}
+    effect = await _effect(keycloak, "keycloak.user.update", params)
+    assert _grant(effect)["platform_admin"] is False
+    request_id = await _park(params, effect, op_id="keycloak.user.update")
     await _approve(request_id, _person("person-admin"), params)
-    case.change(keycloak, monkeypatch)
-    get_settings.cache_clear()
+    keycloak.lists[f"/users/{_OTHER_USER}/groups"] = [
+        {"id": _GROUP_ID, "name": "oncall", "path": "/MEHO-Platform-Admins/oncall"}
+    ]
 
     async def _live_card(operator: Operator, **kwargs: Any) -> dict[str, Any]:
         return await _effect(keycloak, kwargs["op_id"], kwargs["params"])
@@ -567,8 +552,9 @@ async def test_a_login_with_the_platform_admin_role_needs_a_platform_admin(
     [
         _claim_mapper(" Platform_Admin "),
         {"name": "s", "protocolMapper": "script-anything.js", "config": {}},
+        {"name": "s", "protocolMapper": "oidc-script-based-protocol-mapper", "config": {}},
     ],
-    ids=["claim-name", "script"],
+    ids=["claim-name", "script", "script-based"],
 )
 async def test_a_mapper_that_can_set_the_claim_needs_a_platform_admin(
     keycloak: _Keycloak, mapper: dict[str, Any]
@@ -578,6 +564,23 @@ async def test_a_mapper_that_can_set_the_claim_needs_a_platform_admin(
     effect = await _effect(keycloak, "keycloak.protocol_mapper.create", params)
 
     assert _grant(effect)["platform_admin"] is True
+
+
+@pytest.mark.parametrize(
+    ("claim", "sets"),
+    [
+        ("meho\\.platform_admin", True),
+        ("meho.platform_admin", True),
+        ("meho\\.team", False),
+    ],
+)
+def test_a_claim_name_with_escaped_dots_counts_as_the_plain_name(
+    monkeypatch: pytest.MonkeyPatch, claim: str, sets: bool
+) -> None:
+    monkeypatch.setenv("JWT_PLATFORM_ADMIN_CLAIM_NAME", "meho.platform_admin")
+    get_settings.cache_clear()
+
+    assert mapper_sets_platform_admin(_claim_mapper(claim)) is sets
 
 
 @pytest.mark.asyncio

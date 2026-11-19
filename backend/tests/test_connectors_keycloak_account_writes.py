@@ -42,6 +42,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import WRITE_OPS
 from meho_backplane.connectors.keycloak.ops_write_account_preview import _credential_warning
 from meho_backplane.connectors.keycloak.ops_write_grant import CREDENTIALS_CHANGED
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import REASON_KEYS
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -848,7 +849,7 @@ async def test_no_secret_data_reaches_a_result_a_card_or_an_audit_row(
     requester = _operator("kc-account-requester")
     # The change is in MEHO's own login realm, so another admin approves it.
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
     )
     remaining = [c for c in _CREDENTIALS if c["type"] != "otp"]
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -1047,7 +1048,7 @@ async def test_a_realm_management_role_needs_a_platform_admin_in_the_login_realm
     await _approve_as(request_id, platform_admin)
 
 
-async def test_another_client_role_needs_a_tenant_admin_not_a_platform_admin(
+async def test_another_client_role_in_the_login_realm_needs_a_platform_admin(
     kc: KeycloakConnector,
 ) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -1073,11 +1074,15 @@ async def test_another_client_role_needs_a_tenant_admin_not_a_platform_admin(
     async with get_sessionmaker()() as session:
         row = await session.get(ApprovalRequest, request_id)
     assert row is not None
-    assert row.proposed_effect["preview"]["grant"]["platform_admin"] is False
+    grant = row.proposed_effect["preview"]["grant"]
+    # The role gives nothing; the harmless keys rule still asks for a platform admin.
+    assert grant["platform_admin_reason"] == REASON_KEYS
     tenant_admin = _operator("kc-account-approver").model_copy(
         update={"tenant_role": TenantRole.TENANT_ADMIN}
     )
-    await _approve_as(request_id, tenant_admin)
+    with pytest.raises(ApprovalRoleFloorError):
+        await _approve_as(request_id, tenant_admin)
+    await _approve_as(request_id, tenant_admin.model_copy(update={"platform_admin": True}))
 
 
 # ---------------------------------------------------------------------------
@@ -1165,7 +1170,7 @@ async def test_a_credential_delete_does_not_run_when_the_credentials_changed(
 ) -> None:
     """Parked by type; a new credential of that type appears; the approved run is refused."""
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
     )
     new_otp = {**_CREDENTIALS[1], "id": "cred-otp-3", "userLabel": "New phone"}
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -1207,7 +1212,7 @@ async def _approve_and_resume_credential_delete(
 ) -> tuple[Any, respx.Route, respx.Route]:
     """Park a delete by type, approve it, run it; Keycloak answers *credential_reads* in order."""
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
     )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)

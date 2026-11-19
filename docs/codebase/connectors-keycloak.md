@@ -556,49 +556,126 @@ decides. When MEHO cannot read the group, a parent group or its roles, the
 fact is unknown and a platform admin must approve. The run reads the group
 again with the same rule (`ops_write_grant_platform.py`).
 
-**Other writes in the login realm that reach platform admin rights.**
-`ops_write_platform_reach.py` gives more writes the same `grant` block, so
-in MEHO's own login realm a platform admin must approve them when they can
-give platform admin rights, or act on the login of a person who has them:
+**Every Keycloak write in the login realm needs a platform admin.**
+In MEHO's own login realm, a platform admin approves every Keycloak write,
+unless every key it sets is on a short list of keys that cannot touch
+sign-in or rights. The list is `HARMLESS_KEYS` in
+`ops_write_login_realm_rule.py`, and it is the only place:
 
-| Write | Needs a platform admin when |
+| Write | Harmless keys | Params that only name the object |
+|---|---|---|
+| `keycloak.realm.update` | `displayName` in `representation` | `realm` |
+| `keycloak.client.update` | `name`, `description` in `representation` | `client_id`, `id` |
+| `keycloak.user.update` | `firstName`, `lastName` in `changes` | `id`, `username` |
+
+A key that is not on the list counts as strict, and so does any other
+param with a value (for example `smtp_password_secret_ref`). A write with
+no keys to set is strict too. `register_login_realm_rule` adds a last step
+(`register_preview_last_step`) to the approval card of every Keycloak
+write in `RIGHTS_CHANGE_OPS` and `NOT_RIGHTS_CHANGE_OPS`:
+
+- It puts `harmless_keys_only` (`HARMLESS_KEYS_ONLY`) on the `grant` block,
+  in every realm.
+- In the login realm, when the call sets a key that is not harmless and
+  the other checks below found no reason, it sets `platform_admin` with
+  the reason "In MEHO's own login realm, a platform admin approves every
+  Keycloak write that sets more than a display name or a description."
+- A write with no `grant` block of its own gets one here, and is
+  registered for the approval check (`register_grant_op`). A write of
+  `NOT_RIGHTS_CHANGE_OPS` is registered with `per_call=False`: in another
+  realm it stays what it was, not a change of rights.
+
+The realm is the `realm` param for `realm.create` (also the `realm` of its
+representation), `realm.delete`, `realm.update` and `user.check_login`,
+else the realm the target manages, by the name Keycloak answers with
+(`is_login_realm`). When MEHO cannot read it, or cannot read which realms
+its own login uses, the realm counts as the login realm.
+
+A `secret.move` whose source or sink is a `keycloak:` ref in the login
+realm always needs a platform admin (`secret_move_grant`). A ref is a
+client-secret source or a user-password sink by its address shape, the
+same way as `build_keycloak_secret_endpoint`: a sink in a realm named
+`clients` is still a sink.
+
+Right before an approved write runs, MEHO builds the card again. The run
+is refused when the write now needs a stricter approval (for example the
+realm became a login realm while the request waited), and nothing is
+written. A request whose approved card has no `harmless_keys_only` fact
+was approved before this rule: it is refused at run start, in every
+realm, and must be sent again (`GRANT_REASON_OLD_CARD`).
+
+Each write, and the tests in `tests/test_keycloak_login_realm_every_write.py` (for each one: in the login realm a
+tenant admin's approval is refused; a platform admin's approval goes
+through and the run check passes; when MEHO cannot read its login realms a
+tenant admin is refused; in another realm a tenant admin approves, and the
+run is refused when the realm becomes a login realm while the request
+waits):
+
+| Write | In the login realm |
 |---|---|
-| `user.create` | the new user's attributes set `platform_admin`, one of its `groups` gives platform admin rights (same group rule as above, the path is looked up level by level), or it names realm or client roles |
-| `user.reset_password`, `user.update`, `user.credential.delete`, `secret.move` to a Keycloak user | the login has platform admin rights: the attribute on the user, a group that gives them, or the platform admin realm role among all its realm roles (`users/{id}/role-mappings/realm/composite`) |
-| `protocol_mapper.create`, `client.create`, `client.update`, `client_scope.create` | a mapper in the request has the claim name `platform_admin` (or `JWT_PLATFORM_ADMIN_CLAIM_NAME`), is a script mapper, or, with `JWT_PLATFORM_ADMIN_ROLE_NAME` set, writes `realm_access` or names that role |
-| `client_scope.protocol_mapper.update` | the same, for the mapper now or after the change |
-| `realm.update` | new `defaultGroups` give platform admin rights, or the request sets `defaultRole`, `defaultRoles`, `users`, `groups`, `roles`, `clients` or `clientScopes`. The `realm` param names the realm that is checked |
+| `keycloak.authflow.ensure_approval_flow` | strict |
+| `keycloak.authflow.ensure_approval_touch` | strict |
+| `keycloak.authflow.ensure_passkey_code_skip` | strict |
+| `keycloak.client.create` | strict |
+| `keycloak.client.delete` | strict |
+| `keycloak.client.update` | harmless with only `name` and `description`, else strict |
+| `keycloak.client_scope.create` | strict |
+| `keycloak.client_scope.protocol_mapper.update` | strict |
+| `keycloak.group.create` | strict |
+| `keycloak.group.delete` | strict |
+| `keycloak.group.member.add` | strict |
+| `keycloak.group.member.remove` | strict |
+| `keycloak.group.update_attributes` | strict |
+| `keycloak.protocol_mapper.create` | strict |
+| `keycloak.realm.create` | strict |
+| `keycloak.realm.delete` | strict (MEHO never deletes the login realm) |
+| `keycloak.realm.update` | harmless with only `displayName`, else strict |
+| `keycloak.role_mapping.assign` | strict |
+| `keycloak.role_mapping.client.assign` | strict |
+| `keycloak.role_mapping.client.remove` | strict |
+| `keycloak.user.check_login` | strict |
+| `keycloak.user.create` | strict |
+| `keycloak.user.credential.delete` | strict |
+| `keycloak.user.delete` | strict |
+| `keycloak.user.disable` | strict |
+| `keycloak.user.enable` | strict |
+| `keycloak.user.logout` | strict |
+| `keycloak.user.required_actions.update` | strict |
+| `keycloak.user.reset_password` | strict |
+| `keycloak.user.update` | harmless with only `firstName` and `lastName`, else strict |
+| `secret.move` with a Keycloak source or sink | strict |
+
+**What else decides, inside the login realm.** `ops_write_platform_reach.py`
+and `ops_write_grant.py` read what a write gives. Their answer gives the
+card a more exact reason, and it also counts for a write of harmless keys
+(a `user.update` of the first name of a login with platform admin rights
+needs a platform admin too):
+
+| Write | Reads |
+|---|---|
+| `user.create` | the new user's attributes, its `groups` (same group rule as above, the path is looked up level by level), realm or client roles |
+| `user.reset_password`, `user.update`, `user.credential.delete` | whether the login has platform admin rights: the attribute on the user, a group that gives them, or the platform admin realm role among all its realm roles (`users/{id}/role-mappings/realm/composite`) |
+| `protocol_mapper.create`, `client.create`, `client.update`, `client_scope.create` | whether a mapper has the claim name `platform_admin` (or `JWT_PLATFORM_ADMIN_CLAIM_NAME`), is a script mapper (a type that starts with `script-`, or `oidc-script-based-protocol-mapper`), or, with `JWT_PLATFORM_ADMIN_ROLE_NAME` set, writes `realm_access` or names that role. A claim name with escaped dots (`a\.b`) counts as the same name with plain dots (`a.b`) |
+| `client_scope.protocol_mapper.update` | the same, for the mapper now and after the change |
+| `realm.update` | new `defaultGroups`, `defaultRole`, `defaultRoles`, `users`, `groups`, `roles`, `clients` or `clientScopes` |
 
 When MEHO cannot read what decides, a platform admin must approve. The
 card says why in `platform_admin_reason`, and the console shows it in the
-row "Platform admin must approve". The approved run builds the card again
-and is refused when the write now needs a platform admin and did not get
-one.
+row "Platform admin must approve".
 
 The approval request a person reads always holds these facts. A caller
 (the agent's own `preview_operation`, and `meho_approvals_get` /
 `meho_approvals_list`) reads them only while `KEYCLOAK_RIGHTS_CHANGE_CARDS`
 is on. Off, a caller gets what it gets for a write without them: no
 `grant` block for `user.create`, `user.reset_password`,
-`client_scope.protocol_mapper.update` and `secret.move`; and in the
-`grant` block of the other writes of one login or one group, no
-`platform_admin_reason` and, for `user.update` and
-`user.credential.delete`, the `platform_admin` fact of the roles in the
-call only. The agent's own `preview_operation` with the switch off reads
+`client_scope.protocol_mapper.update`, `secret.move` and the writes that
+get their `grant` block from the last step; and in the `grant` block of
+the other writes of one login or one group, no `platform_admin_reason`,
+no `harmless_keys_only`, and the `platform_admin` fact of the call only
+(not the one read from the login, and not the one of the harmless keys
+rule). The agent's own `preview_operation` with the switch off reads
 nothing more from Keycloak for it. The approval checks use the request a
 person reads, so the switch does not change who must approve.
-
-A `secret.move` ref is a client-secret source or a user-password sink by
-its address shape, the same way as `build_keycloak_secret_endpoint`: a
-sink in a realm named `clients` is still a sink.
-
-The other Keycloak writes do not give platform admin rights: the writes in
-`NOT_RIGHTS_CHANGE_OPS` only take away; `realm.create` makes a new realm,
-not MEHO's own; `group.create` makes a group with no members;
-`user.enable` and `user.required_actions.update` give nobody a way to sign
-in as the login; the three `authflow` writes add only MEHO's own fixed
-steps and mappers. `role_mapping.assign`, `role_mapping.client.assign`,
-`group.member.add` and `group.update_attributes` follow the rules above.
 
 **The approval card.** `connectors/keycloak/ops_write_rights_card.py`
 shows the object as it is now next to the new values:

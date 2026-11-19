@@ -517,7 +517,9 @@ async def test_change_waits_for_approval_then_runs_and_audit_names_both(
     kc: KeycloakConnector,
 ) -> None:
     requester = _operator("kc-mapper-requester")
-    approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN)
+    approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN).model_copy(
+        update={"platform_admin": True}
+    )
     args = {
         "connector_id": _CONNECTOR_ID,
         "op_id": _OP,
@@ -581,7 +583,9 @@ async def _card(request_id: uuid.UUID) -> dict[str, Any]:
 
 
 async def _approve_and_resume(request_id: uuid.UUID) -> Any:
-    approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN)
+    approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN).model_copy(
+        update={"platform_admin": True}
+    )
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
         await session.commit()

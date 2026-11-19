@@ -29,7 +29,8 @@ from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     REASON_LOGIN_UNREAD,
     REASON_MAPPER,
     REASON_NEW_USER,
-    _keycloak_sides,
+    REASON_SECRET_MOVE,
+    _keycloak_realms,
 )
 from meho_backplane.operations._preview import build_proposed_effect, proposed_effect_for_agent
 from meho_backplane.settings import get_settings
@@ -237,7 +238,7 @@ async def test_switch_on_an_approval_read_shows_the_grant_blocks(
         (_RESET, {"id": _OTHER_USER, "password_secret_ref": _VAULT_REF}, REASON_LOGIN),
         (_UPDATE, {"id": _OTHER_USER, "changes": {"email": "a@b.example"}}, REASON_LOGIN),
         (_SCOPE_MAPPER, _scope_mapper_params(), REASON_MAPPER),
-        ("secret.move", dict(_MOVE_TO_LOGIN), REASON_LOGIN),
+        ("secret.move", dict(_MOVE_TO_LOGIN), REASON_SECRET_MOVE),
     ]
 
     for op_id, params, reason in cases:
@@ -257,39 +258,29 @@ _SOURCES = {
 }
 
 
-@pytest.mark.parametrize("source", list(_SOURCES.values()), ids=list(_SOURCES))
-def test_a_sink_in_a_realm_named_clients_is_a_sink(source: str) -> None:
-    sink, _source_realm = _keycloak_sides({"from": source, "to": _CLIENTS_SINK})
+_SOURCE_REALMS = {"vault-source": [], "keycloak-client-source": ["other-realm"]}
 
-    assert sink == ("kc", "clients", "alice")
+
+@pytest.mark.parametrize("source", list(_SOURCES), ids=list(_SOURCES))
+def test_a_sink_in_a_realm_named_clients_is_a_sink(source: str) -> None:
+    realms = _keycloak_realms({"from": _SOURCES[source], "to": _CLIENTS_SINK})
+
+    assert realms == [*_SOURCE_REALMS[source], "clients"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", list(_SOURCES.values()), ids=list(_SOURCES))
-async def test_a_move_to_a_platform_login_in_a_realm_named_clients_needs_a_platform_admin(
+async def test_a_move_to_a_login_in_a_login_realm_named_clients_needs_a_platform_admin(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {"clients"})
-    _login(keycloak)
-    realms: list[str] = []
-
-    async def _has_platform(_c: Any, _ctx: Any, realm: str, user_id: str) -> bool:
-        realms.append(realm)
-        return user_id == _OTHER_USER
-
-    monkeypatch.setattr(
-        "meho_backplane.connectors.keycloak.ops_write_platform_reach.login_has_platform_admin",
-        _has_platform,
-    )
     params = {"from": source, "to": _CLIENTS_SINK}
 
     effect = await _effect(keycloak, "secret.move", params)
 
     grant = effect["preview"]["grant"]
     assert grant["login_realm"] is True
-    assert grant["user_id"] == _OTHER_USER
     assert grant["platform_admin"] is True
-    assert grant["platform_admin_reason"] == REASON_LOGIN
-    assert realms == ["clients"]
+    assert grant["platform_admin_reason"] == REASON_SECRET_MOVE
     request_id = await _park(params, effect, op_id="secret.move")
-    assert REASON_LOGIN in await _refused_for_a_tenant_admin(request_id, params)
+    assert REASON_SECRET_MOVE in await _refused_for_a_tenant_admin(request_id, params)

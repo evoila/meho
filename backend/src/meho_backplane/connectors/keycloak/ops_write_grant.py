@@ -67,6 +67,7 @@ from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
     group_gives_platform_admin,
 )
 from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    REASON_KEYS,
     REASON_LOGIN,
     REASON_LOGIN_UNREAD,
     REASON_UNREAD,
@@ -81,7 +82,7 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     register_agent_preview_filter,
 )
-from meho_backplane.operations.grant_approval import register_grant_op
+from meho_backplane.operations.grant_approval import HARMLESS_KEYS_ONLY, register_grant_op
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.keycloak_realm_warnings import (
     backplane_login_realms as _backplane_login_realms,
@@ -169,13 +170,15 @@ def register_grant_ops() -> None:
 def _agent_grant(grant: Any) -> Any:
     """The ``grant`` block as a caller reads it while ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off.
 
-    No reason, and for a sign-in change the ``platform_admin`` fact of the
-    roles in the call only (not the one MEHO read from the login).
+    No reason, no harmless keys fact, and the ``platform_admin`` fact of
+    the call only: not the one MEHO read from the login of a sign-in
+    change, and not the one of the harmless keys rule.
     """
     if not isinstance(grant, dict):
         return grant
     shown = dict(grant)
-    if shown.pop("platform_admin_reason", None) in {REASON_LOGIN, REASON_LOGIN_UNREAD}:
+    shown.pop(HARMLESS_KEYS_ONLY, None)
+    if shown.pop("platform_admin_reason", None) in {REASON_LOGIN, REASON_LOGIN_UNREAD, REASON_KEYS}:
         shown["platform_admin"] = False
     return shown
 

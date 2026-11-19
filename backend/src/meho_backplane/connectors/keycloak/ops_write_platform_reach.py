@@ -17,9 +17,8 @@ card, in the ``grant`` block that
   (:func:`~.ops_write_grant_platform.group_gives_platform_admin`), or it
   names realm or client roles. MEHO does not read what a named role gives,
   so named roles count as the strict case.
-* ``keycloak.user.reset_password``, ``keycloak.user.update``,
-  ``keycloak.user.credential.delete`` and a ``secret.move`` that sets a
-  Keycloak user's password: the login has platform admin rights
+* ``keycloak.user.reset_password``, ``keycloak.user.update`` and
+  ``keycloak.user.credential.delete``: the login has platform admin rights
   (:func:`login_has_platform_admin`): the flag on the user, a group that
   gives the rights, or the platform admin realm role among all its realm
   roles. The first three are in ``GRANT_OPS`` of :mod:`.ops_write_grant`.
@@ -39,6 +38,13 @@ strict case: a platform admin must approve. The card also says why, in
 approved change runs; when the change now needs a stricter approval, the
 run is refused (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
 
+A ``secret.move`` whose source or sink is in the login realm always needs
+a platform admin (:func:`secret_move_grant`).
+
+On top of these facts, :mod:`.ops_write_login_realm_rule` asks for a
+platform admin for every Keycloak write in the login realm that sets more
+than the harmless keys.
+
 Outside the login realm none of this applies, and MEHO reads nothing for it.
 
 The approval request a person reads always holds the ``grant`` block. A
@@ -50,9 +56,8 @@ caller (``preview_operation``, ``meho_approvals_get`` and
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import (
     _USER_GROUPS_PATH,
@@ -76,18 +81,20 @@ from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
-    from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
     from meho_backplane.operations._preview import PreviewBuilder, PreviewContext
 
 __all__ = [
     "GROUP_CAP",
     "PLATFORM_OPS",
+    "REASON_KEYS",
     "REASON_LOGIN",
     "REASON_LOGIN_UNREAD",
     "REASON_MAPPER",
     "REASON_NEW_USER",
     "REASON_REALM_DEFAULTS",
+    "REASON_SECRET_MOVE",
     "REASON_UNREAD",
+    "SCOPE_MAPPER_UPDATE",
     "agent_cards_on",
     "group_paths_give_platform_admin",
     "hide_grant_from_agent",
@@ -124,8 +131,23 @@ REASON_UNREAD: Final[str] = (
     "as a change that does."
 )
 
+REASON_KEYS: Final[str] = (
+    "In MEHO's own login realm, a platform admin approves every Keycloak write that "
+    "sets more than a display name or a description."
+)
+REASON_SECRET_MOVE: Final[str] = (
+    "This secret move reads from or writes to MEHO's own login realm. There, a platform "
+    "admin approves every secret move."
+)
+
+#: The scope mapper write, whose ``grant`` block :mod:`.ops_write_scope_mapper` builds.
+SCOPE_MAPPER_UPDATE: Final[str] = "keycloak.client_scope.protocol_mapper.update"
+
 #: Whether a write can give platform admin rights, from its call and the realm it changes.
 PlatformFact = Callable[["PreviewContext", str], Awaitable[bool | None]]
+
+#: Mapper types that run a script, beside the ones that start with ``script-``.
+_SCRIPT_MAPPERS: Final[frozenset[str]] = frozenset({"oidc-script-based-protocol-mapper"})
 
 #: The realm parts of a realm update that MEHO does not read here.
 _REALM_PARTS: Final[tuple[str, ...]] = ("users", "groups", "roles", "clients", "clientScopes")
@@ -176,10 +198,13 @@ def mapper_sets_platform_admin(mapper: Any) -> bool | None:
     """Whether the protocol *mapper* can put the platform admin claim or role into a token.
 
     True for a mapper whose claim name is the platform admin claim, a
-    script mapper (its script can set any claim), and, when
+    script mapper (its script can set any claim: a type that starts with
+    ``script-``, or ``oidc-script-based-protocol-mapper``), and, when
     ``JWT_PLATFORM_ADMIN_ROLE_NAME`` is set, a mapper that writes the realm
     roles claim (``realm_access``) or names that role (``role`` or
-    ``new.role.name``). ``None`` when the settings cannot be read.
+    ``new.role.name``). A claim name with escaped dots (``a\\.b``) counts
+    as the same name with plain dots (``a.b``). ``None`` when the settings
+    cannot be read.
     """
     if not isinstance(mapper, dict):
         return False
@@ -187,11 +212,11 @@ def mapper_sets_platform_admin(mapper: Any) -> bool | None:
     if roles is None:
         return None
     kind = (_text(mapper.get("protocolMapper")) or "").casefold()
-    if kind.startswith("script-"):
+    if kind.startswith("script-") or kind in _SCRIPT_MAPPERS:
         return True
     raw = mapper.get("config")
     config: dict[str, Any] = raw if isinstance(raw, dict) else {}
-    claim = (_text(config.get("claim.name")) or "").casefold()
+    claim = (_text(config.get("claim.name")) or "").replace("\\.", ".").casefold()
     if claim in platform_claim_names():
         return True
     if not roles:
@@ -465,12 +490,13 @@ def with_platform_facts(
 # ---------------------------------------------------------------------------
 
 
-def _keycloak_sides(params: dict[str, Any]) -> tuple[tuple[str, str, str] | None, str | None]:
-    """The user-password sink ``(target, realm, username)``, and the realm of a client source.
+def _keycloak_realms(params: dict[str, Any]) -> list[str | None]:
+    """The realm of each ``keycloak:`` side of a ``secret.move``; ``None`` for one MEHO cannot read.
 
-    A ref is a client source or a sink by the same address shape as the
-    endpoint factory (:func:`~.secret_endpoint.build_keycloak_secret_endpoint`),
-    so a realm named ``clients`` still holds a sink.
+    A ref is a client source or a user-password sink by the same address
+    shape as the endpoint factory
+    (:func:`~.secret_endpoint.build_keycloak_secret_endpoint`), so a realm
+    named ``clients`` still holds a sink.
     """
     from meho_backplane.connectors.keycloak.secret_endpoint import (
         _looks_like_client_secret_ref,
@@ -479,79 +505,60 @@ def _keycloak_sides(params: dict[str, Any]) -> tuple[tuple[str, str, str] | None
     )
     from meho_backplane.connectors.secret.endpoints import parse_secret_ref
 
-    sink: tuple[str, str, str] | None = None
-    source_realm: str | None = None
+    realms: list[str | None] = []
     for key in ("from", "to"):
         raw = params.get(key)
         try:
             spec = parse_secret_ref(raw) if isinstance(raw, str) else None
-            if spec is None or spec.kind != "keycloak":
-                continue
-            if _looks_like_client_secret_ref(spec.ref):
-                source_realm = _parse_keycloak_client_ref(spec.ref)[1]
-            else:
-                sink = _parse_keycloak_ref(spec.ref)
         except ValueError:
             continue
-    return sink, source_realm
+        if spec is None or spec.kind != "keycloak":
+            continue
+        try:
+            if _looks_like_client_secret_ref(spec.ref):
+                realms.append(_parse_keycloak_client_ref(spec.ref)[1])
+            else:
+                realms.append(_parse_keycloak_ref(spec.ref)[1])
+        except ValueError:
+            realms.append(None)
+    return realms
 
 
-async def _sink_login_platform(ctx: PreviewContext, sink: tuple[str, str, str]) -> dict[str, Any]:
-    """The login of the sink and whether it has platform admin rights."""
-    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
-    from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
-    from meho_backplane.targets.resolver import resolve_target
+def _is_login_realm(realm: str | None) -> bool:
+    from meho_backplane.connectors.keycloak.ops_write_grant import is_login_realm_name
 
-    target_name, realm, username = sink
     try:
-        connector = get_or_create_connector_instance(KeycloakConnector)
-        if not isinstance(connector, KeycloakConnector):
-            return {"user_id": None, "platform_admin": None}
-        async with get_sessionmaker()() as session:
-            row: KeycloakTargetLike = cast(
-                "KeycloakTargetLike",
-                await resolve_target(session, ctx.operator.tenant_id, target_name),
-            )
-        user_id = await connector._find_user_uuid(row, realm, username, operator=ctx.operator)
+        return realm is None or is_login_realm_name(realm)
     except Exception:
-        return {"user_id": None, "platform_admin": None}
-    if user_id is None:
-        return {"user_id": None, "platform_admin": None}
-    login_ctx = dataclasses.replace(ctx, target=row, connector_instance=connector)
-    platform = await login_has_platform_admin(connector, login_ctx, realm, user_id)
-    return {"user_id": user_id, "platform_admin": platform}
+        return True
 
 
 async def secret_move_grant(ctx: PreviewContext) -> dict[str, Any] | None:
     """The ``grant`` block of a ``secret.move`` with a Keycloak side; ``None`` without one.
 
-    The login realm is the realm of the user-password sink, else the realm
-    of the client-secret source. A sink in the login realm needs a platform
-    admin when the user has platform admin rights or MEHO cannot read it.
+    When the source or the sink is in MEHO's own login realm, or MEHO
+    cannot read the realm of a side, a platform admin must approve.
     """
-    from meho_backplane.connectors.keycloak.ops_write_grant import is_login_realm_name
+    from meho_backplane.operations.grant_approval import HARMLESS_KEYS_ONLY
 
-    sink, source_realm = _keycloak_sides(ctx.params)
-    realm = sink[1] if sink is not None else source_realm
-    if realm is None:
+    realms = _keycloak_realms(ctx.params)
+    if not realms:
         return None
+    login_realm = any(_is_login_realm(realm) for realm in realms)
     grant: dict[str, Any] = {
         "user_id": None,
         "group_id": None,
-        "login_realm": is_login_realm_name(realm),
-        "platform_admin": False,
+        "login_realm": login_realm,
+        "platform_admin": login_realm,
+        HARMLESS_KEYS_ONLY: False,
     }
-    if sink is None or not grant["login_realm"]:
-        return grant
-    found = await _sink_login_platform(ctx, sink)
-    grant["user_id"] = found["user_id"]
-    grant.update(platform_fields(found["platform_admin"], REASON_LOGIN, REASON_LOGIN_UNREAD))
+    if login_realm:
+        grant["platform_admin_reason"] = REASON_SECRET_MOVE
     return grant
 
 
 def _register() -> None:
-    for op_id in (*PLATFORM_OPS, "keycloak.client_scope.protocol_mapper.update"):
+    for op_id in (*PLATFORM_OPS, SCOPE_MAPPER_UPDATE):
         register_grant_op(op_id)
 
 

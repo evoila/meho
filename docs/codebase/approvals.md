@@ -1186,12 +1186,21 @@ The group rule (`_check_approver_group`, used by `approve_request` and
 - in the login realm, when the approver is not a platform admin and the
   change can give platform admin rights (a group or role that gives them;
   see "How MEHO decides that a group change gives platform admin rights"
-  and "Other writes in the login realm that reach platform admin rights"
+  and "Every Keycloak write in the login realm needs a platform admin"
   in [connectors-keycloak.md](connectors-keycloak.md)).
 
 `register_grant_op` takes `applies`, a check of the params: only a request
 that passes it counts (`secret.move` with a Keycloak side). Such an op does
-not count in `is_rights_change_op`. `platform_admin_reason(request)` gives
+not count in `is_rights_change_op`. With `per_call=False` an op is checked
+here too, but it gets no per-call mark and does not count in
+`is_rights_change_op`: it is a change of rights only in the login realm
+(the Keycloak writes that only take away). `register_harmless_keys_rule`
+records an op whose card carries `harmless_keys_only`
+(`HARMLESS_KEYS_ONLY`); `grant_changed_since_request` refuses the run of
+such a request when the approved card does not have it
+(`GRANT_REASON_OLD_CARD`), in every realm. The Keycloak rule that uses it
+is in "Every Keycloak write in the login realm needs a platform admin" in
+[connectors-keycloak.md](connectors-keycloak.md). `platform_admin_reason(request)` gives
 the reason a platform admin must approve (from `platform_admin_reason` in
 the `grant` block), or `None`; the refusal text and the console card show
 it.
@@ -2799,6 +2808,10 @@ The per-op preview is opt-in via a builder registry in
   can have both. So the caller gets the same answer there as from
   `preview_operation`. The REST
   approvals API and the console show the stored card.
+- `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
+  every preview the builder of `op_id` returns, whatever module
+  registered the builder and when. A step that raises makes the preview
+  unavailable, the same as a builder that raises.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as

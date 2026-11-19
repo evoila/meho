@@ -495,7 +495,11 @@ async def test_an_older_override_with_approval_off_does_not_let_the_call_run() -
 def test_every_registered_change_of_rights_keeps_approval() -> None:
     import meho_backplane.connectors.policy  # noqa: F401 -- registers its changes of rights
 
-    always = {op for op, grant in grant_approval._GRANT_OPS.items() if grant.applies is None}
+    always = {
+        op
+        for op, grant in grant_approval._GRANT_OPS.items()
+        if grant.applies is None and grant.per_call
+    }
     registered = always | set(grant_approval._RIGHTS_CHANGE_OPS)
     assert set(RIGHTS_CHANGE_OPS) <= registered
     assert len(registered) > len(RIGHTS_CHANGE_OPS)

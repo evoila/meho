@@ -331,7 +331,9 @@ async def test_a_vendor_server_error_is_an_error_not_success(kc: KeycloakConnect
 
 async def test_disable_waits_for_approval_then_runs(kc: KeycloakConnector) -> None:
     requester = _operator("kc-enable-requester")
-    approver = _operator("kc-enable-approver", TenantRole.TENANT_ADMIN)
+    approver = _operator("kc-enable-approver", TenantRole.TENANT_ADMIN).model_copy(
+        update={"platform_admin": True}
+    )
     args = {
         "connector_id": _CONNECTOR_ID,
         "op_id": _DISABLE,

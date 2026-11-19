@@ -118,6 +118,7 @@ __all__ = [
     "register_person_only_preview_keys",
     "register_preview_builder",
     "register_preview_builder_switch",
+    "register_preview_last_step",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -408,6 +409,16 @@ class CardWarnings(Protocol):
     async def __call__(self, ctx: PreviewContext) -> list[str]: ...
 
 
+class PreviewLastStep(Protocol):
+    """A step that runs on the preview of an op after its builder.
+
+    It may change the preview in place. A step that raises makes the
+    preview unavailable, the same as a builder that raises.
+    """
+
+    async def __call__(self, ctx: PreviewContext, preview: dict[str, Any]) -> None: ...
+
+
 class PermissionPreflight(Protocol):
     """An op's opt-in park-time permission check.
 
@@ -437,6 +448,9 @@ _CARD_WARNINGS: dict[str, CardWarnings] = {}
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
 
+#: ``op_id`` -> the step that runs on the builder's preview (:func:`register_preview_last_step`).
+_PREVIEW_LAST_STEPS: dict[str, PreviewLastStep] = {}
+
 #: ``op_id`` -> the switch of its builder for the caller's side. Off, the
 #: preview the caller gets back is the one of an op with no builder; the
 #: approval request a person reads always uses the builder.
@@ -465,6 +479,17 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def register_preview_last_step(op_id: str, step: PreviewLastStep) -> None:
+    """Run *step* on every preview the builder of *op_id* returns.
+
+    The step runs after the builder, whatever module registered the
+    builder and when. It does not run when the builder returns ``None``,
+    or when no builder runs (for example for the caller while the
+    builder's switch is off).
+    """
+    _PREVIEW_LAST_STEPS[op_id] = step
 
 
 def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> None:
@@ -684,6 +709,9 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
 
     try:
         preview = await builder(ctx)
+        last_step = _PREVIEW_LAST_STEPS.get(op_id)
+        if preview is not None and last_step is not None:
+            await last_step(ctx, preview)
     except Exception as exc:
         # Fail-soft: a preview is a convenience, the park is the
         # safety-relevant action. Never let a dry-run fault block it.

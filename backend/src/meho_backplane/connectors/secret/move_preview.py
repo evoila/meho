@@ -73,13 +73,15 @@ with :func:`has_keycloak_side`). The requester never approves it, and
 another admin (a tenant admin or a platform admin) must. A move between
 two Vault places is not a change of rights.
 
-In MEHO's own login realm a move that sets the password of a login with
-platform admin rights needs a platform admin as approver, and so does a
-move whose login MEHO cannot read. The card says it in its ``grant``
-block (:func:`~meho_backplane.connectors.keycloak.ops_write_platform_reach.secret_move_grant`,
+A move whose source or sink is in MEHO's own login realm needs a platform
+admin as approver, and so does a move whose realm MEHO cannot read. The
+card says it in its ``grant`` block
+(:func:`~meho_backplane.connectors.keycloak.ops_write_platform_reach.secret_move_grant`,
 registered with
 :func:`~meho_backplane.operations.grant_approval.register_grant_op`). The
-check runs again right before the approved move runs.
+check runs again right before the approved move runs. A move approved
+with a card made before this rule does not run
+(:func:`~meho_backplane.operations.grant_approval.register_harmless_keys_rule`).
 
 What a caller reads about a ``linux`` side is behind the switch
 ``SECRET_MOVE_LINUX_TARGET_CARD`` (``Settings.secret_move_linux_target_card``,
@@ -158,6 +160,7 @@ from meho_backplane.operations._preview import (
 from meho_backplane.operations._validate import params_problem, register_params_check
 from meho_backplane.operations.grant_approval import (
     register_grant_op,
+    register_harmless_keys_rule,
     register_rights_change_check,
 )
 from meho_backplane.settings import get_settings
@@ -410,6 +413,7 @@ def _register_secret_move_preview_builder() -> None:
     register_agent_preview_filter("secret.move", _hide_target_cards)
     register_rights_change_check("secret.move", has_keycloak_side)
     register_grant_op("secret.move", applies=has_keycloak_side)
+    register_harmless_keys_rule("secret.move")
 
 
 _register_secret_move_preview_builder()

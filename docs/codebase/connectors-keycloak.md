@@ -1207,8 +1207,10 @@ login.
   - Answer: `{id, username, realm, changed, added, removed,
     required_actions, unrequested_changes, read_back_checked}`.
     `required_actions` is the list read back from Keycloak after the
-    write. When the read-back fails it is `null` and `read_back_checked`
-    is `false`.
+    write. It is `null` when MEHO does not know the list: when the
+    read-back failed (`read_back_checked: false`), and when the read-back
+    ran but Keycloak's answer had no usable `requiredActions` list
+    (`read_back_checked: true`).
   - The approval card shows `{resource, username, id, realm, add, remove,
     current_available, user_available[, current_required_actions,
     resulting_required_actions][, warning]}`. When the user could be

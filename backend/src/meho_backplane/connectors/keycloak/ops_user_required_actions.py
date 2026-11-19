@@ -58,8 +58,11 @@ line when the change:
   up).
 
 The result's ``required_actions`` is the list read back from Keycloak after
-the write. When the read-back fails it is ``null`` and ``read_back_checked``
-is ``false``.
+the write. It is ``null`` when MEHO does not know the list:
+
+* the read-back failed (``read_back_checked`` is ``false``);
+* the read-back ran, but Keycloak's answer had no usable
+  ``requiredActions`` list (``read_back_checked`` is ``true``).
 
 Why a new read, not ``keycloak.user.list``
 ==========================================
@@ -186,7 +189,9 @@ _UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "The user's required actions, read back from Keycloak after the write. "
-                "Null when the read-back failed (read_back_checked is false)."
+                "Null when MEHO does not know them: the read-back failed "
+                "(read_back_checked is false), or Keycloak's answer had no usable list "
+                "(read_back_checked is true)."
             ),
         },
         "unrequested_changes": {

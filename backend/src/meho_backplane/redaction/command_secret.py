@@ -36,11 +36,20 @@ A value is read the way a shell reads one word: it ends at white space or
 at an operator (``; | & < > ( )``) that is not quoted or escaped. Quoted
 parts, escaped characters (``\\ `` and ``\\"``) and several parts joined
 together are one value, and a quoted part may run over a line break. A
-quote that is never closed is a plain character inside a value; a value
-that starts with one runs to the end of the line. A form that stands in a
-quoted command (``sh -c "mysql -px"; echo "ok"``) ends at the closing
-quote of that command. A quoted tool name (``"mysql" -px``) is not a
-quoted command: its options follow the closing quote.
+quote that closes on a later line must end the word and stand at most
+64 lines later; otherwise it is an apostrophe of a later log line
+(``it's done``), and the quote is never closed. A quote that is never
+closed is a plain character inside a value; a value that starts with one
+runs to the end of the line. A form that stands in a quoted command
+(``sh -c "mysql -px"; echo "ok"``) or in a JSON string
+(``{"msg":"mysql -px","ok":1}``) ends at the closing quote of that
+string. A quoted tool name (``"mysql" -px``) is not a quoted command: its
+options follow the closing quote.
+
+Names that look like a secret but are not one stay: paging tokens
+(``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), ``_KEY``
+names that do not name a secret key (``S3_KEY=``, ``PARTITION_KEY=``),
+the compiler option ``-pthread`` and a working folder ``pwd=/tmp``.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
@@ -76,6 +85,37 @@ def _skip_double_quoted(text: str, start: int, size: int | None = None) -> int:
         pos = mark.start() + 2
 
 
+#: Most line breaks a quoted value may hold. A quote further down belongs to
+#: a later log line, so the value is not closed.
+_MAX_VALUE_LINES: Final = 64
+
+
+def _ends_word(text: str, index: int) -> bool:
+    """True at the end of the text, at white space or at an operator."""
+    return index >= len(text) or text[index].isspace() or text[index] in ";|&<>()"
+
+
+def _ends_string(text: str, index: int) -> bool:
+    """True where a closing quote may stand before *index*.
+
+    The quote ends a word, or a JSON or list item follows (``"a","b"``,
+    ``"a"}``), or another quoted string.
+    """
+    return _ends_word(text, index) or text[index] in ",:]}'\""
+
+
+def _closes_value(text: str, opening: int, after: int, lines: int | None = None) -> bool:
+    """True when the quote that ends before *after* closes the one at *opening*.
+
+    On the same line it always does. On a later line it must end the word
+    and stand at most ``_MAX_VALUE_LINES`` lines further down. *lines* is the
+    number of line breaks between them when the caller knows it.
+    """
+    if lines is None:
+        lines = text.count("\n", opening, after)
+    return lines == 0 or (lines <= _MAX_VALUE_LINES and _ends_string(text, after))
+
+
 def _value_end(text: str, start: int, size: int | None = None) -> int:
     """Index where the shell word that starts at *start* ends (``start`` when empty).
 
@@ -99,7 +139,7 @@ def _value_end(text: str, start: int, size: int | None = None) -> int:
                 if char == "'"
                 else _skip_double_quoted(text, pos, size)
             )
-            if closing > 0:
+            if closing > 0 and (closing >= size or _closes_value(text, pos, closing)):
                 pos = closing
                 continue
             if pos > start:
@@ -145,11 +185,6 @@ _IN_SINGLE_MARK: Final = re.compile(r"['\n]")
 _IN_DOUBLE_MARK: Final = re.compile(r'["\\\n]')
 
 
-def _ends_word(text: str, index: int) -> bool:
-    """True at the end of the text, at white space or at an operator."""
-    return index >= len(text) or text[index].isspace() or text[index] in ";|&<>()"
-
-
 class _OuterQuotes:
     """Where the quoted string that a position stands in closes, read left to right.
 
@@ -158,8 +193,10 @@ class _OuterQuotes:
     read as the start of a quoted part of the password. A quoted string
     ends at the end of its line here: log text often has an apostrophe of
     its own (``don't``). For the same reason a quote that a word follows
-    directly opens a quoted value and does not close the string. Each part
-    of the text is read once, so a scan stays linear.
+    directly opens a quoted value and does not close the string; a ``,``,
+    ``:``, ``]`` or ``}`` after the quote closes it (a JSON string). Each
+    part of the text is read once, and the end of a line is found once, so
+    a scan stays linear.
     """
 
     def __init__(self, text: str) -> None:
@@ -167,6 +204,13 @@ class _OuterQuotes:
         self._pos = 0
         self._quote = ""
         self._close: int | None = None
+        self._line_end = -1
+
+    def _end_of_line(self, index: int) -> int:
+        if self._line_end < index:
+            line_end = self._text.find("\n", index)
+            self._line_end = len(self._text) if line_end == -1 else line_end
+        return self._line_end
 
     def _advance(self, index: int) -> None:
         text = self._text
@@ -191,14 +235,13 @@ class _OuterQuotes:
             return None
         if self._close is None:
             text = self._text
-            line_end = text.find("\n", index)
-            line_end = len(text) if line_end == -1 else line_end
+            line_end = self._end_of_line(index)
             if self._quote == "'":
                 self._close = text.find("'", index, line_end)
             else:
                 after = _skip_double_quoted(text, index - 1, line_end)
                 self._close = after - 1 if after > 0 else -1
-            if self._close >= 0 and not _ends_word(text, self._close + 1):
+            if self._close >= 0 and not _ends_string(text, self._close + 1):
                 # A quote with a word right behind it opens a quoted value
                 # (``don't --password 'a b'``): it does not close a string.
                 self._close = -1
@@ -213,15 +256,25 @@ _CAMEL: Final = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _SECRET_LAST_WORDS: Final = frozenset(
     {"password", "passwd", "pass", "pwd", "passphrase", "token", "secret"}
 )
+#: The word before ``token`` in the name of a paging token. Such a token names
+#: the next page of a list and is passed back to read it, so it stays.
+_PAGING_WORDS: Final = frozenset(
+    {"next", "continuation", "page", "pagination", "starting", "start", "resume", "cursor"}
+)
 
 
 def _name_words(name: str) -> list[str]:
     return [word for word in _NAME_SPLIT.split(_CAMEL.sub("_", name).lower()) if word]
 
 
+def _is_paging_token(words: list[str]) -> bool:
+    """True for ``next token``, ``continuation token`` and the like."""
+    return len(words) > 1 and words[-1] == "token" and words[-2] in _PAGING_WORDS
+
+
 def _is_secret_option(name: str) -> bool:
     words = _name_words(name)
-    if not words or words[0] == "no":
+    if not words or words[0] == "no" or _is_paging_token(words):
         return False
     return words[-1] in _SECRET_LAST_WORDS or words[-2:] == ["api", "key"]
 
@@ -312,7 +365,7 @@ def _option_span(
     if "sshpass" in tools and word.startswith("-p"):
         tools.discard("sshpass")
         return value(("-p",))
-    if "mysql" in tools and word.startswith("-p") and len(word) > 2:
+    if "mysql" in tools and word.startswith("-p") and len(word) > 2 and word != "-pthread":
         return _read(text, start + 2, None, size)
     if tools & _UPPER_P_TOOLS and word.startswith("-P"):
         return value(("-P",))
@@ -495,6 +548,13 @@ class _ClosingMarks:
     def __init__(self, text: str) -> None:
         self._text = text
         self._runs: dict[str, tuple[list[int], list[int], list[int]]] = {}
+        self._newlines: list[int] | None = None
+
+    def lines_between(self, start: int, end: int) -> int:
+        """The number of line breaks between *start* and *end*, by one look-up."""
+        if self._newlines is None:
+            self._newlines = [m.start() for m in re.finditer("\n", self._text)]
+        return bisect.bisect_left(self._newlines, end) - bisect.bisect_left(self._newlines, start)
 
     def _runs_of(self, closing: str) -> tuple[list[int], list[int], list[int]]:
         """Start and end of each run of *closing*, and the first odd run end from each run on."""
@@ -526,10 +586,11 @@ class _ClosingMarks:
 def _quoted_connection_value(text: str, start: int, marks: _ClosingMarks) -> tuple[int, int]:
     """Span of a quoted connection string value, through its closing mark.
 
-    A value that is never closed ends at the end of its line.
+    A value that is never closed, or closed too far down (see
+    ``_closes_value``), ends at the end of its line.
     """
     end = marks.end(start)
-    if end is not None:
+    if end is not None and _closes_value(text, start, end, marks.lines_between(start, end)):
         return start, end
     line_end = text.find("\n", start)
     return start, len(text) if line_end < 0 else line_end
@@ -559,6 +620,9 @@ def _connection_span(
 ) -> tuple[int, int] | None:
     start = match.end()
     if start >= len(text) or text[start] in ";\n":
+        return None
+    if match["label"].lower() == "pwd" and text[start] == "/":
+        # ``pwd=/tmp`` names the working folder.
         return None
     if text[start] in _CLOSING:
         return _quoted_connection_value(text, start, marks)
@@ -598,8 +662,38 @@ def _connection_spans(text: str) -> list[tuple[int, int]]:
 # -- environment style names ------------------------------------------------------
 
 _ENVIRONMENT: Final = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{0,127}_(?:PASS|PWD|PASSWORD|SECRET|TOKEN|KEY)="
+    r"(?<![A-Za-z0-9_])(?P<name>[A-Z][A-Z0-9_]{0,127})_(?P<kind>PASS|PWD|PASSWORD|SECRET|TOKEN|KEY)="
 )
+#: The word before ``_KEY`` in a name that holds a secret key. Other ``_KEY``
+#: names hold a path, an id or a public key id (``S3_KEY``, ``GPG_KEY``).
+_SECRET_KEY_WORDS: Final = frozenset(
+    {
+        "api",
+        "secret",
+        "private",
+        "access",
+        "signing",
+        "encryption",
+        "master",
+        "auth",
+        "client",
+        "session",
+        "shared",
+        "hmac",
+        "license",
+        "account",
+        "storage",
+        "ssh",
+        "deploy",
+    }
+)
+
+
+def _is_secret_environment_name(match: re.Match[str]) -> bool:
+    last = match["name"].rsplit("_", 1)[-1].lower()
+    if match["kind"] == "KEY":
+        return last in _SECRET_KEY_WORDS
+    return not (match["kind"] == "TOKEN" and last in _PAGING_WORDS)
 
 
 def _environment_spans(text: str) -> list[tuple[int, int]]:
@@ -608,6 +702,8 @@ def _environment_spans(text: str) -> list[tuple[int, int]]:
     pos = 0
     while (match := _ENVIRONMENT.search(text, pos)) is not None:
         pos = match.end()
+        if not _is_secret_environment_name(match):
+            continue
         span = _value_span(text, match.end(), quotes.end(match.start()))
         if span is not None:
             spans.append(span)
@@ -627,7 +723,9 @@ _CDATA_CLOSE: Final = "]]>"
 
 def _is_secret_element(tag: str) -> bool:
     words = _name_words(tag)
-    return bool(words) and (words[-1] in _XML_SECRET_LAST_WORDS or words[-2:] == ["api", "key"])
+    if not words or _is_paging_token(words):
+        return False
+    return words[-1] in _XML_SECRET_LAST_WORDS or words[-2:] == ["api", "key"]
 
 
 class _CdataEnds:

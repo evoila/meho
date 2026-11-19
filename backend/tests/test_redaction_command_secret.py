@@ -43,6 +43,7 @@ _USER_PW: Final = "bob" + ":" + PW
 _PASSWORD_IS: Final = "Pass" + "word="
 _PWD_IS: Final = "P" + "wd="
 _PW_IS: Final = "p" + "w="
+_PUBLIC_KEY_ID: Final = "0x" + "1234ABCD" + "5678EF90"
 
 
 def _login(user: str, password: str) -> str:
@@ -81,6 +82,9 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     (f"DB_PASSWORD={PW} run", PW, "DB_PASSWORD="),
     (f"APP_PASS={PW} APP_PWD={PW} APP_SECRET={PW}", PW, "APP_SECRET="),
     (f"API_TOKEN={PW} SIGNING_KEY={PW}", PW, "SIGNING_KEY="),
+    (f"AWS_SECRET_ACCESS_KEY={PW} SECRET_KEY={PW}", PW, "SECRET_KEY="),
+    (f"run --session-token {PW} --page-size 50", PW, "--page-size 50"),
+    (f"<SessionToken>{PW}</SessionToken>", PW, "<SessionToken>"),
     (f"<config><password>{PW}</password><user>u</user></config>", PW, "<user>u</user>"),
     (f"<Secret><![CDATA[{PW}]]></Secret>", PW, "<![CDATA["),
     # A value joined from quoted parts, with an escaped space or quote.
@@ -150,6 +154,20 @@ _KEPT: Final[list[str]] = [
     "<password><![CDATA[x]]></user></password>",
     '"mysql" -p 3306',
     'echo "mysql" is fine',
+    # Names that look like a secret but hold none: a paging token, a ``_KEY``
+    # name that does not name a secret key, a compiler option, a folder.
+    "aws s3api list-objects-v2 --bucket b --next-token eyJNYXJrZXIiOiBudWxsfQ==",
+    "list --continuation-token 1x2y3z --page-token p2",
+    "<Result><NextToken>AAAA-page-2</NextToken><IsTruncated>true</IsTruncated></Result>",
+    "<ListBucketResult><ContinuationToken>1ueGcxLPRx1</ContinuationToken></ListBucketResult>",
+    "NEXT_TOKEN=page-2 ./list.sh",
+    "S3_KEY=path/to/object.tar.gz aws s3 cp",
+    "PARTITION_KEY=tenant-1 SORT_KEY=created_at",
+    "GPG_KEY=" + _PUBLIC_KEY_ID + " gpg --recv-keys",
+    "mysql -pthread",
+    "gcc $(mysql_config --cflags) main.c -pthread",
+    "cd /srv; pwd=/tmp",
+    "export PWD=/tmp; ls",
 ]
 
 
@@ -410,6 +428,10 @@ def _closing_mark_by_reading(text: str, start: int) -> int | None:
     return None
 
 
+def _ends_a_string(text: str, index: int) -> bool:
+    return index >= len(text) or text[index].isspace() or text[index] in ";|&<>(),:]}'\""
+
+
 def test_the_closing_mark_is_the_one_found_by_reading_the_text() -> None:
     texts = ["".join(p) for n in range(1, 8) for p in itertools.product("'{}a\n", repeat=n)]
     for text in texts:
@@ -418,6 +440,9 @@ def test_the_closing_mark_is_the_one_found_by_reading_the_text() -> None:
         if line[start] not in "'{":
             continue
         end = _closing_mark_by_reading(line, start)
+        if end is not None and "\n" in line[start:end] and not _ends_a_string(line, end):
+            # A mark on a later line that a word follows does not close the value.
+            end = None
         if end is None:
             line_end = line.find("\n", start)
             end = len(line) if line_end < 0 else line_end

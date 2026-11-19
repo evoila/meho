@@ -187,9 +187,10 @@ FIREWALL_BACKENDS: tuple[str, ...] = ("nft", "iptables")
 #: The default interpreter for ``linux.script.run`` when none is declared.
 _DEFAULT_INTERPRETER: str = "/bin/bash"
 
-#: The remote command of ``linux.script.run`` without sudo. bash reads the
-#: wrapper from stdin, so no script, argument or env value is on the host's
-#: command line.
+#: The remote command of ``linux.script.run`` without sudo. The command MEHO
+#: sends over SSH is this fixed text and holds no value. The wrapper goes on
+#: stdin: it holds the script, every ``env`` and ``secret_env`` value, and
+#: the ``arguments``, which the interpreter gets as its own arguments.
 _SCRIPT_RUN_REMOTE_CMD: str = "bash -s"
 
 #: Suffix of the sibling backup ``linux.file.write`` writes before replacing an
@@ -912,9 +913,10 @@ async def linux_script_run(
             timeout=float(timeout),
         )
     else:
-        # The wrapper goes on stdin, the same as the sudo path. The command
-        # line on the host is the same for every call and holds no script,
-        # argument or env value.
+        # The command sent over SSH is fixed and holds no value. The wrapper
+        # goes on stdin, the same as the sudo path: the script, the ``env``
+        # and ``secret_env`` values, and the ``arguments``, which the
+        # interpreter gets as its own arguments.
         proc = await connector._run_command(
             target,
             _SCRIPT_RUN_REMOTE_CMD,

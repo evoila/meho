@@ -258,8 +258,9 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   Vault places (or to a `linux:` place) is not a change of rights.
 - Before the `linux:` store uses SSH, it drops the SSH logins this server
   keeps for the target when a person changed the target since this server
-  last saw it (`forget_target_if_changed`). So the script goes to the host
-  and port the row holds now, also when another server made the change.
+  last saw it (`forget_target_if_changed`). It drops them too the first
+  time this server sees the target. So the script goes to the host and
+  port the row holds now, also when another server made the change.
 - What a caller reads about a `linux:` side is behind the switch
   `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
   `preview_operation` shows only `kind` and `ref` for a `linux:` side, and

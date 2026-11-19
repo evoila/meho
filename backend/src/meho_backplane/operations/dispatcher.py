@@ -4706,7 +4706,8 @@ async def _dispatch_now(
 
         # #3879: a target changed on another server (or by this one, before
         # this process saw it) must not be served with the login kept for its
-        # old values. One dict lookup per dispatch; a drop only on a change.
+        # old values. One dict lookup per dispatch; a drop only on a change,
+        # and also the first time this process sees the target.
         if target is not None:
             await forget_target_if_changed(target)
 

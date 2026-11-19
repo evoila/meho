@@ -3979,6 +3979,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td><code>linux.script.run</code> sends the script and its values to the host on standard input, also without sudo. The host's process list shows <code>bash -s</code> for such a call. A script that reads standard input gets end-of-file.</td>
+<td>None.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>linux.script.run refuses a script over 1,048,576 bytes (1 MiB) before it waits for approval. The approver reads a longer script page by page.</td>
 <td>Keep scripts at or under 1 MiB, for example copy a large file to the host first. Requests that wait at upgrade time show no page links in the console; read their pages with <code>meho approvals show &lt;id&gt; --script-page N</code>. A request with a script over 1 MiB that waits at upgrade time is refused when it is approved. Send it again with a shorter script.</td>
 </tr>

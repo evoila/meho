@@ -4843,6 +4843,20 @@ of the steps each run went through (`operations/composite_steps.py`):
   name (`scrub_secret_fields` with `hide_numbers=True`); otherwise the
   entry stays `started`. A `call`
   that raises leaves its entry `started` too.
+- **Credential steps.** MEHO never stores the result of a credential step,
+  and never a credential value. The entry holds only the connector, op id,
+  target and the keyed params hash. The rule:
+  - A step that **writes or makes** a credential (`credential_write`,
+    `credential_mint`) and ended well becomes `done_no_result`. "Ended
+    well": the `call` of `run_governed_subop` returned, or the
+    `dispatch_child` result is `ok` and not `execution_outcome:
+    "uncertain"`. The entry says only that the step is finished.
+  - A step that **reads** a credential (`credential_read`, or an answer
+    that hides its values) is `run_again` from the start. A read changes
+    nothing on the target.
+  - A credential write whose end MEHO does not know (the call raised, a
+    timeout after it was sent, an error or `uncertain` result) stays
+    `started`, like any other step.
 - **Storing.** When a step waits, the record goes on the new request as
   `resume_parent["steps"]` (left out when it is empty). Like the rest of
   `resume_parent` it is internal and never shown. For a credential write
@@ -4857,9 +4871,28 @@ of the steps each run went through (`operations/composite_steps.py`):
   - `done`: it returns the stored result (`run_governed_subop` gives
     `SubopStep(value=<stored>, replayed=True)`, `dispatch_child` gives the
     stored `OperationResult`);
+  - `done_no_result`: the step is not sent again and gives back no result
+    (`run_governed_subop` gives `SubopStep(value=None, replayed=True)`,
+    `dispatch_child` gives an `ok` `OperationResult` with `result=None`
+    and `extras["result_kept"] = False`). A later step does not get the
+    credential step's answer on a resume;
+  - `run_again`: the read is sent again, with the same target and params.
+    `run_governed_subop` and `enforce_subop_policy` let it go ahead without
+    a new check: this run already let the same read go ahead. A
+    `dispatch_child` read runs through the dispatcher again, with its
+    normal checks. The new answer goes to the handler and is not stored;
   - `started`: the run stops with `composite_resume_step_outcome_unknown`
     (`execution_outcome: "uncertain"`, `retry: false`). MEHO does not know
     if that change happened.
+
+  **What the approver's card shows when a read runs again.** The card of
+  the waiting step shows that step and its params. The read is
+  not on the card. On the run after the approval MEHO reads again, and the
+  approved step goes ahead only when its params are exactly the ones on the
+  card (the params hash). When the new answer of the read changes those
+  params, the approved step does not match: the run stops with
+  `composite_resume_repeats_write` and the step is not sent. So what runs
+  is always what the card showed.
 - **Before the approved step.** Until the approved step has run, every step
   must come from the record. A governed step that is not in it, and is not
   `after_main_effect`, is refused before it runs
@@ -4871,9 +4904,9 @@ of the steps each run went through (`operations/composite_steps.py`):
   after that approval could only stop at that step. So MEHO asks no person
   and stops at once with `composite_resume_step_outcome_unknown`. Not for an
   `after_main_effect` step: its run after the approval continues at that
-  step and does not reach the earlier one. A step that reads, writes or
-  makes a credential has no stored end too, so a later step of the same
-  run that needs approval stops the run this way.
+  step and does not reach the earlier one. A finished credential write
+  (`done_no_result`) and a credential read (`run_again`) do not stop a
+  later wait; a credential write with no known end does.
 - **A second wait.** A step that needs its own approval during a resume
   waits again. Its request stores the whole record so far: the replayed
   steps, the approved step and the steps after it. Two, three or more
@@ -4894,8 +4927,9 @@ approval request.
 The same holds on every resume path: the person's approval in the console,
 REST, MCP or CLI, the agent that waited (`agent/approval_wait.py`), and a
 scheduled run (its request is approved and run on the person's path). Tests:
-`test_operations_composite_steps_resume.py` (through the real dispatcher,
-counting each change that reached the target).
+`test_operations_composite_steps_resume.py` and
+`test_operations_composite_credential_steps_resume.py` (through the real
+dispatcher, counting each request that reached the target).
 
 #### Continuing where it stopped (#4217)
 

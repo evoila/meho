@@ -26,6 +26,16 @@ the step's operation does not read, write or make a credential (its class,
 answer hides its values), and it holds no secret-named value (also no number
 under a secret name); otherwise the entry stays ``started``. A replayed result is a copy, so a
 handler that changes it does not change what a later wait stores.
+
+A credential step keeps no result, so it has its own rules:
+
+* A step that writes or makes a credential and ended well becomes
+  ``done_no_result``: the entry says only that the step is finished. On a
+  resume the step is not sent again and gives back no result.
+* A step that reads a credential is ``run_again``: on a resume it is sent
+  again, with the same target and params. A read changes nothing on the
+  target, and its value is never stored.
+* A step whose end MEHO does not know stays ``started`` and stops the run.
 """
 
 from __future__ import annotations
@@ -48,6 +58,8 @@ from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
 __all__ = [
     "STEP_DONE",
+    "STEP_DONE_NO_RESULT",
+    "STEP_RUN_AGAIN",
     "STEP_STARTED",
     "StepJournal",
     "composite_resume_steps",
@@ -62,15 +74,27 @@ _log = structlog.get_logger(__name__)
 STEP_DONE = "done"
 #: The step was started; MEHO has no stored end for it.
 STEP_STARTED = "started"
+#: A step that writes or makes a credential ran to its end; no result is kept.
+STEP_DONE_NO_RESULT = "done_no_result"
+#: A step that reads a credential; a resume sends it again, nothing is kept.
+STEP_RUN_AGAIN = "run_again"
 
-#: Classes of an operation whose result MEHO never stores: it may hold a secret
-#: under any field name.
-_CREDENTIAL_CLASSES = frozenset({"credential_read", "credential_mint", "credential_write"})
+#: The statuses of a step that a resume does not stop at.
+_FINISHED = frozenset({STEP_DONE, STEP_DONE_NO_RESULT, STEP_RUN_AGAIN})
+
+#: Classes of an operation that writes or makes a credential. MEHO never
+#: stores its result: it may hold a secret under any field name.
+_CREDENTIAL_CHANGE_CLASSES = frozenset({"credential_mint", "credential_write"})
 
 
-def _is_credential_step(op_id: str) -> bool:
-    """True when *op_id* reads, writes or makes a credential, so its result is not kept."""
-    return classify_op(op_id) in _CREDENTIAL_CLASSES or hides_secret_values(op_id)
+def _is_credential_read(op_id: str) -> bool:
+    """True when *op_id* reads a credential: its class, or an answer that hides its values."""
+    return classify_op(op_id) == "credential_read" or hides_secret_values(op_id)
+
+
+def _is_credential_change(op_id: str) -> bool:
+    """True when *op_id* writes or makes a credential."""
+    return classify_op(op_id) in _CREDENTIAL_CHANGE_CLASSES
 
 
 def step_target_key(target: Any) -> str | None:
@@ -108,6 +132,10 @@ class StepJournal:
         stays on the journal, so a later wait stores it again. The caller
         gets a deep copy: changing the returned result does not change the
         stored one.
+
+        A ``run_again`` entry is taken off the earlier run's entries but not
+        added to this run's: the caller sends the step again and records it
+        with :meth:`start`.
         """
         target_key = step_target_key(target)
         for index, entry in enumerate(self.replay):
@@ -118,46 +146,65 @@ class StepJournal:
                 and params_hash_matches(params, str(entry.get("params_hash", "")))
             ):
                 del self.replay[index]
-                self.entries.append(entry)
+                if entry.get("status") != STEP_RUN_AGAIN:
+                    self.entries.append(entry)
                 return copy.deepcopy(entry)
         return None
 
     def start(
         self, connector_id: str, op_id: str, target: Any, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Add a ``started`` entry for a step that is about to run."""
+        """Add an entry for a step that is about to run.
+
+        A step that reads a credential is ``run_again`` from the start: a
+        read changes nothing on the target, so a resume may send it again
+        however it ended. Every other step is ``started``.
+        """
         entry: dict[str, Any] = {
             "connector_id": connector_id,
             "op_id": op_id,
             "target": step_target_key(target),
             "params_hash": compute_params_hash(params),
-            "status": STEP_STARTED,
+            "status": STEP_RUN_AGAIN if _is_credential_read(op_id) else STEP_STARTED,
         }
         self.entries.append(entry)
         return entry
 
-    def finish(self, entry: dict[str, Any], value: Any) -> None:
-        """Mark *entry* ``done`` with *value*, when *value* can be kept.
+    def finish(self, entry: dict[str, Any], value: Any, *, ended_well: bool = True) -> None:
+        """Mark *entry* finished, and keep *value* when it can be kept.
 
-        The result of a step that reads, writes or makes a credential is not
-        stored, whatever its field names. A value that is not JSON, or that
-        holds a secret-named value (a number under a secret name too), is not
-        stored either. The entry then stays
-        ``started``: a later run cannot replay the step and stops instead of
-        sending it again.
+        * A step that reads a credential stays ``run_again``; *value* is not
+          kept.
+        * A step that writes or makes a credential becomes ``done_no_result``
+          when *ended_well*; *value* is not kept, whatever its field names.
+          When it did not end well it stays ``started``.
+        * Any other step becomes ``done`` with *value*. A value that is not
+          JSON, or that holds a secret-named value (a number under a secret
+          name too), is not stored, and the entry stays ``started``.
+
+        A ``started`` entry cannot be replayed: a later run stops at it
+        instead of sending it again.
         """
-        if _is_credential_step(entry["op_id"]):
-            _log.warning(
-                "composite_step_result_not_kept", op_id=entry["op_id"], reason="credential"
+        op_id = entry["op_id"]
+        if entry.get("status") == STEP_RUN_AGAIN:
+            return
+        if _is_credential_change(op_id):
+            if ended_well:
+                entry["status"] = STEP_DONE_NO_RESULT
+            _log.info(
+                "composite_step_result_not_kept",
+                op_id=op_id,
+                reason="credential",
+                finished=ended_well,
             )
             return
         try:
             result = to_jsonable_python(value)
         except PydanticSerializationError:
-            _log.warning("composite_step_result_not_kept", op_id=entry["op_id"], reason="not_json")
+            _log.warning("composite_step_result_not_kept", op_id=op_id, reason="not_json")
             return
         if scrub_secret_fields(result, hide_numbers=True) != result:
-            _log.warning("composite_step_result_not_kept", op_id=entry["op_id"], reason="secret")
+            _log.warning("composite_step_result_not_kept", op_id=op_id, reason="secret")
             return
         entry["status"] = STEP_DONE
         entry["result"] = result
@@ -165,7 +212,7 @@ class StepJournal:
     def first_unfinished(self) -> str | None:
         """The op id of the first stored step with no stored end, or ``None``."""
         for entry in (*self.entries, *self.replay):
-            if entry.get("status") != STEP_DONE:
+            if entry.get("status") not in _FINISHED:
                 return str(entry.get("op_id"))
         return None
 

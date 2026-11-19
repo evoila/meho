@@ -104,6 +104,8 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
+    STEP_DONE_NO_RESULT,
+    STEP_RUN_AGAIN,
     StepJournal,
     current_step_journal,
 )
@@ -528,7 +530,9 @@ def get_dispatch_child(
                 params=params,
             )
             if journal is not None and entry is not None:
-                journal.finish(entry, result.model_dump(mode="json"))
+                journal.finish(
+                    entry, result.model_dump(mode="json"), ended_well=_child_ended_well(result)
+                )
             return result
         finally:
             _composite_op_id_chain_var.reset(chain_token)
@@ -536,6 +540,11 @@ def get_dispatch_child(
             parent_audit_id_var.reset(audit_token)
 
     return _dispatch_child
+
+
+def _child_ended_well(result: OperationResult) -> bool:
+    """True when a ``dispatch_child`` step ran and its change is known to have happened."""
+    return result.status == "ok" and result.extras.get("execution_outcome") != "uncertain"
 
 
 def _replayed_child(
@@ -548,8 +557,11 @@ def _replayed_child(
 ) -> OperationResult | None:
     """What a ``dispatch_child`` step returns without running, during a resume.
 
-    A step the earlier run finished returns its stored result. A step it
-    only started stops the run (``composite_resume_step_outcome_unknown``).
+    A step the earlier run finished returns its stored result. A credential
+    write or make that ended well returns ``ok`` with no result
+    (``extras["result_kept"]`` is ``False``). A credential read runs again.
+    A step the earlier run only started stops the run
+    (``composite_resume_step_outcome_unknown``).
     Before the approved step, a step the earlier run did not do is refused
     (``composite_resume_repeats_write``), unless the composite continues at
     an ``after_main_effect`` step on its own. ``None``: run the step.
@@ -561,10 +573,20 @@ def _replayed_child(
 
     replayed = journal.take(connector_id, op_id, target, params)
     if replayed is not None:
-        if replayed.get("status") == STEP_DONE:
+        status = replayed.get("status")
+        if status == STEP_RUN_AGAIN:
+            _log.info(
+                "composite_step_read_again", composite_op_id=journal.composite_op_id, op_id=op_id
+            )
+            return None
+        if status in (STEP_DONE, STEP_DONE_NO_RESULT):
             _log.info(
                 "composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id
             )
+            if status == STEP_DONE_NO_RESULT:
+                return OperationResult(
+                    status="ok", op_id=op_id, duration_ms=0.0, extras={"result_kept": False}
+                )
             return OperationResult.model_validate(replayed.get("result"))
         _log.error(
             "composite_resume_step_outcome_unknown",
@@ -802,12 +824,22 @@ async def enforce_subop_policy(
     handler's own call, so the step stays "started": when a resume reaches
     it again, the seam returns ``composite_resume_step_outcome_unknown`` and
     the step is not sent again. A step that must be skipped on a resume, with
-    its stored result, runs through :func:`run_governed_subop` instead.
+    its stored result, runs through :func:`run_governed_subop` instead. A step
+    that reads a credential is the exception: a read changes nothing on the
+    target, so on a resume the seam lets the same read (same target and
+    params) go ahead again without a new check.
     """
     from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
 
     journal = current_step_journal()
-    if journal is not None and journal.take(connector_id, op_id, target, params) is not None:
+    replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
+    if journal is not None and replayed is not None:
+        if replayed.get("status") == STEP_RUN_AGAIN:
+            _log.info(
+                "composite_step_read_again", composite_op_id=journal.composite_op_id, op_id=op_id
+            )
+            journal.start(connector_id, op_id, target, params)
+            return None
         _log.error(
             "composite_resume_step_outcome_unknown",
             composite_op_id=journal.composite_op_id,
@@ -869,50 +901,65 @@ async def run_governed_subop(
 
     During the run after an approval, a step the earlier run finished is
     not checked and not sent again: ``value`` is the stored result and
-    ``replayed`` is ``True``. A step the earlier run started but did not
-    finish, or whose result was not kept, stops the run with
-    ``composite_resume_step_outcome_unknown``. An exception from *call*
-    passes to the handler, and the step stays "started".
+    ``replayed`` is ``True``. A step that writes or makes a credential and
+    ended well gives ``value=None`` with ``replayed=True``: its result is
+    never kept. A step that reads a credential is sent again, without a new
+    check: the earlier run already let the same read (same target and
+    params) go ahead, and a read changes nothing on the target. A step the
+    earlier run started but did not finish, or whose result was not kept,
+    stops the run with ``composite_resume_step_outcome_unknown``. An
+    exception from *call* passes to the handler, and the step stays
+    "started".
     """
-    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
-
     journal = current_step_journal()
-    if journal is not None:
-        replayed = journal.take(connector_id, op_id, target, params)
-        if replayed is not None:
-            if replayed.get("status") == STEP_DONE:
-                _log.info(
-                    "composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id
-                )
-                return SubopStep(stopped=None, value=replayed.get("result"), replayed=True)
-            _log.error(
-                "composite_resume_step_outcome_unknown",
-                composite_op_id=journal.composite_op_id,
-                blocked_op_id=op_id,
-            )
-            return SubopStep(
-                stopped=result_composite_resume_step_outcome_unknown(
-                    composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
-                )
-            )
-    gated = await _gate_subop(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        safety_level=safety_level,
-        requires_approval=requires_approval,
-        target=target,
-        params=params,
-        resume_state=resume_state,
-        after_main_effect=after_main_effect,
-    )
-    if gated is not None:
-        return SubopStep(stopped=gated)
+    replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
+    read_again = replayed is not None and replayed.get("status") == STEP_RUN_AGAIN
+    if journal is not None and replayed is not None and not read_again:
+        return _replayed_subop(journal, op_id, replayed)
+    if read_again:
+        _log.info("composite_step_read_again", op_id=op_id)
+    else:
+        gated = await _gate_subop(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=target,
+            params=params,
+            resume_state=resume_state,
+            after_main_effect=after_main_effect,
+        )
+        if gated is not None:
+            return SubopStep(stopped=gated)
     entry = journal.start(connector_id, op_id, target, params) if journal is not None else None
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)
     return SubopStep(stopped=None, value=value)
+
+
+def _replayed_subop(journal: StepJournal, op_id: str, replayed: dict[str, Any]) -> SubopStep:
+    """What a :func:`run_governed_subop` step with an entry of the earlier run gives back.
+
+    A finished step gives its stored result (``None`` for a credential write
+    or make). A step with no stored end stops the run.
+    """
+    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
+
+    if replayed.get("status") in (STEP_DONE, STEP_DONE_NO_RESULT):
+        _log.info("composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id)
+        return SubopStep(stopped=None, value=replayed.get("result"), replayed=True)
+    _log.error(
+        "composite_resume_step_outcome_unknown",
+        composite_op_id=journal.composite_op_id,
+        blocked_op_id=op_id,
+    )
+    return SubopStep(
+        stopped=result_composite_resume_step_outcome_unknown(
+            composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
+        )
+    )
 
 
 # code-quality-allow: the long policy and approval gate of a direct sub-op,

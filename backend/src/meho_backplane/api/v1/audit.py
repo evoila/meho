@@ -80,8 +80,8 @@ minimum (:class:`~meho_backplane.auth.operator.TenantRole.OPERATOR`):
 :mod:`~meho_backplane.api.v1.retrieve` and
 :mod:`~meho_backplane.api.v1.retrieve_usage`. These match the MCP
 ``query_audit`` tool, which is also ``operator``-gated — including its
-``shape="tree"`` *self-session* replay, locked to the caller's own
-session id.
+``shape="tree"`` *self-session* replay, which holds only the rows of
+the caller's own calls.
 
 The **cross-session replay** route
 (``GET /api/v1/audit/sessions/{session_id}/replay``) takes an

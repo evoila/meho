@@ -969,14 +969,12 @@ excluded_null_session_count, loose_row_count}` (same envelope, including
 the same `excluded_null_session_count` and `loose_row_count` glosses, as
 the admin tool below).
 
-The tree path is **self-session only** and intentionally stricter than
-the flat path (which returns other in-tenant principals' rows to a
-person): `agent_session_id` must be present (absent → `-32602`), and the
-stored rows of the session must hold a row of the caller's own calls
-(`session_has_rows_of`). MEHO never reads the `Mcp-Session-Id` header
-for this check. Any other session answers with an empty tree, the same
-answer as for a session that does not exist. A service login sees only
-its own rows in the tree. Cross-session forensic replay is the
+The tree path is **self-session only** and stricter than the flat path
+(which returns other in-tenant principals' rows to a person):
+`agent_session_id` must be present (absent → `-32602`). The tree holds
+only the rows of the caller's own calls, for every caller, a person too.
+A session with no rows of the caller's own calls answers like a session
+that does not exist: an empty tree. Cross-session forensic replay is the
 `tenant_admin`-gated `meho_audit_replay` tool, not this path.
 
 ## `meho_audit_replay` admin tool (G8.2-T6 #1014)

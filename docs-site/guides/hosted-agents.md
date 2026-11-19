@@ -160,6 +160,10 @@ More rules:
   connectors in the list. When the agent asks for a connector that is not in
   the list, MEHO refuses the call and tells the agent which connectors it
   may use.
+  `result_query` reads only results that were stored under the list.
+  With the setting `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` on, an agent
+  with a `connectors` list does not get `query_topology`; the setting is
+  off by default.
 
 ### The tool names
 

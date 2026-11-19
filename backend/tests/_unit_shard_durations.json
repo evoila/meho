@@ -865,6 +865,7 @@
   "tests/test_operation_run_lifecycle.py": 2.34,
   "tests/test_operation_run_reaper.py": 0.76,
   "tests/test_operation_run_service.py": 2.15,
+  "tests/test_operation_switch_params.py": 12.0,
   "tests/test_operations_audit_error_envelope.py": 0.91,
   "tests/test_operations_audit_extras_scope.py": 0.58,
   "tests/test_operations_audit_principal_name.py": 0.3,

@@ -129,7 +129,6 @@ from meho_backplane.operations.approved_reveal import (
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 from meho_backplane.policy.routing_floor import InstallFloor, load_install_floor
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals import routes as _routes
 from meho_backplane.ui.routes.approvals.render import (
@@ -138,6 +137,7 @@ from meho_backplane.ui.routes.approvals.render import (
     project_request_to_view,
     set_csrf_cookie,
 )
+from meho_backplane.ui.routes.approvals.sign_in import sign_in_url, web_sign_in_level
 from meho_backplane.ui.routes.work_ref_form import (
     filter_work_ref,
     mark_work_ref_refused,
@@ -273,7 +273,9 @@ def build_in_order_router() -> APIRouter:
                 operator_sub=operator.sub,
             )
             return await _render(request, session, ref, run, reason=reason, started=False)
-        await _run_steps(operator, run, reason=reason, confirmed=confirmed)
+        await _run_steps(
+            operator, run, reason=reason, confirmed=confirmed, session_id=session.session_id
+        )
         response = await _render(request, session, ref, run, reason=reason, started=True)
         if run.approved_now:
             # Refresh the bell and the history list, but keep this modal
@@ -410,14 +412,19 @@ def group_warnings(rows: list[ApprovalRequest]) -> list[str]:
 
 
 async def _run_steps(
-    operator: Operator, run: _Run, *, reason: str, confirmed: uuid.UUID | None
+    operator: Operator,
+    run: _Run,
+    *,
+    reason: str,
+    confirmed: uuid.UUID | None,
+    session_id: uuid.UUID,
 ) -> None:
     """Go through the steps oldest first until the end, a wait, or a stop."""
     for step in run.steps:
         if run.waiting is not None or run.stopped is not None:
             step.outcome = "not_run"
             continue
-        await _run_step(operator, step, reason=reason, confirmed=confirmed)
+        await _run_step(operator, step, reason=reason, confirmed=confirmed, session_id=session_id)
         if step.outcome == "approved":
             run.approved_now += 1
             if step.self_approval:
@@ -452,7 +459,12 @@ def _settle_approved_step(step: _Step) -> None:
 
 
 async def _run_step(
-    operator: Operator, step: _Step, *, reason: str, confirmed: uuid.UUID | None
+    operator: Operator,
+    step: _Step,
+    *,
+    reason: str,
+    confirmed: uuid.UUID | None,
+    session_id: uuid.UUID,
 ) -> None:
     row = step.row
     if row.status == ApprovalRequestStatus.APPROVED.value:
@@ -466,17 +478,8 @@ async def _run_step(
         step.outcome = "waiting"
         return
 
-    try:
-        approved = await _routes._commit_decision(
-            operator=operator, request_id=row.id, decision="approved", reason=reason
-        )
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        if detail.startswith(_SIGN_IN_PREFIXES):
-            step.outcome, step.detail, step.sign_in_needed = "stopped", _SIGN_IN_AGAIN, True
-        else:
-            step.outcome = "stopped"
-            step.detail = f"The approval was refused: {detail} {WEB_APPROVAL_HINT}"
+    approved = await _approve_step(operator, step, reason=reason, session_id=session_id)
+    if approved is None:
         return
     # The step is approved now: say so when it was the person's own change
     # (#3329), whatever its run does next. The sign is no longer needed.
@@ -518,6 +521,28 @@ async def _run_step(
         )
     else:
         _stop_on_run_status(step, status, getattr(result, "error", None))
+
+
+async def _approve_step(
+    operator: Operator, step: _Step, *, reason: str, session_id: uuid.UUID
+) -> ApprovalRequest | None:
+    """Approve *step*; on a refusal say why on the step and return ``None``."""
+    try:
+        return await _routes._commit_decision(
+            operator=operator,
+            request_id=step.row.id,
+            decision="approved",
+            reason=reason,
+            session_id=session_id,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        if detail.startswith(_SIGN_IN_PREFIXES):
+            step.outcome, step.detail, step.sign_in_needed = "stopped", _SIGN_IN_AGAIN, True
+        else:
+            step.outcome = "stopped"
+            step.detail = f"The approval was refused: {detail} {WEB_APPROVAL_HINT}"
+        return None
 
 
 def _stop_on_run_status(step: _Step, status: object, error: object) -> None:
@@ -589,7 +614,7 @@ async def _render(
         "stopped": _project_step(run.stopped) if run.stopped else None,
         "unseen": [_project_step(s) for s in run.unseen],
         "sign_in_url": (
-            login_location(_ticket_page(work_ref), fresh_sign_in=True)
+            sign_in_url(_ticket_page(work_ref), await web_sign_in_level())
             if run.sign_in_needed
             else None
         ),

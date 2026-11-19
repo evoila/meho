@@ -232,17 +232,21 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   side names no MEHO target.
 - For each `keycloak:` side (a user password sink or a client secret
   source) the card shows the Keycloak target the name points to
-  (`target_id`, `target_name`), its `host` and the reference of its admin
-  login (`secret_ref`). The approved run compares the id, the host and the
-  secret reference with the target it finds
-  (`connectors/keycloak/secret_move_target.py`, called where the Keycloak
-  store finds its target). Another target, a new host or secret reference
-  on the same target, or a card without one of them, refuses the run with
-  `KeycloakTargetChangedError`: "Nothing was read or written. Send a new
-  request". The check runs before any Keycloak login; for a sink it also
-  runs before the source is read. `preview_operation`,
-  `meho_approvals_get` and `meho_approvals_list` leave these four fields
-  out; only the card a person reads shows them.
+  (`target_id`, `target_name`), how MEHO connects to it (`host`, `port`,
+  `scheme` and the TLS check `tls`) and the reference of its admin login
+  (`secret_ref`). The `port` is the one MEHO dials: the target's own port,
+  or 443 for https and 80 for http. `tls` says whether MEHO checks the
+  certificate, and names a pinned CA (by a short SHA-256 digest) and a TLS
+  server name when the target sets them. The approved run compares the
+  id, these connection fields and the secret reference with the target it
+  finds (`connectors/keycloak/secret_move_target.py`, called where the
+  Keycloak store finds its target). Another target, a new host, port,
+  scheme, TLS setting or secret reference on the same target, or a card
+  without one of them, refuses the run with `KeycloakTargetChangedError`:
+  "Nothing was read or written. Send a new request". The check runs before
+  any Keycloak login; for a sink it also runs before the source is read.
+  `preview_operation`, `meho_approvals_get` and `meho_approvals_list`
+  leave these fields out; only the card a person reads shows them.
 - A move with a `keycloak:` side is a change of rights, like
   `keycloak.user.reset_password`: it sets a Keycloak user's password or
   reads a client secret. The request carries the rights-change mark

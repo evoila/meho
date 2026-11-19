@@ -41,13 +41,14 @@ What the card adds to the refs
   (:class:`~meho_backplane.connectors.linux.secret_sink_target.LinuxTargetChangedError`).
 * A ``keycloak`` side (a user password sink or a client secret source)
   names the Keycloak target it points to now (``target_id``,
-  ``target_name``), its ``host`` and the reference of its admin login
-  (``secret_ref``). The approved run compares the id, host and secret
-  reference with the target it finds, before any Keycloak login, and
-  refuses another one
+  ``target_name``), how MEHO connects to it (``host``, ``port``, ``scheme``
+  and the TLS check ``tls``) and the reference of its admin login
+  (``secret_ref``). The approved run compares the id, these connection
+  fields and the secret reference with the target it finds, before any
+  Keycloak login, and refuses another one
   (:class:`~meho_backplane.connectors.keycloak.secret_move_target.KeycloakTargetChangedError`).
   ``preview_operation``, ``meho_approvals_get`` and ``meho_approvals_list``
-  leave these four fields out; only the card a person reads shows them.
+  leave these fields out; only the card a person reads shows them.
 * The sink says whether its secret exists (``secret_exists``) and, with
   ``merge``, whether the named field exists (``field_exists``): ``"yes"``,
   ``"no"`` or ``"not known"``. A Vault sink looks it up with the same
@@ -162,7 +163,9 @@ _LINUX_CARD_KEYS: frozenset[str] = frozenset({"target", "target_id", "target_nam
 
 #: The fields the approval request adds to a ``keycloak:`` side. Only the card
 #: a person reads shows them.
-_KEYCLOAK_CARD_KEYS: frozenset[str] = frozenset({"target_id", "target_name", "host", "secret_ref"})
+_KEYCLOAK_CARD_KEYS: frozenset[str] = frozenset(
+    {"target_id", "target_name", "host", "port", "scheme", "tls", "secret_ref"}
+)
 
 
 def _ref_only(spec: SecretRef, *, linux_target: bool) -> dict[str, str]:
@@ -250,9 +253,9 @@ async def _ref_summary(spec: SecretRef, operator: Operator) -> dict[str, str]:
     finds.
 
     A ``keycloak:`` side also names the Keycloak target it points to now
-    (``target_id``, ``target_name``), its ``host`` and its ``secret_ref``.
-    The approved run compares the id, host and secret reference with the
-    target it finds.
+    (``target_id``, ``target_name``), its ``host``, ``port``, ``scheme``,
+    TLS check (``tls``) and ``secret_ref``. The approved run compares them
+    with the target it finds.
     """
     summary = _ref_only(spec, linux_target=True)
     if spec.kind == VAULT_TARGET_KIND:

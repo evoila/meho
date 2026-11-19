@@ -319,6 +319,9 @@ async def test_the_card_names_the_keycloak_target_its_host_and_its_secret_ref(
     assert side["target_id"] == await _target_id("kc-a")
     assert side["target_name"] == "kc-a"
     assert side["host"] == _HOST_A
+    assert side["port"] == "443"
+    assert side["scheme"] == "https"
+    assert side["tls"] == "checked"
     assert side["secret_ref"] == "example/kc-a/admin"
     assert _SECRET_VALUE not in json.dumps(row.proposed_effect)
     # The agent's view of the stored request leaves the target fields out.
@@ -331,7 +334,8 @@ async def test_the_card_names_the_keycloak_target_its_host_and_its_secret_ref(
     )
     assert shown is not None
     agent_side = shown["preview"][_side_of(params)]
-    assert {"target_id", "target_name", "host", "secret_ref"}.isdisjoint(agent_side)
+    card_keys = {"target_id", "target_name", "host", "port", "scheme", "tls", "secret_ref"}
+    assert card_keys.isdisjoint(agent_side)
     assert agent_side["kind"] == "keycloak"
 
 
@@ -393,6 +397,74 @@ async def test_a_target_moved_to_another_host_refuses_the_run(
 
 
 @_MOVES
+async def test_a_new_port_on_the_same_target_refuses_the_run(
+    params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask(params)
+    await _update("kc-a", port=8080)
+
+    result = await _approve_and_run(row.id)
+
+    _assert_refused(result, "the port of the", fake, keycloak)
+    assert "'8080'" in _message(result)
+
+
+@_MOVES
+async def test_plain_http_on_the_same_target_refuses_the_run(
+    params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask(params)
+    # The stored port stays 443, so only the scheme changes.
+    await _update("kc-a", extras={"managed_realm": _REALM, "scheme": "http"})
+
+    result = await _approve_and_run(row.id)
+
+    _assert_refused(result, "the scheme (http or https) of the", fake, keycloak)
+    assert "'http'" in _message(result)
+
+
+@_MOVES
+async def test_an_unknown_scheme_on_the_same_target_refuses_the_run(
+    params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask(params)
+    await _update("kc-a", extras={"managed_realm": _REALM, "scheme": "ftp"})
+
+    result = await _approve_and_run(row.id)
+
+    _assert_refused(result, "is not http or https", fake, keycloak)
+
+
+@_MOVES
+@pytest.mark.parametrize(
+    ("values", "now"),
+    [
+        ({"verify_tls": False}, "not checked"),
+        ({"tls_server_name": "other.test.invalid"}, "server name other.test.invalid"),
+        ({"tls_ca_pin": "-----BEGIN CERTIFICATE-----\nmade-up\n"}, "pinned CA"),
+    ],
+)
+async def test_a_new_tls_setting_on_the_same_target_refuses_the_run(
+    params: dict[str, Any],
+    values: dict[str, Any],
+    now: str,
+    monkeypatch: pytest.MonkeyPatch,
+    keycloak: _Keycloak,
+) -> None:
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask(params)
+    await _update("kc-a", **values)
+
+    result = await _approve_and_run(row.id)
+
+    _assert_refused(result, "the TLS check of the", fake, keycloak)
+    assert now in _message(result)
+
+
+@_MOVES
 async def test_an_alias_moved_to_another_keycloak_target_refuses_the_run(
     params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
 ) -> None:
@@ -420,8 +492,8 @@ async def test_a_new_secret_ref_on_the_same_target_refuses_the_run(
     assert "example/other/admin" not in _message(result)
 
 
-@pytest.mark.parametrize("key", ["target_id", "host", "secret_ref"])
-async def test_a_card_without_the_target_host_or_secret_ref_refuses_the_run(
+@pytest.mark.parametrize("key", ["target_id", "host", "port", "scheme", "tls", "secret_ref"])
+async def test_a_card_without_the_target_a_connection_field_or_secret_ref_refuses_the_run(
     key: str, monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
 ) -> None:
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})

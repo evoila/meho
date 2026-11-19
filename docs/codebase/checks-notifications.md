@@ -47,13 +47,27 @@ and you add a Sensor to it. The new Sensor has not run, so it counts as
 member only waits for its first confirmed result (it never ran, or its
 results wait for confirmation), MEHO claims no change. The stored state
 stays, and nothing is sent: no mail, no investigation, no broadcast event.
-The member memos stay as they are. The wait has a limit: a member waits
-only until it is overdue, which is its `next_fire_at` plus the 60 seconds
-of grace the rollup uses (`_STALE_GRACE_SECONDS`). After that the Dashboard
-alerts as `degraded`, so a Sensor that never runs is still noticed. A new
+The member memos stay as they are. Only a Sensor that never had a
+confirmed state (`state_since` is empty) can wait. A Sensor that had one
+and now reports `unknown` alerts at once, also while new results wait for
+confirmation.
+
+The wait has a limit. It ends at the first of these two times:
+
+- The Sensor is overdue: its `next_fire_at` plus the 60 seconds of grace
+  the rollup uses (`_STALE_GRACE_SECONDS`). This catches a Sensor that
+  never runs.
+- A fixed time that a running Sensor cannot move: its first due time after
+  `created_at`, plus one full confirmation window (`retry_times` + 1 times
+  `retry_backoff_seconds`), plus the same 60 seconds. This catches a
+  Sensor that runs but never gets a confirmed result, for example when
+  its results flip between `degraded` and `critical`.
+
+After that the Dashboard alerts as `degraded`. A new
 member whose first confirmed result is `degraded` or `critical`, and
-another member that really fails at the same time, alert at once. The
-rule for a new Dashboard (no state) has no time limit and is unchanged.
+another member that really fails at the same time, alert at once. On a
+new Dashboard (no state) the wait has no time limit, but there too only a
+Sensor that never had a confirmed state can wait.
 
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator

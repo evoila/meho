@@ -55,7 +55,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -276,7 +276,7 @@ async def _seed_sensor(
     last_state: str = "critical",
     severity: str = "critical",
     for_seconds: int = 0,
-    state_since: datetime | None = None,
+    state_since: datetime | Literal["an hour ago"] | None = "an hour ago",
     evaluated: bool = True,
     retry_times: int = 0,
 ) -> UUID:
@@ -306,7 +306,9 @@ async def _seed_sensor(
                 last_value=7,
                 last_evidence={"observed": 7, "bound": 10},
                 last_evaluated_at=now - timedelta(seconds=30) if evaluated else None,
-                state_since=state_since or now - timedelta(hours=1),
+                state_since=now - timedelta(hours=1)
+                if state_since == "an hour ago"
+                else state_since,
                 retry_times=retry_times,
                 identity_sub="__sensor__",
                 created_by_sub="op-admin",
@@ -1552,7 +1554,7 @@ async def test_new_dashboard_waiting_for_members_sends_nothing(
     monkeypatch.setattr(inv, "_publish_dashboard_event", _record_publish)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     dash = await _seed_dashboard(
         name="new-board", sensor_ids=[sid_a, sid_b], notify_min_state="degraded"
     )
@@ -1619,10 +1621,10 @@ async def test_new_dashboard_stays_silent_until_results_are_confirmed(
     monkeypatch.setattr(inv, "_publish_dashboard_event", _record_publish)
     await _seed_tenant()
     sid_a = await _seed_sensor(
-        name="sensor-a", last_state="unknown", evaluated=False, retry_times=2
+        name="sensor-a", last_state="unknown", evaluated=False, state_since=None, retry_times=2
     )
     sid_b = await _seed_sensor(
-        name="sensor-b", last_state="unknown", evaluated=False, retry_times=2
+        name="sensor-b", last_state="unknown", evaluated=False, state_since=None, retry_times=2
     )
     dash = await _seed_dashboard(
         name="new-board", sensor_ids=[sid_a, sid_b], notify_min_state="degraded"
@@ -1662,9 +1664,11 @@ async def test_new_dashboard_mails_when_a_member_reports_unknown(
     fired: list[dict[str, Any]] = []
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
     await _seed_tenant()
-    sid_a = await _seed_sensor(name="sensor-a", last_state="unknown", evaluated=False)
+    sid_a = await _seed_sensor(
+        name="sensor-a", last_state="unknown", evaluated=False, state_since=None
+    )
     sid_b = await _seed_sensor(
-        name="sensor-b", last_state="unknown", evaluated=False, retry_times=2
+        name="sensor-b", last_state="unknown", evaluated=False, state_since=None, retry_times=2
     )
     dash = await _seed_dashboard(
         name="new-board", sensor_ids=[sid_a, sid_b], notify_min_state="degraded"
@@ -1699,7 +1703,7 @@ async def test_new_dashboard_with_a_failing_member_still_mails(
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     await _seed_dashboard(name="new-board", sensor_ids=[sid_a, sid_b])
 
     await _evaluate(sid_a)
@@ -1722,7 +1726,7 @@ async def test_new_dashboard_failure_after_a_silent_first_state_mails(
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     await _seed_dashboard(name="new-board", sensor_ids=[sid_a, sid_b])
 
     await _evaluate(sid_a)
@@ -1759,7 +1763,7 @@ async def test_member_added_to_an_ok_dashboard_sends_nothing(
     monkeypatch.setattr(inv, "_publish_dashboard_event", _record_publish)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     dash = await _seed_dashboard(
         name="old-board",
         sensor_ids=[sid_a, sid_b],
@@ -1787,7 +1791,7 @@ async def test_member_added_to_an_ok_dashboard_waits_for_confirmation(
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
     sid_b = await _seed_sensor(
-        name="sensor-b", last_state="unknown", evaluated=False, retry_times=2
+        name="sensor-b", last_state="unknown", evaluated=False, state_since=None, retry_times=2
     )
     dash = await _seed_dashboard(
         name="old-board",
@@ -1814,7 +1818,7 @@ async def test_member_added_to_an_ok_dashboard_alerts_on_a_confirmed_failure(
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     await _seed_dashboard(
         name="old-board",
         sensor_ids=[sid_a, sid_b],
@@ -1838,7 +1842,7 @@ async def test_overdue_member_added_to_an_ok_dashboard_alerts_as_degraded(
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     dash = await _seed_dashboard(
         name="old-board",
         sensor_ids=[sid_a, sid_b],
@@ -1863,13 +1867,88 @@ async def test_member_added_to_an_ok_dashboard_does_not_hide_a_real_failure(
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     await _seed_dashboard(name="old-board", sensor_ids=[sid_a, sid_b], last_rollup_state="ok")
 
     await _evaluate(sid_a)
 
     assert len(fake.calls) == 1
     assert "ok -> critical" in fake.calls[0]["subject"]
+
+
+async def _make_old(sensor_id: UUID, hours: int) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(Sensor, sensor_id)
+        assert row is not None
+        row.created_at = datetime.now(UTC) - timedelta(hours=hours)
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_new_member_with_flipping_results_alerts_after_the_wait_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: results that never confirm end the wait at a fixed limit.
+
+    The member runs (it is never overdue), but its results flip between
+    ``degraded`` and ``critical``, so each one opens a new confirmation
+    window and no state is ever confirmed. Once the fixed limit after
+    ``created_at`` has passed, the Dashboard alerts, once.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(
+        name="sensor-b", last_state="unknown", evaluated=False, state_since=None, retry_times=2
+    )
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+    await _make_old(sid_b, hours=10)
+
+    start = datetime.now(UTC) - timedelta(hours=10)
+    for tick in range(40):
+        state = "degraded" if tick % 2 == 0 else "critical"
+        await _record(sid_b, state, start + timedelta(minutes=tick * 15))
+        await _evaluate(sid_b)
+
+    assert len(fake.calls) == 1
+    assert "ok -> degraded" in fake.calls[0]["subject"]
+    assert await _rollup_memo(dash) == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_member_with_a_confirmed_unknown_alerts_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: a member that had a confirmed ``unknown`` does not wait.
+
+    Its confirmation window is open, but it already has a confirmed state
+    (``state_since`` is set), so its ``unknown`` is real.
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="unknown", retry_times=2)
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="ok",
+        notify_min_state="degraded",
+    )
+    await _record(sid_b, "ok", datetime.now(UTC))
+
+    await _evaluate(sid_b)
+
+    assert len(fake.calls) == 1
+    assert "ok -> degraded" in fake.calls[0]["subject"]
+    assert await _rollup_memo(dash) == "degraded"
 
 
 @pytest.mark.asyncio
@@ -1881,7 +1960,7 @@ async def test_member_added_to_a_degraded_dashboard_keeps_member_memos(
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
     sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
-    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False, state_since=None)
     dash = await _seed_dashboard(
         name="old-board",
         sensor_ids=[sid_a, sid_b],

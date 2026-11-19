@@ -4441,13 +4441,13 @@ async def _dispatch_now(
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
             # ``requires_approval`` step keeps its own approval. A credential
-            # read that a resume sends again is not covered: it is refused.
+            # read that a resume sends again is refused whenever it would wait,
+            # also when it is destructive or needs its own approval: an
+            # approval request for it alone cannot finish the waiting run.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
                 and approved_run_var.get()
-                and descriptor.safety_level != "destructive"
-                and not descriptor.requires_approval
             ):
                 if child_read_sent_again(op_id):
                     verdict = PermissionVerdict.DENY
@@ -4456,7 +4456,7 @@ async def _dispatch_now(
                         "credential; the run after an approval sends it again only when "
                         "its policy lets it go ahead with no person"
                     )
-                else:
+                elif descriptor.safety_level != "destructive" and not descriptor.requires_approval:
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                     mark_child_cleared_by_person(op_id)
                     verdict = PermissionVerdict.AUTO_EXECUTE

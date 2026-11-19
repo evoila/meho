@@ -299,11 +299,13 @@ async def credential_read_child_handler(target: Any, params: dict[str, Any]) -> 
     return {"data": {"value": SECRET_VALUE}, "version": 1}
 
 
-async def register_credential_read_child(embedding: Any, safety_level: str = "dangerous") -> None:
+async def register_credential_read_child(
+    embedding: Any, safety_level: str = "dangerous", *, requires_approval: bool = False
+) -> None:
     """Register the credential read run through ``dispatch_child``.
 
     ``dangerous``: a person's call waits, so only the approval of the run lets it go ahead.
-    ``safe``: it goes ahead with no person.
+    ``safe``: it goes ahead with no person. ``requires_approval``: every call waits.
     """
     await register_typed_operation(
         product="vault",
@@ -316,6 +318,7 @@ async def register_credential_read_child(embedding: Any, safety_level: str = "da
         parameter_schema={"type": "object"},
         when_to_use=None,
         safety_level=safety_level,
+        requires_approval=requires_approval,
         embedding_service=embedding,
     )
 

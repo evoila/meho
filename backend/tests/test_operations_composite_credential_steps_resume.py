@@ -492,6 +492,32 @@ async def test_child_credential_read_that_now_needs_a_person_is_not_sent_again(
     assert len(await _requests()) == 1, "no approval request is made for the read"
 
 
+async def test_child_credential_read_that_now_requires_approval_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """The child read needed no person; now it needs its own approval: the run stops."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.CHILD_READ_WAIT_CHANGE_OP_ID,
+        "child_read_wait_change_composite",
+    )
+    await c.register_credential_read_child(stub_embedding_service, safety_level="safe")
+    first = await h.run(c.CHILD_READ_WAIT_CHANGE_OP_ID)
+    assert c.sent == [c.CREDENTIAL_READ_STEP]
+    await c.register_credential_read_child(
+        stub_embedding_service, safety_level="safe", requires_approval=True
+    )
+    reset_dispatcher_caches()
+
+    second = await _approve_and_resume(first)
+
+    assert second.status == "denied", second
+    assert "composite_resume_read_not_sent" in (second.error or "")
+    assert c.sent == [c.CREDENTIAL_READ_STEP], "the read is not sent again"
+    assert len(await _requests()) == 1, "no approval request is made for the read"
+
+
 # ---------------------------------------------------------------------------
 # The step record
 # ---------------------------------------------------------------------------

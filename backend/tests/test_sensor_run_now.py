@@ -123,7 +123,7 @@ async def test_run_bad_cases(client: TestClient) -> None:
         assert "paused" in refused.json()["detail"]
         assert f"meho sensor resume {paused}" in refused.json()["detail"]
         assert client.post(f"/api/v1/sensors/{uuid.uuid4()}/run", headers=admin).status_code == 404
-        # The id of another tenant is not leaked: 404, and nothing changes.
+        # The id of another tenant is not shown: 404, and nothing changes.
         other_due = (await _get_sensor(other)).next_fire_at
         assert client.post(f"/api/v1/sensors/{other}/run", headers=admin).status_code == 404
     assert (await _get_sensor(other)).next_fire_at == other_due

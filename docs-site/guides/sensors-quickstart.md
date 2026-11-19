@@ -261,8 +261,9 @@ history with `meho sensor results <sensor_id>` (filters `--from`,
 
 ## Run a sensor once now
 
-A new sensor waits for its first run, and a changed sensor waits for its
-next one. To see a result sooner, ask MEHO to run the sensor now:
+A new sensor waits one full interval for its first run. To see a result
+sooner, or to check a sensor again between two scheduled runs, ask MEHO
+to run it now:
 
 ```bash
 meho sensor run <sensor_id>

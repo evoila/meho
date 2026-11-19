@@ -662,7 +662,8 @@ fact from the `sub` alone. Migration `0097` adds two nullable
 This is the same hoist-at-write pattern `audit_log.principal_name` uses
 (#1212). The approval audit rows (`_write_audit_row`) carry the same
 `payload['principal_name']` so the name-aware audit views resolve the
-row's `operator_sub` too, and the `/decide` response gains an additive
+row's `operator_sub` too (the payload's other pairs are under "Who the
+payload names" in "Audit rows"), and the `/decide` response gains an additive
 `decided_by_name` beside `decided_by`.
 
 **Where the requester's name comes from (#3885).** An agent's token
@@ -4743,6 +4744,37 @@ withdrawn request has a withdraw row instead of a decision row:
 | Request | `approval.request` | `202` | `create_pending_request` |
 | Decision | `approval.decision` | `200` (approved) / `403` (rejected) / `410` (expired) | `approve_request` / `reject_request` / `expire_stale_requests` |
 | Withdraw | `approval.withdraw` | `200` | `withdraw_request` (#4987) |
+
+### Who the payload names
+
+`_write_audit_row` writes the people of a row in clear pairs. Each id
+stands next to the name of the same person:
+
+| Payload keys | Person |
+|---|---|
+| `principal_sub` / `principal_name` | The person who acted on this row. The same person as the row's `operator_sub` column: the requester on a request, withdraw or result row; the reviewer on an approve or reject row; the expiry login on an expiry row. |
+| `requester_sub` / `requester_name` | The person who asked for the operation (`approval_request.principal_sub` / `principal_name`). `requester_name` is left out when the request has no name. |
+| `reviewed_by` / `reviewed_by_name` | Only on an approve or reject row: the reviewer. `reviewed_by_name` is left out when the reviewer has no name. |
+
+The other rows that `_write_audit_row` writes (refused resume, re-run,
+outcome check, reveal fetch, restart recovery) follow the same rule. The
+standing-grant row (`service_grants._record_grant_use`) and the run
+approval row (`run_approval_gate`) name only the caller, in
+`principal_sub`.
+
+**Rows in the older form.** Older rows have no `requester_sub`: their
+`payload.principal_sub` is the requester, while `payload.principal_name`
+is the person who acted. The audit log is append-only, so these rows stay
+as they are. The readers show them through
+`audit_query/approval_payload.py:approval_payload_view`: every such row
+with an `approval_request_id` shows the requester's id in
+`requester_sub`, and `principal_sub` shows the row's `operator_sub`. This
+holds also when the requester acted on the row (a request, withdraw or
+result row, or a self-approval), so every reader finds the requester in
+`requester_sub`. Two readers use it: `audit_query/query.py:_build_audit_entry`
+(the audit REST API, `meho audit query` / `show` / `replay`, the MCP audit
+tools and the session replay) and the console's audit row drawer
+(`ui/routes/audit/routes.py:_build_drawer_context`).
 
 ### Session-replay lineage (#2086)
 

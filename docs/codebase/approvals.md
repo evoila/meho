@@ -1471,11 +1471,11 @@ How the kinds are found:
 The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
 (`EndpointDescriptor.policy_category`, set by `apply_effective_policy` and
-`apply_step_classification` while `POLICY_CLASSIFICATION` is on). The
+`apply_step_policy` while `POLICY_CLASSIFICATION` is on). The
 install's category is `EndpointDescriptor.policy_install_category`: the
 category from the install's classification entries and overrides alone.
 A step of a multi-step operation reads the override rows of its operation
-too (`apply_step_classification` passes them to `classify_step`), so a
+too (`apply_step_policy` passes them to `classify_step`), so a
 step and a direct call of the same operation get the same categories and
 the same approvers.
 When those entries give the operation two categories, it is the empty
@@ -2417,27 +2417,81 @@ One rule for every view: `result_state_of_envelope` in
 console all read it. Every view gives the same advice: do not run it again,
 check the target first. No view says "failed" or "did not succeed" for it.
 
-Five cases end as `uncertain`:
+Eight cases end as `uncertain`:
 
 | Case | Where | Stored result |
 |---|---|---|
 | The audit record could not be saved after the change ran. | `result_audit_commit_failed` | `error_code` `audit_commit_failed` |
 | A change was sent and the answer was lost: a read timeout, a write timeout, or a dropped connection after the request was written. | `result_connector_timeout(..., changes_target=True)` | `error_code` `connector_timeout`, `retry: false` |
+| The same on a connection that is not HTTP: an SSH command that timed out or lost its connection, or the same fault of the Kubernetes client, of the Vault client (`requests`) or of a database driver. | the general error arm of the dispatcher (`connection_lost_after_send`) | `error_code` `connector_error`, `retry: false` |
+| A step of a multi-step operation ended `uncertain`, and the operation then failed (it handed back the step's result, returned its own error, or raised). | `_composite_steps.mark_when_a_step_is_unknown`, on the error audit path of the dispatcher | the operation's own error, `retry: false`, and `steps`: each step's `op_id` and `state` (`done`, `failed` or `unknown`) |
+| An approved re-run stopped with such a timeout or lost connection. | `rerun_failed_request` (`connection_lost_after_send`) | `error` `rerun_failed: ...`, `retry: false` |
 | The product ended the login session after MEHO sent a change, and MEHO did not send it again. | `result_connector_auth_failed(..., changes_target=True)` | `error_code` `connector_auth_failed`, `retry: false`, advice `LOGIN_ENDED_ADVICE` |
 | MEHO stopped in the middle of an approved run. | `recover_interrupted_approvals` | `error_code` `interrupted_by_restart`, `retry: false` |
 | An async run of a change lost its worker. | `operation_run_reaper` | the run row is `uncertain` (see `async-governed-dispatch.md`) |
 
-A connect timeout, a pool timeout, a refused connection and a refused login
+The rule holds for every kind of connection. On HTTP, a connect timeout, a
+pool timeout, a refused connection and a refused login
 (`connector_auth_failed` at stage `establish`) stay plain errors, because
 nothing was sent. An approved change always starts with a fresh login
 (`drop_login_before_approved_change`, see `backend.md`), so a login that ended
-while the change waited does not end the run. A timeout of a read operation (`safety_level`
-`safe`) stays a plain error. Any other level counts as a change
-(`changes_target`).
+while the change waited does not end the run. On the other connections, the
+types are listed once, in `operations/uncertain_outcome.py`:
+
+- uncertain: `TimeoutError` (what `asyncio.wait_for` raises around an SSH
+  command), `ConnectionError` (reset, aborted, broken pipe),
+  `asyncssh.ConnectionLost`, aiohttp's `ServerDisconnectedError`,
+  `ClientOSError` and `ClientPayloadError`, the `ReadTimeout`,
+  `ConnectionError` and `ChunkedEncodingError` of `requests` (the Vault
+  client), pymongo's `AutoReconnect`, asyncpg's
+  `ConnectionDoesNotExistError`, and pytds's `TimeoutError` and
+  `ClosedConnectionError`;
+- a plain error, because nothing was sent: `ConnectionRefusedError`,
+  aiohttp's `ClientConnectorError` and `ConnectionTimeoutError`, the
+  `ConnectTimeout` of `requests`, pymongo's `ServerSelectionTimeoutError`,
+  and the credential errors of MEHO (`VaultClientError`, a failed Vault
+  login; `CredentialsReadError`; `TargetSecretNotFoundError`;
+  `TargetSecretReadFailedError`).
+
+The not-sent list is checked first, because some of its types are
+subclasses of types on the other list.
+
+A connector may wrap a fault in its own error (`raise RuntimeError(...) from
+exc`, as the VPN user create of the pfSense connector does). So
+`connection_lost_after_send` reads the `__cause__` chain from the outside in,
+up to eight links. The first link whose type is on a list decides. A wrapped
+httpx fault counts the same way: `ReadTimeout`, `WriteTimeout`, `ReadError`,
+`WriteError` and `RemoteProtocolError` are uncertain, `ConnectError`,
+`ConnectTimeout` and `PoolTimeout` are plain. A wrapper that cuts the chain
+(`from None`) is judged by its own type only.
+
+Errors of the steps before the call stay plain errors too: the target or
+secret lookup, the input checks and a refused probe. The shared loader of
+the target's secret (`_resolve_and_load` in `connectors/_shared/vault_creds.py`)
+turns a `requests` fault of the read into `TargetSecretReadFailedError`, so
+a secret read that times out can run again, while the same `requests` fault
+during a Vault change is uncertain. A timeout while an SSH connection opens
+has the same type as a timeout of the command, so it counts as uncertain: in
+doubt, MEHO does not run the change again.
+
+A multi-step run keeps a log of its steps while it runs
+(`track_composite_steps` around the run in `_execute_and_audit`). Its
+`dispatch_child` writes each step into the log (`recording_steps`). The log
+carries the run's `audit_id`, so the error result of a step itself, which
+passes the same audit path, is never marked by the log of its parent. Only
+steps that run through `dispatch_child` are in the log. A call that a
+multi-step operation sends on its own connection is not a step of the log:
+when its fault reaches the dispatcher, the general error arm judges it like
+any other error.
+
+A timeout of a read operation (`safety_level` `safe`) stays a plain error.
+Any other level counts as a change (`changes_target`).
 
 MEHO never runs an uncertain change again. `retry` is `false`, an approved
 request starts only once (`resumed_at`), and the re-run (#5417) refuses a
-request whose state is not `failed`, so it refuses `uncertain` too.
+request whose state is not `failed`, so it refuses `uncertain` too. The
+claim of the re-run (`_claim_rerun`) also leaves out a stored result whose
+`extras.execution_outcome` is `uncertain`, in its SQL.
 
 The summary of such a run (`resume_outcome`, see below) carries the advice
 as its `guidance`, because a timeout, a failed audit write and a restart
@@ -2671,7 +2725,12 @@ shape, odd envelopes, a resume that errors shows on REST show, list and
 MCP, the `guidance` stamp rules, a credential operation with no vendor
 text, and a result stored before the stamp that shows no guidance),
 `tests/test_uncertain_outcome.py` (the shared rule, the timeout rule and the
-restart recovery), `tests/test_ui_approvals.py` (run badge, failed-run modal,
+restart recovery), `tests/test_uncertain_outcome_any_connection.py` (an SSH
+timeout or lost connection of a change, the re-run refusal and its SQL, a
+failed secret lookup, a read that times out),
+`tests/test_uncertain_outcome_vault_and_steps.py` (a Vault change that loses
+its answer, a secret read that times out, a wrapped timeout and the cause
+chain, and a failed multi-step run with an uncertain step), `tests/test_ui_approvals.py` (run badge, failed-run modal,
 uncertain-run badge, modal and card, failed approve card, the "Next step" line, and no "Next step" for an older stored result),
 `tests/test_connectors_vmware_rest_typed_vm_question.py` (a CD-ROM change
 that times out on a VM question names the question id in the summary) and
@@ -3187,7 +3246,7 @@ classification (`approval_classification` in `operations/op_policy.py`):
 
 The values come from the looked-up row (`policy_category`,
 `policy_labels`, `policy_rule_ref`, set by `apply_effective_policy`, and
-by `apply_step_classification` for a step of a multi-step operation).
+by `apply_step_policy` for a step of a multi-step operation).
 So an approver sees at once what kind of change waits. The console
 modal shows the category as a badge next to the risk level, and the
 labels and rule below it (`data-testid="approval-classification"`).

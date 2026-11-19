@@ -21,7 +21,20 @@ direction (the retrieval-metadata-filter precedent,
 :mod:`meho_backplane.retrieval.retriever`). A filter that is a subset of the
 payload matches; a payload that is a subset of the filter does **not**
 (unless they are equal). An empty filter (``{}``) contains no constraints and
-so matches every event of the tenant.
+so matches every internal event of the tenant. It matches no external event
+(see below).
+
+External events need a source in the filter
+============================================
+
+An event that came in over the webhook intake (``event_kind`` starts with
+``external.``) fires a trigger only when the trigger's filter names an event
+source by ``slug`` or ``id`` (``{"source": {"slug": "am-prod"}, ...}``), and
+the containment check then holds it to that source. The ingest envelope
+writes ``source`` itself (:func:`meho_backplane.events.ingest.service._normalise`),
+so a sender cannot set it. A filter without a source (for example one
+written for ``agent_run.completed``) never matches an external event, even
+when the body carries the same fields.
 
 The containment check is a single pure-Python predicate
 (:func:`_payload_contains`) used on **both** dialects rather than the native
@@ -176,8 +189,30 @@ def _payload_contains(container: object, subset: object) -> bool:
     return container == subset
 
 
+#: ``event_kind`` prefix of an event that came in over the webhook intake.
+_EXTERNAL_EVENT_KIND_PREFIX = "external."
+
+
+def _filter_names_a_source(event_filter: object) -> bool:
+    """Return ``True`` when *event_filter* names an event source by slug or id."""
+    if not isinstance(event_filter, dict):
+        return False
+    source = event_filter.get("source")
+    return isinstance(source, dict) and ("slug" in source or "id" in source)
+
+
+def _trigger_matches(event: EventOutbox, trigger: ScheduledTrigger) -> bool:
+    """Return ``True`` when *event* fires *trigger* (see the module docstring)."""
+    event_filter = trigger.event_filter or {}
+    if event.event_kind.startswith(_EXTERNAL_EVENT_KIND_PREFIX) and not _filter_names_a_source(
+        event_filter
+    ):
+        return False
+    return _payload_contains(event.payload, event_filter)
+
+
 async def _matching_event_triggers(event: EventOutbox) -> list[ScheduledTrigger]:
-    """Return the tenant's active event triggers whose filter the payload contains.
+    """Return the tenant's active event triggers that *event* fires.
 
     A fresh session (separate from the drain's claim transaction) reads the
     candidate rows -- ``kind=event`` triggers have ``next_fire_at IS NULL`` so
@@ -196,7 +231,7 @@ async def _matching_event_triggers(event: EventOutbox) -> list[ScheduledTrigger]
             )
         )
         triggers = list(result.scalars().all())
-    return [t for t in triggers if _payload_contains(event.payload, t.event_filter or {})]
+    return [t for t in triggers if _trigger_matches(event, t)]
 
 
 async def _run_exists_for_work_ref(tenant_id: object, work_ref: str) -> bool:

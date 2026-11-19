@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""PostgreSQL tests for migration ``0175_add_people_behind_columns``.
+"""PostgreSQL tests for migration ``0176_add_people_behind_columns``.
 
 The SQLite twin is
-``tests/migrations/test_migration_0175_add_people_behind_columns.py`` and
+``tests/migrations/test_migration_0176_add_people_behind_columns.py`` and
 holds the seed data. On PostgreSQL the fill reads the ``jsonb`` payload of
 the audit rows with ``->>``. The tests check:
 
@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
-from tests.migrations.test_migration_0175_add_people_behind_columns import (
+from tests.migrations.test_migration_0176_add_people_behind_columns import (
     _DOWN_REVISION,
     _NEW,
     _OTHER_TENANT,
@@ -154,7 +154,7 @@ async def _has_columns(url: str) -> dict[str, bool]:
 
 @pytest.fixture
 def migration_cfg(integration_env: None, async_pg_url: str) -> Iterator[tuple[Config, str]]:
-    """Seeded container at ``0174``; cleared and back at ``head`` afterwards."""
+    """Seeded container at ``0175``; cleared and back at ``head`` afterwards."""
     reset_engine_for_testing()
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", async_pg_url)

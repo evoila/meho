@@ -1850,7 +1850,7 @@ request is made (`create_pending_request`):
 The checks investigator runs as an agent (`run_scheduled`), so its
 requests follow the agent row. A sensor never makes a request.
 
-**What MEHO stores.** Migration `0175` adds three columns:
+**What MEHO stores.** Migration `0176` adds three columns:
 
 - `approval_request.people_behind` — JSON list of
   `{"sub", "name", "why"}`, one entry per person and reason. `NULL` for a

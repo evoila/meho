@@ -4268,7 +4268,7 @@ class AgentDefinition(Base):
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # The person who last changed the definition. NULL until the first
-    # change after migration ``0175`` on a row the migration could not fill.
+    # change after migration ``0176`` on a row the migration could not fill.
     updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -7589,7 +7589,7 @@ class ApprovalRequest(Base):
     # ``[{"sub", "name", "why"}]``, set at park time by
     # :mod:`meho_backplane.operations.people_behind`. NULL for a person's
     # request. An empty list: MEHO knows nobody behind the login. Added by
-    # migration ``0175``.
+    # migration ``0176``.
     people_behind: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON, nullable=True, default=None
     )
@@ -8931,7 +8931,7 @@ class RunbookRun(Base):
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
     # The person who last handed the run to a new assignee. NULL when the
-    # run was never handed over. Added by migration ``0175``.
+    # run was never handed over. Added by migration ``0176``.
     reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

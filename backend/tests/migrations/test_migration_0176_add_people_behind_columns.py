@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0175_add_people_behind_columns``.
+"""Behavioural tests for ``0176_add_people_behind_columns``.
 
 The migration adds three nullable columns: ``approval_request.people_behind``,
 ``agent_definition.updated_by_sub`` and ``runbook_runs.reassigned_by``. It
@@ -9,11 +9,11 @@ fills ``updated_by_sub`` from the newest successful ``agent.edit`` audit row
 of the definition, else from ``created_by_sub``. An edit from before the
 definition was created (an edit of a deleted definition with the same name)
 does not count. ``downgrade()`` removes the
-columns again. Every step targets this migration's own revision (``0175``)
-and its ``down_revision`` (``0174``), never ``head``.
+columns again. Every step targets this migration's own revision (``0176``)
+and its ``down_revision`` (``0175``), never ``head``.
 
 The PostgreSQL twin is
-``tests/integration/test_migration_0175_people_behind_pg.py``; it uses the
+``tests/integration/test_migration_0176_people_behind_pg.py``; it uses the
 seed helpers of this module.
 """
 
@@ -32,8 +32,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0175"
-_DOWN_REVISION = "0174"
+_REVISION = "0176"
+_DOWN_REVISION = "0175"
 _NEW = {
     "approval_request": "people_behind",
     "agent_definition": "updated_by_sub",
@@ -77,7 +77,7 @@ EXPECTED = [
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0175.db"
+    db_path = tmp_path / "migration_0176.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

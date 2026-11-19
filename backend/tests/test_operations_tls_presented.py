@@ -196,7 +196,7 @@ async def test_slow_dns_stays_within_the_timeout_and_does_not_block_the_loop(
 async def test_probe_does_not_dial_a_name_that_did_not_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The name does not resolve at the check, and would resolve to 127.0.0.1 later."""
+    """A name that does not resolve at the check is not dialed."""
     monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
     monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
     answers: list[list[ipaddress.IPv4Address]] = [[], [ipaddress.IPv4Address("127.0.0.1")]]
@@ -212,7 +212,7 @@ async def test_probe_does_not_dial_a_name_that_did_not_resolve(
 
     monkeypatch.setattr("asyncio.open_connection", _spy)
 
-    assert await probe_presented_leaf("rebind.example.test", 443, None) is None
+    assert await probe_presented_leaf("unresolved.example.test", 443, None) is None
     assert dialed == []
 
 

@@ -244,8 +244,9 @@ class RunNotOwnedCancellationError(AgentRunError):
     Raised by :func:`cancel_run` when
     :func:`~meho_backplane.auth.operator.may_stop_run` refuses: the caller
     is not the run's owner and is not a person with the ``tenant_admin``
-    role or a platform admin in the tenant. The message is :data:`~meho_backplane.auth.operator.RUN_STOP_RULE`,
-    which the boundary shows in its 403.
+    role or a platform admin in the tenant. The message is
+    :data:`~meho_backplane.auth.operator.RUN_STOP_RULE`, which the boundary
+    shows in its 403.
     """
 
     def __init__(self, *, operator_sub: str, role: TenantRole) -> None:

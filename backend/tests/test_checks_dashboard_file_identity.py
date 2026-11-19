@@ -255,9 +255,7 @@ async def test_a_second_admin_importing_what_runs_resets_the_identity(
     assert sensor["identity_sub_after"] == "__sensor__"
     assert await _identity() == "__sensor__"
     audit = await _import_audit()
-    assert audit["import"]["identity_sub"] == {
-        "items": {"before": _CREATOR, "after": "__sensor__"}
-    }
+    assert audit["import"]["identity_sub"] == {"items": {"before": _CREATOR, "after": "__sensor__"}}
 
 
 @pytest.mark.asyncio

@@ -87,9 +87,7 @@ _EDITABLE_FIELDS: tuple[str, ...] = (
 
 #: The fields that decide what a Sensor runs. Changing one of them resets an
 #: identity that belongs to another person (:func:`identity_after_change`).
-_RUN_FIELDS: frozenset[str] = frozenset(
-    {"connector_id", "op_id", "target", "params", "assertion"}
-)
+_RUN_FIELDS: frozenset[str] = frozenset({"connector_id", "op_id", "target", "params", "assertion"})
 
 
 class SensorUpdate(BaseModel):

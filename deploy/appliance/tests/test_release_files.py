@@ -15,6 +15,7 @@ a failure.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -672,6 +673,117 @@ class GoogleCloudSignInTest(unittest.TestCase):
             self.assertEqual(1, len(lines), name)
             self.assertRegex(lines[0], r"\$\{\{ secrets\.MEHO_RELEASE_GCP_[A-Z_]+ \}\}$")
         self.assertNotIn("vars.MEHO_RELEASE_GCP_", text)
+
+
+STUB_GH = """#!/usr/bin/env bash
+# A stand-in for "gh api": answers from the files in $GH_DIR.
+echo "$*" >>"$GH_DIR/log"
+[[ $1 == api ]] || exit 2
+case "$*" in
+    *"environments/release/deployment-branch-policies"*)
+        jq -c '.branch_policies[]' "$GH_DIR/policies.json" ;;
+    *"environments/release")
+        cat "$GH_DIR/environment.json" ;;
+    *) exit 2 ;;
+esac
+"""
+
+REVIEWERS = {"type": "required_reviewers", "reviewers": [{"type": "User"}]}
+CUSTOM_RULES = {"protected_branches": False, "custom_branch_policies": True}
+
+
+def environment_check_script() -> str:
+    """The run block of the step that checks the environment release."""
+    lines = WORKFLOW.read_text().splitlines()
+    start = lines.index("      - name: Check the settings of the environment release")
+    run = next(i for i in range(start, len(lines)) if lines[i] == "        run: |")
+    body = []
+    for line in lines[run + 1 :]:
+        if line.strip() and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body) + "\n"
+
+
+@unittest.skipUnless(shutil.which("jq"), "jq is missing")
+class ReleaseEnvironmentCheckTest(unittest.TestCase):
+    """Runs the workflow's own check step against a stand-in for gh."""
+
+    def check(
+        self,
+        policies: list[dict[str, str]],
+        rules: list[dict[str, object]] | None = None,
+        branch_policy: dict[str, bool] | None = CUSTOM_RULES,
+    ) -> subprocess.CompletedProcess[str]:
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work)
+        environment = {
+            "protection_rules": [REVIEWERS] if rules is None else rules,
+            "deployment_branch_policy": branch_policy,
+        }
+        (work / "environment.json").write_text(json.dumps(environment))
+        (work / "policies.json").write_text(json.dumps({"branch_policies": policies}))
+        gh = work / "bin" / "gh"
+        gh.parent.mkdir()
+        gh.write_text(STUB_GH)
+        gh.chmod(0o755)
+        script = work / "check.sh"
+        script.write_text(environment_check_script())
+        env = {
+            **os.environ,
+            "PATH": f"{gh.parent}{os.pathsep}{os.environ['PATH']}",
+            "GH_DIR": str(work),
+            "GITHUB_REPOSITORY": "example/repo",
+        }
+        return subprocess.run(
+            ["bash", str(script)], env=env, capture_output=True, text=True, check=False
+        )
+
+    def assert_refused(self, result: subprocess.CompletedProcess[str], words: str) -> None:
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(words, result.stdout)
+
+    def test_one_reviewer_and_the_tag_rule_v_star_pass(self) -> None:
+        result = self.check([{"type": "tag", "name": "v*"}])
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("allows tags v* only", result.stdout)
+
+    def test_an_extra_tag_rule_is_refused(self) -> None:
+        result = self.check([{"type": "tag", "name": "v*"}, {"type": "tag", "name": "*"}])
+
+        self.assert_refused(result, "must allow tags v* only")
+
+    def test_a_branch_rule_is_refused(self) -> None:
+        result = self.check([{"type": "tag", "name": "v*"}, {"type": "branch", "name": "main"}])
+
+        self.assert_refused(result, "must allow tags v* only")
+
+    def test_another_tag_rule_alone_is_refused(self) -> None:
+        result = self.check([{"type": "tag", "name": "*"}])
+
+        self.assert_refused(result, "must allow tags v* only")
+
+    def test_no_rule_is_refused(self) -> None:
+        result = self.check([])
+
+        self.assert_refused(result, "must allow tags v* only")
+
+    def test_no_custom_rules_is_refused(self) -> None:
+        result = self.check([{"type": "tag", "name": "v*"}], branch_policy=None)
+
+        self.assert_refused(result, "has no tag rule")
+
+    def test_a_missing_reviewer_is_refused(self) -> None:
+        result = self.check([{"type": "tag", "name": "v*"}], rules=[])
+
+        self.assert_refused(result, "has no required reviewer")
+
+    def test_a_reviewer_rule_with_nobody_is_refused(self) -> None:
+        rules: list[dict[str, object]] = [{"type": "required_reviewers", "reviewers": []}]
+        result = self.check([{"type": "tag", "name": "v*"}], rules=rules)
+
+        self.assert_refused(result, "has no required reviewer")
 
 
 if __name__ == "__main__":

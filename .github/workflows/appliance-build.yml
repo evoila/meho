@@ -283,8 +283,8 @@ jobs:
             echo "::error::Cannot read the tag rule of the environment release. Ask the release owner to check it in the repository settings."
             exit 1
           fi
-          # Only tag rules, and one of them is v*.
-          if [[ "$(jq -s 'any(.type == "tag" and .name == "v*") and all(.type == "tag")' <<<"${policies}")" != "true" ]]; then
+          # Exactly one rule: the tag rule v*. Any other rule lets more refs in.
+          if [[ "$(jq -s 'length == 1 and .[0].type == "tag" and .[0].name == "v*"' <<<"${policies}")" != "true" ]]; then
             echo "::error::The environment release must allow tags v* only. Ask the release owner to fix its deployment rule."
             exit 1
           fi

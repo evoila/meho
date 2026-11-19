@@ -21,6 +21,10 @@ cannot: :mod:`meho_backplane.tenancy.policies` for the tenant columns,
 :class:`~meho_backplane.conventions.service.ConventionsService` for
 conventions, and the ``create_target`` / ``update_target`` handlers (with
 their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
+A file that adds or changes a target applies only for a person in the web
+console (:func:`~meho_backplane.api.v1._wait_for_approval.runs_at_once`), the
+same rule as the target routes; any other caller gets 403 and nothing is
+written. The preview has no such limit.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._wait_for_approval import runs_at_once
 from meho_backplane.api.v1.targets import (
     _canonicalise_and_validate_product,
     _enforce_tls_trust_exclusion,
@@ -93,6 +98,7 @@ from meho_backplane.version import deployed_version_label
 
 __all__ = [
     "DEFAULT_POLICIES",
+    "TARGET_WRITES_NEED_CONSOLE",
     "ImportPlan",
     "ImportResult",
     "SettingsExportRefusedError",
@@ -130,6 +136,14 @@ TARGET_KEYS: Final[tuple[str, ...]] = (
 )
 
 _conventions = ConventionsService()
+
+#: The 403 reason when a call with a token applies a file that adds or
+#: changes targets. Only a person in the web console writes targets at once,
+#: the same rule as ``POST`` and ``PATCH /api/v1/targets``.
+TARGET_WRITES_NEED_CONSOLE: Final[str] = (
+    "A settings file that adds or changes targets is applied in the web console. "
+    "A call with a token cannot write targets at once."
+)
 
 
 class SettingsForbiddenError(Exception):
@@ -873,7 +887,10 @@ async def apply_import(
     """Apply *content*: add or update, never delete. See the module docstring.
 
     Writes nothing when the file has mistakes (``result.plan.mistakes``) or
-    changes nothing (empty diff, no revision). The caller's session dependency
+    changes nothing (empty diff, no revision). Raises
+    :class:`SettingsForbiddenError` and writes nothing when the file adds or
+    changes a target and the caller is not a person in the web console
+    (:func:`runs_at_once`). The caller's session dependency
     commits the one transaction after the route returns.
     """
     plan = await build_plan(session, operator, content)
@@ -881,6 +898,8 @@ async def apply_import(
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff
         return result
+    if not runs_at_once(operator) and any(tp.targets for tp in plan.tenants):
+        raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
     audit_id = uuid.uuid4()
     bind_preallocated_audit_id(audit_id)

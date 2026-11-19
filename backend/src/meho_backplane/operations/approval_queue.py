@@ -230,6 +230,7 @@ __all__ = [
     "approval_expired_reason",
     "approval_release_changed",
     "approval_result_state",
+    "approval_risk_level",
     "approve_request",
     "claim_resume",
     "composite_resume_binding",
@@ -1928,8 +1929,8 @@ async def take_approval_lock(session: AsyncSession, scope: str, key: str) -> Non
 
 
 def _is_destructive(request: ApprovalRequest) -> bool:
-    """Whether the parked operation is ``destructive`` (read off ``proposed_effect``)."""
-    return (request.proposed_effect or {}).get("safety_level") == "destructive"
+    """Whether the parked operation counts as ``destructive`` (:func:`approval_risk_level`)."""
+    return approval_risk_level(request) == "destructive"
 
 
 async def _check_sign_in_use(
@@ -3788,6 +3789,8 @@ def _check_reviewer_role(operator: Operator) -> None:
 #: approved only by the groups :func:`_check_approver_group` names.
 #: ``dangerous`` is here because a delete-class op can register on it.
 _HIGH_RISK_TIERS = frozenset({"dangerous", "destructive"})
+#: The four level names. Any other stored value counts as ``destructive``.
+_RISK_LEVELS = frozenset({"safe", "caution", "dangerous", "destructive"})
 
 
 def is_high_risk_level(level: str | None) -> bool:
@@ -3809,6 +3812,17 @@ def _request_safety_level(request: ApprovalRequest) -> str | None:
     """Return the risk level the dispatcher stamped on *request*, or ``None``."""
     level = (request.proposed_effect or {}).get("safety_level")
     return level if isinstance(level, str) else None
+
+
+def approval_risk_level(request: ApprovalRequest) -> str:
+    """The risk level that decides who may approve *request*.
+
+    The stamped level, or ``destructive`` when the request has none or a
+    value that is not one of the four level names: such a request counts
+    as the strictest level.
+    """
+    level = _request_safety_level(request)
+    return level if level in _RISK_LEVELS else "destructive"
 
 
 def request_waits_only_for_token_call(request: ApprovalRequest) -> bool:
@@ -3865,7 +3879,7 @@ def _check_self_approval(
     if token_wait and operator.web_session:
         return ApprovalRule.TOKEN_CALL_SELF_APPROVAL
 
-    high_risk = _request_safety_level(request) in _HIGH_RISK_TIERS
+    high_risk = approval_risk_level(request) in _HIGH_RISK_TIERS
 
     from meho_backplane.settings import get_settings
 
@@ -3898,7 +3912,7 @@ def _approver_kinds(request: ApprovalRequest) -> tuple[str, ...]:
     routing on, only the kinds the request stored as well. Used for the
     "who may approve" part of :class:`SelfApprovalForbiddenError`.
     """
-    kinds = today_kinds(_request_safety_level(request), request.op_id)
+    kinds = today_kinds(approval_risk_level(request), request.op_id)
     if not routing_enabled():
         return kinds
     stored = stored_kinds(request.approver_roles)
@@ -3931,15 +3945,15 @@ def _check_approver_group(
       it is marked ``requires_approval``): the reviewer rule of
       :func:`_check_reviewer_role` is enough.
 
-    A request without a stamped level is treated as lower-risk, the same
-    as the break-glass check and :func:`_check_destructive_preview_binding`.
+    A request without a stamped level counts as ``destructive`` here and
+    in the break-glass check (:func:`approval_risk_level`).
     """
     check_rights_change_approval(operator, request)
     check_grant_approval(operator, request)
     self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule
-    level = _request_safety_level(request)
+    level = approval_risk_level(request)
     if not is_high_risk_level(level):
         return ApprovalRule.REVIEWER
     if may_approve_high_risk(operator):
@@ -3948,7 +3962,7 @@ def _check_approver_group(
         request.id,
         operator_sub=operator.sub,
         role=operator.tenant_role.value,
-        safety_level=str(level),
+        safety_level=level,
     )
 
 

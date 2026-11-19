@@ -3924,6 +3924,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>In its text output (without <code>--json</code>) the CLI shows control characters in text from an API description, a target system or an uploaded session as visible escapes, for example <code>\x1b</code> for ESC. This holds for <code>meho operation search</code>, <code>meho operation groups</code>, <code>meho operation preview</code>, the failure text of <code>meho operation call</code> and of the vendor commands (not <code>meho vcf-automation about</code>), the <code>meho audit trace</code> list, <code>meho targets describe</code>, and <code>meho sessions show</code> and <code>list</code>. Other text is printed as it is. The <code>--json</code> output is unchanged.</td>
+<td>None for most installs. A script that reads the text output of these commands and needs the exact bytes of a field gets the visible escape for each control character: switch it to <code>--json</code> and read the field there.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>When a multi-step operation waits for approval at one of its steps and goes on after the approval, MEHO does not send the steps that already ran again. MEHO stores the steps of the run, with their results, on the approval request and replays them; the result of a step that reads, writes or makes a credential is not stored. A step whose end MEHO does not know stops the run with <code>composite_resume_step_outcome_unknown</code>, and a later step of that run that needs approval stops it at once with the same error. A second step that waits in the same run waits for its own approval (the error <code>composite_resume_multi_gate_unsupported</code> is gone). A request of a step of a multi-step operation is never run again through <code>POST /api/v1/approvals/{id}/rerun</code> (refusal <code>multi_step_run</code>, which replaces <code>input_not_kept</code>). Connector authors run each change of a multi-step operation that can go on after an approval through <code>run_governed_subop</code>.</td>
 <td>A multi-step run that waits for approval at the upgrade does not go on: its request expires at start-up like every request of the older release, and an approved one that has not run yet is refused. The requester starts the operation again.</td>
 </tr>

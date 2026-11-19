@@ -3429,6 +3429,12 @@ meho<span class="w"> </span>broadcast<span class="w"> </span>watch<span class="w
 </code></pre></div>
 <p><code>--op-class</code> exists too, but it filters operation events, so it matches
 no announcement. Pass <code>--json</code> to get one JSON object per line.</p>
+<p>The server ends a stream when the login that opened it ends: when the
+token expires, and after one hour at the latest (<code>FEED_STREAM_MAX_SECONDS</code>,
+default 3600). The watch then renews the token and opens a new stream
+that starts after the last announcement it printed, so it misses none. A script that reads
+<code>GET /api/v1/feed</code> itself must do the same: reconnect with a fresh
+token and the <code>Last-Event-Id</code> header set to the <code>id</code> of the last event.</p>
 <p><code>meho broadcast recent</code> and the agent tool read the stored
 announcements. The default window is the <strong>last 30 minutes</strong>; page
 forward with the cursor:</p>

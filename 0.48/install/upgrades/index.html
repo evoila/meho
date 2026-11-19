@@ -3924,6 +3924,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A live announcement stream ends when the login that opened it ends. <code>GET /api/v1/feed</code> ends at the token's expiry (plus the JWT leeway), and after <code>FEED_STREAM_MAX_SECONDS</code> (default 3600) at the latest. The console stream <code>GET /ui/broadcast/stream</code> ends when its session is signed out, revoked or expired, or loses the operator role.</td>
+<td>Update the CLI: <code>meho status --watch</code> and <code>meho broadcast watch</code> now renew the token and reconnect with <code>Last-Event-Id</code>, so they miss no announcement. A script that reads <code>GET /api/v1/feed</code> must reconnect when the stream ends, with a fresh token and the <code>Last-Event-Id</code> header set to the <code>id</code> of the last event. The web console reconnects by itself.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>Only a person can remove a <code>deny</code> grant or a <code>needs-approval</code> grant of an agent. A call that removes such a grant with a service, runner or agent login now gets 403 <code>human_principal_required</code>, and the grant stays. This holds for REST, MCP and the console. Over REST and MCP, any login that has the <code>tenant_admin</code> role can remove an <code>auto-execute</code> grant. On the unified console page, only a person can remove any grant.</td>
 <td>If a script removes <code>deny</code> or <code>needs-approval</code> grants, run it with a person's login. Scripts that only remove <code>auto-execute</code> grants need no change.</td>
 </tr>

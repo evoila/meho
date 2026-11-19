@@ -1873,6 +1873,37 @@ async def test_member_added_to_an_ok_dashboard_does_not_hide_a_real_failure(
 
 
 @pytest.mark.asyncio
+async def test_member_added_to_a_degraded_dashboard_keeps_member_memos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6711: during the wait on a ``degraded`` Dashboard, member memos stay as they are."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="ok")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="ok", evaluated=False)
+    dash = await _seed_dashboard(
+        name="old-board",
+        sensor_ids=[sid_a, sid_b],
+        last_rollup_state="degraded",
+        notify_min_state="degraded",
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        link = await session.get(CheckDashboardSensor, (dash, sid_a))
+        assert link is not None
+        link.last_member_state = "degraded"
+        await session.commit()
+
+    await _evaluate(sid_a)
+
+    assert fake.calls == []
+    assert await _rollup_memo(dash) == "degraded"
+    assert await _member_memo(dash, sid_a) == "degraded", "the old member memo stays"
+    assert await _member_memo(dash, sid_b) is None, "the new member memo stays"
+
+
+@pytest.mark.asyncio
 async def test_member_recovery_on_a_red_dashboard_is_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

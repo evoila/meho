@@ -549,11 +549,10 @@ async def _claim_dashboard_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
         changes: list[MemberChange] = []
-        if claimed or not dashboard_edge:
-            # A caller that lost the Dashboard edge leaves the member memos
-            # to the winner, which read the same rows. Moving a memo here
-            # would silence that member for good: its change belongs to a
-            # Dashboard mail this caller does not own.
+        if (claimed or not dashboard_edge) and not waiting:
+            # A caller that lost the Dashboard edge leaves the member memos to
+            # the winner: its change belongs to a mail this caller does not own.
+            # During a wait (#6711) the member memos stay too.
             changes = await _claim_member_changes(session, evaluations)
             if returned_sensor_id is not None:
                 returned = _acknowledgement_ended(evaluations, returned_sensor_id, changes)

@@ -18,6 +18,8 @@ Any other caller (the CLI, a script, an AI tool with a person's token) gets
 403 for the whole file and MEHO writes nothing. The opposite direction
 (target kinds off, gate on) narrows what runs, so it applies with a token.
 The preview works with a token and names each such change in ``warnings``.
+The web console cannot apply a settings file yet, so for now no caller can
+make these two changes.
 
 The other policies are not in this list. ``flight_recorder`` and
 ``mail_recipient_allowlist`` have their own REST routes, which write at once
@@ -72,8 +74,9 @@ def console_only_warnings(operator: Operator, paths: Iterable[str]) -> list[str]
     if runs_at_once(operator):
         return []
     return [
-        f"`{path}` {_what(path)}. MEHO applies this change only for a person in the "
-        "web console; an import with a token is refused (403) and writes nothing."
+        f"`{path}` {_what(path)}. This change applies only for a person in the web "
+        "console. The web console cannot apply a settings file yet, so MEHO cannot make "
+        "this change now; an import with a token is refused (403) and writes nothing."
         for path in paths
     ]
 
@@ -84,7 +87,7 @@ def console_only_refusal(operator: Operator, paths: list[str]) -> str | None:
         return None
     named = ", ".join(f"`{path}` ({_what(path)})" for path in paths)
     return (
-        f"A settings file that changes {named} is applied in the web console. "
-        "A call with a token cannot widen approvals or turn a gate off. "
-        "MEHO wrote nothing from this file."
+        f"A settings file that changes {named} applies only for a person in the web "
+        "console. The web console cannot apply a settings file yet, so MEHO cannot make "
+        "this change now. MEHO wrote nothing from this file."
     )

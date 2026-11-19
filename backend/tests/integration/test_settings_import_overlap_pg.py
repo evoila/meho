@@ -7,7 +7,9 @@ A settings import locks the rows of the tenants in its file before it reads
 their policies, and holds the lock until its commit. A second import of the
 same tenant waits, then reads what the first one wrote. So an import that
 changes only the flight recorder retention never writes back an announce
-gate that another import turned on.
+gate that another import turned on. The same holds for a tenant that is new
+in both files: the second import waits for the row the first one creates,
+then plans its policies again from that row.
 """
 
 from __future__ import annotations
@@ -121,6 +123,34 @@ async def test_gate_import_first_then_retention_import_keeps_gate_on(
     second = await _overlap(_GATE_ON, _RETENTION_ONLY)
 
     assert second.plan.before[str(_TENANT)]["policies"]["announce_gate_enabled"] is True
+    tenant = await _tenant()
+    assert tenant.announce_gate_enabled is True
+    assert tenant.flight_recorder_retention_days == 30
+
+
+async def _overlap_new_tenant(first: bytes, second: bytes) -> None:
+    """Run *first* on a tenant with no row up to its commit, start *second*, commit."""
+    async with get_sessionmaker()() as session:
+        first_result = await apply_import(session, _admin(), first)
+        assert first_result.applied
+        second_task = asyncio.create_task(_import_and_commit(second))
+        await asyncio.sleep(0.5)
+        assert not second_task.done()
+        await session.commit()
+    second_result = await asyncio.wait_for(second_task, timeout=10)
+    assert second_result.applied
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [(_GATE_ON, _RETENTION_ONLY), (_RETENTION_ONLY, _GATE_ON)],
+    ids=["gate-first", "retention-first"],
+)
+async def test_new_tenant_overlapping_imports_keep_gate_on(
+    pg_engine: None, first: bytes, second: bytes
+) -> None:
+    await _overlap_new_tenant(first, second)
+
     tenant = await _tenant()
     assert tenant.announce_gate_enabled is True
     assert tenant.flight_recorder_retention_days == 30

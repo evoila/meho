@@ -15,7 +15,9 @@ The design is ``core.md`` §5; the file, the endpoints and the table are in
 * ``POST /api/v1/settings/import`` -- add or update, never delete. 422 with
   the same body as the preview when the file has mistakes. 403 for a call
   with a token when the file adds or changes a target: only a person in the
-  web console writes targets at once, as on ``/api/v1/targets``.
+  web console writes targets at once, as on ``/api/v1/targets``. The same
+  403 when the file turns on ``run_approval_target_kinds`` or turns off
+  ``announce_gate_enabled`` (:mod:`~meho_backplane.instance_settings.console_only`).
 * ``GET /api/v1/settings/history`` -- the revisions, newest first.
 * ``POST /api/v1/settings/conventions-drift`` -- compare a file that holds
   only conventions with the tenant's operational conventions: added, changed,
@@ -230,7 +232,9 @@ async def import_settings(
     (never deletes) in one transaction, or answers 422 with the mistakes and
     writes nothing. A file that adds or changes a target applies only for a
     person in the web console; a call with a token gets 403 and nothing is
-    written, the same rule as the target routes.
+    written, the same rule as the target routes. The same holds for a file
+    that turns on ``run_approval_target_kinds`` or turns off
+    ``announce_gate_enabled``.
     """
     content = await _read_file(request)
     try:

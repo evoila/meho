@@ -149,14 +149,21 @@ Tenant rows and conventions change no approval or gate.
 - The preview with a token works. It shows the change in `diff` and names
   each such path in `warnings`. It writes nothing.
 - A value equal to the stored one is no change and is not refused.
-- The console has no settings page yet. Until it has one, no caller can
-  make these two changes; they have no REST route of their own.
+- The web console cannot apply a settings file yet. Until it has a
+  settings page, these two changes cannot be made at all; they have no
+  REST route of their own. Turning the gate on applies with a token, so
+  after that the gate stays on until then.
 
 - The apply locks the rows of the tenants in the file before it reads
   their policies, and holds the lock until its commit. A second import of
   the same tenant waits, then reads what the first one wrote. So it checks
   and writes the stored policies, not an older copy. The preview takes no
   lock.
+- A tenant that is new in the file has no row to lock when the plan is
+  made, so the plan starts from the defaults. Right after the apply
+  creates the row (or waits for another import that creates it), it locks
+  the row, plans the file's policies again from what is stored, and runs
+  the console-only check again.
 
 Tests: `tests/test_settings_import_console_policies.py`, and on PostgreSQL
 `tests/integration/test_settings_import_overlap_pg.py`.

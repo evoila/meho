@@ -24,7 +24,10 @@ their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
 A file that adds or changes a target applies only for a person in the web
 console (:func:`~meho_backplane.api.v1._wait_for_approval.runs_at_once`), the
 same rule as the target routes; any other caller gets 403 and nothing is
-written. The preview has no such limit.
+written. The same rule holds for a file that turns on
+``run_approval_target_kinds`` or turns off ``announce_gate_enabled``
+(:mod:`~meho_backplane.instance_settings.console_only`). The preview has no
+such limit.
 """
 
 from __future__ import annotations
@@ -372,6 +375,8 @@ class _TenantPlan:
     tenant_id: uuid.UUID
     index: int
     exists: bool
+    #: The file's block for this tenant (re-planned for a new tenant, see apply).
+    entry: SettingsTenant | None = None
     policies: dict[str, Any] | None = None
     #: (index, slug, ConventionCreate | ConventionUpdate)
     conventions: list[tuple[int, str, ConventionCreate | ConventionUpdate]] = field(
@@ -734,7 +739,7 @@ async def build_plan(
     desired_view: dict[str, dict[str, Any]] = {}
     in_file: dict[str, dict[str, set[str]]] = {}
     for ti, (entry, tid) in enumerate(zip(model.spec.tenants, tenant_ids, strict=True)):
-        tenant_plan = _TenantPlan(tenant_id=tid, index=ti, exists=tid in tenants)
+        tenant_plan = _TenantPlan(tenant_id=tid, index=ti, exists=tid in tenants, entry=entry)
         tenant_operator = _operator_for(operator, tid)
         current = plan.before.get(str(tid)) or {
             "id": str(tid),
@@ -836,6 +841,38 @@ async def _apply_tenant_rows(
     return broken
 
 
+async def _replan_new_tenants(
+    session: AsyncSession, plan: ImportPlan, live: list[_TenantPlan]
+) -> list[str]:
+    """Plan the policies of each new tenant again from its row, under the lock.
+
+    The plan read no row for a new tenant, so it planned from the defaults.
+    Another import may have created the row since (the insert waits for its
+    commit). So lock the row, plan the file's policies again from what is
+    stored, and return the console-only paths of that plan. When the row holds
+    more than an empty new tenant, it becomes the tenant's "before".
+    """
+    new = [tp for tp in live if not tp.exists]
+    if not new:
+        return []
+    tenants, _, _ = await _load_state(session, [tp.tenant_id for tp in new], lock=True)
+    stored = await load_tenant_blocks(session, [tp.tenant_id for tp in new])
+    paths: list[str] = []
+    for tp in new:
+        if tp.entry is None:
+            continue
+        current = _policies_block(tenants[tp.tenant_id])
+        desired, tp.policies = _plan_policies(tp.entry, current)
+        if tp.policies == current:
+            tp.policies = None
+        else:
+            paths.extend(console_only_changes(tp.index, current, desired))
+        block = stored[str(tp.tenant_id)]
+        if block["policies"] != DEFAULT_POLICIES or block["conventions"] or block["targets"]:
+            plan.before[str(tp.tenant_id)] = block
+    return paths
+
+
 async def _apply_policies(
     session: AsyncSession, tenant_plan: _TenantPlan, failed: list[str]
 ) -> None:
@@ -927,8 +964,9 @@ async def apply_import(
     Writes nothing when the file has mistakes (``result.plan.mistakes``) or
     changes nothing (empty diff, no revision). Raises
     :class:`SettingsForbiddenError` and writes nothing when the file adds or
-    changes a target and the caller is not a person in the web console
-    (:func:`runs_at_once`). The caller's session dependency
+    changes a target, turns on ``run_approval_target_kinds`` or turns off
+    ``announce_gate_enabled``, and the caller is not a person in the web
+    console (:func:`runs_at_once`). The caller's session dependency
     commits the one transaction after the route returns.
     """
     plan = await build_plan(session, operator, content, lock=True)
@@ -942,13 +980,16 @@ async def apply_import(
     if not runs_at_once(operator) and any(tp.targets for tp in plan.tenants):
         raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
+    tenant_ids = [tp.tenant_id for tp in plan.tenants]
+    broken = await _apply_tenant_rows(session, plan, result.failed)
+    live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
+    refusal = console_only_refusal(operator, await _replan_new_tenants(session, plan, live))
+    if refusal is not None:
+        raise SettingsForbiddenError(refusal)
+
     audit_id = uuid.uuid4()
     bind_preallocated_audit_id(audit_id)
     structlog.contextvars.bind_contextvars(audit_op_class="write")
-    tenant_ids = [tp.tenant_id for tp in plan.tenants]
-
-    broken = await _apply_tenant_rows(session, plan, result.failed)
-    live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
     for tenant_plan in live:
         await _apply_policies(session, tenant_plan, result.failed)
     for tenant_plan in live:

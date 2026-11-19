@@ -48,9 +48,10 @@ with a token waits for approval. When you send such a file with a token
 - The preview still works with a token. It shows the target changes.
 - A file that changes no target still applies with a token. A target in
   the file that is the same as the stored one is no change.
-- Two policies also change only in the web console:
+- Two policies change only in the web console:
   `run_approval_target_kinds` turned on and `announce_gate_enabled`
-  turned off. See
+  turned off. The web console cannot apply a settings file yet, so these
+  two changes cannot be made at all today. See
   [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
   The other policies and the conventions apply with a token.
 
@@ -127,11 +128,16 @@ Two policies decide how far an approval reaches or whether a gate runs:
   target kind, not only one target.
 - `announce_gate_enabled: false` turns the announce gate off.
 
-Only a person in the web console applies a file that makes one of these
-two changes. When you send such a file with a token (the CLI, a script or
-an AI tool), MEHO answers `403`, names each policy, and saves nothing
-from the file, also not its other parts. This includes `policies: null`
-when the gate is on, because it turns the gate off.
+These two changes apply only for a person in the web console. The web
+console cannot apply a settings file yet, so today these two changes
+cannot be made at all. When you send such a file with a token (the CLI, a
+script or an AI tool), MEHO answers `403`, names each policy, and saves
+nothing from the file, also not its other parts. This includes
+`policies: null` when the gate is on, because it turns the gate off.
+
+!!! warning "Turn the announce gate on only if you want to keep it on"
+    Turning the gate on applies with a token. Turning it off again
+    cannot be done until the web console can apply a settings file.
 
 - The preview works with a token. It shows the change in `diff` and
   names it in `warnings`.
@@ -139,9 +145,6 @@ when the gate is on, because it turns the gate off.
   `announce_gate_enabled: true`) applies with a token.
 - A value that is the same as the stored one is no change.
 - The other policies apply with a token.
-
-The web console does not have the settings file yet. Until it does,
-these two changes cannot be made with a token.
 
 ### What is never in the file
 

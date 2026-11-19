@@ -143,7 +143,7 @@ func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 
 func TestRenderBroadcastSSEEmitsWireData(t *testing.T) {
 	cmd, stdout, _ := newRunCmd(t)
-	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: {\"kind\":\"announcement\"}\n\n"), cmd.OutOrStdout(), true); err != nil {
+	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: {\"kind\":\"announcement\"}\n\n"), cmd.OutOrStdout(), true, nil); err != nil {
 		t.Fatalf("renderBroadcastSSE: %v", err)
 	}
 	if got := stdout.String(); got != "{\"kind\":\"announcement\"}\n" {

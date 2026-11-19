@@ -138,6 +138,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "event_drain_enabled",
         "event_drain_tick_interval_seconds",
         "events_ingest_rate_per_minute",
+        "feed_stream_max_seconds",
         "flight_recorder_enabled",
         "flight_recorder_reaper_enabled",
         "flight_recorder_reaper_max_per_tick",

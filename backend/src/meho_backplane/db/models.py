@@ -9334,8 +9334,9 @@ class Sensor(Base):
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
-    # when the state changes so #2506's ``for:`` hysteresis can read how
-    # long the current state has held.
+    # when the state changes (or the first result confirms the initial
+    # ``unknown``) so the ``for:`` hysteresis can read how long the
+    # current state has held.
     last_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,

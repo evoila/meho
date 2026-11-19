@@ -108,7 +108,9 @@ Vault path and field: the request shows only that reference, never the
 secret. MEHO refuses a call with a secret-looking `env` name (for example
 `DB_PASSWORD`) or value (for example a token or a password in a URL)
 before it waits for approval. The `env` values are for the person who
-approves: the MCP approval tools show the `env` names only.
+approves: reads by an agent or a token show the `env` names only (the
+MCP approval tools, and the REST approval reads with an agent, service or
+runner login).
 
 When several requests belong to one change ticket and depend on each
 other, approve them as a group, oldest first:

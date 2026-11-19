@@ -163,7 +163,8 @@ def _rest_effect(rid: uuid.UUID) -> dict[str, Any]:
             assert row is not None
             return row
 
-    return dict(_view(asyncio.run(_load())).proposed_effect or {})
+    person = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    return dict(_view(asyncio.run(_load()), operator=person).proposed_effect or {})
 
 
 @pytest.mark.parametrize("case", [_CLIENT_UPDATE, _MAPPER_CREATE], ids=["client", "mapper"])

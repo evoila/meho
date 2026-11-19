@@ -9,6 +9,8 @@
 * The console approval window shows the ``env`` values, a control
   character as a visible escape. The MCP approval reads get the ``env``
   names only, also for a request that another principal sent.
+* The REST approval list and detail give a person's login the ``env``
+  values. An agent or service login gets the ``env`` names only.
 * The params hash binds the ``env`` values: an approval with another value
   is refused.
 """
@@ -22,7 +24,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.linux.ops_write import ENV_NOTE
 from meho_backplane.operations._preview import proposed_effect_for_agent
@@ -205,3 +207,58 @@ async def test_stored_request_shows_env_values_in_the_console_and_names_only_ove
         assert "env" not in preview
         assert "env_note" not in preview
         assert "env-card-value" not in repr(row)
+
+
+def _rest_reader(kind: PrincipalKind) -> Operator:
+    return Operator(
+        sub=f"linux-env-card-rest-{kind.value}",
+        name=None,
+        email=None,
+        raw_jwt="<linux-env-card-rest-raw-jwt>",
+        tenant_id=_OPERATOR.tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=kind,
+    )
+
+
+async def _rest_reads(operator: Operator, request_id: uuid.UUID) -> list[dict[str, Any]]:
+    from meho_backplane.api.v1.approvals import get_approval_request, list_approvals
+
+    detail = await get_approval_request(request_id, operator=operator)
+    listed = await list_approvals(
+        status="pending",
+        work_ref=None,
+        limit=None,
+        offset=0,
+        order="newest",
+        outcome_unknown=False,
+        operator=operator,
+    )
+    rows = [row for row in listed if row.id == request_id]
+    assert len(rows) == 1
+    return [detail.proposed_effect, rows[0].proposed_effect]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE])
+async def test_rest_approval_read_by_an_agent_or_service_gets_the_env_names_only(
+    linux_write_registered: None,  # noqa: F811 -- fixture
+    kind: PrincipalKind,
+) -> None:
+    request_id = await _park({"script": _SCRIPT, "env": {"TAR_OPTIONS": "env-card-value"}})
+    for effect in await _rest_reads(_rest_reader(kind), request_id):
+        preview = effect["preview"]
+        assert preview["env_var_names"] == ["TAR_OPTIONS"]
+        assert "env" not in preview
+        assert "env_note" not in preview
+        assert "env-card-value" not in repr(effect)
+
+
+@pytest.mark.asyncio
+async def test_rest_approval_read_by_a_person_gets_the_env_values(
+    linux_write_registered: None,  # noqa: F811 -- fixture
+) -> None:
+    request_id = await _park({"script": _SCRIPT, "env": {"TAR_OPTIONS": "env-card-value"}})
+    for effect in await _rest_reads(_rest_reader(PrincipalKind.USER), request_id):
+        assert effect["preview"]["env"] == {"TAR_OPTIONS": "env-card-value"}
+        assert effect["preview"]["env_note"] == ENV_NOTE

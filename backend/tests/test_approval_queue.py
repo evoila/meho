@@ -271,7 +271,7 @@ async def test_credential_write_parks_only_an_opaque_handle(session: AsyncSessio
     assert request.resume_parent == {"op_id": "composite.rotate"}
     assert request.execution_handle is not None
     assert secret not in repr(request)
-    assert secret not in _view(request).model_dump_json()
+    assert secret not in _view(request, operator=_make_operator()).model_dump_json()
     assert secret not in repr(_row_to_dict(request))
 
     async with get_sessionmaker()() as fresh:
@@ -569,7 +569,7 @@ async def test_create_pending_request_captures_bound_work_ref(
         work_ref_var.reset(token)
 
     assert request.work_ref == "gh:evoila/meho#1659"
-    assert _view(request).work_ref == "gh:evoila/meho#1659"
+    assert _view(request, operator=_make_operator()).work_ref == request.work_ref
     assert _row_to_dict(request)["work_ref"] == "gh:evoila/meho#1659"
 
 

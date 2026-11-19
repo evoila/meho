@@ -671,7 +671,9 @@ value, and so does `meho approvals show` with a person's sign-in. The MCP
 approval tools (`meho_approvals_get`, `meho_approvals_list`) read the
 stored request through `proposed_effect_for_agent`, which drops these two
 keys: an agent gets `env_var_names` only, also for a request another
-principal sent.
+principal sent. The REST approval list and detail follow the same rule:
+a person's login gets the values, and a read by an agent or a token (an
+agent, service or runner login) shows the names only.
 
 **No secret in `env`.** The card shows every `env` value, so the op's check
 before the wait for approval (`_refuse_secret_in_env`, registered with

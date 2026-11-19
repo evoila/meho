@@ -258,14 +258,14 @@ _SOURCES = {
 }
 
 
-_SOURCE_REALMS = {"vault-source": [], "keycloak-client-source": ["other-realm"]}
+_SOURCE_REALMS = {"vault-source": [], "keycloak-client-source": [("kc", "other-realm")]}
 
 
 @pytest.mark.parametrize("source", list(_SOURCES), ids=list(_SOURCES))
 def test_a_sink_in_a_realm_named_clients_is_a_sink(source: str) -> None:
     realms, sink, _ = _keycloak_sides({"from": _SOURCES[source], "to": _CLIENTS_SINK})
 
-    assert realms == [*_SOURCE_REALMS[source], "clients"]
+    assert realms == [*_SOURCE_REALMS[source], ("kc", "clients")]
     assert sink is not None and sink[1] == "clients"
 
 

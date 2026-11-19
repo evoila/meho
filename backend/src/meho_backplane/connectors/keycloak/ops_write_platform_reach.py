@@ -133,12 +133,12 @@ REASON_UNREAD: Final[str] = (
 )
 
 REASON_KEYS: Final[str] = (
-    "In MEHO's own login realm, a platform admin approves every Keycloak write that "
-    "sets more than a display name or a description."
+    "In MEHO's own login realm, in master and in the target's admin realm, a platform "
+    "admin approves every Keycloak write that sets more than a display name or a description."
 )
 REASON_SECRET_MOVE: Final[str] = (
-    "This secret move reads from or writes to MEHO's own login realm. There, a platform "
-    "admin approves every secret move."
+    "This secret move reads from or writes to MEHO's own login realm, master or the "
+    "target's admin realm. There, a platform admin approves every secret move."
 )
 
 #: The scope mapper write, whose ``grant`` block :mod:`.ops_write_scope_mapper` builds.
@@ -438,7 +438,7 @@ async def _realm_of(op_id: str, ctx: PreviewContext) -> tuple[bool, str | None]:
 
     explicit = _text(ctx.params.get("realm")) if op_id == _REALM_UPDATE else None
     if explicit is not None:
-        return is_login_realm_name(explicit), explicit
+        return is_login_realm_name(explicit, ctx.target), explicit
     try:
         realm: str | None = resolve_realm_config(ctx.target).managed_realm
     except Exception:
@@ -493,11 +493,11 @@ def with_platform_facts(
 
 def _keycloak_sides(
     params: dict[str, Any],
-) -> tuple[list[str | None], tuple[str, str, str] | None, bool]:
+) -> tuple[list[tuple[str, str] | None], tuple[str, str, str] | None, bool]:
     """The Keycloak sides of a ``secret.move``.
 
-    Returns the realm of each ``keycloak:`` side (``None`` for one MEHO
-    cannot read), the user-password sink ``(target, realm, username)``, and
+    Returns the ``(target, realm)`` of each ``keycloak:`` side (``None`` for
+    one MEHO cannot read), the user-password sink ``(target, realm, username)``, and
     whether the sink is a user password that MEHO cannot read. A ref is a
     client source or a user-password sink by the same address shape as the
     endpoint factory (:func:`~.secret_endpoint.build_keycloak_secret_endpoint`),
@@ -510,7 +510,7 @@ def _keycloak_sides(
     )
     from meho_backplane.connectors.secret.endpoints import parse_secret_ref
 
-    realms: list[str | None] = []
+    realms: list[tuple[str, str] | None] = []
     sink: tuple[str, str, str] | None = None
     sink_unread = False
     for key in ("from", "to"):
@@ -525,10 +525,11 @@ def _keycloak_sides(
         try:
             client = _looks_like_client_secret_ref(spec.ref)
             if client:
-                realms.append(_parse_keycloak_client_ref(spec.ref)[1])
+                target, realm, _client = _parse_keycloak_client_ref(spec.ref)
+                realms.append((target, realm))
             else:
                 parsed = _parse_keycloak_ref(spec.ref)
-                realms.append(parsed[1])
+                realms.append((parsed[0], parsed[1]))
                 if key == "to":
                     sink = parsed
         except ValueError:
@@ -537,11 +538,33 @@ def _keycloak_sides(
     return realms, sink, sink_unread
 
 
-def _is_login_realm(realm: str | None) -> bool:
+async def _side_target(ctx: PreviewContext, target_name: str) -> KeycloakTargetLike:
+    """The target a ``keycloak:`` side names, read from the tenant's targets."""
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.targets.resolver import resolve_target
+
+    async with get_sessionmaker()() as session:
+        return cast(
+            "KeycloakTargetLike",
+            await resolve_target(session, ctx.operator.tenant_id, target_name),
+        )
+
+
+async def _is_login_realm(ctx: PreviewContext, side: tuple[str, str] | None) -> bool:
+    """Whether a side is in a realm of :func:`~.ops_write_grant.is_login_realm_name`.
+
+    ``True`` when MEHO cannot read the side, or the target it names (then
+    MEHO cannot read the target's ``admin_realm``).
+    """
     from meho_backplane.connectors.keycloak.ops_write_grant import is_login_realm_name
 
+    if side is None:
+        return True
+    target_name, realm = side
     try:
-        return realm is None or is_login_realm_name(realm)
+        if is_login_realm_name(realm):
+            return True
+        return is_login_realm_name(realm, await _side_target(ctx, target_name))
     except Exception:
         return True
 
@@ -549,20 +572,14 @@ def _is_login_realm(realm: str | None) -> bool:
 async def _sink_user_id(ctx: PreviewContext, sink: tuple[str, str, str]) -> str | None:
     """The id of the login whose password the sink sets; ``None`` when MEHO cannot read it."""
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
-    from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
-    from meho_backplane.targets.resolver import resolve_target
 
     target_name, realm, username = sink
     try:
         connector = get_or_create_connector_instance(KeycloakConnector)
         if not isinstance(connector, KeycloakConnector):
             return None
-        async with get_sessionmaker()() as session:
-            row: KeycloakTargetLike = cast(
-                "KeycloakTargetLike",
-                await resolve_target(session, ctx.operator.tenant_id, target_name),
-            )
+        row = await _side_target(ctx, target_name)
         return await connector._find_user_uuid(row, realm, username, operator=ctx.operator)
     except Exception:
         return None
@@ -571,8 +588,9 @@ async def _sink_user_id(ctx: PreviewContext, sink: tuple[str, str, str]) -> str 
 async def secret_move_grant(ctx: PreviewContext) -> dict[str, Any] | None:
     """The ``grant`` block of a ``secret.move`` with a Keycloak side; ``None`` without one.
 
-    When the source or the sink is in MEHO's own login realm, or MEHO
-    cannot read the realm of a side, a platform admin must approve. A
+    When the source or the sink is in MEHO's own login realm, ``master`` or
+    the ``admin_realm`` of the target it names, or MEHO cannot read the
+    realm of a side, a platform admin must approve. A
     user-password sink there names the login whose password changes
     (``for_login`` and ``user_id``), so that login never approves the move.
     When MEHO cannot read that login, ``user_id`` is ``None`` and the
@@ -583,8 +601,11 @@ async def secret_move_grant(ctx: PreviewContext) -> dict[str, Any] | None:
     realms, sink, sink_unread = _keycloak_sides(ctx.params)
     if not realms:
         return None
-    login_realm = any(_is_login_realm(realm) for realm in realms)
-    sink_in_login_realm = sink_unread or (sink is not None and _is_login_realm(sink[1]))
+    protected = [await _is_login_realm(ctx, side) for side in realms]
+    login_realm = any(protected)
+    sink_in_login_realm = sink_unread or (
+        sink is not None and await _is_login_realm(ctx, (sink[0], sink[1]))
+    )
     grant: dict[str, Any] = {
         "user_id": None,
         "group_id": None,

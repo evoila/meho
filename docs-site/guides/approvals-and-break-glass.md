@@ -297,8 +297,11 @@ group has more rules:
   gives, not its name: the attribute `platform_admin=true` on the group or
   a parent group, a place under `/MEHO-Platform-Admins/`, or the realm role
   in `JWT_PLATFORM_ADMIN_ROLE_NAME`. A group MEHO cannot read counts too.
-- In MEHO's own login realm, a platform admin approves every Keycloak
-  write, and every `secret.move` that reads from or writes to that realm.
+- In MEHO's own login realm, in `master` and in the target's admin realm,
+  a platform admin approves every Keycloak write, and every `secret.move`
+  that reads from or writes to one of these realms. An admin in `master`
+  or in the admin realm can change every realm, so the same rule holds
+  there.
   The one exception is a write that sets only keys from a short list that
   cannot touch sign-in or rights: the display name of the realm
   (`keycloak.realm.update`), the name and description of a client

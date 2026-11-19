@@ -21,7 +21,9 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
   resolves it: an id in the params wins, else the name is looked up on
   the same level (``parent_id``). ``None`` when it cannot be read.
 * ``login_realm``: the target manages a realm that MEHO's own login uses,
-  by the realm name Keycloak answers with. ``True`` when it cannot be read.
+  ``master``, or the target's ``admin_realm``, by the realm name Keycloak
+  answers with (:func:`is_login_realm_name`). ``True`` when it cannot be
+  read.
 * ``platform_admin``: the change can give platform admin rights, or gives a
   role of the ``realm-management`` client (it decides who may manage the
   realm). For a group, MEHO reads what the group gives
@@ -48,7 +50,7 @@ rules that use these facts are in
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import (
@@ -75,7 +77,7 @@ from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     login_has_platform_admin,
     platform_fields,
 )
-from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.connectors.keycloak.session import DEFAULT_ADMIN_REALM, resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import (
     PreviewBuilder,
@@ -212,14 +214,24 @@ def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
     return connector
 
 
-def is_login_realm_name(realm: str) -> bool:
-    """True when *realm* names a realm of MEHO's own login (letter case and spaces ignored)."""
-    own = {name.strip().casefold() for name in _backplane_login_realms()}
-    return realm.strip().casefold() in own
+def is_login_realm_name(realm: str, target: object = None) -> bool:
+    """True when *realm* is a realm the login realm rule protects (letter case and spaces ignored).
+
+    These are the realms of MEHO's own login, ``master`` (Keycloak's admin
+    realm), and the ``admin_realm`` of *target* when it names one. A
+    Keycloak admin in ``master`` or in the admin realm can change every
+    realm, also the one of MEHO's own login.
+    """
+    names = {*_backplane_login_realms(), DEFAULT_ADMIN_REALM}
+    extras = getattr(target, "extras", None) or {}
+    admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
+    if isinstance(admin, str) and admin.strip():
+        names.add(admin)
+    return realm.strip().casefold() in {name.strip().casefold() for name in names}
 
 
 async def is_login_realm(ctx: PreviewContext) -> bool:
-    """True when the target manages a realm of MEHO's own login, or that cannot be read.
+    """True when the target manages a realm of :func:`is_login_realm_name`, or that cannot be read.
 
     The name is the one Keycloak answers with for the target's realm
     (``GET /admin/realms/{realm}``), not the text stored on the target: a
@@ -239,7 +251,7 @@ async def is_login_realm(ctx: PreviewContext) -> bool:
         name = _text(answer.get("realm")) if isinstance(answer, dict) else None
         if name is None:
             return True
-        return is_login_realm_name(name) or is_login_realm_name(stored)
+        return is_login_realm_name(name, ctx.target) or is_login_realm_name(stored, ctx.target)
     except Exception:
         return True
 

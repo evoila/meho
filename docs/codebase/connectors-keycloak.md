@@ -560,7 +560,14 @@ again with the same rule (`ops_write_grant_platform.py`).
 In MEHO's own login realm, a platform admin approves every Keycloak write,
 unless every key it sets is on a short list of keys that cannot touch
 sign-in or rights. The list is `HARMLESS_KEYS` in
-`ops_write_login_realm_rule.py`, and it is the only place:
+`ops_write_login_realm_rule.py`, and it is the only place.
+
+The same rule holds in `master` (Keycloak's admin realm) and in the
+target's `admin_realm`: a Keycloak admin there can change every realm, also
+the one of MEHO's own login. In this part, "the login realm" means all of
+these realms (`is_login_realm_name` in `ops_write_grant.py`; letter case
+and spaces at the ends do not count).
+
 
 | Write | Harmless keys | Params that only name the object |
 |---|---|---|
@@ -578,8 +585,9 @@ write in `RIGHTS_CHANGE_OPS` and `NOT_RIGHTS_CHANGE_OPS`:
   in every realm.
 - In the login realm, when the call sets a key that is not harmless and
   the other checks below found no reason, it sets `platform_admin` with
-  the reason "In MEHO's own login realm, a platform admin approves every
-  Keycloak write that sets more than a display name or a description."
+  the reason "In MEHO's own login realm, in master and in the target's
+  admin realm, a platform admin approves every Keycloak write that sets
+  more than a display name or a description."
 - A write with no `grant` block of its own gets one here, and is
   registered for the approval check (`register_grant_op`). A write of
   `NOT_RIGHTS_CHANGE_OPS` is registered with `per_call=False`: in another
@@ -599,7 +607,10 @@ else the realm the target manages, by the name Keycloak answers with
 its own login uses, the realm counts as the login realm.
 
 A `secret.move` whose source or sink is a `keycloak:` ref in the login
-realm always needs a platform admin (`secret_move_grant`). A ref is a
+realm always needs a platform admin (`secret_move_grant`). For a side in
+another realm, MEHO reads the target the ref names, to know its
+`admin_realm`; when it cannot read that target, the side counts as one in
+the login realm. A ref is a
 client-secret source or a user-password sink by its address shape, the
 same way as `build_keycloak_secret_endpoint`: a sink in a realm named
 `clients` is still a sink. A user-password sink in the login realm also
@@ -622,7 +633,10 @@ tenant admin's approval is refused; a platform admin's approval goes
 through and the run check passes; when MEHO cannot read its login realms a
 tenant admin is refused; in another realm a tenant admin approves, and the
 run is refused when the realm becomes a login realm while the request
-waits). `tests/test_keycloak_login_realm_grants_and_password_sink.py`
+waits). `tests/test_keycloak_admin_realm_every_write.py` runs the same four
+tests for each write in `master` and in the target's `admin_realm`; there
+the last one makes the target's `admin_realm` the realm of the write while
+the request waits. `tests/test_keycloak_login_realm_grants_and_password_sink.py`
 tests the grant check for each write without a per-call mark, and the
 login of a `secret.move` password sink:
 
@@ -643,7 +657,7 @@ login of a `secret.move` password sink:
 | `keycloak.group.update_attributes` | strict |
 | `keycloak.protocol_mapper.create` | strict |
 | `keycloak.realm.create` | strict |
-| `keycloak.realm.delete` | strict (MEHO never deletes the login realm) |
+| `keycloak.realm.delete` | strict (MEHO never deletes the login realm, `master` or the admin realm) |
 | `keycloak.realm.update` | harmless with only `displayName`, else strict |
 | `keycloak.role_mapping.assign` | strict |
 | `keycloak.role_mapping.client.assign` | strict |

@@ -3,6 +3,11 @@
 
 """In MEHO's own login realm, a platform admin approves every Keycloak write.
 
+The same holds in ``master`` (Keycloak's admin realm) and in the target's
+``admin_realm``: an admin there can change every realm. In this module and
+on the card, "the login realm" means all of these realms
+(:func:`~.ops_write_grant.is_login_realm_name`).
+
 The one exception: a write whose every key is on :data:`HARMLESS_KEYS`, a
 short list of keys that cannot touch sign-in or rights (display names and
 descriptions). A key that is not on the list counts as strict.
@@ -147,7 +152,7 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
                 names.append(_text(representation.get("realm")))
             given = [name for name in names if name is not None]
             if given:
-                return any(is_login_realm_name(name) for name in given)
+                return any(is_login_realm_name(name, ctx.target) for name in given)
             if op_id == "keycloak.realm.create":
                 return True
         return await is_login_realm(ctx)

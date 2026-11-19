@@ -150,7 +150,10 @@ from meho_backplane.connectors.keycloak.secret_move_target import check_approved
 from meho_backplane.connectors.keycloak.session import KeycloakTargetLike, resolve_realm_config
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.targets.required_extras import realm_name_problem
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
@@ -324,6 +327,7 @@ class KeycloakCredentialSecretEndpoint:
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
         check_approved_keycloak_target("sink", self._target_name, row)
+        await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
     async def check_target(self, operator: Operator) -> None:
@@ -479,6 +483,7 @@ class KeycloakClientSecretSourceEndpoint:
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
         check_approved_keycloak_target("source", self._target_name, row)
+        await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:

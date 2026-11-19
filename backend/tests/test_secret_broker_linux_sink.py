@@ -358,6 +358,7 @@ def _run_script(
     home: Path | None = None,
     owner_uid: str = "4242",
     realpath: str | None = None,
+    awk: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run *script* with the local bash.
 
@@ -365,7 +366,9 @@ def _run_script(
     argument to ``runuser.log`` next to the home, then runs the command (the
     test user already is the owner). The test user plays root. A fake ``id``
     gives a known owner the user id *owner_uid* and fails for an unknown one.
-    *realpath*, when set, is the body of a fake ``realpath``.
+    *realpath*, when set, is the body of a fake ``realpath``. *awk*, when set,
+    is the body of a fake ``awk``, which stands for what ``/etc/login.defs``
+    gives (nothing: the file has no such line).
     """
     env = dict(os.environ)
     if home is not None:
@@ -385,6 +388,8 @@ def _run_script(
         )
         if realpath is not None:
             _fake_tool(fake_bin, "realpath", realpath)
+        if awk is not None:
+            _fake_tool(fake_bin, "awk", awk)
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, check=False, env=env
@@ -624,6 +629,43 @@ def test_script_still_writes_for_the_last_normal_user_id(tmp_path: Path) -> None
     proc = _run_script(
         build_secret_sink_script(str(target), getpass.getuser(), b"v"), home=home, owner_uid="60000"
     )
+    assert proc.returncode == 0, proc.stderr
+
+
+@_NEEDS_LINUX
+def test_script_refuses_the_first_id_above_the_default_range(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "dirsvc"
+    home.mkdir(parents=True)
+    target = home / "key"
+    # The fake awk prints nothing: the host file has no UID_MAX line.
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v")
+    proc = _run_script(script, home=home, owner_uid="60001", awk="exit 0\n")
+    assert proc.returncode == 5
+    assert "===MEHO_SINK_ERR:system-owner===" in proc.stderr
+    assert not target.exists()
+    assert _runuser_log(home) == []
+
+
+@_NEEDS_LINUX
+def test_script_uses_the_default_when_the_host_file_has_no_uid_max(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "seat"
+    home.mkdir(parents=True)
+    target = home / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v")
+    proc = _run_script(script, home=home, owner_uid="60000", awk="exit 0\n")
+    assert proc.returncode == 0, proc.stderr
+
+
+@_NEEDS_LINUX
+def test_script_allows_an_id_above_the_default_when_the_host_raises_uid_max(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home" / "dirsvc"
+    home.mkdir(parents=True)
+    target = home / "key"
+    script = build_secret_sink_script(str(target), getpass.getuser(), b"v")
+    awk = 'case "$*" in *UID_MAX*) echo 70000;; esac\n'
+    proc = _run_script(script, home=home, owner_uid="60001", awk=awk)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -1039,7 +1081,12 @@ async def test_the_approval_preview_shows_only_refs() -> None:
     )
     preview = await build_secret_move_preview(ctx)
     assert preview is not None
-    assert preview["sink"] == {"kind": "linux", "ref": f"{_TARGET_NAME}/home/seat/key#seat"}
+    assert preview["sink"] == {
+        "kind": "linux",
+        "ref": f"{_TARGET_NAME}/home/seat/key#seat",
+        "target": _TARGET_NAME,  # no such target here, so no id, host or port
+        "secret_exists": "not known",  # a linux sink cannot tell
+    }
     assert _SENTINEL not in json.dumps(preview)
 
 

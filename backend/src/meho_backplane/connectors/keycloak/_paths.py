@@ -40,12 +40,14 @@ than reconciling them:
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
+    "_ADMIN_EVENTS_PATH",
     "_AUTH_CONFIG_PATH",
     "_AUTH_EXECUTION_CONFIG_PATH",
     "_AUTH_EXECUTION_RAISE_PRIORITY_PATH",
@@ -54,13 +56,25 @@ __all__ = [
     "_AUTH_FLOW_ADD_SUBFLOW_PATH",
     "_AUTH_FLOW_COPY_PATH",
     "_AUTH_FLOW_EXECUTIONS_PATH",
+    "_CLIENT_ROLE_PATH",
+    "_CLIENT_ROLE_USERS_PATH",
+    "_CLIENT_SCOPE_PATH",
+    "_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH",
+    "_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH",
     "_EVENTS_CONFIG_PATH",
+    "_EVENTS_PATH",
+    "_GROUP_REALM_COMPOSITE_PATH",
+    "_GROUP_ROLE_MAPPINGS_PATH",
     "_IDENTITY_PROVIDERS_PATH",
     "_REQUIRED_ACTIONS_PATH",
+    "_ROLE_BY_ID_COMPOSITES_PATH",
     "_USER_BRUTE_FORCE_PATH",
     "_USER_CREDENTIALS_PATH",
+    "_USER_CREDENTIAL_PATH",
+    "_USER_ROLE_MAPPINGS_CLIENT_PATH",
     "_USER_SESSIONS_PATH",
     "fill_path",
+    "quote_segment",
 ]
 
 # -- templates reconciled against the pinned Admin REST spec ----------------
@@ -74,6 +88,13 @@ _CLIENT_PROTOCOL_MAPPERS_PATH = (
     "/admin/realms/{realm}/clients/{client-uuid}/protocol-mappers/models"
 )
 _CLIENT_SCOPES_PATH = "/admin/realms/{realm}/client-scopes"
+_CLIENT_SCOPE_PATH = "/admin/realms/{realm}/client-scopes/{client-scope-id}"
+_CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH = (
+    "/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models"
+)
+_CLIENT_SCOPE_PROTOCOL_MAPPER_PATH = (
+    "/admin/realms/{realm}/client-scopes/{client-scope-id}/protocol-mappers/models/{id}"
+)
 _USERS_PATH = "/admin/realms/{realm}/users"
 _USER_PATH = "/admin/realms/{realm}/users/{user-id}"
 _USER_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings"
@@ -83,13 +104,32 @@ _USER_LOGOUT_PATH = "/admin/realms/{realm}/users/{user-id}/logout"
 _USER_SESSIONS_PATH = "/admin/realms/{realm}/users/{user-id}/sessions"
 _USER_CREDENTIALS_PATH = "/admin/realms/{realm}/users/{user-id}/credentials"
 _USER_BRUTE_FORCE_PATH = "/admin/realms/{realm}/attack-detection/brute-force/users/{user-id}"
+# Client role writes: a user's role mappings on one client (the spec names the
+# client placeholder ``{client-id}`` here, though it holds the client UUID), and
+# the role of one client.
+_USER_ROLE_MAPPINGS_CLIENT_PATH = (
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}"
+)
+_CLIENT_ROLE_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}"
+# The users who hold one client role directly (the client role remove card).
+_CLIENT_ROLE_USERS_PATH = "/admin/realms/{realm}/clients/{client-uuid}/roles/{role-name}/users"
+# One stored credential of a user.
+_USER_CREDENTIAL_PATH = "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}"
 _ROLES_PATH = "/admin/realms/{realm}/roles"
 _ROLE_PATH = "/admin/realms/{realm}/roles/{role-name}"
+# The roles one role is made of (its direct parts), by the role's id.
+_ROLE_BY_ID_COMPOSITES_PATH = "/admin/realms/{realm}/roles-by-id/{role-id}/composites"
 _ROLE_USERS_PATH = "/admin/realms/{realm}/roles/{role-name}/users"
 _GROUPS_PATH = "/admin/realms/{realm}/groups"
 _GROUP_PATH = "/admin/realms/{realm}/groups/{group-id}"
 _GROUP_CHILDREN_PATH = "/admin/realms/{realm}/groups/{group-id}/children"
 _GROUP_MEMBERS_PATH = "/admin/realms/{realm}/groups/{group-id}/members"
+# The roles a group gives directly (the group member add approval card).
+_GROUP_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/groups/{group-id}/role-mappings"
+# Every realm role a group gives: its own, its parent groups' and the parts of composites.
+_GROUP_REALM_COMPOSITE_PATH = (
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/composite"
+)
 _USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
 # NB: the user-group membership sub-resource uses the camelCase ``{groupId}``
 # path-parameter name (a Keycloak spec quirk — the groups resource itself uses
@@ -119,6 +159,9 @@ _IDENTITY_PROVIDERS_PATH = "/admin/realms/{realm}/identity-provider/instances"
 # Safe reads of the login setup: required actions and the event settings.
 _REQUIRED_ACTIONS_PATH = "/admin/realms/{realm}/authentication/required-actions"
 _EVENTS_CONFIG_PATH = "/admin/realms/{realm}/events/config"
+# Safe reads of the saved login events and admin events.
+_EVENTS_PATH = "/admin/realms/{realm}/events"
+_ADMIN_EVENTS_PATH = "/admin/realms/{realm}/admin-events"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 
@@ -130,16 +173,33 @@ _SERVERINFO_PATH = "/admin/serverinfo"
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
 
 
-def fill_path(template: str, values: Mapping[str, str]) -> str:
+def quote_segment(value: Any) -> str:
+    """Percent-encode one value for one URL path segment.
+
+    Encodes ``/`` (``safe=""``) and ``.`` so that neither slash-based nor
+    dot-segment path traversal (``..``) can alter the request path structure.
+    A traversal-shaped id such as ``../../../../realms/master/clients``
+    becomes ``%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients``
+    and cannot climb out of the realm sub-tree.  A bare ``..`` id becomes
+    ``%2E%2E`` and is not normalised by httpx.  Mirrors the ArgoCD connector's
+    ``_quote_name`` (``argocd/ops_write.py:130-132``).
+
+    :func:`fill_path` applies it to every value, so a handler never calls
+    it for a path it builds from a template.
+    """
+    return quote(str(value), safe="").replace(".", "%2E")
+
+
+def fill_path(template: str, values: Mapping[str, Any]) -> str:
     """Substitute *values* into *template*'s ``{placeholder}`` segments.
 
     Fail-loud contract, both directions: every placeholder in *template*
     must have a value and every provided key must name a placeholder — a
     typo'd key or a missing segment raises :exc:`ValueError` at the call
-    site instead of dispatching a malformed URL. Values are inserted
-    verbatim; callers pre-encode caller-controlled segments with
-    :func:`~meho_backplane.connectors.keycloak.session.quote_segment`
-    exactly as the pre-#2988 f-strings did.
+    site instead of dispatching a malformed URL. Every value is encoded
+    with :func:`quote_segment`, so a ``/``, a ``?`` or a ``..`` in a realm
+    name or an id stays inside its one path segment. Callers pass raw
+    values, never encoded ones.
     """
     placeholders = set(_PLACEHOLDER_RE.findall(template))
     provided = set(values)
@@ -148,4 +208,4 @@ def fill_path(template: str, values: Mapping[str, str]) -> str:
             f"fill_path template {template!r} declares placeholders "
             f"{sorted(placeholders)} but got values for {sorted(provided)}"
         )
-    return _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template)
+    return _PLACEHOLDER_RE.sub(lambda match: quote_segment(values[match.group(1)]), template)

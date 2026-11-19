@@ -31,12 +31,10 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
-from meho_backplane.connectors.keycloak.ops_user_login_guard import refuse_login_user_rep
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
-from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -44,12 +42,6 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
 __all__ = ["keycloak_user_disable", "keycloak_user_enable"]
-
-
-def _opt_str(value: Any) -> str | None:
-    if isinstance(value, str):
-        return value.strip() or None
-    return None
 
 
 async def _set_enabled(
@@ -62,39 +54,18 @@ async def _set_enabled(
     enabled: bool,
 ) -> dict[str, Any]:
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError(f"{op_id} requires either 'id' (UUID) or 'username'")
-        uuid = await connector._find_user_uuid(
-            target, realms.managed_realm, username, operator=operator
-        )
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"{op_id}: no user with username={username!r} in realm {realms.managed_realm!r}"
-            )
-    path = fill_path(_USER_PATH, {"realm": realms.managed_realm, "user-id": quote_segment(uuid)})
-    before: dict[str, Any] | None = None
-    if not enabled:
-        # Check and write the same read, so a rename between two reads cannot
-        # slip the sign-in user past the check.
-        before = await get_or_none(connector, target, path, operator)
-        if before is None:
-            raise KeycloakUserNotFoundError(
-                f"{op_id}: no user with id={uuid!r} in realm {realms.managed_realm!r}"
-            )
-        await refuse_login_user_rep(
-            connector, operator, target, before, op_id=op_id, action="disabling it"
-        )
+    # Check and write the same read, so a rename between two reads cannot
+    # slip the sign-in user past the check (read_user_for_write runs it).
+    user = await read_user_for_write(connector, operator, target, params, op_id=op_id)
+    uuid = user.uuid
     try:
         check = await read_merge_write(
             connector,
             operator,
             target,
-            path=path,
+            path=user.path,
             requested={"enabled": enabled},
-            before=before,
+            before=user.user,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
@@ -104,7 +75,7 @@ async def _set_enabled(
         raise
     return {
         "id": uuid,
-        "username": username,
+        "username": user.username,
         "enabled": enabled,
         "unrequested_changes": check["unrequested_changes"],
         "read_back_checked": check["read_back_checked"],

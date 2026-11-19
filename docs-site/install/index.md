@@ -46,6 +46,7 @@ systems.
 |---|---|
 | **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class (the built-in parts keep their data on disks the cluster makes). [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. The chart is tested with Helm 3.16.4. Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
 | **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. With the built-in parts, the chart can also make a self-signed certificate for you. |
+| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
 
 Everything else — the activity-feed store (Valkey), database
 migrations, the operations catalog — ships inside the Helm release.
@@ -158,6 +159,30 @@ Every rule needs a `to` list. The chart refuses a rule without one,
 because Kubernetes reads a rule with no `to` as "every destination". The
 chart also refuses keys it does not know, so a typo such as `port:` for
 `ports:` cannot remove the port limit.
+
+#### Push services for approval notifications
+
+Only when you turn on approval notifications (`webPush.enabled: true`,
+off by default): MEHO sends each notification to the push service of the
+browser maker of the person's phone or laptop. So MEHO needs outbound
+HTTPS (TCP 443) to these hosts:
+
+| Browser maker | Host | Used by |
+|---|---|---|
+| Apple | `*.push.apple.com` | Safari on iPhone, iPad and Mac |
+| Google | `fcm.googleapis.com` | Chrome on Android, Mac and Windows |
+| Microsoft | `*.notify.windows.com` | Edge on Windows |
+| Mozilla | `updates.push.services.mozilla.com` | Firefox |
+
+MEHO sends to no other host: it refuses a browser whose push address is
+not on this list. The browser makers do not publish fixed address ranges
+for these hosts. So allow the host names in your firewall or outgoing
+proxy. MEHO uses the `HTTPS_PROXY` and `NO_PROXY` variables of its
+container for these sends. In the Kubernetes network rules, the second
+rule of the example above (public addresses on port 443) covers them.
+
+What a notification carries, and what leaves your network:
+[MEHO on your phone and laptop](../guides/phone-and-laptop.md#what-leaves-your-network).
 
 ### Step 3 — Install the chart
 
@@ -300,8 +325,10 @@ This runs the OAuth device-code flow: the CLI prints a verification
 URL and code, you approve it in a browser, and the CLI stores the
 resulting token in your OS keyring.
 
-**Who logs in.** The install made two users with temporary passwords: the first admin (`admin`) and a second person
-who can approve the admin's changes (`approver`). Both are in the
+**Who logs in.** The install made two users with temporary passwords: the first admin (`admin`, in `MEHO-Admins`)
+and an approver (`approver`, in `MEHO-SA-Operators`). The approver is not an admin. The approver can approve the
+admin's risky changes, but not a change of rights: a change of rights needs a second admin. See
+[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). Both logins are in the
 Secret `meho-core-first-login`. Keycloak asks for a new password, a
 name and an email at the first login. Then it asks you to set up an
 authenticator app, and shows twelve recovery codes once. Save them: each

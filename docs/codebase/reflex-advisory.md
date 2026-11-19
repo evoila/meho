@@ -32,10 +32,13 @@ names a person and that is not inside a hosted agent run
 (`is_agent_caller`, `auth/agent_admission.py`). An AI tool that works
 with a person's own login counts as that person. Every other caller is
 asked: agents, hosted agent runs, service logins and runner logins. In a
-tenant with the gate on, their caution-or-higher writes need an active
-claim first. A service login and a runner login cannot make a claim, so
-there those writes are refused. `announce_gate_enabled` turns the gate
-on or off. See
+tenant with the gate on, a caution-or-higher write that would run at
+once is refused when the caller holds no active claim. A write that
+waits for approval is not asked. A claim counts only when it is trusted,
+not completed, and its TTL has not run out. A service login and a runner
+login cannot make a claim, so their `caution`-or-higher writes that would
+run at once are refused. `announce_gate_enabled` turns the gate on or off.
+See
 [the decision record](../decisions/2026-11-08-broadcast-people-read-agents-publish.md).
 
 ## Key types
@@ -234,7 +237,10 @@ fail-open-to-default). A dedicated rules table + CRUD/REST/MCP/UI surface
 (the full `broadcast_override` shape) is more than a one-flag policy
 warrants. The flag has no REST route of its own. A tenant opts in through
 the settings file: `spec.tenants[].policies.announce_gate_enabled`, applied
-by `POST /api/v1/settings/import` (see [settings.md](settings.md)). The
+by `POST /api/v1/settings/import` (see [settings.md](settings.md)).
+Turning the gate on applies with a token. Turning it off applies only for
+a person in the web console, which cannot apply a settings file yet; until
+then the gate cannot be turned off again. The
 write goes through `tenancy/policies.set_announce_gate_enabled`, which is
 audited and clears the 60s cache for that tenant.
 

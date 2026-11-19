@@ -417,7 +417,8 @@ async def test_a_user_renamed_to_the_sign_in_user_while_the_request_waits_is_ref
                 operator=approver, request=row, params=None
             )
     assert resumed.status != "ok", resumed
-    assert "target_login_user" in str(resumed.model_dump(mode="json"))
+    # The shared user check sees the rename first: the name is not the one on the card.
+    assert "not the name on the approval card" in str(resumed.model_dump(mode="json"))
     assert api.put_ids == []
 
 

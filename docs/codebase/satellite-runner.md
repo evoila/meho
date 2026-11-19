@@ -28,10 +28,10 @@ are three outcomes:
 
 - `safe` operations (reads) run. This is the default, and the only kind
   that can be in a recurring assignment.
-- `caution` operations (low-risk writes) run only through the write gate:
-  a person's approval, a signature from the central instance, and an
-  allowlist entry at the center and on the runner. If one part is
-  missing, the operation is refused.
+- `caution` operations (low-risk writes) are screened by the write gate in
+  the code: a person's approval, a signature from the central instance, and
+  an allowlist entry at the center and on the runner. Nothing sends a
+  `caution` item to a runner yet (not built yet), so none runs there.
 - `dangerous` and `destructive` operations never run on a runner.
 
 See "Satellite-mint tier ladder" below for the details.
@@ -65,10 +65,15 @@ client polls are `GET /api/v1/checks/assignment` and
     target table). v1 carries `name` / `product` / `version` /
     `fingerprint` / `extras` / `preferred_impl_id`; #2499 widens it with
     the connection-routing set (host/port/secret_ref/TLS). #3879 adds
-    `updated_at`: the executor drops the login it keeps for the target
-    when this value differs from the one it saw last, so a changed
-    secret or host is used on the next run and not only after the
-    kept login expires.
+    `updated_at`, and #6504 adds `connection_changed_at` (the time a
+    person last changed the connection). The executor drops the login
+    it keeps for the target when `connection_changed_at`, or the
+    connector class that serves the target, differs from what it saw
+    last, so a changed secret or host is used on the next run and not
+    only after the kept login expires. It uses `updated_at` only when
+    the gateway sends no `connection_changed_at` (an older gateway). A
+    probe moves `updated_at` but does not drop the login. See
+    [targets.md](targets.md).
   - `RunnerResult` / `RunnerResultBatch` — each result carries a
     runner-generated `result_uid` (uuid4) so central ingest can
     deduplicate spool re-posts idempotently. `status` is a runner-level

@@ -21,9 +21,10 @@ For these, MEHO checks when a person approves:
   approves it, and the request cannot be approved when MEHO could not
   read who is in the group.
 * In MEHO's own login realm, the change always needs a second person who
-  is a tenant admin (a platform admin for the platform admin group or
-  role). No self-approval rule covers it, also not the one of the
-  MEHO-SA-Operators group.
+  is a tenant admin. It needs a platform admin when the change can give
+  platform admin rights: the connector decides this from what the group or
+  role gives (``platform_admin``), not from its name. No self-approval rule
+  covers it, also not the one of the MEHO-SA-Operators group.
 
 The connector describes each parked request in
 ``proposed_effect["preview"]["grant"]``: ``user_id`` (the login the change
@@ -47,8 +48,11 @@ they also bind the run:
   who is in the group. A person can join the group after the request was
   made, so the list saved with the request is not enough.
 * The change does not run when it now needs a stricter approval than the
-  one it got: the realm became a login realm, the group became the platform
-  admin group, or MEHO cannot read which case it is.
+  one it got: the realm became a login realm, the group now gives platform
+  admin rights, or MEHO cannot read which case it is.
+* A change that acts on a list of objects shown on the card (for example
+  the credentials a credential delete removes, registered with
+  ``bound_ids``) does not run when the live card lists other ids.
 
 The decision audit row names the login the change is for and says whether
 it is the approver (:func:`grant_audit_fields`).
@@ -59,23 +63,37 @@ The rights-change mark
 Every change of rights carries one mark (``ApprovalRequest.rights_change``):
 the changes above in MEHO's own login realm, every request of an
 operation registered with :func:`register_rights_change_op` (for example
-a change of an operation's category or labels), and any other request
+a change of an operation's category or labels), every request whose params
+pass the check registered with :func:`register_rights_change_check` (for
+example a ``secret.move`` with a Keycloak side), and any other request
 that was parked with the mark. :func:`check_rights_change_approval` applies
 it: the requester never approves their own change of rights, whatever
 their group, at every risk level and with the break-glass switch on, and
 the approver is another admin
 (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
+
+A person approves each call
+---------------------------
+
+Both register functions also mark the operation with
+:func:`~meho_backplane.op_classes.declare_per_call_approval`. So a
+standing grant, a stored grant row and a run approval never cover a
+registered change of rights: making such a grant or such a run approval
+list is refused, and each call waits for its own approval. A connector
+needs no second mark for this.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.op_classes import declare_per_call_approval
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
@@ -95,6 +113,7 @@ __all__ = [
     "is_rights_change",
     "is_rights_change_op",
     "register_grant_op",
+    "register_rights_change_check",
     "register_rights_change_op",
 ]
 
@@ -137,6 +156,12 @@ class _GrantOp:
     user_id_params: tuple[str, ...]
     #: The params that can hold the id of the group the change is for.
     group_id_params: tuple[str, ...]
+    #: A card key that lists the ``{"id": ...}`` entries the run acts on, and
+    #: the refusal when the live card lists other ids. ``None``: no such list.
+    bound_ids: tuple[str, str] | None = None
+    #: The refusal when the approved card has no list under the ``bound_ids``
+    #: key: the request was made before MEHO put that list on the card.
+    bound_ids_missing: str | None = None
 
 
 #: op_id -> where its params carry the login and the group.
@@ -148,13 +173,22 @@ def register_grant_op(
     *,
     user_id_params: tuple[str, ...] = (),
     group_id_params: tuple[str, ...] = (),
+    bound_ids: tuple[str, str] | None = None,
+    bound_ids_missing: str | None = None,
 ) -> None:
     """Record that *op_id* changes the rights of a login or a group.
 
     *user_id_params* is empty for a change of a whole group;
     *group_id_params* is empty for a change that names no group.
+    *bound_ids* is ``(card key, refusal)`` for a change that acts on a list
+    of objects shown on the card: the run is refused with the refusal when
+    the live card lists other ids than the approved card.
+    *bound_ids_missing* is the refusal when the approved card has no list
+    under that key at all: the request is older than the list. A person
+    approves each call of *op_id* (:func:`declare_per_call_approval`).
     """
-    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params)
+    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params, bound_ids, bound_ids_missing)
+    declare_per_call_approval((op_id,))
 
 
 #: Operations that are always a change of rights, but not of one login or
@@ -164,8 +198,31 @@ _RIGHTS_CHANGE_OPS: set[str] = set()
 
 
 def register_rights_change_op(op_id: str) -> None:
-    """Record that every request of *op_id* is a change of rights."""
+    """Record that every request of *op_id* is a change of rights.
+
+    A person approves each call of *op_id* (:func:`declare_per_call_approval`).
+    """
     _RIGHTS_CHANGE_OPS.add(op_id)
+    declare_per_call_approval((op_id,))
+
+
+#: Operations whose request is a change of rights when its params pass a
+#: check: op_id -> the check. The check reads the params only (no I/O).
+_RIGHTS_CHANGE_CHECKS: dict[str, Callable[[dict[str, Any]], bool]] = {}
+
+
+def register_rights_change_check(op_id: str, check: Callable[[dict[str, Any]], bool]) -> None:
+    """Record that a request of *op_id* is a change of rights when *check* passes on its params.
+
+    A person approves each call of *op_id* (:func:`declare_per_call_approval`).
+    """
+    _RIGHTS_CHANGE_CHECKS[op_id] = check
+    declare_per_call_approval((op_id,))
+
+
+def _params_are_rights_change(request: ApprovalRequest) -> bool:
+    check = _RIGHTS_CHANGE_CHECKS.get(request.op_id)
+    return check is not None and isinstance(request.params, dict) and check(request.params)
 
 
 @dataclass(frozen=True)
@@ -234,10 +291,16 @@ def is_rights_change_op(op_id: str) -> bool:
 def is_rights_change(request: ApprovalRequest) -> bool:
     """True when *request* carries the rights-change mark.
 
-    A request parked before the ``rights_change`` column has no stored
-    mark, so a registered change in the login realm counts too.
+    A request whose params pass the check of its operation
+    (:func:`register_rights_change_check`) counts too. A request parked
+    before the ``rights_change`` column has no stored mark, so a
+    registered change in the login realm counts too.
     """
-    if request.rights_change or request.op_id in _RIGHTS_CHANGE_OPS:
+    if (
+        request.rights_change
+        or request.op_id in _RIGHTS_CHANGE_OPS
+        or _params_are_rights_change(request)
+    ):
         return True
     facts = grant_facts(request)
     return facts is not None and facts.login_realm
@@ -305,14 +368,14 @@ def _check_who_the_change_is_for(
 def _check_login_realm_approver(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
-    """In the login realm: a tenant admin, or a platform admin for the platform admin group."""
+    """In the login realm: a tenant admin; a platform admin when it gives platform admin."""
     if facts.platform_admin:
         if not operator.platform_admin:
             raise _refusal(
                 request,
                 operator,
                 "it changes who has rights in MEHO's own login realm "
-                "(the platform admin group or role, or a group MEHO could not read). "
+                "(a group or role that gives platform admin rights, or one MEHO could not read). "
                 "A second person who is a platform admin must approve it",
             )
     elif operator.tenant_role != TenantRole.TENANT_ADMIN:
@@ -418,6 +481,7 @@ async def grant_changed_since_request(
         _id_moved(facts, live)
         or _stricter_now(facts, live)
         or _approver_joined_group(request, facts, live)
+        or _bound_ids_moved(request, preview)
     )
     if reason is not None:
         kind = "unreadable" if reason == GRANT_REASON_UNREADABLE else "changed"
@@ -445,6 +509,33 @@ def _stricter_now(facts: GrantFacts, live: dict[str, Any]) -> str | None:
     realm_is_stricter = not facts.login_realm and live.get("login_realm") is not False
     group_is_stricter = not facts.platform_admin and live.get("platform_admin") is not False
     return GRANT_REASON_STRICTER if realm_is_stricter or group_is_stricter else None
+
+
+def _card_ids(preview: Any, key: str) -> frozenset[str] | None:
+    """The ids of the entries the card lists under *key*; ``None`` when they cannot be read."""
+    rows = preview.get(key) if isinstance(preview, dict) else None
+    if not isinstance(rows, list):
+        return None
+    ids = {row["id"] for row in rows if isinstance(row, dict) and _text(row.get("id"))}
+    return frozenset(ids) if len(ids) == len(rows) else None
+
+
+def _bound_ids_moved(request: ApprovalRequest, live_preview: Any) -> str | None:
+    """Why the live card lists other objects than the approved card, for a ``bound_ids`` op."""
+    op = _GRANT_OPS.get(request.op_id)
+    if op is None or op.bound_ids is None:
+        return None
+    key, reason = op.bound_ids
+    approved_preview = (request.proposed_effect or {}).get("preview")
+    if op.bound_ids_missing is not None and not (
+        isinstance(approved_preview, dict) and key in approved_preview
+    ):
+        return op.bound_ids_missing
+    now = _card_ids(live_preview, key)
+    if now is None:
+        return GRANT_REASON_UNREADABLE
+    approved = _card_ids(approved_preview, key)
+    return None if approved == now else reason
 
 
 def _approver_joined_group(

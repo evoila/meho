@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.auth.agent_admission import (
+    AGENT_IDENTITY_REMEDIATION,
     AGENT_IDENTITY_REQUIRED,
     NOT_AN_AGENT_REMEDIATION,
     AgentIdentityRequiredError,
@@ -182,6 +183,17 @@ async def test_unregistered_agent_is_refused() -> None:
     tenant_id = uuid4()
     with pytest.raises(AgentIdentityRequiredError, match="not registered"):
         await resolve_agent_admission(_operator(tenant_id))
+
+
+async def test_unregistered_agent_is_told_a_register_command_with_a_starting_grant() -> None:
+    """The register command in the text must work with every AGENT_GRANT_REQUIRED value."""
+    tenant_id = uuid4()
+    with pytest.raises(AgentIdentityRequiredError) as caught:
+        await resolve_agent_admission(_operator(tenant_id))
+    assert caught.value.remediation == AGENT_IDENTITY_REMEDIATION
+    assert "`meho agent-principal register <name> --grants none`" in AGENT_IDENTITY_REMEDIATION
+    assert "`--grants read-everything`" in AGENT_IDENTITY_REMEDIATION
+    assert "`--grants read-targets --target <target>`" in AGENT_IDENTITY_REMEDIATION
 
 
 async def test_agent_registered_in_another_tenant_is_refused() -> None:

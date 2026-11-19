@@ -64,11 +64,28 @@ surface (CLAUDE.md postulate 5).
 
 `harbor.robot.create` is classified `credential_mint` by
 [`broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py).
-The minted secret is returned to the **caller** in the `OperationResult`
-but the broadcast event collapses to aggregate-only — the secret never
-appears in the SSE stream or in `audit_log.payload`. The create waits for
-approval first; store the secret as soon as `meho approvals result <id>`
-shows it. Harbor does not expose it again.
+The broadcast event shows only that a robot was made: the secret never
+appears in the SSE stream or in `audit_log.payload`. A person approves each
+create call. No standing grant or run approval covers it.
+
+Harbor shows a robot secret only once. There are two ways to keep it:
+
+- **With `vault_target`** (`vault:<path>#<field>`, for example
+  `vault:tenants/<tenant_id>/ci/harbor#secret`). The path must be inside
+  the tenant's Vault path. An agent must use this way, because MEHO hides
+  secret fields from an agent. MEHO writes the secret to that Vault item
+  itself. An existing value in the field is replaced; the other fields of
+  the item stay. The answer has the robot `id` and `name`, `stored_to`, a
+  fingerprint and the length, but no secret. The approval request shows the
+  Vault mount, path and field. Before the call waits for approval, MEHO asks
+  Vault whether the write is allowed; if not, the call is refused. If the
+  write fails after the approval, MEHO deletes the new robot and the error
+  (`robot_secret_not_stored`) says with `robot_deleted` whether that worked.
+  When `robot_deleted` is false, delete the robot with `harbor.robot.delete`
+  before you try again.
+- **Without `vault_target`.** The secret is returned to the caller in the
+  answer. Store it as soon as `meho approvals result <id>` shows it. Harbor
+  does not show it again.
 
 `harbor.robot.list` (list) never returns `secret` in any entry —
 this is a Harbor API guarantee, not a MEHO filter.

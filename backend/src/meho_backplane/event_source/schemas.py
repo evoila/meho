@@ -31,7 +31,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import EventSource as EventSourceORM
@@ -159,6 +159,17 @@ class EventSource(BaseModel):
     deleted_at: datetime | None = None
 
 
+def _refuse_blank_secret(value: SecretStr | None) -> SecretStr | None:
+    """Refuse a secret that is empty or only whitespace (422 at the boundary).
+
+    A source checks every sender against this secret, so a blank one would
+    check nothing. ``None`` (no secret sent) stays allowed.
+    """
+    if value is not None and not value.get_secret_value().strip():
+        raise ValueError("secret must not be empty or blank")
+    return value
+
+
 class EventSourceCreate(BaseModel):
     """POST body. ``name`` and ``slug`` are immutable after creation.
 
@@ -181,6 +192,8 @@ class EventSourceCreate(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict)
     secret: SecretStr | None = None
 
+    _secret_not_blank = field_validator("secret")(_refuse_blank_secret)
+
 
 class EventSourceUpdate(BaseModel):
     """PATCH body. Every field optional; ``name`` / ``slug`` are absent.
@@ -201,6 +214,8 @@ class EventSourceUpdate(BaseModel):
     status: EventSourceStatus | None = None
     extras: dict[str, Any] | None = None
     secret: SecretStr | None = None
+
+    _secret_not_blank = field_validator("secret")(_refuse_blank_secret)
 
 
 def project_event_source_to_summary(row: EventSourceORM) -> EventSourceSummary:

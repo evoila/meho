@@ -76,9 +76,13 @@ from meho_backplane.connectors.keycloak._paths import (
 )
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     CLIENT_LOOKUP_ROLES,
+    ReadBackRefusedError,
     find_client_uuid,
+    flow_refused_error,
     missing_rights_error,
     names_missing_rights,
+    read_or_write,
+    reading_back,
     register_rights_check,
 )
 from meho_backplane.connectors.keycloak.ops_authflow_schemas import (
@@ -86,11 +90,12 @@ from meho_backplane.connectors.keycloak.ops_authflow_schemas import (
     ENSURE_APPROVAL_FLOW_OP_ID,
     WHEN_TO_USE_AUTHFLOW_BY_GROUP,
 )
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak_levels import (
     APPROVAL_LEVEL,
     APPROVAL_LEVEL_NAME,
@@ -265,9 +270,7 @@ async def _read_steps(
     realm: str,
     alias: str,
 ) -> list[Any]:
-    path = fill_path(
-        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(alias)}
-    )
+    path = fill_path(_AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": alias})
     return await get_admin_list_strict(connector, target, path, operator=operator)
 
 
@@ -304,7 +307,7 @@ async def _make_flow(
         idempotent_conflict=False,
     )
     for step in _STEPS:
-        values = {"realm": realm, "flowAlias": quote_segment(step.parent)}
+        values = {"realm": realm, "flowAlias": step.parent}
         if step.subflow:
             path = fill_path(_AUTH_FLOW_ADD_SUBFLOW_PATH, values)
             body = {
@@ -324,7 +327,7 @@ async def _make_flow(
     }
     executions_path = fill_path(
         _AUTH_FLOW_EXECUTIONS_PATH,
-        {"realm": realm, "flowAlias": quote_segment(APPROVAL_FLOW_ALIAS)},
+        {"realm": realm, "flowAlias": APPROVAL_FLOW_ALIAS},
     )
     for row in await _read_steps(connector, operator, target, realm, APPROVAL_FLOW_ALIAS):
         if not isinstance(row, dict):
@@ -362,7 +365,7 @@ async def _ensure_level_setting(
     )
     config_id = step.get("authenticationConfig")
     if config_id:
-        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(config_id))})
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": str(config_id)})
         have = await connector._get_admin_json(target, path, operator=operator)
         config = have.get("config")
         values: dict[str, Any] = config if isinstance(config, dict) else {}
@@ -375,7 +378,7 @@ async def _ensure_level_setting(
         return False
     path = fill_path(
         _AUTH_EXECUTION_CONFIG_PATH,
-        {"realm": realm, "executionId": quote_segment(str(step.get("id")))},
+        {"realm": realm, "executionId": str(step.get("id"))},
     )
     await connector._write_admin(
         target,
@@ -479,7 +482,8 @@ async def _bind(
         await connector._write_admin(
             target, "PUT", client_path, operator=operator, json=merged, idempotent_conflict=False
         )
-        client = await connector._get_admin_json(target, client_path, operator=operator)
+        with reading_back():
+            client = await connector._get_admin_json(target, client_path, operator=operator)
         overrides = client.get("authenticationFlowBindingOverrides")
     read_back = overrides.get("browser") if isinstance(overrides, dict) else None
     if read_back != flow_id:
@@ -501,31 +505,85 @@ def _refused_text(
     created: bool,
     level_setting_added: bool,
     level_changed: bool,
+    bound: bool = False,
     client_id: str | None = None,
 ) -> str:
     """Say what the run changed before Keycloak refused *step*.
 
-    Without *client_id* the text is short enough for the error message.
+    Without *client_id* the text is short enough for the error message: it
+    leaves out the flow's name, so the longest step still fits.
     """
+    flag = str(created).lower()
+    refused = f"Keycloak refused (HTTP 403) to {step}"
+    head = f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way"
+    if client_id is None:
+        return (
+            f"{head}: flow id {flow_id!r} (flow_created={flag}); {refused}. See extras.remediation."
+        )
     state = "made" if created else "already there"
     text = (
-        f"{ENSURE_APPROVAL_FLOW_OP_ID} stopped half-way: the flow {APPROVAL_FLOW_ALIAS!r} "
-        f"(id {flow_id!r}, flow_created={str(created).lower()}) is {state}; "
-        f"Keycloak refused (HTTP 403) to {step}"
+        f"{head}: the flow {APPROVAL_FLOW_ALIAS!r} (id {flow_id!r}, flow_created={flag}) "
+        f"is {state}; {refused}"
     )
-    if client_id is None:
-        return f"{text}. See extras.remediation."
     kept = [
         name
         for name, changed in (
             ("the flow", created),
             ("the level setting", level_setting_added),
             ("the level name in the realm's level map", level_changed),
+            ("the binding to the client (MEHO could not read it back)", bound),
         )
         if changed
     ]
     after = f"These stay in the realm: {', '.join(kept)}." if kept else "MEHO changed nothing."
     return f"{text} (client {client_id!r}). {after}"
+
+
+async def _ensure_flow(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+) -> tuple[str, bool, list[dict[str, Any]]]:
+    """Find or make the flow; return ``(flow_id, created, steps)``.
+
+    A 403 says whether the run only read (nothing changed) or may have made
+    the flow only in part.
+    """
+    writing = False
+    try:
+        flow_id = await _find_flow_id(connector, operator, target, realm)
+        created = flow_id is None
+        if flow_id is None:
+            writing = True
+            flow_id = await _make_flow(connector, operator, target, realm)
+        steps = _listed_steps(
+            await _read_steps(connector, operator, target, realm, APPROVAL_FLOW_ALIAS)
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise await flow_refused_error(
+            connector,
+            operator,
+            target,
+            exc,
+            op_id=ENSURE_APPROVAL_FLOW_OP_ID,
+            roles=_ROLES,
+            flow_alias=APPROVAL_FLOW_ALIAS,
+            writing=writing,
+        ) from exc
+    difference = _difference(steps)
+    if difference is not None and created:
+        raise KeycloakApprovalFlowError(
+            "check_failed",
+            f"flow {APPROVAL_FLOW_ALIAS!r} was made, but its steps read back wrong: "
+            f"{difference}. The client was not bound to it.",
+        )
+    if difference is not None:
+        raise KeycloakApprovalFlowError(
+            "other_steps",
+            f"flow {APPROVAL_FLOW_ALIAS!r} exists with other steps: {difference}. "
+            "Nothing was changed. Fix the flow by hand, or delete it and run again.",
+        )
+    return flow_id, created, steps
 
 
 @names_missing_rights(ENSURE_APPROVAL_FLOW_OP_ID, _ROLES)
@@ -537,13 +595,12 @@ async def keycloak_authflow_ensure_approval_flow(
 ) -> dict[str, Any]:
     """Make the approval sign-in flow when it is missing and bind it to the client."""
     realm = resolve_realm_config(target).managed_realm
-    realm_segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
     client_uuid = await find_client_uuid(
         self,
         operator,
         target,
-        realm_segment,
+        realm,
         client_id,
         op_id=ENSURE_APPROVAL_FLOW_OP_ID,
         roles=_ROLES,
@@ -552,43 +609,17 @@ async def keycloak_authflow_ensure_approval_flow(
         raise KeycloakApprovalFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
-    client_path = fill_path(
-        _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
-    )
-    await _check_levels(self, operator, target, realm_segment, client_path)
+    client_path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid})
+    await _check_levels(self, operator, target, realm, client_path)
 
-    flow_id = await _find_flow_id(self, operator, target, realm_segment)
-    created = flow_id is None
-    if flow_id is not None:
-        steps = _listed_steps(
-            await _read_steps(self, operator, target, realm_segment, APPROVAL_FLOW_ALIAS)
-        )
-        difference = _difference(steps)
-        if difference is not None:
-            raise KeycloakApprovalFlowError(
-                "other_steps",
-                f"flow {APPROVAL_FLOW_ALIAS!r} exists with other steps: {difference}. "
-                "Nothing was changed. Fix the flow by hand, or delete it and run again.",
-            )
-    else:
-        flow_id = await _make_flow(self, operator, target, realm_segment)
-        steps = _listed_steps(
-            await _read_steps(self, operator, target, realm_segment, APPROVAL_FLOW_ALIAS)
-        )
-        difference = _difference(steps)
-        if difference is not None:
-            raise KeycloakApprovalFlowError(
-                "check_failed",
-                f"flow {APPROVAL_FLOW_ALIAS!r} was made, but its steps read back wrong: "
-                f"{difference}. The client was not bound to it.",
-            )
+    flow_id, created, steps = await _ensure_flow(self, operator, target, realm)
 
     setting_added = level_changed = False
     step = "write the settings of the level step"
     try:
-        setting_added = await _ensure_level_setting(self, operator, target, realm_segment)
+        setting_added = await _ensure_level_setting(self, operator, target, realm)
         step = "write the realm's level map"
-        level_changed = await _ensure_level_name(self, operator, target, realm_segment)
+        level_changed = await _ensure_level_name(self, operator, target, realm)
         step = "bind it to the client"
         binding = await _bind(self, operator, target, client_path, flow_id)
     except httpx.HTTPStatusError as exc:
@@ -597,10 +628,12 @@ async def keycloak_authflow_ensure_approval_flow(
         refused = functools.partial(
             _refused_text,
             flow_id,
-            step=step,
+            step=read_or_write(exc, step),
             created=created,
             level_setting_added=setting_added,
             level_changed=level_changed,
+            # Only the binding step reads back a change it made.
+            bound=isinstance(exc, ReadBackRefusedError),
         )
         raise await missing_rights_error(
             self,
@@ -643,5 +676,8 @@ async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 register_rights_check(
-    ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview, per_object=_PER_CLIENT
+    ENSURE_APPROVAL_FLOW_OP_ID,
+    _ROLES,
+    with_current_binding(client=True)(_approval_flow_preview),
+    per_object=_PER_CLIENT,
 )

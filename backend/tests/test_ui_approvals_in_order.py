@@ -31,6 +31,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
+import pytest
 import respx
 from sqlalchemy import select, update
 
@@ -42,6 +43,7 @@ from meho_backplane.operations.approved_reveal import WAITING_FOR_REQUESTER
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
 from meho_backplane.ui.routes.approvals import in_order
 from meho_backplane.ui.routes.approvals.in_order import group_warnings
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from tests.test_ui_approvals import (
     _RESOLVE_OPERATOR,
     _REVIEWER_SUB,
@@ -236,15 +238,15 @@ def _get(session_id: uuid.UUID, path: str) -> Any:
         return client.get(path)
 
 
-def _plan(session_id: uuid.UUID, operator: Operator | None = None) -> Any:
-    """Open the in-order modal of ``_REF`` as *operator* (default: an admin)."""
+def _plan(session_id: uuid.UUID, operator: Operator | None = None, *, work_ref: str = _REF) -> Any:
+    """Open the in-order modal of *work_ref* as *operator* (default: an admin)."""
     operator = operator or _operator(
         tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN
     )
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
-            return client.get(f"/ui/approvals/in-order?work_ref={_REF_Q}")
+            return client.get("/ui/approvals/in-order", params={"work_ref": work_ref})
 
 
 def _sa_operator() -> Operator:
@@ -278,6 +280,107 @@ def test_history_offers_in_order_button_only_for_a_ticket_with_pending_steps() -
     assert "/ui/approvals/in-order?work_ref=gh%3Aexample/repo%237" in filtered.text
     assert "data-approval-in-order-open" not in unfiltered.text
     assert "data-approval-in-order-open" not in other_tab.text
+
+
+def _set_work_ref(request_id: uuid.UUID, work_ref: str) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            await session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .values(work_ref=work_ref)
+            )
+
+    asyncio.run(_do())
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [("  " + "x" * 256 + "  ", "x" * 256), ("A\u0308" * 130, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_plan_counts_the_ticket_id_length_after_cleaning(typed: str, stored: str) -> None:
+    """The page checks the ticket id like the approvals search box: clean, then count."""
+    session_id = _session()
+    _set_work_ref(_seed(1, "caution"), stored)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.TENANT_ADMIN)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/approvals/in-order", params={"work_ref": typed})
+
+    assert response.status_code == 200, response.text
+    assert 'data-approval-in-order-step="1"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [
+        ("CHG\u200b1", "control or invisible characters"),
+        ("x" * 257, "at most 256 characters"),
+        ("   ", "must name a change ticket"),
+    ],
+    ids=["invisible", "too-long", "blank"],
+)
+def test_plan_refuses_a_bad_ticket_id(typed: str, message: str) -> None:
+    """A refused value is a 422 window that shows the rule and lists no step."""
+    session_id = _session()
+    _seed(1, "caution")
+    response = _get(session_id, f"/ui/approvals/in-order?work_ref={quote(typed, safe='')}")
+
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "data-approval-in-order-refused" in response.text
+    assert message in response.text
+    assert "data-approval-in-order-step" not in response.text
+
+
+def test_run_with_a_bad_ticket_id_shows_the_rule_and_approves_nothing() -> None:
+    """A POST with a refused ticket id answers with the rule and leaves the steps pending."""
+    session_id = _session()
+    first = _seed(1, "caution")
+    resume = _fake_resume(set())
+
+    response = _post(session_id, resume, work_ref="CHG\u200b1")
+
+    resume.assert_not_awaited()
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "control or invisible characters" in response.text
+    assert _request_status(first) == "pending"
+
+
+def test_list_and_window_count_the_same_rows_when_a_ticket_is_stored_in_two_forms() -> None:
+    """One ticket stored as the cleaned id and, from before the rule, with a space.
+
+    The Pending tab filtered with the text as typed finds both forms, and the
+    window lists the same rows: the step numbers in the list and the steps
+    in the window agree. Filtered with the cleaned id, both show only the
+    cleaned form, and a lone request offers no in-order window.
+    """
+    session_id = _session()
+    first = _seed(1, "caution")
+    second = _seed(2, "caution")
+    _set_work_ref(second, _REF + " ")
+    third = _seed(3, "caution")
+    typed = quote(_REF + " ", safe="")
+
+    listed = _get(session_id, f"/ui/approvals/list?tab=pending&order=oldest&work_ref={typed}")
+    window = _plan(session_id, work_ref=_REF + " ")
+
+    assert listed.status_code == 200, listed.text
+    assert window.status_code == 200, window.text
+    assert "data-approval-in-order-open" in listed.text
+    for step in (1, 2, 3):
+        assert f"Step {step} of 3" in listed.text
+        assert f'data-approval-in-order-step="{step}"' in window.text
+    assert 'data-approval-in-order-step="4"' not in window.text
+    assert _form_step_ids(window.text) == [str(first), str(second), str(third)]
+
+    cleaned = _get(session_id, f"/ui/approvals/list?tab=pending&order=oldest&work_ref={_REF_Q}")
+    assert "Step 1 of 2" in cleaned.text
+    assert "Step 2 of 2" in cleaned.text
+    assert "of 3" not in cleaned.text
 
 
 def test_plan_lists_steps_oldest_first_with_a_start_form() -> None:

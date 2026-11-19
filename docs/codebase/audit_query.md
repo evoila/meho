@@ -141,9 +141,15 @@ never stored. Query parameters: `request_id` (UUID), `caller` (the exact
 spans. Migration `0169` added `request_id` and `operator_sub` to
 `dispatch_trace`; an older trace has neither and is found by time only.
 Access rules are those of the single trace read: a person reads every trace
-of the tenant, an agent reads none unless the tenant lets agents read
-traces, and never a trace marked `redaction_uncertain`. There is no CLI
-command for it yet.
+of the tenant; an agent or service login reads only the traces of its own
+calls (MEHO filters on its own `sub` and ignores its `caller`); an agent
+reads none unless the tenant lets agents read traces, and never a trace
+marked `redaction_uncertain`. A call that ran after a person approved it
+stores the requester as its caller (`handle_owner_sub_var`, the same owner
+as its result handle), so the agent that asked reads its trace. `since` also limits a search by
+`request_id`: it is a filter on the capture time, and it applies together
+with `request_id`. To find an older trace by its request id, give a wider
+`since`, for example `since=30d`. There is no CLI command for it yet.
 
 ### Results a handler returns: error, wait, deny (#4274, #4275)
 
@@ -355,7 +361,7 @@ take `event_class` as a required argument.
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
 | `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
-| `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
+| `work_ref` | `str \| None` | `audit_log.work_ref IN (cleaned id, text as typed)` — the **whole id**, see "Search filters" below (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
 | `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
 | `has_trace` | `bool \| None` | `True` keeps only the rows the trace route returns a trace for: `event_class = operation_execution` AND `EXISTS` a `dispatch_trace` row with the same `audit_id` and the caller's `tenant_id` (#4855). `False` keeps the other rows. `None` applies no filter. The unique index `dispatch_trace_audit_id_idx` makes the check cheap. On the REST body (`AuditQueryRequest`) and used by `meho audit trace list`; not on the MCP input schema. |
 | `limit` | `int` (1-1000) | Default 100. |
@@ -386,7 +392,7 @@ Field-to-source mapping:
 | `principal_name` | `payload['principal_name']` when present. Four writers set it: MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), `DISPATCH` operation run and refusal rows (#4029, `operations/_audit.py:write_audit_row`), and the tool rows of MEHO's own agent runs (`agent/tool_audit.py:write_agent_tool_row`). Each takes the name from `auth/display_name.py:principal_display_name` (#3885): the token's `name` claim, else for an agent token the registered agent name, else for any machine token its client id. The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when none of these gives a name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
-| `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. The server reads the `Meho-Work-Ref` header as UTF-8, with latin-1 as the fallback for bytes that are not valid UTF-8 (`decode_work_ref_header` in `operations/_audit.py`). So a non-ASCII ticket id such as `Änderung-7` lands on the audit row as the client sent it. |
+| `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + filterable by the whole ticket id since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. The server reads the `Meho-Work-Ref` header as UTF-8, with latin-1 as the fallback for bytes that are not valid UTF-8 (`decode_work_ref_header` in `operations/_audit.py`). So a non-ASCII ticket id such as `Änderung-7` lands on the audit row as the client sent it. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
 | `policy_rule` | `audit_log.policy_rule` (#6044, migration `0168`) — the policy rule that matched the call, as `<source>:<rule id>`, for example `default:person.safe`. Today only the policy evaluator in shadow mode (`POLICY_ENGINE_SHADOW`, see [policy-evaluator.md](policy-evaluator.md)) sets it, so the text ends with ` (shadow)`: the evaluator matched this rule, but today's checks decided the call. Set from `policy_rule_var`, only on rows written after the call's own policy gate ran. `None` with the switch off, where no gate ran (also on a step refused before its own gate), on every approval "decision" row (also an expiry written during a retry), on the run of an approved call (the gate does not run again), and on rows from before the column existed. `meho audit show` prints it. |
 | `policy_version` | `audit_log.policy_version` (#6044, migration `0168`) — the version of the policy file the rule came from. `None` while no policy file decides (today always). |
@@ -464,7 +470,7 @@ query_audit(filters, tenant_id, session)
   │       [+ audit_id = :audit_id]
   │       [+ parent_audit_id = :parent_audit_id]                ← exact match
   │       [+ agent_session_id = :agent_session_id]
-  │       [+ work_ref = :work_ref]                              ← exact match
+  │       [+ work_ref IN (:cleaned, :typed)]                    ← whole id
   │       [+ event_class = :event_class]                        ← exact match
   │       [+ operator_sub ILIKE :principal OR payload->>'principal_name' ILIKE :principal]
   │       [+ operator_sub = :principal_sub]                     ← exact match
@@ -540,14 +546,108 @@ and NFC.
   NFD form, or with spaces at the ends, can be longer than 256 code
   points and still be taken. The body size limit of the server bounds
   the raw input.
-- A 422 answer for a bad body names the rule. When the refused input
-  cannot be encoded as UTF-8 (a lone surrogate written as `\ud800` in
-  JSON), the answer shows it as backslash escapes
-  (`api/request_validation.py`).
+- A 422 answer for a bad body, query or path value names the rule and
+  the code point. It does not show the refused ticket id: the `input`
+  field is left out of the error (`api/request_validation.py`). It is
+  also left out of any other error of the same answer whose input holds
+  the refused ticket id, for example a missing field, which carries the
+  whole body. A header
+  that is refused leaves one log line, `work_ref_header_refused`, with
+  the request id, the method, the URL path (`path`) and the rule that failed
+  (`empty`, `invisible_character` or `too_long`). It never holds the
+  value. So an operator can find a client that sends a blank or bad
+  header after an upgrade.
 
 Rows stored before this rule are not changed. A ticket id stored before
-this release may carry white space at the ends, so an exact-match filter
-or a run approval made for the cleaned text does not match such a row.
+this release may carry white space at the ends, or another Unicode form,
+so a run approval made for the cleaned text does not match such a row.
+A search filter still finds it with the exact old text, if that text
+follows the rule (see below).
+
+### Search filters
+
+A filter on a ticket id is checked with the same rule as a stored one
+(the type `WorkRefFilter`), and a bad value is refused with the same
+message (HTTP 422, or invalid params on MCP). A good value matches two
+texts (`work_ref_filter_values` in `work_ref.py`): the cleaned id
+(stripped and made NFC), so a search finds a ticket id however it is
+typed, and the text exactly as typed. So a search finds the exact text
+stored before the rule, if that text follows the rule. An old id that
+breaks the rule (for example with a tab) can no longer be used as a
+filter; such rows still show in a list without a filter. A filter
+`"  CHG1  "` finds rows stored as `CHG1` and as `  CHG1  `; a filter
+`CHG1` finds only `CHG1`. The filters are:
+
+- the audit search (`POST /api/v1/audit/query`, `POST
+  /api/v1/audit/class-counts`, `GET /api/v1/audit/by-work-ref/{ref}`;
+  CLI `meho audit query --filter-work-ref`);
+- the approvals list (`GET /api/v1/approvals`, MCP `meho_approvals_list`);
+- the agent runs list (`GET /api/v1/agents/runs`, MCP
+  `meho_agents_list_runs`);
+- the scheduler list (`GET /api/v1/scheduler/triggers`, MCP
+  `meho_scheduler_list`);
+- the runbook runs list (`GET /api/v1/runbooks/runs`, MCP
+  `meho_runbook_list_runs`);
+- the broadcast history (`GET /api/v1/broadcast/recent`, MCP
+  `meho_broadcast_recent` and `meho_broadcast_watch`, key
+  `filter.work_ref`).
+
+An empty or blank filter is refused on every REST filter and on the
+nested broadcast filter (`filter.work_ref` of `meho_broadcast_recent` and
+`meho_broadcast_watch`). Leave the filter out for no filter. On the
+top-level filter of the MCP list tools `meho_approvals_list`,
+`meho_agents_list_runs`, `meho_scheduler_list` and
+`meho_runbook_list_runs`, a blank value means "no filter": MCP drops
+blank optional text arguments of read tools before it checks them
+(`mcp/handlers.py`). `tests/test_mcp_empty_optional_filter.py` pins this.
+
+The console search boxes of the agent runs, the scheduler, the audit
+and the approvals pages, and the approvals "in order" page, check the
+value with the same rule (`filter_work_ref` in
+`ui/routes/work_ref_form.py`): they clean first and then count the
+length. A blank box means no filter. The "in order" page needs a ticket,
+so there a blank value is refused too.
+
+A refused value still gets its page, list or window, with no rows and
+the rule text in it (`refused_filter_text`). The answer is a 422 with the
+header `Meho-Work-Ref-Refused` (`mark_work_ref_refused`). htmx does not
+swap an error answer by itself, so the console script
+`static/src/app/work-ref-refused.js` swaps in a 422 HTML answer with
+that header. So a bookmarked page and a search-as-you-type box both show
+why the value was refused.
+
+The "Load more" button of the audit and approvals pages adds its answer
+at the end of the rows list. A refused answer there is the whole results
+area, so it also carries the htmx headers `HX-Retarget` and `HX-Reswap`.
+They make htmx replace the results area instead of adding to the list.
+
+The "in order" window lists the same requests as the Pending tab
+filtered with the same text: the cleaned id and the text as typed. The
+step numbers on the Pending tab count the same rows. With a filter,
+`pending_chain_positions` numbers all the rows it matched as one change
+ticket, also when they are stored in two forms (for example `CHG1` and,
+from before the rule, `CHG1 ` with a space at the end). So the numbers in
+the list and in the window agree.
+
+### How a new door is found
+
+`tests/test_work_ref_doors.py` walks every REST and console request
+model field, every query, path, header and form parameter, and every MCP
+tool argument named `work_ref`. It fails when one does not use the
+shared type (`WorkRef`, or `WorkRefFilter` for a search filter) or the
+shared function (`normalize_work_ref`, `work_ref_argument` for MCP),
+unless it is on a short list with a reason (`_REST_OTHER_DOORS`, 13
+entries):
+
+- the `Meho-Work-Ref` header of the two agent run routes;
+- the four console forms that store a ticket id (`form_work_ref`);
+- the seven console search boxes and pages that check the value with
+  `filter_work_ref` (agent runs, scheduler, audit page, audit results,
+  the two approvals search boxes and the approvals "in order" page).
+
+The test fails too when an entry of the list matches no route. The
+command line tool has the same rule in `cli/internal/api/workref.go`.
+Both tests read one case list, `testdata/work_ref_cases.json`.
 
 ## Per-session replay (G8.2-T3 #1011)
 
@@ -674,11 +774,11 @@ tenant-scoping invariant is enforced one layer up.
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
 | `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `has_trace`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. CLI: `meho audit count` (#4983). |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
-| `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
+| `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (whole ticket id); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
 | `GET /api/v1/audit/traces` | Finds stored traces by `request_id`, `caller` and the window `since` / `until`, without the audit row (#6452). See "Find a trace without its audit row". 200 body is `{items: [TraceView]}`. | Flight-recorder trace search. |
-| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), and never a trace marked `redaction_uncertain`. Both answer `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read. Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace; any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. A person keeps full access, independent of the agent gate. An agent login (`principal_kind=agent`) gets the agent rules: no trace unless `should_expose_to_agent` is true for the tenant (checked before the load), only the trace of its own call (the trace's `operator_sub` is the agent's `sub`; a trace with no stored caller is never shown to an agent), and never a trace marked `redaction_uncertain`. A service login (`principal_kind=service`, also a paired add-on) gets only the trace of its own call. Each answers `trace_present=false` (`_load_trace_for`). | Flight-recorder trace. |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}`; `loose_row_count` is the nodes whose parent id names no row, #4670). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped

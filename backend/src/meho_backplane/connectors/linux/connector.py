@@ -55,7 +55,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
-from meho_backplane.connectors.adapters.ssh import SshConnector
+from meho_backplane.connectors.adapters.ssh import SshConnector, fingerprint_error_extras
 from meho_backplane.connectors.linux.ops import (
     LINUX_OPS,
     LINUX_WHEN_TO_USE_BY_GROUP,
@@ -291,7 +291,7 @@ class LinuxSshConnector(SshConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="ssh: cat /etc/os-release",
-                extras={"error": str(exc)},
+                extras=fingerprint_error_extras(exc),
             )
 
         raw = (proc.stdout or "") if hasattr(proc, "stdout") else ""

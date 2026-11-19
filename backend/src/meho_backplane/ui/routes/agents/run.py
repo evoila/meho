@@ -127,6 +127,7 @@ from meho_backplane.api.v1.agent_runs import AgentRunRequest, _bound_work_ref
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
+    RunNotOwnedCancellationError,
     UnauthorizedCancellationError,
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
@@ -503,7 +504,9 @@ async def cancel_run(
       error.
     * 403 (``agent_run_cancel_forbidden``) if the operator's role ranks
       below the cancel floor (defence-in-depth; the route gate already
-      rejects ``read_only``).
+      rejects ``read_only``), or if the run was started by another
+      person and the operator is not a tenant admin. That detail says who
+      may stop the run.
     """
     del request  # tenant + identity come from the lifted operator.
     structlog.contextvars.bind_contextvars(
@@ -518,6 +521,11 @@ async def cancel_run(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="agent_run_not_found",
+        ) from exc
+    except RunNotOwnedCancellationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"agent_run_cancel_forbidden: {exc}",
         ) from exc
     except UnauthorizedCancellationError as exc:
         raise HTTPException(

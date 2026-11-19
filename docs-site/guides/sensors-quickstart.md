@@ -259,6 +259,24 @@ history with `meho sensor results <sensor_id>` (filters `--from`,
 `--to`, `--state`). MEHO keeps this history for 7 days by default
 (`CHECKS_EVIDENCE_RETENTION_DAYS`).
 
+## Run a sensor once now
+
+A new sensor waits one full interval for its first run. To see a result
+sooner, or to check a sensor again between two scheduled runs, ask MEHO
+to run it now:
+
+```bash
+meho sensor run <sensor_id>
+meho sensor results <sensor_id>
+```
+
+MEHO does not run the check inside the command. It makes the sensor due
+at once, and the runner runs it at its next tick (10 seconds by default),
+with its normal login and rules. Read the new result with
+`meho sensor results`. A paused sensor is refused: run
+`meho sensor resume <sensor_id>` first. Sending the command twice is safe.
+It needs the `tenant_admin` role.
+
 ## Change a sensor or a dashboard
 
 You can change a sensor or a dashboard in place. Its id stays. A sensor

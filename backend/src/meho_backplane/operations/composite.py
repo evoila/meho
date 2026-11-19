@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: file-size — core composite-dispatch infrastructure a hair
-# over the 600-line ceiling after #3351 review B1 added the fail-closed
-# multi-gate resume guard + its ``composite_resume_scope_var`` and the corrected
-# resume-contract docstrings. Splitting the contextvars away from the single
-# ``enforce_subop_policy`` seam that reads them would scatter one tightly-coupled
-# mechanism across modules for a few lines — not warranted.
+# code-quality-allow: file-size — core composite-dispatch infrastructure over
+# the 600-line ceiling: the resume contextvars, the ``enforce_subop_policy``
+# seam that reads them and ``run_governed_subop`` form one tightly-coupled
+# mechanism. The record of the steps a run already did lives in
+# ``composite_steps``.
 
 """Composite-operation recursion infrastructure for the G0.6 dispatcher.
 
@@ -103,6 +102,11 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations.composite_steps import (
+    STEP_DONE,
+    StepJournal,
+    current_step_journal,
+)
 from meho_backplane.operations.governed_subops import governed_subops_for
 from meho_backplane.settings import get_settings
 
@@ -116,6 +120,7 @@ __all__ = [
     "CompositeRecursionLimitExceeded",
     "CompositeResumeState",
     "DispatchChild",
+    "SubopStep",
     "approved_run_var",
     "composite_depth_var",
     "composite_dispatch_var",
@@ -125,6 +130,7 @@ __all__ = [
     "composite_resume_var",
     "enforce_subop_policy",
     "get_dispatch_child",
+    "run_governed_subop",
 ]
 
 
@@ -231,15 +237,12 @@ composite_dispatch_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextV
 #: sub-op. Every other governed sub-op that is not ``destructive`` and not
 #: marked ``requires_approval`` goes ahead because a person approved the run
 #: (:func:`_covered_by_approved_run`), whoever runs the resume and however
-#: the approval was given (web click or command line). So the composite
-#: completes in one resume. A multi-gate re-park — a later governed sub-op
-#: that is ``destructive`` or ``requires_approval=True`` — is **not
-#: supported** by this re-entry mechanism (there is no completed-leg guard, so
-#: a second park + second resume would re-run earlier legs). It is detected via
-#: :data:`composite_resume_scope_var` and fails closed in
-#: :func:`enforce_subop_policy` with ``composite_resume_multi_gate_unsupported``
-#: rather than parking. A step marked ``after_main_effect`` is the exception
-#: (#4217): it saved where its own resume continues, so it may wait again.
+#: the approval was given (web click or command line). A later sub-op that is
+#: ``destructive`` or ``requires_approval=True`` waits for its own approval.
+#: The steps the earlier runs did are stored on the request
+#: (:mod:`~meho_backplane.operations.composite_steps`), so no resume sends
+#: one of them again. While this var is still set the run has not reached
+#: the approved step, and every step it reaches must be a stored one.
 composite_resume_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume",
     default=None,
@@ -253,12 +256,9 @@ composite_resume_var: ContextVar[tuple[str, str] | None] = ContextVar(
 #: but — unlike that var — **never consumed**: it stays set for the entire
 #: re-entry so :func:`enforce_subop_policy` can tell it is running inside a
 #: resume even after the approved sub-op has already cleared and consumed
-#: ``composite_resume_var``. Read only by the fail-closed multi-gate guard: if
-#: any sub-op *other* than the approved one reaches ``NEEDS_APPROVAL`` during a
-#: resume, the composite has more than one governed gate, which this mechanism
-#: cannot re-enter safely, so the guard aborts with
-#: ``composite_resume_multi_gate_unsupported`` instead of parking a second
-#: request. ``None`` for every ordinary (non-resume) dispatch.
+#: ``composite_resume_var``. Read by :func:`_covered_by_approved_run` and by
+#: :func:`_resume_has_not_reached_approved_step`. ``None`` for every ordinary
+#: (non-resume) dispatch.
 composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume_scope",
     default=None,
@@ -319,16 +319,25 @@ def composite_resume_state(op_id: str) -> dict[str, Any] | None:
 
 
 def _resume_has_not_reached_approved_step() -> bool:
-    """``True`` while a resume that must skip earlier writes has not run its approved step.
+    """``True`` while the run after an approval has not run its approved step.
 
-    Set only when the approved sub-op was marked ``after_main_effect``
-    (#4217): the composite's resume must go straight to that step. Until
-    the approved sub-op clears (which consumes :data:`composite_resume_var`),
-    any other governed write that is not itself ``after_main_effect`` is a
-    write the first run already did.
+    Until the approved sub-op clears (which consumes
+    :data:`composite_resume_var`), every step is one the earlier run did. It
+    comes back from the stored steps
+    (:mod:`~meho_backplane.operations.composite_steps`); a governed step that
+    is not among them is refused (``composite_resume_repeats_write``).
+    """
+    return composite_resume_scope_var.get() is not None and composite_resume_var.get() is not None
+
+
+def _resume_continues_at_approved_step() -> bool:
+    """``True`` when the approved step is ``after_main_effect``.
+
+    Such a composite reads its saved state and continues at the approved
+    step on its own, so it may make new reads on the way there.
     """
     bound = composite_resume_state_var.get()
-    return bound is not None and bound.after_main_effect and composite_resume_var.get() is not None
+    return bound is not None and bound.after_main_effect
 
 
 class DispatchChild(Protocol):
@@ -488,6 +497,20 @@ def get_dispatch_child(
             parent_op_id=parent_op_id,
             child_op_id=op_id,
         )
+        effective_target = parent_target if target is None else target
+        journal = current_step_journal()
+        entry: dict[str, Any] | None = None
+        if journal is not None:
+            stop = _replayed_child(
+                journal,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=effective_target,
+                params=params,
+            )
+            if stop is not None:
+                return stop
+            entry = journal.start(connector_id, op_id, effective_target, params)
         # Bind the audit-tree + depth + op-id chain contextvars for
         # the duration of the recursive dispatch. Tokens make resets
         # exception-safe -- ``finally`` restores siblings' clean state.
@@ -497,20 +520,69 @@ def get_dispatch_child(
             (*_composite_op_id_chain_var.get(), parent_op_id),
         )
         try:
-            effective_target = parent_target if target is None else target
-            return await dispatch(
+            result = await dispatch(
                 operator=parent_operator,
                 connector_id=connector_id,
                 op_id=op_id,
                 target=effective_target,
                 params=params,
             )
+            if journal is not None and entry is not None:
+                journal.finish(entry, result.model_dump(mode="json"))
+            return result
         finally:
             _composite_op_id_chain_var.reset(chain_token)
             composite_depth_var.reset(depth_token)
             parent_audit_id_var.reset(audit_token)
 
     return _dispatch_child
+
+
+def _replayed_child(
+    journal: StepJournal,
+    *,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult | None:
+    """What a ``dispatch_child`` step returns without running, during a resume.
+
+    A step the earlier run finished returns its stored result. A step it
+    only started stops the run (``composite_resume_step_outcome_unknown``).
+    Before the approved step, a step the earlier run did not do is refused
+    (``composite_resume_repeats_write``), unless the composite continues at
+    an ``after_main_effect`` step on its own. ``None``: run the step.
+    """
+    from meho_backplane.operations._errors import (
+        result_composite_resume_repeats_write,
+        result_composite_resume_step_outcome_unknown,
+    )
+
+    replayed = journal.take(connector_id, op_id, target, params)
+    if replayed is not None:
+        if replayed.get("status") == STEP_DONE:
+            _log.info(
+                "composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id
+            )
+            return OperationResult.model_validate(replayed.get("result"))
+        _log.error(
+            "composite_resume_step_outcome_unknown",
+            composite_op_id=journal.composite_op_id,
+            blocked_op_id=op_id,
+        )
+        return result_composite_resume_step_outcome_unknown(
+            composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
+        )
+    if _resume_has_not_reached_approved_step() and not _resume_continues_at_approved_step():
+        approved = composite_resume_var.get()
+        return result_composite_resume_repeats_write(
+            composite_op_id=journal.composite_op_id,
+            approved_op_id=approved[0] if approved is not None else "<unknown>",
+            blocked_op_id=op_id,
+            duration_ms=0.0,
+        )
+    return None
 
 
 def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
@@ -527,13 +599,10 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     the params-hash (not op_id alone) pins the clear to the exact entity
     approved. This clears **exactly one** sub-op. Every other governed sub-op
     that is not ``destructive`` and not ``requires_approval`` goes ahead under
-    the approval of the run (:func:`_covered_by_approved_run`, #3980). If any
-    other governed sub-op would instead need its own approval, the fail-closed multi-gate guard in
-    :func:`enforce_subop_policy` (keyed off the unconsumed
-    :data:`composite_resume_scope_var`) aborts the resume rather than re-park it
-    (#3351 review B1) — it does **not** re-park the rest. The exception is a
-    step marked ``after_main_effect`` (#4217): it saved where to continue, so
-    it may wait for its own approval during the resume.
+    the approval of the run (:func:`_covered_by_approved_run`). A
+    governed sub-op that needs its own approval waits for it; the steps this
+    run did are stored with that request, so its resume does not send them
+    again (:mod:`~meho_backplane.operations.composite_steps`).
     """
     from meho_backplane.operations._validate import params_hash_matches
 
@@ -555,8 +624,7 @@ def _covered_by_approved_run(
     (:data:`composite_resume_scope_var`). Such an approval covers every other
     internal step, except a ``destructive`` step, a step marked
     ``requires_approval`` and a step a classification entry makes always
-    wait: those keep their own approval, or end with
-    ``composite_resume_multi_gate_unsupported`` during a resume.
+    wait: those keep their own approval.
     """
     if safety_level == "destructive" or requires_approval or always_wait:
         return False
@@ -579,9 +647,12 @@ def _resume_parent_for_current_composite(
     approved sub-op pre-cleared. *resume_state*, when given, is stored under
     ``state``, and ``after_main_effect: true`` marks a step that runs after
     the composite's main change exists (#4217); both come back through
-    :data:`composite_resume_state_var` during the re-entry. ``None`` when no
-    composite is on the stack, so the park keeps the unchanged generic
-    re-dispatch of its ``op_id``.
+    :data:`composite_resume_state_var` during the re-entry. ``steps`` holds
+    the steps this run of the composite went through, with their results
+    (:class:`~meho_backplane.operations.composite_steps.StepJournal`), so the
+    re-entry does not send them again; the key is left out when there are
+    none. ``None`` when no composite is on the stack, so the park keeps the
+    unchanged generic re-dispatch of its ``op_id``.
     """
     ctx = composite_dispatch_var.get()
     if ctx is None:
@@ -592,14 +663,46 @@ def _resume_parent_for_current_composite(
         resume_parent["state"] = resume_state
     if after_main_effect:
         resume_parent["after_main_effect"] = True
+    journal = current_step_journal()
+    if journal is not None and journal.composite_op_id == parent_op_id:
+        steps = journal.stored()
+        if steps:
+            resume_parent["steps"] = steps
     return resume_parent
 
 
-# code-quality-allow: pre-existing 118-line function (predates #3151); this
-# change adds the approval-resume sub-op clear + the resume_parent capture
-# (#3351) and the #294 proposed_effect stamping + destructive-tier refusal,
-# alongside the earlier `connector_id=connector_id` grant pass-through, and
-# the #4217 resume-state checks.
+def _unfinished_step_before_wait(op_id: str, duration_ms: float) -> OperationResult | None:
+    """Stop a step that would wait when an earlier step of the run has no stored end.
+
+    The run after the approval would stop at that earlier step with
+    ``composite_resume_step_outcome_unknown``, so MEHO does not ask a person
+    for the approval and stops now with that error. ``None``: the step may wait.
+    The caller skips this check for an ``after_main_effect`` step: its run
+    after the approval continues at that step and does not reach the earlier one.
+    """
+    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
+
+    ctx = composite_dispatch_var.get()
+    journal = current_step_journal()
+    if ctx is None or journal is None or journal.composite_op_id != ctx[0]:
+        return None
+    unfinished = journal.first_unfinished()
+    if unfinished is None:
+        return None
+    _log.error(
+        "composite_resume_step_outcome_unknown",
+        composite_op_id=journal.composite_op_id,
+        blocked_op_id=unfinished,
+        waiting_op_id=op_id,
+    )
+    return result_composite_resume_step_outcome_unknown(
+        composite_op_id=journal.composite_op_id,
+        step_op_id=unfinished,
+        duration_ms=duration_ms,
+        waiting_op_id=op_id,
+    )
+
+
 def _warn_if_step_not_declared(step_op_id: str) -> None:
     """Log one warning when a composite checks a step its list does not have (#6298).
 
@@ -680,23 +783,154 @@ async def enforce_subop_policy(
     composite's main change already exists when this sub-op runs (the
     rename or cleanup of a deployed VM), and that the composite uses the
     saved state to continue at this step instead of running from the start.
-    Three checks keep that safe:
+    Two checks keep that safe:
 
     * ``after_main_effect=True`` without ``resume_state`` is refused
       (``composite_resume_state_missing``): without state the re-run could
       only start from the beginning.
-    * During the resume of such a park, any other governed write that is
-      not ``after_main_effect`` and comes before the approved step is
-      refused (``composite_resume_repeats_write``): it is a write the first
-      run already did.
-    * **The relaxed guard.** The multi-gate guard below
-      (``composite_resume_multi_gate_unsupported``) does not apply to an
-      ``after_main_effect`` step, so such a step may wait for approval even
-      during a resume. Its own resume continues at that step and repeats no
-      earlier write. The risk: the composite must really skip every earlier
-      write when it continues; the second check above stops a composite
-      that does not, before the write runs.
+    * During a resume, any other governed step that is not
+      ``after_main_effect``, comes before the approved step and is not a
+      stored step of the earlier run is refused
+      (``composite_resume_repeats_write``).
+    * An ``after_main_effect`` step may wait for approval during a resume
+      like any other step. Its own resume continues at that step.
+
+    **Steps that already ran.** The seam records each step it lets go ahead
+    in the composite's step record
+    (:mod:`~meho_backplane.operations.composite_steps`); a step that waits
+    stores that record on its approval request. The seam does not see the
+    handler's own call, so the step stays "started": when a resume reaches
+    it again, the seam returns ``composite_resume_step_outcome_unknown`` and
+    the step is not sent again. A step that must be skipped on a resume, with
+    its stored result, runs through :func:`run_governed_subop` instead.
     """
+    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
+
+    journal = current_step_journal()
+    if journal is not None and journal.take(connector_id, op_id, target, params) is not None:
+        _log.error(
+            "composite_resume_step_outcome_unknown",
+            composite_op_id=journal.composite_op_id,
+            blocked_op_id=op_id,
+        )
+        return result_composite_resume_step_outcome_unknown(
+            composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
+        )
+    gated = await _gate_subop(
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        target=target,
+        params=params,
+        resume_state=resume_state,
+        after_main_effect=after_main_effect,
+    )
+    if gated is None and journal is not None:
+        journal.start(connector_id, op_id, target, params)
+    return gated
+
+
+class SubopStep(NamedTuple):
+    """What :func:`run_governed_subop` gives back.
+
+    ``stopped`` is the result the composite handler returns as is (the step
+    waits for approval, is denied, or the run stops); then ``value`` is
+    ``None``. Otherwise ``value`` is what the step's call returned, and
+    ``replayed`` says it is the stored result of an earlier run.
+    """
+
+    stopped: OperationResult | None
+    value: Any = None
+    replayed: bool = False
+
+
+async def run_governed_subop(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    target: Any,
+    params: dict[str, Any],
+    call: Callable[[], Awaitable[Any]],
+    resume_state: dict[str, Any] | None = None,
+    after_main_effect: bool = False,
+) -> SubopStep:
+    """Check a governed direct sub-op with :func:`enforce_subop_policy`'s gate, then run *call*.
+
+    The same gate as :func:`enforce_subop_policy`, with the step's own call
+    inside, so MEHO knows when the step ended and what it returned. *call*
+    is awaited only when the gate lets the step go ahead. Its result is
+    stored in the composite's step record when it is JSON and holds no
+    secret-named value (:mod:`~meho_backplane.operations.composite_steps`).
+
+    During the run after an approval, a step the earlier run finished is
+    not checked and not sent again: ``value`` is the stored result and
+    ``replayed`` is ``True``. A step the earlier run started but did not
+    finish, or whose result was not kept, stops the run with
+    ``composite_resume_step_outcome_unknown``. An exception from *call*
+    passes to the handler, and the step stays "started".
+    """
+    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
+
+    journal = current_step_journal()
+    if journal is not None:
+        replayed = journal.take(connector_id, op_id, target, params)
+        if replayed is not None:
+            if replayed.get("status") == STEP_DONE:
+                _log.info(
+                    "composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id
+                )
+                return SubopStep(stopped=None, value=replayed.get("result"), replayed=True)
+            _log.error(
+                "composite_resume_step_outcome_unknown",
+                composite_op_id=journal.composite_op_id,
+                blocked_op_id=op_id,
+            )
+            return SubopStep(
+                stopped=result_composite_resume_step_outcome_unknown(
+                    composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
+                )
+            )
+    gated = await _gate_subop(
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        target=target,
+        params=params,
+        resume_state=resume_state,
+        after_main_effect=after_main_effect,
+    )
+    if gated is not None:
+        return SubopStep(stopped=gated)
+    entry = journal.start(connector_id, op_id, target, params) if journal is not None else None
+    value = await call()
+    if journal is not None and entry is not None:
+        journal.finish(entry, value)
+    return SubopStep(stopped=None, value=value)
+
+
+# code-quality-allow: the long policy and approval gate of a direct sub-op,
+# kept in one piece; the step record lives in ``enforce_subop_policy`` and
+# ``run_governed_subop`` above.
+async def _gate_subop(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    target: Any,
+    params: dict[str, Any],
+    resume_state: dict[str, Any] | None = None,
+    after_main_effect: bool = False,
+) -> OperationResult | None:
+    """The policy and approval gate of :func:`enforce_subop_policy`, without the step record."""
     # Lazy imports: this module is imported by the dispatcher, so a
     # top-level import of the policy/approval machinery (which imports
     # back into the operations package) would risk an import cycle.
@@ -709,7 +943,6 @@ async def enforce_subop_policy(
     from meho_backplane.operations._audit import policy_decision_var, policy_rule_var
     from meho_backplane.operations._errors import (
         result_awaiting_approval,
-        result_composite_resume_multi_gate_unsupported,
         result_composite_resume_repeats_write,
         result_composite_resume_state_missing,
         result_denied,
@@ -725,14 +958,15 @@ async def enforce_subop_policy(
         create_pending_request,
         record_approval_step_event,
         resume_requester_var,
+        rights_change_note,
     )
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
-        _build_proposed_effect,
+        _build_park_effect,
         _destructive_binding_refusal,
         _preflight_denied_refusal,
     )
-    from meho_backplane.operations.op_policy import apply_step_classification
+    from meho_backplane.operations.op_policy import apply_step_policy
     from meho_backplane.policy.stamp import take_rule
 
     started = time.monotonic()
@@ -759,10 +993,10 @@ async def enforce_subop_policy(
     if _subop_resume_cleared(op_id=op_id, params=params):
         return None
 
-    # #4217: the approved step runs after the composite's main change, so its
-    # resume must go straight to it. A governed write before it that is not
-    # itself ``after_main_effect`` is one the first run already did: refuse it
-    # before it runs, whatever the policy verdict would be.
+    # Before the approved step, every step is one the first run did,
+    # and the stored ones were replayed above. A governed step before it that
+    # is not itself ``after_main_effect`` is refused before it runs, whatever
+    # the policy verdict would be.
     if not after_main_effect and _resume_has_not_reached_approved_step():
         composite_ctx = composite_dispatch_var.get()
         composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
@@ -795,10 +1029,11 @@ async def enforce_subop_policy(
         requires_approval=requires_approval,
         parameter_schema={},
     )
-    # A classification entry can raise the step's level or make it always
-    # wait, the same as for a called operation. Only the step's group key is
-    # read from a stored row; the step runs without one.
-    await apply_step_classification(tenant_id=operator.tenant_id, step=descriptor)
+    # The override rows of the step's operation and a classification entry
+    # can raise the step's level or make it wait, the same as for a called
+    # operation. Only the step's group key is read from a stored row; the
+    # step runs without one.
+    await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -834,38 +1069,6 @@ async def enforce_subop_policy(
     try:
         duration_ms = (time.monotonic() - started) * 1000.0
         if verdict is PermissionVerdict.NEEDS_APPROVAL:
-            # #3351 review B1 — fail-closed multi-gate resume guard. The approved
-            # sub-op already cleared above (``_subop_resume_cleared`` returned), so
-            # reaching NEEDS_APPROVAL while :data:`composite_resume_scope_var` is set
-            # means a *second* governed sub-op would park during a resume. Parking it
-            # would create a second approval whose own resume re-enters the composite
-            # from the top and re-runs every earlier governed leg (this mechanism
-            # clears one sub-op and has no completed-leg guard), double-executing
-            # writes. Only a ``destructive`` or ``requires_approval`` step reaches
-            # here: every other step went ahead above under the approval of the
-            # run (#3980). Refuse instead of parking.
-            #
-            # #4217 relaxes this guard for an ``after_main_effect`` step: it saved
-            # the state its resume continues from (checked above), so its own
-            # resume repeats no earlier write, and it may wait for approval here.
-            resume_scope = composite_resume_scope_var.get()
-            if resume_scope is not None and not after_main_effect:
-                approved_op_id, _approved_hash = resume_scope
-                composite_ctx = composite_dispatch_var.get()
-                composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
-                _log.error(
-                    "composite_resume_multi_gate_unsupported",
-                    composite_op_id=composite_op_id,
-                    approved_op_id=approved_op_id,
-                    blocked_op_id=op_id,
-                )
-                return result_composite_resume_multi_gate_unsupported(
-                    composite_op_id=composite_op_id,
-                    approved_op_id=approved_op_id,
-                    blocked_op_id=op_id,
-                    duration_ms=duration_ms,
-                )
-
             # The step's own check before the wait for approval, the same as
             # at the dispatcher: a param that must not be stored (a secret
             # given as a plain value) refuses the step before any approval
@@ -901,7 +1104,8 @@ async def enforce_subop_policy(
             # ``_build_proposed_effect`` keeps one stamping path rather than
             # diverging; it is fail-soft (returns ``None`` only when connector /
             # preview resolution raises, exactly as the dispatcher park path).
-            proposed_effect = await _build_proposed_effect(
+            # When it raises, the row still stores the catalog risk level.
+            proposed_effect = await _build_park_effect(
                 op_id=op_id,
                 connector_id=connector_id,
                 descriptor=descriptor,
@@ -961,6 +1165,12 @@ async def enforce_subop_policy(
                     duration_ms=duration_ms,
                 )
 
+            unfinished = (
+                None if after_main_effect else _unfinished_step_before_wait(op_id, duration_ms)
+            )
+            if unfinished is not None:
+                return unfinished
+
             run_id = current_agent_run_id_var.get()
             sessionmaker = get_sessionmaker()
             async with sessionmaker() as session:
@@ -989,6 +1199,7 @@ async def enforce_subop_policy(
                     # reviewer who runs the re-run. ``None`` outside a re-run.
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
+                    install_category=descriptor.policy_install_category,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed
@@ -1000,7 +1211,11 @@ async def enforce_subop_policy(
                 audit_id=request._audit_id,  # type: ignore[attr-defined]
             )
             return result_awaiting_approval(
-                op_id, request.id, duration_ms, audit_id=request.request_audit_id
+                op_id,
+                request.id,
+                duration_ms,
+                audit_id=request.request_audit_id,
+                note=await rights_change_note(request),
             )
 
         # DENY, or any unexpected verdict — fail closed: the sub-op never

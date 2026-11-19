@@ -50,6 +50,8 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
+from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations.approval_outcome import ResumeOutcome, resume_outcome
 from meho_backplane.operations.approval_outcome_check import (
     list_outcome_unknown,
@@ -165,7 +167,14 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "op_id": row.op_id,
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
-        "proposed_effect": row.proposed_effect,
+        # A card behind a switch reads as ``preview_operation`` gives it.
+        "proposed_effect": proposed_effect_for_agent(
+            row.op_id,
+            row.proposed_effect,
+            params=row.params,
+            connector_id=row.connector_id,
+            tenant=str(row.tenant_id),
+        ),
         # True when the requester asked for the hidden values of the answer
         # (``reveal_secret: true``). The operation runs when the requester
         # gets the values, not on approve.
@@ -260,12 +269,7 @@ async def _list_handler(
             ) from exc
     limit = int(arguments.get("limit", 50))
     offset = int(arguments.get("offset", 0))
-    work_ref_raw = arguments.get("work_ref")
-    work_ref_filter: str | None = None
-    if work_ref_raw is not None:
-        if not isinstance(work_ref_raw, str) or not work_ref_raw:
-            raise McpInvalidParamsError("work_ref must be a non-empty string when supplied")
-        work_ref_filter = work_ref_raw
+    work_ref_filter = work_ref_argument(arguments.get("work_ref"))
 
     outcome_unknown_only = arguments.get("outcome_unknown", False)
     if not isinstance(outcome_unknown_only, bool):
@@ -340,10 +344,12 @@ register_mcp_tool(
                 "work_ref": {
                     "type": "string",
                     "description": (
-                        "Filter by external change-ticket reference (exact "
-                        "match), e.g. 'gh:evoila/meho#1' — the requests "
-                        "authorised by change ticket X. Omit for no "
-                        "work_ref filter."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#1') — the requests authorised by "
+                        "change ticket X. White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused. Omit for no work_ref filter."
                     ),
                 },
                 "outcome_unknown": {

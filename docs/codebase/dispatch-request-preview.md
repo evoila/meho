@@ -82,6 +82,15 @@ sees, so it stays off until a before-and-after measurement shows it helps.
   - The `preview_operation` tool text says the new rule (full and short
     text). The registered text is the "off" text, so the reference docs
     show it.
+- **Params that make a call wait** (`declare_wait_when_set`) do not
+  change this rule. `preview_dispatch` decides whether the op previews
+  before it raises the descriptor for such params. So with the switch off,
+  `targets.register` with `flight_recorder_capture` stays `unavailable`.
+- **Approver and agent.** A preview builder gets `ctx.agent_preview=True`
+  when it runs for the agent's `preview_operation`, and `False` for the
+  approval request. A builder may show the approver more. Example: the
+  `changes` map of `targets.update` is always on the approval request,
+  and in the agent's preview only with the switch on.
 - **Code:** `_is_previewable` and `is_credential_builder_op` in
   `operations/_request_preview.py`; the tool text in
   `mcp/tools/_preview_typed_writes_text.py`. Tests:
@@ -154,6 +163,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
         ├─ params_check_errors → a problem ? → status=error error_code=invalid_params
         │       (the op's own check from register_params_check; validator=params_check)
+        │       (params_errors: when only maxLength failed, the check runs too and
+        │       its problem replaces the length error on the same field)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
         ├─ source_kind != 'ingested' (governed tier) ? → build_composite_preview:
@@ -278,6 +289,16 @@ preview looked the same whether the call would run at once or wait for
 approval, and an operator in a lab only found out with a second command
 (`meho operation search --op-id`).
 
+**`policy_rule` and `approvers` (#6045).** Only with
+`POLICY_ENGINE_SHADOW` on (off by default), the governance fields also
+carry `policy_rule`, the rule the policy evaluator matched for the call's
+own gate (`{source, rule_id, text, decided: false}`, taken with
+`take_rule` right after the gate; `null` when the evaluator failed), and
+`approvers`, the login groups that may approve when `policy_verdict` is
+`needs-approval` (`policy/who_approves.py`), else `[]`, and `null` when
+the stored routing is not valid. Both are advisory and unhashed. With the switch off neither key is present, and
+the MCP `outputSchema` does not list them.
+
 Operator-input faults come back **inside** the envelope (not as
 exceptions), mirroring the dispatcher's never-raises contract so the REST
 route and MCP tool keep one uniform shape. Target failures
@@ -387,7 +408,8 @@ hash by building the preview again, so they stay in step.
   `count_known_ops`.
 - `operations._validate` — `validate_params`, `params_check_errors` (the
   op's own params check, registered with `register_params_check`; the
-  dispatcher runs the same check before its policy gate), `policy_gate`
+  dispatcher runs the same check before its policy gate), `params_errors`
+  (puts the two together), `policy_gate`
   (decide-only).
 - `operations._handler_resolve` — `get_or_create_connector_instance`.
 - `connectors.resolve_connector_or_label` — the same yes/no/ambiguous

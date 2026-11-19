@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 import respx
+import structlog.testing
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -324,6 +325,89 @@ async def test_a_failing_connector_is_an_error_and_keeps_the_last_fingerprint() 
     assert "connection refused" in _error_text(result)
     assert await _stored_fingerprint(row.id) == last
     assert await _audit_rows()
+
+
+# ---------------------------------------------------------------------------
+# A target secret MEHO cannot read
+# ---------------------------------------------------------------------------
+
+
+def _secret_error(kind: str, *, name: str, ref: str) -> Exception:
+    """The error the shared credential loader raises for *kind* on the target's own ref."""
+    import hvac.exceptions
+
+    from meho_backplane.connectors._shared.vault_creds import (
+        TargetSecretForbiddenError,
+        TargetSecretNotFoundError,
+    )
+
+    url = f"https://vault.test/v1/secret/data/{ref}"
+    if kind == "missing":
+        err: Exception = TargetSecretNotFoundError(target_name=name, secret_ref=ref)
+        err.__cause__ = hvac.exceptions.InvalidPath(None, method="GET", url=url)
+    else:
+        err = TargetSecretForbiddenError(target_name=name, secret_ref=ref)
+        err.__cause__ = hvac.exceptions.Forbidden("permission denied", method="GET", url=url)
+    return err
+
+
+_SECRET_ERROR_CODES = {"missing": "target_secret_not_found", "refused": "connector_vault_forbidden"}
+
+
+@pytest.mark.parametrize("kind", ["missing", "refused"])
+async def test_op_answers_an_unreadable_secret_with_its_error_code(kind: str) -> None:
+    ref = f"tenants/{_TENANT_ID}/no-secret"
+    last = _fingerprint().model_dump(mode="json")
+    _use_connector(_secret_error(kind, name="no-secret", ref=ref))
+    row = await _seed("no-secret", fingerprint=last)
+
+    result = await _probe("no-secret")
+
+    assert result["status"] == "error", result
+    extras = result["extras"]
+    assert extras["error_code"] == _SECRET_ERROR_CODES[kind]
+    assert extras["secret_ref"] == ref
+    assert extras["secret_ref_derived"] is True
+    assert "default path MEHO builds from the target name" in result["error"]
+    assert "--secret-ref <path>" in result["error"]
+    assert "vault.test" not in str(result)
+    assert "Vault said:" not in str(result)
+    assert "exception_message" not in extras
+    assert await _stored_fingerprint(row.id) == last
+
+
+@pytest.mark.parametrize("kind", ["missing", "refused"])
+async def test_rest_answers_an_unreadable_secret_with_a_422(kind: str) -> None:
+    ref = "tenants/shared/other"
+    _use_connector(_secret_error(kind, name="rest-no-secret", ref=ref))
+    row = await _seed("rest-no-secret")
+
+    key = make_rsa_keypair("kid-probe")
+    client = TestClient(_build_app())
+    with respx.mock as mock_router, structlog.testing.capture_logs() as logs:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/rest-no-secret/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+
+    assert response.status_code == 422, response.text
+    events = [e for e in logs if e["event"] == "target_probe_secret_unreadable"]
+    assert len(events) == 1, logs
+    assert events[0]["target_name"] == "rest-no-secret"
+    assert events[0]["error_code"] == _SECRET_ERROR_CODES[kind]
+    assert events[0]["secret_ref"] == ref
+    assert "vault.test" not in str(events[0])
+    detail = response.json()["detail"]
+    assert detail["error"] == _SECRET_ERROR_CODES[kind]
+    assert detail["target"] == "rest-no-secret"
+    assert detail["secret_ref"] == ref
+    assert detail["secret_ref_derived"] is False
+    assert ref in detail["message"]
+    assert "vault.test" not in response.text
+    assert "Vault said:" not in response.text
+    assert "fingerprint_failed" not in response.text
+    assert await _stored_fingerprint(row.id) is None
 
 
 async def test_a_product_without_a_connector_is_an_error() -> None:

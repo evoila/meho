@@ -73,6 +73,18 @@ registering a target outside the allowlist is rejected, not warned
 about.
 ([`docs/deploying.md` § Operational chart knobs](https://github.com/evoila/meho/blob/main/docs/deploying.md#operational-chart-knobs).)
 
+### What leaves your network
+
+MEHO connects to the systems you add as targets, and to the services you
+set up for it yourself: for example your AI service, your company login,
+or a mail server or webhook for check notifications. This table lists
+what MEHO sends to a service outside your network that you did not set
+up yourself.
+
+| Feature | Default | Goes to | What leaves |
+|---|---|---|---|
+| Approval notifications (`webPush.enabled`) | Off | The push services of Apple, Google, Microsoft and Mozilla ([host names](install/index.md#push-services-for-approval-notifications)) | One message for each notification, encrypted for the person's browser: "an approval waits" (or the result), the tenant name and the request id. The request id is also sent readable, so the push service can replace a waiting message by its result. Never the operation, its parameters or the target. [Details](guides/phone-and-laptop.md#what-leaves-your-network) |
+
 ### Broadcast runs single-replica, with ephemeral streams
 
 The activity-broadcast bus is deliberately **one replica** in the
@@ -221,7 +233,7 @@ flowchart TB
   bp -->|"governed operations"| ta
   bp -->|"governed operations"| tb
   runner -->|"outbound-only poll and report"| bp
-  runner -->|"safe operations, approved caution changes"| tc
+  runner -->|"safe reads only"| tc
 ```
 
 **Pick this shape when:**
@@ -244,14 +256,13 @@ approval, and audit stay central; a gateway never self-authorises.
 
 The consequence is worth stating plainly to whoever is planning the
 rollout: **an enclave served only by a satellite gateway gets
-observation and, at most, small approved changes.** A tenant admin can
-turn on a write tier for one runner. Then `caution` operations on that
-runner's allowlist run there, each after a person approves it.
-`dangerous` and `destructive` operations never run on a satellite: they
-need the central backplane to reach the target itself. Design the
-segment map around that before anyone promises otherwise. How the write
-tier works:
-[Writes through a satellite](guides/satellite-gateway.md#writes-through-a-satellite).
+observation only.** A satellite runs `safe` reads. Changes through a
+satellite are not built yet. `dangerous` and `destructive` operations never
+run on a satellite: they need the central backplane to reach the target
+itself. Design the
+segment map around that before anyone promises otherwise. How a
+satellite works today:
+[What is not built yet](guides/satellite-gateway.md#what-is-not-built-yet).
 Implementation detail:
 [`docs/codebase/satellite-runner.md`](https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md).
 The satellite gateway is a **Beta** feature — see the
@@ -314,6 +325,10 @@ caveat is one-directional — setting a **custom**
 `config.retrievalEmbeddingModel` makes the backplane download it at
 runtime, which is exactly what an air-gapped estate cannot do. Keep the
 default model.
+
+Keep approval notifications off (`webPush.enabled: false`, the default).
+They reach a phone or laptop only through the push services of the
+browser makers on the internet.
 
 **Three artefacts have to be mirrored:**
 

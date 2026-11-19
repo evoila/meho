@@ -55,9 +55,10 @@ from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vault import (
     kv_write_preview,  # noqa: F401
     ops_kv_folder,  # noqa: F401
+    ops_kv_generate,  # noqa: F401
     userpass_write_preview,  # noqa: F401
 )
-from meho_backplane.connectors.vault.connector import VaultConnector
+from meho_backplane.connectors.vault.connector import OpenBaoConnector, VaultConnector
 from meho_backplane.connectors.vault.ops import (
     register_vault_typed_operations,
     vault_kv_delete,
@@ -85,6 +86,14 @@ register_connector_v2(
     version="1.x",
     impl_id="vault",
     cls=VaultConnector,
+)
+
+# OpenBao 2.x: same product slug, its own range (a class holds one range).
+register_connector_v2(
+    product="vault",
+    version="2.x",
+    impl_id="vault-openbao",
+    cls=OpenBaoConnector,
 )
 
 # G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
@@ -126,6 +135,7 @@ register_typed_op_registrar(register_vault_identity_token_operations)
 register_typed_op_registrar(register_vault_auth_jwt_operations)
 
 __all__ = [
+    "OpenBaoConnector",
     "VaultAuthBackendNotMountedError",
     "VaultConnector",
     "register_vault_auth_jwt_operations",

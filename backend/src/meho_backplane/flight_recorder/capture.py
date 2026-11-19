@@ -139,6 +139,9 @@ class _OpContext:
     tags: tuple[str, ...]
     body_paths: tuple[str, ...]
     delete_shaped_patterns: tuple[str, ...] | None
+    # The class stored on the row of an ingested op (a connector's safety
+    # floor sets it). A stored ``credential_read`` records no body.
+    stored_op_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -233,8 +236,13 @@ async def begin_dispatch_capture(
     target: Any,
     descriptor: Any,
     connector_id: str,
+    owner_sub: str | None = None,
 ) -> CaptureHandle:
     """Open (or join) the capture scope for one dispatch. Never raises (F7).
+
+    *owner_sub* is the login stored as the caller of the trace. It is the
+    requester when a call runs after a person approved it; else ``None``,
+    and the caller is ``operator.sub``.
 
     * **Root dispatch** (no active scope): consults :func:`should_capture`
       (F1 precedence + kill switch, fail-open) and, when enabled, binds a fresh
@@ -267,7 +275,7 @@ async def begin_dispatch_capture(
             tenant_id=tenant_id,
             target_id=target_id,
             request_id=coerce_uuid(request_id()),
-            operator_sub=getattr(operator, "sub", None),
+            operator_sub=owner_sub or getattr(operator, "sub", None),
         )
         cap_token = _active_capture_var.set(scope)
         op_token = _op_context_var.set(_op_context_from(descriptor, connector_id))
@@ -450,6 +458,7 @@ def _redact_vendor_call(
         connector_id=op.connector_id if op else None,
         method=method,
         tags=op.tags if op else (),
+        stored_op_class=op.stored_op_class if op else None,
         request_headers=as_mapping(request_headers),
         response_headers=as_mapping(getattr(response, "headers", None)),
         request_body=req_body,
@@ -587,4 +596,5 @@ def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
         # every body until a connector declares its paths.
         body_paths=(),
         delete_shaped_patterns=delete_shaped,
+        stored_op_class=getattr(descriptor, "op_class", None),
     )

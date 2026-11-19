@@ -66,6 +66,7 @@ __all__ = [
     "TARGETS_PROBE_OP_ID",
     "TARGETS_PROBE_PARAMETER_SCHEMA",
     "TARGETS_PROBE_RESPONSE_SCHEMA",
+    "probe_policy_refusal",
     "register_targets_probe_operation",
     "targets_probe",
     "targets_probe_preflight",
@@ -172,6 +173,16 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+async def probe_policy_refusal(operator: Operator, row: Any) -> str | None:
+    """MEHO's policy for ``targets.probe`` on the found target *row*; ``None`` = allowed.
+
+    The one check behind the ``targets.probe`` operation and the REST route
+    ``POST /api/v1/targets/{name}/probe``. Returns the refusal reason, which
+    names the target.
+    """
+    return await secondary_target_refusal(operator, _PROBE_ON_TARGET, row)
+
+
 async def targets_probe(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Detect one target's product and version and store it on the row.
 
@@ -183,7 +194,9 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
     and the system is not contacted. Service exceptions (unknown target,
     no connector, a connector that fails) are re-raised as
     :class:`ValueError`, like the other ``targets.*`` ops; nothing is
-    stored then.
+    stored then. A target secret MEHO cannot read passes unchanged, so
+    the dispatcher answers ``target_secret_not_found`` or
+    ``connector_vault_forbidden`` with its ``error_code``, as for a call.
     """
     if operator.tenant_role is TenantRole.READ_ONLY:
         raise ValueError(
@@ -194,7 +207,7 @@ async def targets_probe(operator: Operator, target: Any, params: dict[str, Any])
     try:
         async with sessionmaker() as session, session.begin():
             row = await resolve_route_target(session, operator.tenant_id, str(params["name"]))
-            refusal = await secondary_target_refusal(operator, _PROBE_ON_TARGET, row)
+            refusal = await probe_policy_refusal(operator, row)
             if refusal is not None:
                 raise ValueError(f"{refusal}. Nothing was probed or stored.")
             fp = await probe_and_store_fingerprint(session, row, operator=operator)

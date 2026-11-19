@@ -201,15 +201,22 @@ async def test_others_cannot_approve_their_own_high_risk_change(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("level", [*_LOW_RISK, None])
-async def test_others_cannot_approve_their_own_lower_risk_change(level: str | None) -> None:
+@pytest.mark.parametrize("level", _LOW_RISK)
+async def test_others_cannot_approve_their_own_lower_risk_change(level: str) -> None:
     request_id = await _park(level)
 
     with pytest.raises(SelfApprovalForbiddenError) as exc:
         await _approve(request_id, _person(_REQUESTER))
 
     assert exc.value.high_risk is False
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in str(exc.value)
+    message = str(exc.value)
+    assert (
+        "Ask another person in MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or "
+        "MEHO-Approvers to approve it." in message
+    )
+    assert "Approvals page" in message
+    assert "APPROVAL_ALLOW_SELF_APPROVAL" not in message
+    assert "break-glass" not in message
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
@@ -293,7 +300,7 @@ async def test_other_groups_cannot_approve_another_persons_high_risk_change(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("level", [*_LOW_RISK, None])
+@pytest.mark.parametrize("level", _LOW_RISK)
 @pytest.mark.parametrize(
     "approver",
     [
@@ -302,10 +309,8 @@ async def test_other_groups_cannot_approve_another_persons_high_risk_change(
     ],
     ids=["operator", "approver"],
 )
-async def test_a_lower_risk_change_keeps_the_reviewer_rule(
-    level: str | None, approver: Operator
-) -> None:
-    """A ``requires_approval`` change, or one without a stamped level (#3243)."""
+async def test_a_lower_risk_change_keeps_the_reviewer_rule(level: str, approver: Operator) -> None:
+    """A ``requires_approval`` change keeps the reviewer rule."""
     request_id = await _park(level)
 
     await _approve(request_id, approver)
@@ -313,6 +318,58 @@ async def test_a_lower_risk_change_keeps_the_reviewer_rule(
     payload = await _decision_payload(request_id)
     assert payload["self_approved"] is False
     assert payload["approval_rule"] == ApprovalRule.REVIEWER.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approver",
+    [
+        _person(_OTHER),
+        _person(_OTHER, role=TenantRole.READ_ONLY, approver=True),
+    ],
+    ids=["operator", "approver"],
+)
+@pytest.mark.parametrize("level", [None, "", "not-a-level"], ids=["none", "empty", "unknown"])
+async def test_a_change_without_a_level_needs_a_destructive_approver(
+    approver: Operator, level: str | None
+) -> None:
+    """A request with no stored risk level, or an unknown one, counts as ``destructive``."""
+    request_id = await _park(level)
+
+    with pytest.raises(ApprovalGroupForbiddenError) as exc:
+        await _approve(request_id, approver)
+
+    assert exc.value.safety_level == "destructive"
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approver",
+    [_person(_OTHER, sa_operator=True), _person(_OTHER, role=TenantRole.TENANT_ADMIN)],
+    ids=["sa-operator", "admin"],
+)
+async def test_the_named_groups_approve_a_change_without_a_level(approver: Operator) -> None:
+    request_id = await _park(None)
+
+    await _approve(request_id, approver)
+
+    payload = await _decision_payload(request_id)
+    assert payload["approval_rule"] == ApprovalRule.SA_OPERATOR_OR_ADMIN.value
+
+
+@pytest.mark.asyncio
+async def test_the_emergency_switch_does_not_cover_an_own_change_without_a_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _break_glass_on(monkeypatch)
+    request_id = await _park(None)
+
+    with pytest.raises(SelfApprovalForbiddenError) as exc:
+        await _approve(request_id, _person(_REQUESTER))
+
+    assert exc.value.high_risk is True
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
 @pytest.mark.asyncio
@@ -420,7 +477,7 @@ async def test_rest_an_operator_cannot_approve_their_own_dangerous_change(
     detail = response.json()["detail"]
     assert detail.startswith("self_approval_forbidden:")
     assert "Only members of the MEHO-SA-Operators and MEHO-Admins groups" in detail
-    assert "MEHO-SA-Operator or a MEHO-Admin" in detail
+    assert "Ask another person in MEHO-SA-Operators or MEHO-Admins to approve it." in detail
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
     assert _fake_resume == []
 

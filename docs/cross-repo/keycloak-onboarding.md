@@ -123,12 +123,16 @@ approves it through the queue.
 | `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
 | `realm_write` | `keycloak.realm.delete` | `DELETE /admin/realms/{realm}` | destructive |
 | `user_write` | `keycloak.user.logout` | `POST .../users/{id}/logout` | caution |
+| `account_write` | `keycloak.role_mapping.client.assign` | `POST .../users/{id}/role-mappings/clients/{client-id}` | dangerous |
+| `account_write` | `keycloak.role_mapping.client.remove` | `DELETE .../users/{id}/role-mappings/clients/{client-id}` | dangerous |
+| `account_write` | `keycloak.user.update` | `PUT .../users/{id}` | caution |
+| `account_write` | `keycloak.user.credential.delete` | `DELETE .../users/{id}/credentials/{credentialId}` | dangerous |
 | `user_write` | `keycloak.user.required_actions.update` | `PUT .../users/{id}` (add or remove required actions, for example `CONFIGURE_TOTP`) | dangerous |
 | `user_login_check` | `keycloak.user.check_login` | `POST /realms/{realm}/protocol/openid-connect/token` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |
 
-Twenty-two write ops. The group column is the registered group key: use it
+Twenty-six write ops. The group column is the registered group key: use it
 as the `group` argument of `search_operations` (for example
 `group="realm_write"` finds `keycloak.realm.create`).
 
@@ -393,10 +397,12 @@ A keycloak target row carries:
 
 The two realm knobs live on `target.extras` (a free-form JSONB column) so
 they are target-configurable without a schema migration. `admin_realm`
-falls back to `master` when absent. Always set `managed_realm`: its
-fallback is a fixed realm name from early development, not `meho`
-(`DEFAULT_MANAGED_REALM` in
-[`session.py`](../../backend/src/meho_backplane/connectors/keycloak/session.py)).
+falls back to `master` when absent. `managed_realm` is required and has no
+default: MEHO refuses to create or update a Keycloak target without it
+(HTTP 422), and refuses every operation on an older target that lacks it.
+To fix such a target, run
+`meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>`
+(`--extra` replaces the whole `extras` map, so repeat the keys you keep).
 
 `auth_headers` rejects any `auth_model` other than
 `shared_service_account` (or `None` for pre-G0.3 targets) with a clear

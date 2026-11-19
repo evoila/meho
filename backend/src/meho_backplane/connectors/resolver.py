@@ -30,6 +30,12 @@ The resolver reads three attributes from ``target``:
   target can carry an explicit version before the first probe.
   Consulted only when ``fingerprint.version`` is absent; the probed
   value is always the authoritative source when present.
+* ``target.fingerprint`` → ``product`` — the product the last probe
+  reported. Read only for a class that sets
+  :attr:`~meho_backplane.connectors.base.Connector.fingerprint_products`:
+  that class matches only a target whose probed product is in the set
+  (OpenBao 2.x and HashiCorp Vault 2.x share the slug ``vault`` and the
+  version numbers).
 
 A third, optional attribute participates in the tie-break:
 
@@ -129,6 +135,7 @@ to make the binding visible in ``pyproject.toml``.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -148,6 +155,7 @@ __all__ = [
     "connector_serves_target",
     "resolve_connector",
     "resolve_connector_or_label",
+    "stale_openbao_probe_hint",
 ]
 
 #: Labels surfaced by :func:`resolve_connector_or_label` so callers
@@ -343,7 +351,13 @@ def resolve_connector(target: Any, *, for_probe: bool = False) -> type[Connector
     preferred_impl_id = getattr(target, "preferred_impl_id", None)
 
     tenant_id = _target_tenant(target)
-    candidates = _filter_candidates(product, target_version, tenant_id, strict=not for_probe)
+    candidates = _filter_candidates(
+        product,
+        target_version,
+        tenant_id,
+        strict=not for_probe,
+        probed_product=_probed_product(target),
+    )
 
     if not candidates:
         raise NoMatchingConnector(
@@ -610,8 +624,51 @@ def connector_serves_target(product: str, version: str, impl_id: str, target: An
     key = (product, version, impl_id)
     return any(
         (c.product, c.version, c.impl_id) == key
-        for c in _filter_candidates(product, resolve_target_version(target), _target_tenant(target))
+        for c in _filter_candidates(
+            product,
+            resolve_target_version(target),
+            _target_tenant(target),
+            probed_product=_probed_product(target),
+        )
     )
+
+
+def _probed_product(target: Any) -> str | None:
+    """The product the last probe of *target* reported, or ``None``."""
+    fp = getattr(target, "fingerprint", None)
+    if fp is None:
+        return None
+    value = fp.get("product") if isinstance(fp, Mapping) else getattr(fp, "product", None)
+    return value if isinstance(value, str) and value else None
+
+
+def stale_openbao_probe_hint(target: Any) -> str | None:
+    """A fix to name when a ``vault`` target may be an OpenBao server probed before 0.47.
+
+    Before 0.47 a probe of OpenBao stored the product ``vault``. Since 0.47
+    the OpenBao connector serves only a target whose stored product is
+    ``openbao``, and the Vault connector serves only 1.x. So such a target
+    matches no connector until it is probed again.
+    """
+    if getattr(target, "product", None) != "vault" or _probed_product(target) != "vault":
+        return None
+    version = resolve_target_version(target)
+    try:
+        if version is None or Version(version).major < 2:
+            return None
+    except InvalidVersion:
+        return None
+    name = getattr(target, "name", None)
+    quoted = shlex.quote(name) if isinstance(name, str) and name else "<target-name>"
+    return (
+        "this may be an OpenBao server that was probed before 0.47; "
+        f"run `meho targets probe -- {quoted}` to detect it again"
+    )
+
+
+def _fingerprint_product_fits(cls: type[Connector], probed_product: str | None) -> bool:
+    """Whether *cls* serves a target whose probe reported *probed_product*."""
+    return cls.fingerprint_products is None or probed_product in cls.fingerprint_products
 
 
 def _target_tenant(target: Any) -> UUID | None:
@@ -625,6 +682,11 @@ def _supported_ranges_hint(product: str, tenant_id: UUID | None) -> str:
     ranges = sorted(
         {
             f"{cls.impl_id or cls.product} supports {cls.supported_version_range}"
+            + (
+                f" (only {', '.join(sorted(cls.fingerprint_products))})"
+                if cls.fingerprint_products
+                else ""
+            )
             for (entry_product, _v, _i), cls in connectors_for_tenant(tenant_id).items()
             if entry_product == product and cls.supported_version_range
         }
@@ -670,15 +732,24 @@ def _wildcard_fits(cls: type[Connector], version: Version | None) -> bool:
 
 
 def _filter_candidates(
-    product: str, target_version: str | None, tenant_id: UUID | None, *, strict: bool = True
+    product: str,
+    target_version: str | None,
+    tenant_id: UUID | None,
+    *,
+    strict: bool = True,
+    probed_product: str | None = None,
 ) -> list[_Candidate]:
-    """Enumerate the registry entries *tenant_id* sees that match ``product`` and version."""
+    """Enumerate the registry entries *tenant_id* sees that match ``product`` and version.
+
+    A class with :attr:`~meho_backplane.connectors.base.Connector.fingerprint_products`
+    matches only when *probed_product* is in that set.
+    """
     out: list[_Candidate] = []
     parsed_target_version = _parse_version(target_version)
 
     for key, cls in connectors_for_tenant(tenant_id).items():
         entry_product, entry_version, entry_impl_id = key
-        if entry_product != product:
+        if entry_product != product or not _fingerprint_product_fits(cls, probed_product):
             continue
 
         # G0.15-T6 (#1215). A v1-shape wildcard entry --

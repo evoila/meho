@@ -9,6 +9,60 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.48.0](https://github.com/evoila/meho/releases/tag/v0.48.0) — 2026-11-18
+
+- **MEHO says when a change of rights needs a second admin.** When the
+  only admin of a tenant asks for such a change, the answer says so.
+  `meho doctor` shows a new line "second admin".
+- **An approved change starts with a fresh login.** Before MEHO sends a
+  change that a person approved, it signs in to the target again. A change
+  whose login was refused after MEHO sent it is stored as "outcome
+  unknown": check the target first, then make a new request.
+- **New help for agents, behind switches.** Typed operations first in
+  search, required parameters in search hits, operations in the group
+  list, a short guide to the call flow, and clearer `result_query`
+  answers. All are off by default.
+- **More operations.** A Vault operation that makes a password that meets
+  given rules, and reads of Keycloak login and admin events.
+- **Reset a lost second factor.** A host command on the appliance and on
+  the Linux server install resets the code app of a local account.
+- **No database migration.** After the upgrade, probe every OpenBao
+  target again.
+
+## [v0.47.0](https://github.com/evoila/meho/releases/tag/v0.47.0) — 2026-11-17
+
+- **Keycloak writes that change rights need another admin.** Giving a
+  role, adding a group member, changing a client or resetting a
+  password waits for a second admin on every call, in every realm.
+- **More changes wait for a person.** A run approval never covers a
+  credential read or a command as root on a host. Every `secret.move`,
+  every `harbor.robot.create` and every AD group member change waits
+  for its own approval.
+- **Target writes with a token wait for approval.** Upgrade the `meho`
+  command line together with the server.
+- **Secret values go only to the person who asked.** After the
+  approval, that person fetches the value once, within 15 minutes.
+  MEHO stores no value.
+- **Connectors say which versions they serve.** A target whose version
+  is outside its connector's range is refused. Check your Kubernetes,
+  RKE2, PostgreSQL, MongoDB, Argo CD and Vault targets before the
+  upgrade.
+- **Keycloak targets name their realm.** Set `managed_realm` on each
+  Keycloak target before the upgrade.
+- **A policy file for each install and tenant**, and `meho policy
+  explain` says why a call runs, waits or is refused. Most policy
+  features are behind switches that are off by default.
+- **Sign in and approve with a passkey**, and get a push message on
+  your phone or laptop when an approval waits.
+- **Command line.** Named login profiles, a Windows build, and
+  `meho docs ask` for a docs answer with sources.
+- **More operations.** Keycloak, Harbor, Azure, pfSense, FreeIPA,
+  Vault and Linux operations, and a `spaces` connector behind a switch.
+- **MEHO on a plain Linux server** has its own chapter in the install
+  guide.
+- **Many security fixes.** They are listed under "Security" in the
+  release notes.
+
 ## [v0.46.0](https://github.com/evoila/meho/releases/tag/v0.46.0) — 2026-11-09
 
 - **Approved changes with hidden values run.** A request whose settings

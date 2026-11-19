@@ -219,13 +219,27 @@ writes (`_service_safety_gate_reason` in `operations/_validate.py`), and
 so does a person's call made with a token. A person in the web interface
 runs them at once.
 
-**The REST graph writes are for people.** `POST /edges`,
-`POST /edges/bulk`, `DELETE /edges/{edge_id}` and
-`DELETE /nodes/{node_id}` use one gate, `_require_admin_person` in
+**The REST graph writes are for people, and a token call waits for
+approval.** `POST /edges`, `POST /edges/bulk`, `DELETE /edges/{edge_id}`
+and `DELETE /nodes/{node_id}` use one gate, `_require_admin_person` in
 `api/v1/topology.py`. It checks the `tenant_admin` role first, then that
 the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
 
-- A person with `tenant_admin` writes at once (the CLI, scripts).
+- A person's call made with a token (the `meho` CLI, scripts) waits for
+  approval, like the same write through `call_operation`. The route sends
+  it to `topology.annotate`, `topology.bulk_import`, `topology.unannotate`
+  or `topology.delete_node` through the dispatcher
+  (`dispatch_rest_write` in `api/v1/_wait_for_approval.py`) and answers
+  202 with the approval request id. Nothing is written until a person
+  approves it. A bulk dry run changes nothing and runs at once.
+- Checks that write nothing run first and answer at once, with no
+  approval request: an unknown or ambiguous endpoint of `POST /edges`
+  (404 `node_not_found`, 409 for an ambiguous name), a bad row of
+  `POST /edges/bulk` (the route runs a dry run first; 422 `invalid_bulk`
+  lists every bad row), an unknown edge (404 `edge_not_found`) and an
+  unknown node (404 `node_not_found`).
+- Only a person in the web interface writes at once. The console calls
+  the topology services in process.
 - A service or runner login with `tenant_admin` gets 403
   `human_principal_required`. The text names the `topology.*`
   operations of `topology-graph-1.x`, which go through the approval
@@ -281,8 +295,9 @@ displaced — already stamped on the shared audit payload, so
 surfacing them on the return is a shape change, not a new query (the
 handler reads `plan.audit_payload["superseded"]` from
 `annotate_edge_with_plan`, the plan-returning sibling of `annotate_edge`). The REST + UI
-write fronts are human-only surfaces and keep calling the service
-primitives directly. The five write ops are also discoverable /
+write fronts are for people only. The web console calls the service
+functions directly and writes at once. A REST graph write made with a
+token goes to the matching `topology.*` op and waits for approval. The five write ops are also discoverable /
 dispatchable through the generic agent meta-tools (`search_operations`
 / `call_operation`) with identical gating, since the gate lives in the
 dispatcher, not the front.

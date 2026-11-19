@@ -63,6 +63,12 @@ _REFUSAL = (
     "always wait for the whole install. A tenant can make more operations wait, not fewer. "
     "Remove `always_wait: false` from the tenant entry; its other fields can stay."
 )
+#: A single edit has no file entry: the text says what not to send.
+_EDIT_REFUSAL = (
+    "This edit sets `always_wait: false` on `iwfix.vm.stop`, but `install:classifications[0]` "
+    "makes it always wait for the whole install. A tenant can make more operations wait, "
+    "not fewer. Do not send `always_wait: false`."
+)
 
 
 @pytest.fixture(autouse=True)
@@ -316,11 +322,11 @@ async def test_a_single_edit_that_sets_an_install_wait_back_is_refused() -> None
         match={"op": "iwfix.vm.*"}, category=None, labels=None, always_wait=False
     )
     preview = await preview_classification_edit(_operator(), edit)
-    assert preview.conflict == f"This edit {_REFUSAL}"
-    with pytest.raises(ClassificationEditError, match="A tenant can make more operations wait"):
+    assert preview.conflict == _EDIT_REFUSAL
+    with pytest.raises(ClassificationEditError, match="Do not send `always_wait: false`"):
         await request_classification_edit(_operator(), edit)
     async with get_sessionmaker()() as session:
-        with pytest.raises(ValueError, match="A tenant can make more operations wait"):
+        with pytest.raises(ValueError, match="Do not send `always_wait: false`"):
             await set_classification(session, tenant_id=_TENANT, set_by_sub="a", edit=edit)
     async with get_sessionmaker()() as session:
         stored = (

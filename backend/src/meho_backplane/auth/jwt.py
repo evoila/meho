@@ -93,6 +93,7 @@ from meho_backplane.auth.current_tenant import (
     reject_duplicate_tenants,
     select_current_tenant,
 )
+from meho_backplane.auth.mcp_profile_claim import read_mcp_profile_claim, refuse_profile_token
 from meho_backplane.auth.operator import (
     MACHINE_PRINCIPAL_KINDS,
     Operator,
@@ -1671,6 +1672,18 @@ def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | 
     )
 
 
+def _extract_exp(claims: Any) -> int | None:
+    """Read the ``exp`` claim as whole seconds; ``None`` when it is not a number.
+
+    The decode step already requires ``exp`` and checks it. A bool is not
+    a time, even though Python counts it as an ``int``.
+    """
+    raw = claims.get("exp")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return int(raw)
+
+
 def _extract_azp(claims: Any) -> str | None:
     """Read the ``azp`` claim: the client the token was made for (#5515).
 
@@ -1875,10 +1888,12 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             self_approver=self_approver,
             tenants_claim_malformed=tenants_claim_malformed,
             auth_time=auth_time,
+            token_exp=_extract_exp(claims),
             acr=acr,
             sid=sid,
             azp=_extract_azp(claims),
             agent_role_capped=tenant_role is not token_role,
+            mcp_profile_claim=read_mcp_profile_claim(claims),  # 403 when bad (#6099)
         )
     except pydantic.ValidationError as exc:
         # Field names only: the input values may hold personal data.
@@ -1897,6 +1912,7 @@ async def verify_jwt_for_audience(
     expected_audience: str,
     requested_tenant: str | None = None,
     allow_unchosen: bool = False,
+    allow_mcp_profile: bool = False,
 ) -> Operator:
     """Validate a Bearer token against an explicit ``aud`` claim value.
 
@@ -1953,6 +1969,11 @@ async def verify_jwt_for_audience(
     :func:`~meho_backplane.policy.bindings.bind_current_tenant` matches the
     login's groups against the bindings of that tenant. Two group kinds
     give 401 ``multiple_bound_kinds``. With the switch off it does nothing.
+
+    Profile tokens (#6099): a token with the ``mcp_profile`` claim gets 403
+    ``mcp_profile_scope_violation`` unless *allow_mcp_profile* is set. Only
+    the MCP route sets it. So a new entrance refuses such a token unless it
+    allows it on purpose (:mod:`meho_backplane.auth.mcp_profile_claim`).
     """
     if not expected_audience or not expected_audience.strip():
         raise _http_401(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
@@ -1964,6 +1985,8 @@ async def verify_jwt_for_audience(
         expected_audience=expected_audience,
     )
     operator = _operator_from_claims(claims, token, settings)
+    if not allow_mcp_profile:
+        refuse_profile_token(operator)
     operator = await select_current_tenant(
         operator, requested_tenant, allow_unchosen=allow_unchosen
     )

@@ -1177,6 +1177,7 @@ async def vault_kv_metadata_delete(
 VAULT_KV_WRITE_CAPABILITIES: dict[str, frozenset[str]] = {
     "vault.kv.put": frozenset({"create", "update"}),
     "vault.kv.patch": frozenset({"read", "update"}),
+    "vault.kv.generate": frozenset({"read", "create", "update"}),
     "vault.kv.delete": frozenset({"update"}),
     "vault.kv.metadata.delete": frozenset({"delete", "read"}),
 }
@@ -1683,8 +1684,14 @@ async def register_vault_typed_operations(
     from meho_backplane.connectors.vault.ops_kv_folder import (
         register_vault_kv_folder_operations,
     )
+    from meho_backplane.connectors.vault.ops_kv_generate import (
+        register_vault_kv_generate_operation,
+    )
 
     await register_vault_kv_folder_operations(
+        when_to_use=kv_when_to_use, embedding_service=embedding_service
+    )
+    await register_vault_kv_generate_operation(
         when_to_use=kv_when_to_use, embedding_service=embedding_service
     )
     await register_vault_auth_operations(embedding_service=embedding_service)

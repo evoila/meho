@@ -58,6 +58,21 @@ was closed as not planned).
    error after streaming began is one `event: feed_error` frame. A
    heartbeat comment follows 30 seconds without output.
 
+   **A stream ends when its login ends.** `/api/v1/feed` ends the
+   stream at the token's `exp` plus the JWT leeway, and after
+   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. This end
+   also stops an archive read that is still running (a slow Valkey or
+   database call), and a read error after the end sends no
+   `feed_error` frame.
+   `/ui/broadcast/stream` checks its session again (the same check as
+   `require_ui_operator`) at most every
+   `UI_SESSION_READ_REVALIDATION_SECONDS`, before a frame, a heartbeat
+   or a wait; a signed-out, revoked or expired session, or a lost
+   role, ends it. The client reconnects with a fresh login and
+   `Last-Event-Id`, so it misses no announcement: `meho status --watch`
+   and `meho broadcast watch` renew the token once on a 401, and the
+   browser's `EventSource` reconnects by itself.
+
    **Row identifier semantics.** Every reader returns `event_id` (the
    announcement's UUID, equal to the `agent_announcement` row's PK).
    Readers de-duplicate by `event_id`.
@@ -518,8 +533,9 @@ the caller sent.
 
 - Run the work as a MEHO-hosted agent run (`meho agent run …`). The
   run's announcements are stamped automatically.
-- Register an agent principal: `meho agent-principal register <name>`
-  (a tenant admin does this). Then the agent calls MEHO with that
+- Register an agent principal:
+  `meho agent-principal register <name> --grants none` (a tenant admin
+  does this). Announcing needs no grant. Add grants only for the operations the agent runs. Then the agent calls MEHO with that
   principal's client-credentials token.
 
 **What the server stamps.** The caller cannot set these fields:
@@ -617,8 +633,12 @@ cannot make:
   person's write is never refused for a missing claim. An AI tool that
   works with a person's own login counts as that person. Every other
   caller is asked: agents, hosted agent runs, service logins and runner
-  logins. A service login and a runner login cannot make a claim, so in
-  a tenant with the gate on their caution-or-higher writes are refused.
+  logins. In a tenant with the gate on, a caution-or-higher write that
+  would run at once is refused when the caller holds no active claim. A
+  write that waits for approval is not asked. A claim counts only when it
+  is trusted, not completed, and its TTL has not run out. A service login
+  and a runner login cannot make a claim, so their `caution`-or-higher
+  writes that would run at once are refused.
   See [reflex-advisory.md](reflex-advisory.md).
 - **Reads use trusted claims.** The target advisory and the reflex claim
   lookup use only trusted claims, judged by their newest step (see *When

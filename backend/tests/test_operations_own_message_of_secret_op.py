@@ -34,12 +34,19 @@ from meho_backplane.connectors.linux.ops_write import (
     _resolve_sudo_password,
 )
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.rke2 import ops_snapshot as rke2_snapshot
+from meho_backplane.connectors.rke2 import ops_write as rke2_write
+from meho_backplane.connectors.rke2.ops import RKE2_OPS
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._errors import MESSAGE_SOURCE_KEY, result_connector_error
-from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD, withhold_vendor_text
+from meho_backplane.operations._vendor_text import (
+    VENDOR_TEXT_WITHHELD,
+    sends_secret,
+    withhold_vendor_text,
+)
 from meho_backplane.settings import get_settings
 
 _SECRET_TAGS = ["license", "license-key"]
@@ -126,6 +133,55 @@ def test_other_linux_write_errors_stay_hidden() -> None:
     assert out.extras["exception_message"] == VENDOR_TEXT_WITHHELD
 
 
+class _NoSudoSecretConnector:
+    async def _resolve_secret(self, target: object, operator: object) -> dict[str, str]:
+        return {"private_key": "x"}  # no sudo_password and no password
+
+
+@pytest.mark.asyncio
+async def test_rke2_write_sudo_refusal_shows_meho_reason_on_a_secret_op() -> None:
+    with pytest.raises(rke2_write.Rke2WriteOwnMessageError) as raised:
+        await rke2_write._resolve_sudo_password(_NoSudoSecretConnector(), object(), None)  # type: ignore[arg-type]
+
+    built = result_connector_error("rke2.token.rotate", raised.value, 1.0)
+    out = withhold_vendor_text(built, op_id="rke2.token.rotate", tags=_SECRET_TAGS)
+
+    assert out.extras["exception_class"] == "Rke2WriteOwnMessageError"
+    assert "sudo_password" in out.extras["exception_message"]
+    assert VENDOR_TEXT_WITHHELD not in out.model_dump_json()
+
+
+def test_rke2_snapshot_sudo_refusal_shows_meho_reason_on_a_secret_op() -> None:
+    error = rke2_snapshot.Rke2SnapshotNoSudoError("this operation needs root; no sudo credential")
+    built = result_connector_error("rke2.etcd-snapshot.save", error, 1.0)
+
+    out = withhold_vendor_text(built, op_id="rke2.etcd-snapshot.save", tags=_SECRET_TAGS)
+
+    assert out.extras["exception_message"] == str(error)
+    assert issubclass(
+        rke2_snapshot.Rke2SnapshotNoSudoError, rke2_snapshot.Rke2SnapshotPreconditionError
+    )
+
+
+def test_rke2_snapshot_ops_do_not_send_a_secret() -> None:
+    snapshot_ops = [op for op in RKE2_OPS if op.op_id.startswith("rke2.etcd-snapshot.")]
+
+    assert snapshot_ops
+    assert not any(sends_secret(op.op_id, list(op.tags)) for op in snapshot_ops)
+
+
+def test_other_rke2_write_errors_stay_hidden() -> None:
+    for error in (
+        rke2_write.Rke2WriteError(_VENDOR_TEXT),
+        rke2_write.Rke2WriteSafetyError(_VENDOR_TEXT),
+        rke2_snapshot.Rke2SnapshotPreconditionError(_VENDOR_TEXT),
+        rke2_snapshot.Rke2SnapshotError(_VENDOR_TEXT),
+    ):
+        built = result_connector_error("rke2.token.rotate", error, 1.0)
+        out = withhold_vendor_text(built, op_id="rke2.token.rotate", tags=_SECRET_TAGS)
+        assert out.extras["exception_message"] == VENDOR_TEXT_WITHHELD
+
+
 def test_a_secret_shaped_value_in_an_own_message_is_still_cleaned() -> None:
     secret = "hunter2-" + "quokka-pass"
     built = result_connector_error(_OP, _OwnMessageError(f"login failed: password={secret}"), 1.0)
@@ -161,7 +217,28 @@ def test_a_marked_http_error_stays_hidden() -> None:
 #: Each error type in ``meho_backplane`` whose message is shown on an operation
 #: that sends a secret. A new one fails the test below until it is added here,
 #: so each new one is seen in review.
-_MARKED_TYPES = {"LinuxWriteOwnMessageError"}
+_MARKED_TYPES = {
+    "LinuxWriteOwnMessageError",
+    # secret.move: a fixed sentence about a deleted sink version.
+    "SecretMergeDeletedVersionError",
+    # secret.move: target name, op id and MEHO's policy reason; no vendor text.
+    "VaultTargetRefusedError",
+    # secret.move: target names and ids, the approved one and the one found now.
+    "VaultTargetChangedError",
+    # secret.move: the target name as typed; no vendor text.
+    "VaultTargetNotFoundError",
+    # secret.move: Linux target name, id, host and port, the approved and the found ones.
+    "LinuxTargetChangedError",
+    # secret.move: Keycloak target name, id and host, the approved and the found ones.
+    "KeycloakTargetChangedError",
+    # secret.move: a fixed sentence with the field name at most; no Vault text.
+    "SecretSinkChangedError",
+    # secret.move: fixed sentences about a refused merge write; no Vault text.
+    "SecretMergeChangedError",
+    "SecretMergeRefusedError",
+    "Rke2SnapshotNoSudoError",
+    "Rke2WriteOwnMessageError",
+}
 
 
 def _base_names(node: ast.ClassDef) -> set[str]:
@@ -262,7 +339,9 @@ async def _returning_handler(operator: Operator, target: Any, params: dict[str, 
     )
 
 
-async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
+async def _dispatch(
+    handler: Any, op_id: str = _DISPATCH_OP, tags: list[str] = _DISPATCH_TAGS
+) -> tuple[Any, dict[str, Any]]:
     embedding = AsyncMock()
     embedding.encode_one.return_value = [0.1] * 384
     embedding.encode.return_value = [[0.1] * 384]
@@ -272,7 +351,7 @@ async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
         product="demo",
         version="1.x",
         impl_id="demo",
-        op_id=_DISPATCH_OP,
+        op_id=op_id,
         handler=handler,
         summary="Demo op that sends a licence key.",
         description="Demo op for the own-message rule.",
@@ -280,7 +359,7 @@ async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
         when_to_use=None,
         embedding_service=embedding,
         safety_level="safe",
-        tags=_DISPATCH_TAGS,
+        tags=tags,
     )
     operator = Operator(
         sub="op-own-message",
@@ -294,15 +373,13 @@ async def _dispatch(handler: Any) -> tuple[Any, dict[str, Any]]:
     result = await dispatch(
         operator=operator,
         connector_id="demo-1.x",
-        op_id=_DISPATCH_OP,
+        op_id=op_id,
         target=_Target(),
         params={},
     )
     async with get_sessionmaker()() as session:
         rows = (
-            (await session.execute(select(AuditLog).where(AuditLog.path == _DISPATCH_OP)))
-            .scalars()
-            .all()
+            (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
         )
     assert len(rows) == 1
     return result, rows[0].payload
@@ -330,3 +407,27 @@ async def test_dispatch_hides_vendor_text_of_a_returned_result_that_claims_the_m
     assert MESSAGE_SOURCE_KEY not in result.extras
     assert "quokka" not in result.model_dump_json()
     assert "quokka" not in str(payload)
+
+
+_RKE2_ROTATE = next(op for op in RKE2_OPS if op.op_id == "rke2.token.rotate")
+
+
+async def _rke2_rotate_without_sudo(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    return await rke2_write.rke2_token_rotate(_NoSudoSecretConnector(), target, params, operator)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_dispatch_of_rke2_token_rotate_without_sudo_is_an_error_with_its_reason() -> None:
+    tags = list(_RKE2_ROTATE.tags)
+    assert sends_secret(_RKE2_ROTATE.op_id, tags)
+
+    result, payload = await _dispatch(
+        _rke2_rotate_without_sudo, op_id=_RKE2_ROTATE.op_id, tags=tags
+    )
+
+    assert result.status == "error"
+    assert result.extras["exception_class"] == "Rke2WriteOwnMessageError"
+    assert "no sudo_password / password" in result.extras["exception_message"]
+    assert payload["error"]["exception_message"] == result.extras["exception_message"]
+    assert VENDOR_TEXT_WITHHELD not in result.model_dump_json()

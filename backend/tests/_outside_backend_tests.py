@@ -91,6 +91,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_check_plugin_version.py",
     "tests/test_ci_check_release_body_paths.py",
     "tests/test_ci_coverage_shards.py",
+    "tests/test_ci_dockerhub_login_soft_fail.py",
     "tests/test_ci_docs_deploy.py",
     "tests/test_ci_fork_runner_isolation.py",
     "tests/test_ci_helm_golden.py",
@@ -100,6 +101,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_memory_sampler.py",
     "tests/test_ci_merge_queue_cleanup.py",
     "tests/test_ci_merge_queue_watchdog.py",
+    "tests/test_ci_repo_secrets.py",
     "tests/test_ci_security_weekly_issue.py",
     "tests/test_ci_spec_shelf_lists.py",
     "tests/test_ci_upgrade_release_lookup.py",
@@ -127,6 +129,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_operations_connector_auth_failed.py",
     "tests/test_operations_meta_tools.py",
     "tests/test_policy_routing.py",
+    "tests/test_policy_small_team_parity.py",
     "tests/test_proxy_headers.py",
     "tests/test_reference_docs_drift.py",
     "tests/test_release_security_sheet.py",
@@ -135,8 +138,10 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_soak_harness_host_detach_from_vds.py",
     "tests/test_ssh_host_key_pins_script.py",
     "tests/test_targets_file_schema.py",
+    "tests/test_upgrade_rows.py",
     "tests/test_vault_tenant_admin_policy_doc.py",
     "tests/test_vcf_api_contract_manifest.py",
+    "tests/test_work_ref_rule.py",
 )
 
 # `Path(__file__)`, an optional `.resolve()`, then `.parents[N]` or `.parent`s.

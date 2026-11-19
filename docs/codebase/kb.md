@@ -906,20 +906,41 @@ job never confirms a candidate.
 
 ### Weekly upkeep (`lessons/upkeep.py`)
 
-A background job keeps the store clean. It runs once per
-`KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default), counted from
-its last recorded run, and can be turned off with
-`KNOWLEDGE_UPKEEP_ENABLED=false` (Helm: `config.knowledgeUpkeepEnabled`
-and `config.knowledgeUpkeepIntervalSeconds`). On PostgreSQL an advisory lock lets
-one replica at a time run it. Each run:
+A background job keeps the store clean. It is **off by default**. It
+changes which entries `search_knowledge` returns to agents, and a change
+to what the agent sees ships off until it is measured. An operator turns
+it on with `KNOWLEDGE_UPKEEP_ENABLED=true` (Helm:
+`config.knowledgeUpkeepEnabled: "true"`). `GET /version` lists the switch
+under `agent_switches`. When on, it runs once per
+`KNOWLEDGE_UPKEEP_INTERVAL_SECONDS` (one week by default, Helm:
+`config.knowledgeUpkeepIntervalSeconds`), counted from its last recorded
+run. On PostgreSQL an advisory lock lets one replica at a time run it.
+
+While it is off, nothing below happens: no duplicate is merged, no
+expired entry gets `status: retired`, no report is written, and recorded
+retrievals are not deleted.
+
+Each run:
 
 1. **Merges duplicates.** Entries of one tenant with exactly the same
    body are one entry. Case and spaces count, because `MODE=prod` and
    `MODE=PROD` say different things. The job keeps a `confirmed` copy
    first, else the oldest, and gives each other copy `status: replaced`
-   and `replaced_by: <slug of the kept entry>`. Before the change it
+   and `replaced_by: <slug of the kept entry>`. It does so only when the
+   kept entry is `confirmed` or both entries have the same creator
+   (`created_by_sub`; two entries with no creator count as the same).
+   The job writes as the system login, so it follows the rule that a
+   writer changes only its own entries. Any other pair goes to the
+   report for a reviewer (`merge_for_review`: `slug` and `same_as`), and
+   neither entry changes. Before the change it
    locks both entries and reads them again. When either was edited or
-   deleted after the scan, it leaves both as they are.
+   deleted after the scan, it leaves both as they are. The job compares
+   each copy with the kept entry only, not copies with each other. So in
+   a group of three equal entries, where the kept entry is not
+   `confirmed` and comes from person A, the two copies of person B both
+   go to the review list. The job does not merge B's two copies with
+   each other. A reviewer who confirms one entry lets the next run merge
+   the rest into it.
 2. **Retires expired entries.** An entry whose `expires_at` has passed
    gets `status: retired`.
 3. **Refreshes used confirmed entries.** A `confirmed` knowledge or
@@ -950,7 +971,8 @@ retrievals older than 180 days.
 `operator_sub = system:knowledge-upkeep` and `path = knowledge.upkeep`.
 The payload lists what was merged (`merged`: slug and `into`), retired
 (`retired`), refreshed (`refreshed`) and what waits for a reviewer
-(`for_review`), each list at most 100 items with full counts
+(`for_review` for used candidates, `merge_for_review` for equal entries
+the job did not merge), each list at most 100 items with full counts
 (`merged_count` and so on), plus the four numbers (`numbers`). The
 report models are in `lessons/upkeep_report.py`. Read it
 with `meho audit query` and the principal `system:knowledge-upkeep`. A

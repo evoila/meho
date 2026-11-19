@@ -41,6 +41,8 @@ from meho_backplane.db.models import (
     TenantPolicy,
 )
 from meho_backplane.policy.classification import (
+    LABEL_KEY_MAX,
+    LABEL_VALUE_MAX,
     Classification,
     ClassificationEntry,
     OpCoordinates,
@@ -71,8 +73,6 @@ __all__ = [
 ]
 
 _MAX_LABELS = 32
-_MAX_LABEL_KEY = 63
-_MAX_LABEL_VALUE = 255
 
 
 class InvalidStoredPolicyError(ValueError):
@@ -130,7 +130,7 @@ def _override_entries(
                 connector=connector_id,
                 op=override.op_id,
                 category=override.category,
-                labels={str(k): str(v) for k, v in labels.items() if label_text_ok(str(k), str(v))},
+                labels={str(k): str(v) for k, v in labels.items()},
             )
         )
     return entries
@@ -243,7 +243,11 @@ async def _stored_group_key(
 
 
 async def classify_step(
-    session: AsyncSession, *, tenant_id: UUID | None, step: EndpointDescriptor
+    session: AsyncSession,
+    *,
+    tenant_id: UUID | None,
+    step: EndpointDescriptor,
+    overrides: Sequence[OperationPolicyOverride] = (),
 ) -> Classification:
     """Return the classified values of one step of a multi-step operation.
 
@@ -251,12 +255,15 @@ async def classify_step(
     Entries for the connector and the operation match it. The group key
     comes from the step's stored row when one exists, so a group entry
     matches too; without a stored row the step still runs, and only the
-    group entries do not match.
+    group entries do not match. *overrides* are the override rows of the
+    step's operation: their ``category`` and ``labels`` count as for a
+    direct call (:func:`classify_rows`).
     """
     taxonomy, entries = await load_classification(session, tenant_id)
     group_key = await _stored_group_key(session, tenant_id, step)
-    coords = OpCoordinates(connector_id_of(step), group_key, step.op_id)
-    return classify(coords, entries, taxonomy)
+    connector_id = connector_id_of(step)
+    coords = OpCoordinates(connector_id, group_key, step.op_id)
+    return classify(coords, [*entries, *_override_entries(overrides, connector_id)], taxonomy)
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +304,11 @@ def _check_labels(labels: Mapping[str, str]) -> None:
     if len(labels) > _MAX_LABELS:
         raise ValueError(f"At most {_MAX_LABELS} labels are allowed.")
     for key, value in labels.items():
-        if not key or len(key) > _MAX_LABEL_KEY:
-            raise ValueError(f"Label key {key!r} must have 1 to {_MAX_LABEL_KEY} characters.")
-        if not value or len(value) > _MAX_LABEL_VALUE:
+        if not key or len(key) > LABEL_KEY_MAX:
+            raise ValueError(f"Label key {key!r} must have 1 to {LABEL_KEY_MAX} characters.")
+        if not value or len(value) > LABEL_VALUE_MAX:
             raise ValueError(
-                f"The value of label {key!r} must have 1 to {_MAX_LABEL_VALUE} characters."
+                f"The value of label {key!r} must have 1 to {LABEL_VALUE_MAX} characters."
             )
         if not label_text_ok(key, value):
             raise ValueError(
@@ -467,7 +474,9 @@ async def plan_edit(
         after=[*install_entries, *new_tenant_entries, *overrides],
         matched=matched,
         tenant_row=tenant,
-        install_wait_refusal=install_wait_text("This edit", *undone) if undone else None,
+        install_wait_refusal=(
+            install_wait_text("This edit", *undone, single_edit=True) if undone else None
+        ),
     )
 
 

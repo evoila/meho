@@ -5,9 +5,10 @@ runs** on durable triggers — a cron expression, a one-off instant, or an
 event — with no operator at the keyboard. An operator (or agent author)
 creates a trigger row; a background loop scans for what is due and
 launches the bound agent definition when its time comes. This is what
-runs your nightly reconciliation, your scheduled remediation, and the
-autonomous writes behind the [agent-requester approval
-pattern](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+runs your nightly reconciliation, your scheduled remediation, and other
+writes that run on a schedule. A write of a scheduled run still waits
+for approval like any other (see
+[Approvals and break-glass](approvals-and-break-glass.md)).
 
 The hard part of unattended execution is not the timer — it is *credentials*:
 a scheduled run days later still needs a live identity to reach Vault.
@@ -264,9 +265,12 @@ meho sensor create \
 
 **2. Make a small agent that can only read.** First give it a login. Then
 create it, and give it two grants: deny everything, then allow the pod list.
+`--grants none` picks no starting grant, because the two grants come last.
+MEHO asks for this pick when the switch `AGENT_GRANT_REQUIRED` is `observe`
+or `on` (see [Hosted agents](hosted-agents.md#starting-grants-pick-them-when-you-create-the-agent)).
 
 ```bash
-meho agent-principal register pod-reader
+meho agent-principal register pod-reader --grants none
 
 cat > pod-reader-toolset.json <<'JSON'
 {
@@ -280,7 +284,8 @@ meho agent create pod-reader \
   --model-tier standard \
   --turn-budget 20 \
   --system-prompt "You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. If the answer is a link to a stored result, read all rows with result_query. Say in short plain sentences which pods are not running." \
-  --toolset @pod-reader-toolset.json
+  --toolset @pod-reader-toolset.json \
+  --grants none
 
 meho agent grant create --principal agent:pod-reader --op '*' --verdict deny
 meho agent grant create --principal agent:pod-reader \

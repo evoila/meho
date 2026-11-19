@@ -23,8 +23,15 @@ params schema is `TARGETS_REGISTER_PARAMETER_SCHEMA`
 (`connectors/targets/schemas.py`): required `name`, `product`, `host`;
 optional `aliases`, `version`, `port`, `fqdn`, `secret_ref`,
 `auth_model`, `verify_tls`, `tls_ca_pin`, `tls_server_name`,
-`vpn_required`, `extras`, `notes`, `preferred_impl_id`. Any other field
-is refused. `vpn_required` (boolean, default `false`) records that a
+`vpn_required`, `extras`, `notes`, `preferred_impl_id`,
+`secret_field_map`, `flight_recorder_capture`. Any other field
+is refused. A call that sets `secret_field_map` or
+`flight_recorder_capture` waits for a person on every call, whoever makes
+it: no standing grant and no run approval covers it
+(`declare_wait_when_set` in `connectors/targets/__init__.py`). A call
+without these two fields keeps the usual rules. These two fields do not
+open the agent's `preview_operation`: with `PREVIEW_TYPED_WRITES` off,
+the preview of `targets.register` stays `unavailable`. `vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every
 `target` argument elsewhere resolves
@@ -48,12 +55,42 @@ checks the person who runs it from an approvals surface once more. The
 requester's own run is not checked again: the agent's resume, and the
 re-run of a failed approved call by the requester, also a service login.
 
-**REST writes are for people.** `POST`, `PATCH` and `DELETE
-/api/v1/targets` use one gate, `_require_admin_person` in
-`api/v1/targets.py`. It checks the `tenant_admin` role first, then that
-the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
+**REST writes are for people, and a token call waits for approval.**
+`POST`, `PATCH` and `DELETE /api/v1/targets` use one gate,
+`_require_admin_person` in `api/v1/targets.py`. It checks the
+`tenant_admin` role first, then that the login is a person
+(`ensure_human_principal` in `auth/rbac.py`). So:
 
-- A person with `tenant_admin` writes at once (the CLI, scripts).
+- A person's call made with a token (the `meho` CLI, scripts, an AI tool
+  that uses a person's login) follows the same rule as `call_operation`
+  ([approvals.md](approvals.md)): it waits for approval. The route sends
+  it to the matching operation through the dispatcher
+  (`dispatch_rest_write` in `api/v1/_wait_for_approval.py`) and answers
+  202 with `{status: "awaiting_approval", op_id, approval_request_id,
+  message}`. `POST` becomes `targets.register`, `PATCH` becomes
+  `targets.update`, `DELETE` becomes `targets.remove`. `PATCH` and
+  `DELETE` look the target up first and send its id, so the approved
+  change goes to the target the approver saw. Checks that need no write
+  run first and answer at once: the create and update checks (product,
+  `preferred_impl_id`, `secret_ref` scope, Vault login keys), the TLS
+  check of `PATCH` on the stored row with the sent fields (a `tls_ca_pin`
+  with `verify_tls: false`), 409 for a `POST` whose name a live target of
+  the tenant already has, 404 for an unknown target, and 409
+  `target_has_references` for a delete without `force`. A `PATCH` with
+  no field answers 422 `no_fields`. Nothing is written until a person approves it. The CLI
+  prints the approval id and exits 0.
+- `meho targets import` sends one `POST` or `PATCH` per row, so each row
+  makes its own approval request: a file with 50 rows makes 50 requests.
+  For a large file, import it in the web console, where it is written at
+  once. Or give the import a change ticket
+  (`meho --work-ref gh:acme/ops#42 targets import <file>`): every
+  request then carries it. A person goes through all of them with one
+  command, `meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order`.
+  It shows each row and asks for a yes. The command help says the same.
+- Only a person in the web interface (`Operator.web_session`) writes at
+  once. The console calls `create_target`, `update_target` and
+  `delete_target` as functions with its web session, not through the
+  routes.
 - A service login with `tenant_admin` gets 403 `human_principal_required`.
   The text names `targets.register`, `targets.update` and
   `targets.remove`, the operations a machine login uses. All three go
@@ -63,9 +100,8 @@ the login is a person (`ensure_human_principal` in `auth/rbac.py`). So:
 - Reads (`GET`, `probe`) keep the `operator` role and stay open to
   machine logins.
 
-The console and the operations call `create_target`, `update_target` and
-`soft_delete_target` as functions, not through the routes, so the gate
-does not apply to them. The console signs people in through the browser.
+The operations call the same functions in process, so the route check
+does not apply to them; the policy gate of the dispatcher does.
 
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
@@ -121,11 +157,12 @@ a name or an alias only. Tests: `tests/test_api_v1_targets_by_id.py`.
 ## Control flow — changing a target
 
 `PATCH /api/v1/targets/{name}` (`update_target`) changes only the sent
-fields. Connectors keep logins and credentials per target, keyed on
+fields. A call made with a token waits for approval as `targets.update`
+(see [Changing a target (`targets.update`)](#changing-a-target-targetsupdate)). Connectors keep logins and credentials per target, keyed on
 `(tenant_id, id)`, and a change does not alter that key. So when the
 PATCH sends a field that changes how MEHO reaches or logs in to the
 target (`_CONNECTION_FIELDS`: `product`, `version`, `preferred_impl_id`, `host`,
-`port`, `fqdn`, `secret_ref`, `auth_model`, `verify_tls`, `tls_ca_pin`,
+`port`, `fqdn`, `secret_ref`, `secret_field_map`, `auth_model`, `verify_tls`, `tls_ca_pin`,
 `tls_server_name`, `extras`), the route calls `forget_target_in_connectors(target)`
 (`operations/_handler_resolve.py`, through
 `_drop_kept_logins_on_connection_change`).
@@ -147,12 +184,27 @@ Limits:
   second backplane server, a satellite runner) notices the change on
   its next call: the dispatcher and the runner executor call
   `forget_target_if_changed` with the target they just read. It keeps,
-  per process, the `updated_at` it saw last for each target. The update
-  route always refreshes `updated_at`, also when the same `secret_ref`
-  is sent again. A new value drops the kept logins once, then the next
-  login uses the new values. The runner gets `updated_at` in its target
+  per process, a change version for each target: the time a person last
+  changed it (`connection_changed_at`), the connector class that
+  serves it now (the class itself, not its name), and the product the last
+  probe detected (`fingerprint.product`). The update route sets `connection_changed_at` whenever it gets a
+  connection field (the same fields as above), also when the same
+  `secret_ref` is sent again. A probe does not move it: a probe moves
+  `updated_at` and stores the detected product and version, but MEHO does
+  not sign in again for that. A probe that finds a new version drops the
+  kept logins only when another connector serves the target now. A probe
+  that finds another product behind the address drops them once, even when
+  the same connector serves the target: the old system is gone. A probe that
+  finds the same product, with a new version or only a new probe time,
+  drops nothing. The first probe of a target that was never probed before
+  also drops the kept logins once, because the product goes from none to a
+  name. This is harmless: the next call signs in again. A new
+  value drops the kept logins once, then the next login uses the new
+  values. Rows from before migration `0170` got `connection_changed_at`
+  from `updated_at`; a descriptor from an older gateway has none, and
+  `updated_at` is used. The runner gets both times in its target
   descriptor from the gateway. The check and the drop run under a lock
-  per target, and the new `updated_at` is recorded only when every hook
+  per target, and the new change version is recorded only when every hook
   is done. So a call that arrives while a hook still runs waits for the
   drop, instead of treating the version as handled and reusing the old
   login. Paths that call a connector without the dispatcher (topology
@@ -295,6 +347,21 @@ from Vault there.
   that path, or run `meho targets update <name> --secret-ref <path>`.
   It never shows the hvac text or the Vault URL. The builder is
   `operations/_errors_target_secret.py`.
+- **A refused read names its cause.** When Vault refuses to read the
+  target's own ref, the loader raises `TargetSecretForbiddenError` and a
+  dispatch answers `connector_vault_forbidden` about that ref, with
+  `secret_ref_derived`. For a ref MEHO built, the error says "this is the
+  default path MEHO builds from the target name" and advises a path MEHO
+  may read plus `meho targets update <name> --secret-ref <path>`. A
+  refused read of any other Vault path names that path
+  (`extras.refused_path`), not the target's ref. Neither shows the Vault
+  text or the Vault address.
+- **A probe answers the same way.** `POST /api/v1/targets/{name}/probe`
+  answers a missing secret with 422 `target_secret_not_found` and a
+  refused read with 422 `connector_vault_forbidden`, with the fields and
+  text of the call's answer. The console re-probe shows the same text in
+  a 422 alert. The `targets.probe` operation gives the same result as a
+  call, with its `error_code`.
 - **A machine login gets only the own path, unless a person approves.**
   A call of `targets.register` from an agent, a service login or a
   runner can run with no person, under a standing grant or an approved
@@ -430,7 +497,10 @@ meho targets probe web-01
 `POST /api/v1/targets/{name}/probe` (`meho targets probe`) reads the
 target's secret when the target has a map, and checks that every mapped
 **source** field exists. If one is missing, the probe fails with a 422 and
-does not save a fingerprint:
+does not save a fingerprint. When Vault has no secret at the ref during
+this check, the probe answers 422 `target_secret_not_found`; when Vault
+refuses the read, 422 `connector_vault_forbidden`. A missing source field
+answers:
 
 ```json
 {"detail": {"kind": "secret_field_map_source_missing",
@@ -464,7 +534,11 @@ both fields are present, `ssh_private_key` wins.
    with `detail.kind = "target_has_references"` and
    `detail.graph_node_refs`. The CLI prints the count and says to run
    again with `--force`.
-5. Otherwise it sets `deleted_at` (a soft delete) and answers 204. The
+5. Otherwise, for a call made with a token, it waits for approval as
+   `targets.remove` with the target's id and answers 202 with the
+   approval request id. The CLI prints it and exits 0. The steps below
+   run once a person approves it, or at once in the console.
+6. It sets `deleted_at` (a soft delete) and answers 204. The
    row stays, so audit rows still point at it; every read path filters
    it out. With `force`, the topology nodes stay and keep the deleted
    target's id in `target_id`. The FK's `ON DELETE SET NULL` only acts
@@ -545,7 +619,10 @@ and each register path says so and names the probe:
   not match there. The handler checks MEHO's policy for `targets.probe` on
   the found target (`secondary_target_refusal`) before the system is
   contacted. A deny grant for that target refuses the call, and nothing is
-  stored. Another target of the same agent is still probed.
+  stored. Another target of the same agent is still probed. The REST route
+  runs the same check (`probe_policy_refusal`) for an agent, service or
+  runner login and answers 403 `{"error": "denied", ...}` on a refusal. For
+  a person these rules are the role gate the route already has.
 - **A call that waits for approval.** An agent with a `needs-approval`
   grant parks the call; a reviewer runs the approved call as the reviewer.
   So the park records who asked and the requester's policy on the named
@@ -574,7 +651,8 @@ An agent or a person changes fields of one target with
 `call_operation(connector_id="targets-registry-1.x", op_id="targets.update",
 params={"target_id": "<target-uuid>", "secret_ref": "<vault-path>"})`, or
 with the operator-plane MCP tool `meho_targets_update`. People also have
-`meho targets update` on the CLI, which calls `PATCH`.
+`meho targets update` on the CLI, which calls `PATCH`. A `PATCH` made
+with a token becomes a call of this op.
 
 - **One code path.** The handler finds the target by id in the caller's
   tenant (`resolve_target_by_id` with `for_update=True`, which locks the
@@ -587,8 +665,14 @@ with the operator-plane MCP tool `meho_targets_update`. People also have
   `secret_field_map` merge, Vault login keys in `extras`), and the change
   drops kept logins like a `PATCH` does.
 - **By id, not by name.** An approved call changes the target the
-  approver saw. The preview names that target and the fields the call
-  sends.
+  approver saw. The preview names that target. Its `changes` map shows
+  each sent field with its stored value and its new value
+  (`{"host": {"from": "<stored>", "to": "<new>"}}`), so the approver sees
+  what the call changes. Secret-shaped values are hidden the same way as
+  in the generic parameter echo; `secret_ref` is a path and shows. The
+  approval request always holds `changes`. The agent's own
+  `preview_operation` holds it only with the `PREVIEW_TYPED_WRITES`
+  switch on (off by default).
 - **Fields.** Every field of `TargetUpdate` except `name`. Only the sent
   fields change; an explicit `null` clears a nullable field. A call with
   no field besides `target_id` is refused, and nothing changes.
@@ -598,8 +682,8 @@ with the operator-plane MCP tool `meho_targets_update`. People also have
 - **Risk level.** `caution` with `requires_approval`: every call waits
   until a person with `tenant_admin` approves it. `host` and `fqdn` are
   marked as addresses MEHO connects to (`x-meho-caller-address: true`), and
-  the call can change `secret_ref`. People who change a target at once use
-  `PATCH` (`meho targets update`, the web console).
+  the call can change `secret_ref`. Only the web console changes a target
+  at once.
 - **Result.** `{target_id, name, product, version, host, updated_fields}`.
 - **Errors.** An unknown id, a target of another tenant, or a failed check
   give an error that names the cause; nothing changes.

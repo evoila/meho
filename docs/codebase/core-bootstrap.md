@@ -37,14 +37,14 @@ What is true after the Job ran:
 - The first admin can log in with `meho login https://<host>` or in the
   browser. Keycloak asks for a new password first. The token then carries
   the first tenant's id, the role `tenant_admin` and `platform_admin`.
-- The second person is in `MEHO-SA-Operators`. That group gives the role
-  `operator`, and its members may also approve their own changes
+- The second person is in `MEHO-SA-Operators`. MEHO reads that old group
+  as Operators: the role `operator`, with no self-approval
   (`RoleGroup.SA_OPERATORS` in `auth/operator.py`). A change that waits
   for a second person can be approved by any operator other than the
-  person who asked, or by a member of `MEHO-Approvers`. So the second
-  person can approve the first admin's changes. The first admin may also
-  approve their own changes: members of `MEHO-Admins` may, like members
-  of `MEHO-SA-Operators` (`Operator.may_self_approve`).
+  person who asked, if it is a `safe` or `caution` change. A `dangerous`
+  or `destructive` change needs an admin. The first admin may approve
+  their own changes: members of `MEHO-Admins` may
+  (`Operator.may_self_approve`).
 - The console admin can log in to the admin console at
   `https://<host>/auth/admin/master/console/#/meho` (with
   `coreKeycloak.ingress.exposeAdmin: true`), pick realm `meho` and manage

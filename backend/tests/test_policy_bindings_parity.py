@@ -144,7 +144,7 @@ def _listed(entries: list[str], **extra: Any) -> dict[str, Any]:
             "/MEHO-Operators",
             "SA-Operators",
             "/MEHO-lab-b-SA-Operators",
-            (False, True),
+            (False, False),
             id="self-approval-group-of-tenant-b",
         ),
         pytest.param(
@@ -152,7 +152,7 @@ def _listed(entries: list[str], **extra: Any) -> dict[str, Any]:
             "/MEHO-Readers",
             "Approvers",
             "/MEHO-lab-b-Approvers",
-            (True, False),
+            (False, False),
             id="approver-group-of-tenant-b",
         ),
     ],
@@ -340,7 +340,7 @@ async def test_a_custom_self_approval_group_next_to_an_operator_group_changes_no
     _switch(monkeypatch, on=True)
     on = await _login(monkeypatch, claims, None)
     assert isinstance(off, Operator) and isinstance(on, Operator)
-    assert off.self_approver is True
+    assert off.self_approver is False
     assert on.model_dump(exclude={"bound_kind", "bound_categories"}) == off.model_dump(
         exclude={"bound_kind", "bound_categories"}
     )
@@ -366,9 +366,9 @@ async def test_a_custom_self_approval_group_next_to_another_role_group_changes_n
     _switch(monkeypatch, on=True)
     on = await _login(monkeypatch, claims, None)
     assert isinstance(off, Operator) and isinstance(on, Operator)
-    assert off.self_approver is True
-    assert on == off
-    assert on.bound_kind is None
+    assert off.self_approver is False
+    noted = {"bound_kind", "bound_categories"}
+    assert on.model_dump(exclude=noted) == off.model_dump(exclude=noted)
 
 
 # ---------------------------------------------------------------------------
@@ -392,12 +392,12 @@ async def test_a_custom_self_approval_group_next_to_another_role_group_changes_n
         ),
         pytest.param(
             _person(groups=["/MEHO-Readers"], tenant_role="read_only", approver=True),
-            True,
+            False,
             id="readers-group-claim-true",
         ),
         pytest.param(
             _person(groups=["/MEHO-Operators"], approver=True),
-            True,
+            False,
             id="operators-group-claim-true",
         ),
     ],
@@ -405,24 +405,28 @@ async def test_a_custom_self_approval_group_next_to_another_role_group_changes_n
 async def test_a_shipped_group_alone_gives_or_takes_no_approve_right(
     monkeypatch: pytest.MonkeyPatch, claims: dict[str, Any], want_approver: bool
 ) -> None:
-    """No tenant list, full group paths, no stored bindings: the token decides."""
+    """No tenant list, full group paths, no stored bindings: no approver flag.
+
+    MEHO does not read the ``approver`` claim, with the switch on or off.
+    """
     _switch(monkeypatch, on=False)
     off = await _login(monkeypatch, claims, None)
     _switch(monkeypatch, on=True)
     on = await _login(monkeypatch, claims, None)
     assert isinstance(off, Operator) and isinstance(on, Operator)
     assert off.approver is want_approver
-    assert on == off
-    assert on.bound_kind is None
+    noted = {"bound_kind", "bound_categories"}
+    assert on.model_dump(exclude=noted) == off.model_dump(exclude=noted)
 
 
 @pytest.mark.asyncio
 async def test_a_shipped_binding_that_agrees_with_the_token_is_noted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The old group MEHO-Approvers is read as Readers, also with an approver claim."""
     claims = _person(groups=["/MEHO-Approvers"], tenant_role="read_only", approver=True)
     _switch(monkeypatch, on=True)
     on = await _login(monkeypatch, claims, None)
     assert isinstance(on, Operator)
-    assert on.approver is True
-    assert on.bound_kind is not None and on.bound_kind.value == "Approvers"
+    assert on.approver is False
+    assert on.bound_kind is not None and on.bound_kind.value == "Readers"

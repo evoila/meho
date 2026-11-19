@@ -329,11 +329,10 @@ meho approvals approve <approval_request_id> --reason "verified blast radius"
 meho approvals reject  <approval_request_id> --reason "wrong target"
 ```
 
-Members of the `MEHO-SA-Operators` and `MEHO-Admins` groups may approve
-their own requests, on purpose. Everyone else needs another person to
-approve their request. A login holds exactly one role group, so an admin
-is not also a MEHO-SA-Operator; both groups may approve their own
-requests. The rules are in the
+Members of the `MEHO-Admins` group may approve their own requests, on
+purpose. Everyone else needs another person to approve their request.
+MEHO reads the old group `MEHO-SA-Operators` as Operators: its members
+do not approve their own requests. The rules are in the
 [decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md).
 Parked requests expire on a TTL. Approve
 in the web interface (the normal place), or on the command line after a

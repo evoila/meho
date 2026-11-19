@@ -488,9 +488,10 @@ install-verify.sh: 6 passed, 0 failed, 0 warned
 
 The install made two users with temporary passwords: the first admin
 (`admin`, in `MEHO-Admins`) and an approver (`approver`, in
-`MEHO-SA-Operators`). The approver is not an admin. The approver can
-approve the admin's risky changes, but not a change of rights: a change
-of rights needs a second admin. See
+`MEHO-SA-Operators`). The approver is not an admin. MEHO reads the old group `MEHO-SA-Operators` as
+Operators, so the approver can approve the admin's `safe` and `caution`
+changes. The admin approves their own `dangerous` and `destructive`
+changes. A change of rights needs a second admin. See
 [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 Write the two logins into a file that only you can read:
 

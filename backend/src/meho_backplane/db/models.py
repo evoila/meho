@@ -7289,7 +7289,7 @@ class ApprovalRequest(Base):
       NULL on every other request. Added by migration ``0153``.
 
     * ``approver_roles`` -- JSON nullable. The login group kinds that may
-      approve the request (for example ``["SA-Operators", "Admins"]``),
+      approve the request (for example ``["Operators", "Admins"]``),
       worked out from the policy file's ``routing`` section when the
       request started to wait (:mod:`meho_backplane.policy.routing`). Group
       kinds only, never people. At the click the person must be in one of

@@ -242,8 +242,8 @@ def test_a_refusal_shows_the_text_of_the_approve() -> None:
 @pytest.mark.parametrize(
     ("level", "groups"),
     [
-        ("caution", "MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or MEHO-Approvers"),
-        ("destructive", "MEHO-SA-Operators or MEHO-Admins"),
+        ("caution", "MEHO-Operators or MEHO-Admins"),
+        ("destructive", "MEHO-Admins"),
     ],
 )
 def test_an_own_change_names_only_who_may_approve_and_where(level: str, groups: str) -> None:
@@ -351,7 +351,8 @@ def test_the_confirmation_line_names_the_self_approval_rule() -> None:
     token_call = self_approval_confirmation(ApprovalRule.TOKEN_CALL_SELF_APPROVAL)
     break_glass = self_approval_confirmation(ApprovalRule.BREAK_GLASS_SELF_APPROVAL)
 
-    assert sa is not None and "MEHO-SA-Operators or MEHO-Admins" in sa and "audit log" in sa
+    assert sa is not None and "MEHO-Admins" in sa and "MEHO-SA-Operators" not in sa
+    assert sa is not None and "audit log" in sa
     assert token_call is not None and "came with a token" in token_call
     assert break_glass is not None and "APPROVAL_ALLOW_SELF_APPROVAL" in break_glass
     assert self_approval_confirmation(ApprovalRule.REVIEWER) is None
@@ -400,7 +401,7 @@ async def test_rest_list_and_show_carry_the_answer_for_the_caller(
 
 
 @pytest.mark.asyncio
-async def test_rest_an_sa_operator_sees_yes_for_their_own_change(
+async def test_rest_an_sa_operators_token_is_read_as_an_operator_and_sees_no(
     _client: tuple[httpx.AsyncClient, Any],  # noqa: F811
 ) -> None:
     ac, key = _client
@@ -410,7 +411,7 @@ async def test_rest_an_sa_operator_sees_yes_for_their_own_change(
     shown = await ac.get(f"/api/v1/approvals/{own}", headers={"Authorization": f"Bearer {token}"})
 
     assert shown.status_code == 200, shown.text
-    assert shown.json()["may_approve"] is True
+    assert shown.json()["may_approve"] is False
     assert shown.json()["may_approve_reason"] == "own_change"
 
 
@@ -443,7 +444,7 @@ async def test_rest_decide_says_it_was_a_self_approval(
     others = await _park("caution", requester="someone-else")
 
     self_approved = await _post(
-        ac, "decide", own, _rest_token(key, "op-sa", groups=["MEHO-SA-Operators"])
+        ac, "decide", own, _rest_token(key, "op-sa", role=TenantRole.TENANT_ADMIN)
     )
     other_approved = await _post(ac, "decide", others, _rest_token(key, "op-other"))
 
@@ -502,11 +503,15 @@ def _corrected_who(groups: str) -> str:
     return f"Ask another person in {groups} to approve it.{_WHERE}"
 
 
-_LOW_GROUPS = "MEHO-Operators, MEHO-SA-Operators, MEHO-Admins or MEHO-Approvers"
+_LOW_GROUPS = "MEHO-Operators or MEHO-Admins"
+_NEW_STEM = (
+    "You cannot approve your own change. Only members of the MEHO-Admins "
+    "group may approve their own changes. "
+)
 _TEXT_CASES = {
     # case: (main "who may approve" sentence, main has the switch hint, listed change)
     "caution": (_MAIN_LOW_WHO, True, _corrected_who(_LOW_GROUPS)),
-    "destructive": (_MAIN_HIGH_WHO, False, _corrected_who("MEHO-SA-Operators or MEHO-Admins")),
+    "destructive": (_MAIN_HIGH_WHO, False, _corrected_who("MEHO-Admins")),
     "token-call": (_MAIN_TOKEN_WHO, True, _MAIN_TOKEN_WHO),
     "routed": (_MAIN_LOW_WHO, True, _corrected_who("MEHO-Admins")),
     "routed-none": (
@@ -534,7 +539,8 @@ def test_own_change_texts_differ_from_main_only_by_the_listed_changes(
 ) -> None:
     """Each agent-facing refusal text is main's text with only the listed changes.
 
-    The listed changes: the "who may approve" sentence names the groups the
+    The listed changes: the sentence on who may approve their own change names
+    only MEHO-Admins, the "who may approve" sentence names the groups the
     approve check allows and the Approvals page (or says no group may
     approve), and the setting hint is removed. Any other change fails here.
     """
@@ -550,7 +556,12 @@ def test_own_change_texts_differ_from_main_only_by_the_listed_changes(
     prefix = f"operator {_REQUESTER!r} may not approve approval_request {row.id}: "
     main_rest = prefix + _MAIN_STEM + main_who + (_MAIN_REST_SUFFIX if main_has_hint else "")
     main_rights = _MAIN_STEM + main_who + (_MAIN_RIGHTS_SUFFIX if main_has_hint else "")
-    listed = [(main_who, who), (_MAIN_REST_SUFFIX, ""), (_MAIN_RIGHTS_SUFFIX, "")]
+    listed = [
+        (_MAIN_STEM, _NEW_STEM),
+        (main_who, who),
+        (_MAIN_REST_SUFFIX, ""),
+        (_MAIN_RIGHTS_SUFFIX, ""),
+    ]
     for old, new in listed:
         main_rest = main_rest.replace(old, new)
         main_rights = main_rights.replace(old, new)

@@ -159,6 +159,14 @@ when your realm asks for one.
 Without a browser (for example over SSH), the command prints the sign-in
 link and stops. Approve in the console instead.
 
+## A second person is a second login
+
+MEHO tells two people apart by their login: the login ID in the token.
+It does not know when two logins belong to one person. So "a second
+person" always means a second login. If one person has two logins, MEHO
+treats them as two people. The approval card in the web console says the
+same in one line.
+
 ## Who may approve
 
 Your login group decides. MEHO reads it only from your signed login
@@ -270,8 +278,10 @@ user's details, removes a credential, or changes the attributes of a
 group has more rules:
 
 - The login the change is for cannot approve it. This holds for every
-  group. A second login of the same person is not a second person. If
-  you have two logins, ask a colleague to approve.
+  group. MEHO treats a second login as a second person (see
+  [A second person is a second login](#a-second-person-is-a-second-login)).
+  If you have two logins, do not approve with the other one: ask a
+  colleague to approve.
 - MEHO must know which login and which group the change is for. When a
   user name or a group name could not be looked up when the request was
   made, nobody can approve the request. Send a new one.

@@ -10,6 +10,8 @@ first start `docs/codebase/appliance-firststart.md`.
 | --- | --- |
 | `build.sh` | The five steps against the lab's vCenter: base image, form-2 install, appliance pieces, clean, export. |
 | `clean.sh` | Runs on the build VM: removes everything that must differ between appliances, checks itself, powers off. |
+| `os-packages.sh` | Makes the signed OS-package file of a release (a flat apt repository). |
+| `upload-release.sh` | Uploads the release files to Google Cloud Storage, one folder per release. |
 | `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
 | `product-section.xml` | The wizard fields of the import in vCenter. |
 | `firststart/` | Runs once at the appliance's first boot: reads the wizard fields (or, without them, asks on the VM console), sets up the machine, installs the core from the disk. Also the console banner. |

@@ -1167,7 +1167,6 @@ async def _gate_subop(
         create_pending_request,
         record_approval_step_event,
         resume_requester_var,
-        rights_change_note,
     )
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
@@ -1431,7 +1430,6 @@ async def _gate_subop(
                 request.id,
                 duration_ms,
                 audit_id=request.request_audit_id,
-                note=await rights_change_note(request),
             )
 
         # DENY, or any unexpected verdict — fail closed: the sub-op never

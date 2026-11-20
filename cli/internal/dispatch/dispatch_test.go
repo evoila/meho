@@ -965,22 +965,3 @@ func TestWriteErrorTrailerNamesIDsOnlyForNotFound(t *testing.T) {
 		t.Errorf("status=error must not print the not-found line:\n%s", buf.String())
 	}
 }
-
-// TestWriteParkedHintShowsTheNote — a parked change of rights that no other
-// admin could approve carries extras.approval_note (#6641); the human line
-// shows it. Without a note the hint is unchanged.
-func TestWriteParkedHintShowsTheNote(t *testing.T) {
-	note := "This change needs a second admin to approve it. This tenant has only one admin."
-	var with, without bytes.Buffer
-	WriteParkedHint(&with, json.RawMessage(`{"approval_request_id":"ar-1","approval_note":"`+note+`"}`))
-	WriteParkedHint(&without, json.RawMessage(`{"approval_request_id":"ar-1"}`))
-	if !strings.Contains(with.String(), note) {
-		t.Errorf("note not shown; got %q", with.String())
-	}
-	if strings.Contains(without.String(), "second admin") {
-		t.Errorf("hint without a note changed; got %q", without.String())
-	}
-	if with.String() != strings.Replace(without.String(), ParkedHint+"\n", ParkedHint+"\n  "+note+"\n", 1) {
-		t.Errorf("the note is not the only addition; got %q", with.String())
-	}
-}

@@ -3818,7 +3818,6 @@ async def _handle_needs_approval(
         IdempotencyKeyConflictError,
         create_pending_request,
         record_approval_step_event,
-        rights_change_note,
     )
 
     run_id = current_agent_run_id_var.get()
@@ -3998,15 +3997,12 @@ async def _handle_needs_approval(
             "requires_approval is True; approval queue unavailable",
             duration_ms,
         )
-    # The request is saved. The note is read last, outside the ``try`` above,
-    # so it can never turn a stored request into a "denied" answer.
     return result_awaiting_approval(
         op_id,
         request.id,
         duration_ms,
         reused=reused,
         audit_id=request.request_audit_id,
-        note=await rights_change_note(request),
     )
 
 

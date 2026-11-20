@@ -100,32 +100,3 @@ func addApprovalSignInCheck(r *doctorReport, h *api.HealthResponse) {
 			fmt.Sprintf("unknown state %q from the backplane: %s", s.State, detail), ""))
 	}
 }
-
-// secondAdminCheckName names the doctor line for the number of admins
-// who could approve a change of rights.
-const secondAdminCheckName = "second admin"
-
-// rightsChangeGuide is the guide part that explains who approves a change of rights.
-const rightsChangeGuide = "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
-
-// addSecondAdminCheck adds one line that says whether a change of rights
-// can be approved in the tenant: another admin must approve it, never the
-// person who asked (approvals.rights_change_admins in /api/v1/health,
-// #6641). One admin is a warning. A backplane that does not report the
-// count, or that cannot count the admins, gets no line.
-func addSecondAdminCheck(r *doctorReport, h *api.HealthResponse) {
-	if h.Approvals == nil || h.Approvals.RightsChangeAdmins == nil {
-		return
-	}
-	n := *h.Approvals.RightsChangeAdmins
-	if n == 1 {
-		r.add(authed(secondAdminCheckName, doctorWarn, "",
-			"This change needs a second admin to approve it. This tenant has only one admin.",
-			"add a second admin in Keycloak (in MEHO-Admins or MEHO-Platform-Admins); see "+rightsChangeGuide))
-		return
-	}
-	if n > 1 {
-		r.add(authed(secondAdminCheckName, doctorOK, "",
-			fmt.Sprintf("%d admins in this tenant", n), ""))
-	}
-}

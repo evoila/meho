@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""MEHO says when a change of rights needs a second admin (#6641).
+"""Reading the admins of a tenant from the sign-in realm.
 
 :func:`tenant_admin_ids` counts the admins of a tenant against a small fake
-Keycloak (respx). A count MEHO is not sure of is ``None`` and never gives a
-warning. The answer to a change of rights in a tenant with one admin holds
-the sentence; with two admins, or when the count is not known, the answer
-is unchanged. ``/api/v1/health`` reports the count.
+Keycloak (respx). A count MEHO is not sure of is ``None``. The answer to a
+change of rights that waits for approval carries no extra note, and
+``/api/v1/health`` has no admin count.
 """
 
 from __future__ import annotations
@@ -26,18 +25,11 @@ from meho_backplane.auth import tenant_admins
 from meho_backplane.auth.approval_sign_in_flow import ApprovalSignInStatus
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.tenant_admins import (
-    ONLY_ONE_ADMIN,
-    RIGHTS_CHANGE_GUIDE_URL,
-    admin_count,
-    only_admin_note,
     tenant_admin_ids,
 )
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import dispatcher, grant_approval
-from meho_backplane.operations._errors import result_awaiting_approval
-from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.templating import get_templates
 from tests.test_api_v1_approvals_fresh_sign_in import _settings_env  # noqa: F401 -- autouse
 
 _KC = "https://keycloak.test"
@@ -124,6 +116,11 @@ def _mount(
         mock.get(f"{_ADMIN}/groups/{group_id}/members").respond(200, json=rows)
 
 
+async def _count(tenant: uuid.UUID) -> int | None:
+    ids = await tenant_admin_ids(tenant)
+    return None if ids is None else len(ids)
+
+
 # --- counting --------------------------------------------------------------------------
 
 
@@ -144,7 +141,7 @@ async def test_platform_admins_count_and_one_person_in_both_groups_counts_once()
             [_admins_group(), _platform_group()],
             {"g-admins": [_user(_ADMIN_A)], "g-platform": [_user(_ADMIN_A), _user(_ADMIN_B)]},
         )
-        assert await admin_count(_TENANT) == 2
+        assert await _count(_TENANT) == 2
 
 
 async def test_another_tenants_admins_do_not_count() -> None:
@@ -154,14 +151,14 @@ async def test_another_tenants_admins_do_not_count() -> None:
             [_admins_group(), _admins_group(_OTHER_TENANT) | {"id": "g-other"}],
             {"g-admins": [_user(_ADMIN_A)], "g-other": [_user(_ADMIN_B)]},
         )
-        assert await admin_count(_TENANT) == 1
+        assert await _count(_TENANT) == 1
 
 
 async def test_an_extra_tenant_group_with_only_meho_tenant_counts() -> None:
     extra = _group("g-extra", {"meho_tenant": [f"{_TENANT}:main:Admins"]})
     with respx.mock(assert_all_called=False) as mock:
         _mount(mock, [extra], {"g-extra": [_user(_ADMIN_A), _user(_ADMIN_B)]})
-        assert await admin_count(_TENANT) == 2
+        assert await _count(_TENANT) == 2
 
 
 async def test_a_child_group_takes_the_attributes_of_its_parent() -> None:
@@ -174,7 +171,7 @@ async def test_a_child_group_takes_the_attributes_of_its_parent() -> None:
             {"g-admins": [_user(_ADMIN_A)], "g-child": [_user(_ADMIN_B)]},
             children={"g-admins": [child]},
         )
-        assert await admin_count(_TENANT) == 2
+        assert await _count(_TENANT) == 2
 
 
 async def test_a_disabled_person_does_not_count() -> None:
@@ -184,18 +181,15 @@ async def test_a_disabled_person_does_not_count() -> None:
             [_admins_group()],
             {"g-admins": [_user(_ADMIN_A), _user(_ADMIN_B, enabled=False)]},
         )
-        assert await admin_count(_TENANT) == 1
+        assert await _count(_TENANT) == 1
 
 
 async def test_a_service_account_in_the_admin_group_does_not_count() -> None:
-    """Only a person may approve a change of rights, so a client login is not counted."""
+    """Only a person is an admin here, so a client login is not counted."""
     robot = {"id": "user-robot", "username": "service-account-meho-agent", "enabled": True}
     with respx.mock(assert_all_called=False) as mock:
         _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A), robot]})
-        assert await admin_count(_TENANT) == 1
-        tenant_admins._kept.clear()
-        note = await only_admin_note(_TENANT, _ADMIN_A)
-    assert note == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+        assert await _count(_TENANT) == 1
 
 
 async def test_the_service_account_prefix_follows_the_setting(
@@ -210,7 +204,7 @@ async def test_the_service_account_prefix_follows_the_setting(
             [_admins_group()],
             {"g-admins": [_user(_ADMIN_A), _user("service-account-is-a-person"), robot]},
         )
-        assert await admin_count(_TENANT) == 2
+        assert await _count(_TENANT) == 2
 
 
 async def test_members_are_read_page_by_page() -> None:
@@ -222,7 +216,7 @@ async def test_members_are_read_page_by_page() -> None:
             httpx.Response(200, json=first),
             httpx.Response(200, json=[_user("user-last")]),
         ]
-        assert await admin_count(_TENANT) == tenant_admins._PAGE_SIZE + 1
+        assert await _count(_TENANT) == tenant_admins._PAGE_SIZE + 1
     assert route.calls[1].request.url.params["first"] == str(tenant_admins._PAGE_SIZE)
 
 
@@ -281,54 +275,14 @@ async def test_the_count_is_kept_and_not_known_only_briefly(
 ) -> None:
     with respx.mock(assert_all_called=False) as mock:
         _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A)]})
-        assert await admin_count(_TENANT) == 1
+        assert await _count(_TENANT) == 1
         _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A), _user(_ADMIN_B)]})
-        assert await admin_count(_TENANT) == 1
+        assert await _count(_TENANT) == 1
     key = (get_settings().keycloak_admin_url, _TENANT)
     tenant_admins._kept[key] = (time.monotonic() - tenant_admins._KEEP_FAILED_S - 1, None)
     with respx.mock(assert_all_called=False) as mock:
         _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A), _user(_ADMIN_B)]})
-        assert await admin_count(_TENANT) == 2
-
-
-# --- the note --------------------------------------------------------------------------
-
-
-def _known(monkeypatch: pytest.MonkeyPatch, ids: set[str] | None) -> None:
-    async def read(*_args: object) -> frozenset[str] | None:
-        return None if ids is None else frozenset(ids)
-
-    monkeypatch.setattr(tenant_admins, "_read", read)
-
-
-async def test_the_note_for_the_only_admin_holds_the_sentence_and_the_link(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _known(monkeypatch, {_ADMIN_A})
-    note = await only_admin_note(_TENANT, _ADMIN_A.upper())
-    assert note == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-
-
-@pytest.mark.parametrize(
-    ("ids", "requester"),
-    [({_ADMIN_A, _ADMIN_B}, _ADMIN_A), ({_ADMIN_A}, "user-operator"), (None, _ADMIN_A)],
-    ids=["two admins", "the one admin can approve another person", "not known"],
-)
-async def test_no_note_when_another_admin_could_approve_or_not_known(
-    monkeypatch: pytest.MonkeyPatch, ids: set[str] | None, requester: str
-) -> None:
-    _known(monkeypatch, ids)
-    assert await only_admin_note(_TENANT, requester) is None
-
-
-def test_the_answer_without_a_note_is_unchanged() -> None:
-    request_id = uuid.uuid4()
-    result = result_awaiting_approval("demo.op", request_id, 1.0)
-    assert result.error == "awaiting_approval: 'demo.op' requires approval before execution"
-    assert result.extras == {
-        "error_code": "awaiting_approval",
-        "approval_request_id": str(request_id),
-    }
+        assert await _count(_TENANT) == 2
 
 
 # --- the answer at request time -----------------------------------------------------------
@@ -379,94 +333,20 @@ async def _ask(monkeypatch: pytest.MonkeyPatch, op_id: str = _RIGHTS_OP) -> Any:
     )
 
 
-async def test_the_only_admin_asks_for_a_change_of_rights_and_reads_the_sentence(
+async def test_a_change_of_rights_waits_with_the_plain_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _known(monkeypatch, {_ADMIN_A})
-    result = await _ask(monkeypatch)
-    assert result.status == "awaiting_approval"
-    assert ONLY_ONE_ADMIN in (result.error or "")
-    assert result.extras["approval_note"] == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-    assert result.extras["approval_request_id"]
-
-
-@pytest.mark.parametrize("ids", [{_ADMIN_A, _ADMIN_B}, None], ids=["two admins", "not known"])
-async def test_the_answer_is_unchanged_with_two_admins_or_an_unknown_count(
-    monkeypatch: pytest.MonkeyPatch, ids: set[str] | None
-) -> None:
-    _known(monkeypatch, ids)
     result = await _ask(monkeypatch)
     assert result.status == "awaiting_approval"
     assert result.error == f"awaiting_approval: {_RIGHTS_OP!r} requires approval before execution"
     assert "approval_note" not in result.extras
-
-
-async def test_a_request_that_is_no_change_of_rights_gets_no_note(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _known(monkeypatch, {_ADMIN_A})
-    result = await _ask(monkeypatch, op_id="demo.vm.restart")
-    assert result.status == "awaiting_approval"
-    assert "approval_note" not in result.extras
-
-
-async def test_a_failed_note_read_still_waits_for_approval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    async def read(*_args: object) -> frozenset[str] | None:
-        calls.append("note")
-        raise RuntimeError("made-up failure")
-
-    async def step_event(**_kwargs: object) -> None:
-        calls.append("step event")
-
-    monkeypatch.setattr(tenant_admins, "_read", read)
-    monkeypatch.setattr(
-        "meho_backplane.operations.approval_queue.record_approval_step_event", step_event
-    )
-    result = await _ask(monkeypatch)
-    assert result.status == "awaiting_approval"
     assert result.extras["approval_request_id"]
-    assert "approval_note" not in result.extras
-    assert calls == ["step event", "note"]
-
-
-async def test_a_step_of_a_multi_step_operation_gets_the_note(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
-    _known(monkeypatch, {_ADMIN_A})
-    operator = Operator(
-        sub=_ADMIN_A,
-        raw_jwt="<jwt>",
-        tenant_id=_TENANT,
-        tenant_role=TenantRole.TENANT_ADMIN,
-        principal_kind=PrincipalKind.USER,
-    )
-    result = await enforce_subop_policy(
-        operator=operator,
-        connector_id="demo-rest-1.0",
-        op_id=_RIGHTS_OP,
-        safety_level="dangerous",
-        requires_approval=True,
-        target=None,
-        params={"user": "someone"},
-    )
-    assert result is not None
-    assert result.status == "awaiting_approval"
-    assert result.extras["approval_note"] == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-    assert ONLY_ONE_ADMIN in (result.error or "")
 
 
 # --- /api/v1/health -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("ids", [{_ADMIN_A}, {_ADMIN_A, _ADMIN_B}, None])
-async def test_health_reports_the_count(
-    monkeypatch: pytest.MonkeyPatch, ids: set[str] | None
-) -> None:
+async def test_health_approvals_block_has_no_admin_count(monkeypatch: pytest.MonkeyPatch) -> None:
     async def vault(*_args: object, **_kwargs: object) -> VaultStatus:
         return VaultStatus(reachable=True, read_ok=True, detail=None)
 
@@ -475,9 +355,8 @@ async def test_health_reports_the_count(
 
     monkeypatch.setattr("meho_backplane.api.v1.health._probe_federation", vault)
     monkeypatch.setattr("meho_backplane.api.v1.health.read_approval_sign_in", sign_in)
-    _known(monkeypatch, ids)
     operator = Operator(
-        sub="op-6641",
+        sub="op-health",
         raw_jwt="<jwt>",
         tenant_id=_TENANT,
         tenant_role=TenantRole.OPERATOR,
@@ -485,65 +364,5 @@ async def test_health_reports_the_count(
     )
     response = await build_health_response(operator)
     assert response.approvals is not None
-    assert response.approvals.rights_change_admins == (None if ids is None else len(ids))
-
-
-# --- the console shows the note -------------------------------------------------------
-
-_NOTE = f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-
-
-def _waiting(note: str | None) -> dict[str, Any]:
-    return result_awaiting_approval(_RIGHTS_OP, uuid.uuid4(), 1.0, note=note).model_dump(
-        mode="json"
-    )
-
-
-def _render(template: str, envelope: dict[str, Any]) -> str:
-    context: dict[str, Any] = {"envelope": envelope, "error_message": None}
-    if template == "operations/_result.html":
-        context |= {"connector_id": "demo", "op_id": _RIGHTS_OP, "chain": None}
-    return get_templates().env.get_template(template).render(**context)
-
-
-@pytest.mark.parametrize(
-    ("template", "marker"),
-    [
-        ("keycloak/_write_result.html", "data-write-approval-note"),
-        ("operations/_result.html", "data-run-approval-note"),
-    ],
-)
-def test_the_console_answer_shows_the_note(template: str, marker: str) -> None:
-    html = _render(template, _waiting(_NOTE))
-    assert marker in html
-    assert ONLY_ONE_ADMIN in html
-    assert RIGHTS_CHANGE_GUIDE_URL in html
-
-
-@pytest.mark.parametrize("template", ["keycloak/_write_result.html", "operations/_result.html"])
-def test_the_console_answer_without_a_note_is_unchanged(template: str) -> None:
-    envelope = _waiting(None)
-    html = _render(template, envelope)
-    assert "approval-note" not in html
-    assert ONLY_ONE_ADMIN not in html
-    # The note is escaped like any other text.
-    with_markup = _render(template, _waiting("<b>a & b</b>"))
-    assert "&lt;b&gt;a &amp; b&lt;/b&gt;" in with_markup
-
-
-def test_the_classify_page_shows_the_note() -> None:
-    template = get_templates().env.get_template("policy/_classify_result.html")
-    requested = {
-        "status": "awaiting_approval",
-        "approval_request_id": str(uuid.uuid4()),
-        "error": None,
-        "matched_operations": 2,
-        "approval_note": _NOTE,
-    }
-    html = template.render(error=None, preview=None, form={}, requested=requested)
-    assert "data-classify-approval-note" in html
-    assert ONLY_ONE_ADMIN in html
-    plain = template.render(
-        error=None, preview=None, form={}, requested=requested | {"approval_note": None}
-    )
-    assert "data-classify-approval-note" not in plain
+    assert "rights_change_admins" not in response.approvals.model_dump()
+    assert "rights_change_admins" not in response.model_dump_json()

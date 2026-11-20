@@ -1,24 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Count the admins who could approve a change of rights in one tenant (#6641).
+"""Read the admins of one tenant from MEHO's own sign-in realm.
 
-A change of rights waits until another admin of the tenant approves it
-(:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`):
-a person with the ``tenant_admin`` role there, or a platform admin. The
-person who asked never approves it. So a tenant with one admin can never
-approve that admin's change of rights.
+A console page about people and roles will use :func:`tenant_admin_ids`.
+No other code calls it yet.
 
 MEHO stores no list of people. :func:`tenant_admin_ids` reads them from
 MEHO's own sign-in realm with the backplane's Keycloak admin client
 (:class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`): the
 enabled members of each group that gives the ``tenant_admin`` role in the
 tenant, plus the members of each group that gives ``platform_admin``.
-Service accounts (logins of a client) are not counted: only a person may
-approve a change of rights. A
-group without these attributes takes them from its parent group, as
-Keycloak does when it fills the login token. The groups and the members are
-read page by page.
+Service accounts (logins of a client) are not counted: only a person is
+an admin here. A group without these attributes takes them from its parent
+group, as Keycloak does when it fills the login token. The groups and the
+members are read page by page.
 
 The answer is ``None`` ("not known") when MEHO cannot count:
 
@@ -29,13 +25,9 @@ The answer is ``None`` ("not known") when MEHO cannot count:
 * the realm has no admin group for the tenant, or the groups have no enabled
   member (for example the people come from a company login MEHO cannot read).
 
-"Not known" never gives a warning. Only a count MEHO is sure of does:
-:func:`only_admin_note` at request time and the doctor line of ``meho
-doctor`` (``approvals.rights_change_admins`` in ``/api/v1/health``).
-
 An answer is kept for :data:`_KEEP_S` seconds per tenant (a failed read for
-:data:`_KEEP_FAILED_S` seconds), so the health answer, which is called
-often, does not read Keycloak on every call.
+:data:`_KEEP_FAILED_S` seconds), so a caller that asks often does not read
+Keycloak on every call.
 """
 
 from __future__ import annotations
@@ -57,23 +49,8 @@ from meho_backplane.auth.operator import RoleGroup, TenantRole
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
-    "ONLY_ONE_ADMIN",
-    "RIGHTS_CHANGE_GUIDE_URL",
-    "admin_count",
-    "only_admin_note",
     "tenant_admin_ids",
 ]
-
-#: The sentence a person reads when no other admin could approve their change.
-ONLY_ONE_ADMIN: Final[str] = (
-    "This change needs a second admin to approve it. This tenant has only one admin."
-)
-
-#: The guide part that explains who approves a change of rights.
-RIGHTS_CHANGE_GUIDE_URL: Final[str] = (
-    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
-    "#changes-of-rights-need-another-admin"
-)
 
 #: The whole read gives up after this many seconds.
 _READ_TIMEOUT_S = 5.0
@@ -235,20 +212,3 @@ async def tenant_admin_ids(
     ids = await _read(settings, tenant_id)
     _kept[key] = (time.monotonic(), ids)
     return ids
-
-
-async def admin_count(tenant_id: uuid.UUID) -> int | None:
-    """How many admins could approve a change of rights in the tenant; ``None`` when not known."""
-    ids = await tenant_admin_ids(tenant_id)
-    return None if ids is None else len(ids)
-
-
-async def only_admin_note(tenant_id: uuid.UUID, requester_sub: str) -> str | None:
-    """The note for a change of rights that no other admin could approve, else ``None``.
-
-    ``None`` too when the count is not known: then MEHO says nothing new.
-    """
-    ids = await tenant_admin_ids(tenant_id)
-    if ids is None or ids - {requester_sub.casefold()}:
-        return None
-    return f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"

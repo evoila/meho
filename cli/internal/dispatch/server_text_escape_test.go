@@ -45,9 +45,9 @@ var serverTextRenderers = map[string]func(s string) string{
 		}
 		return ""
 	},
-	"parked note": func(s string) string {
+	"parked approval id": func(s string) string {
 		var b bytes.Buffer
-		extras, _ := json.Marshal(map[string]any{"approval_note": s})
+		extras, _ := json.Marshal(map[string]any{"approval_request_id": s})
 		WriteParkedHint(&b, extras)
 		return b.String()
 	},

@@ -2203,15 +2203,10 @@ type ApprovalSignInStatusState string
 // binding, so the two can differ. “sign_in_level_warning“ is a short
 // sentence whenever the level is not required in practice for either
 // client or a read failed, else “None“.
-// “rights_change_admins“ is how many admins of the caller's tenant could
-// approve a change of rights (#6641,
-// :mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
-// count them. With one admin, a change of rights cannot be approved.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
 	EffectivePosture         string `json:"effective_posture"`
-	RightsChangeAdmins       *int   `json:"rights_change_admins"`
 
 	// SignIn The state of the approval sign-in flow and its binding (#6280).
 	SignIn             *ApprovalSignInStatus `json:"sign_in,omitempty"`
@@ -7172,10 +7167,6 @@ type HealthResponse struct {
 	// binding, so the two can differ. ``sign_in_level_warning`` is a short
 	// sentence whenever the level is not required in practice for either
 	// client or a read failed, else ``None``.
-	// ``rights_change_admins`` is how many admins of the caller's tenant could
-	// approve a change of rights (#6641,
-	// :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-	// count them. With one admin, a change of rights cannot be approved.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

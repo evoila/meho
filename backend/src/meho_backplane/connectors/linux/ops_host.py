@@ -72,8 +72,9 @@ UNIT_NAME_PATTERN: str = r"^[A-Za-z0-9:._@-]+$"
 _UNIT_NAME_RE: re.Pattern[str] = re.compile(UNIT_NAME_PATTERN)
 
 #: sysctl key charset. Covers dotted (``net.ipv4.ip_forward``) and slashed
-#: (``net/ipv4/ip_forward``) spellings; no shell metacharacters.
-SYSCTL_KEY_PATTERN: str = r"^[A-Za-z0-9._/-]+$"
+#: (``net/ipv4/ip_forward``) spellings; no shell metacharacters. The key
+#: never starts with ``-``, so ``sysctl`` never reads it as an option.
+SYSCTL_KEY_PATTERN: str = r"^[A-Za-z0-9._/][A-Za-z0-9._/-]*$"
 _SYSCTL_KEY_RE: re.Pattern[str] = re.compile(SYSCTL_KEY_PATTERN)
 
 #: Exit code the service-status command uses when the host has no

@@ -494,8 +494,11 @@ standing grant, no agent grant and no run approval covers it
 `op_classes.py` tells it apart from the params
 (`sysctl_write_can_run_a_program`, registered with
 `declare_credential_check`): a value with a `/`, a key in the
-`binfmt_misc` directory, a key named in `RUN_OR_WRITE_NAMES`, and a key
-MEHO does not read as a plain name (an empty part between separators). The
+`binfmt_misc` directory, a key named in `RUN_OR_WRITE_NAMES`, a key that
+starts with `-`, and a key MEHO does not read as a plain name (an empty
+part between separators). The key pattern of `sysctl.read` and
+`sysctl.write` (`SYSCTL_KEY_PATTERN`) also refuses a key that starts with
+`-`, so `sysctl` never reads the key as an option. The
 key is split on `.` and `/`, as `sysctl` reads it, and compared in lower
 case. A plain tuning key with a number keeps the rules of the op: a
 standing grant still covers it. The approval card shows the key and the

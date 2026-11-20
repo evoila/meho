@@ -23,6 +23,7 @@ value. A sensor never runs such a call.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from meho_backplane.checks import runner as sensor_runner
 from meho_backplane.checks.service import SensorRequiresNoPersonError, _require_read
 from meho_backplane.connectors.argocd.op_classes import sync_sets_a_revision
 from meho_backplane.connectors.linux.op_classes import sysctl_write_can_run_a_program
+from meho_backplane.connectors.linux.ops_host import SYSCTL_KEY_PATTERN, validate_sysctl_key
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.op_classes import call_always_waits, is_credential_capable
 from meho_backplane.operations._audit import work_ref_var
@@ -189,6 +191,28 @@ def test_a_key_that_names_a_program_or_a_file_waits(key: str) -> None:
     params = {"key": key, "value": "1"}
     assert sysctl_write_can_run_a_program(params) is True
     assert call_always_waits("linux.sysctl.write", params) is True
+
+
+@pytest.mark.parametrize("key", ["--load", "-p", "--system", "-a", "-"])
+def test_a_key_that_sysctl_reads_as_an_option_waits_and_is_refused(key: str) -> None:
+    params = {"key": key, "value": "settings.conf"}
+    assert sysctl_write_can_run_a_program(params) is True
+    assert call_always_waits("linux.sysctl.write", params) is True
+    with pytest.raises(ValueError):
+        validate_sysctl_key(key)
+    assert re.fullmatch(SYSCTL_KEY_PATTERN, key) is None
+
+
+def test_a_key_with_a_dash_inside_is_still_a_key() -> None:
+    assert validate_sysctl_key("net.ipv4.conf.br-lan.forwarding") == (
+        "net.ipv4.conf.br-lan.forwarding"
+    )
+    assert (
+        call_always_waits(
+            "linux.sysctl.write", {"key": "net.ipv4.conf.br-lan.forwarding", "value": "1"}
+        )
+        is False
+    )
 
 
 def test_a_value_with_a_path_waits() -> None:

@@ -75,6 +75,8 @@ def sysctl_write_can_run_a_program(params: Mapping[str, Any]) -> bool:
     ``sysctl`` reads ``.`` and ``/`` both as separators, so the key is split
     on both. The call is flagged when:
 
+    * the key starts with ``-``: ``sysctl`` reads it as an option (for
+      example ``--load``), not as a parameter name,
     * the value has a ``/`` (a path the kernel can run or write to),
     * a part of the key is ``binfmt_misc``,
     * the last part of the key is in :data:`RUN_OR_WRITE_NAMES`,
@@ -88,6 +90,8 @@ def sysctl_write_can_run_a_program(params: Mapping[str, Any]) -> bool:
     key = params["key"]
     value = params["value"]
     if not isinstance(key, str) or not isinstance(value, str):
+        return True
+    if key.startswith("-"):
         return True
     if "/" in value:
         return True

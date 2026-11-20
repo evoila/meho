@@ -20,7 +20,10 @@ off, the account page has no such section and the route answers 404.
   sign-out button (the web console), answers 404.
 
 A Keycloak failure answers the section with an error line; the audit row
-of the failed try says what ended before it, if anything. The logic is in
+of the failed try says what ended before it, if anything. When the audit
+row cannot be written, the line is an error too, never "signed out". When
+the last uses cannot be read after a sign-out, the card still shows its
+result line, and each row says its last use is unknown. The logic is in
 :mod:`meho_backplane.auth.tool_sign_out`.
 """
 
@@ -30,9 +33,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import (
@@ -43,6 +48,7 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.tool_sign_out import (
     ToolKind,
+    ToolSignOutAuditError,
     ToolSignOutIncompleteError,
     last_use_by_client,
     sign_out_tool,
@@ -61,22 +67,26 @@ _require_ui_session_dep = Depends(require_ui_session)
 _get_session_dep = Depends(get_session)
 
 #: Result lines after a sign-out. Kept here so the tests pin the words.
+ADMIN_CONSOLE_TEXT = (
+    "If you cannot open it, ask your admin to end that login in the "
+    "Keycloak admin console (Users, your user, Sessions)."
+)
 SIGNED_OUT_TEXT = (
     "{label} is signed out. It stops when its last access token ends: within "
-    "the access token lifetime (about five minutes on MEHO's built-in "
-    "Keycloak). If it signs in again, it gets a new login."
+    "the access token lifetime (about five and a half minutes on MEHO's "
+    "built-in Keycloak). If it signs in again, it gets a new login."
 )
 PARTLY_SHARED_TEXT = (
     "Partly signed out: MEHO ended the logins that only {label} uses, but "
     "{label} also shares one browser login with {others}. MEHO did not end "
     "that login, so {others} keep working, and {label} can still get new "
     "access tokens through it. To end it too, sign out of that login in "
-    "your Keycloak account page. Then {others} must sign in again."
+    "your Keycloak account page. Then {others} must sign in again. " + ADMIN_CONSOLE_TEXT
 )
 SHARED_ONLY_TEXT = (
     "{label} has no login of its own: it shares one browser login with "
     "{others}. MEHO did not end it, so {others} keep working. Nothing "
-    "changed. To stop {label}, end that login in your Keycloak account page."
+    "changed. To stop {label}, end that login in your Keycloak account page. " + ADMIN_CONSOLE_TEXT
 )
 NOTHING_TO_SIGN_OUT_TEXT = "Keycloak has no login of {label} for you. Nothing changed."
 NOT_CONFIGURED_TEXT = (
@@ -97,6 +107,11 @@ PARTLY_SIGNED_OUT_TEXT = (
     "then a call failed. {label} may still work. Try again later. If it "
     "keeps failing, ask your MEHO admin."
 )
+AUDIT_FAILED_TEXT = (
+    "MEHO could not write the audit row for signing out {label}, so the "
+    "sign-out is not confirmed. Keycloak may already have ended some of its "
+    "logins. Ask your MEHO admin to check the MEHO log."
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +123,7 @@ class ToolRow:
     client_id: str
     can_sign_out: bool
     last_used_at: datetime | None
+    last_use_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -142,6 +158,21 @@ async def tools_section(
     ]
 
 
+def _rows_without_last_use() -> list[ToolRow]:
+    """Return the rows of "Your tools" with an unknown last use."""
+    return [
+        ToolRow(
+            key=k.key,
+            label=k.label,
+            client_id=k.client_id,
+            can_sign_out=k.can_sign_out,
+            last_used_at=None,
+            last_use_known=False,
+        )
+        for k in tool_kinds(get_settings())
+    ]
+
+
 def _find_kind(key: str) -> ToolKind:
     """Return the tool kind with a sign-out button named *key*, else 404."""
     settings = get_settings()
@@ -167,6 +198,8 @@ async def _do_sign_out(session_ctx: UISessionContext, kind: ToolKind) -> _Result
             kind=kind,
             settings=get_settings(),
         )
+    except ToolSignOutAuditError:
+        return _Result("error", AUDIT_FAILED_TEXT.format(label=kind.label))
     except KeycloakConsentNotFoundError:
         return _Result("info", NOTHING_TO_SIGN_OUT_TEXT.format(label=kind.label))
     except KeycloakAdminNotConfiguredError:
@@ -204,8 +237,22 @@ def build_account_tools_router() -> APIRouter:
         """``POST /ui/account/tools/sign-out`` -- the tool kind key is a form field."""
         kind = _find_kind(tool)
         result = await _do_sign_out(session_ctx, kind)
+        tools: list[ToolRow] | None
+        try:
+            tools = await tools_section(db_session, session_ctx)
+        except (SQLAlchemyError, asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as exc:
+            # The result line must reach the person even when the database
+            # is down (the audit write may have failed for the same reason).
+            # asyncpg passes some connect errors on unwrapped, for example
+            # CannotConnectNowError while the server restarts.
+            _log.warning(
+                "ui_account_tools_last_use_read_failed",
+                operator_sub=session_ctx.operator_sub,
+                reason=type(exc).__name__,
+            )
+            tools = _rows_without_last_use()
         context: dict[str, object] = {
-            "tools": await tools_section(db_session, session_ctx),
+            "tools": tools,
             "tools_result": result,
             "now_utc": datetime.now(UTC),
         }

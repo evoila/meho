@@ -29,8 +29,9 @@ from typing import Any
 
 import pytest
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- registers the Keycloak writes
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.keycloak.ops_write_grant import GRANT_OPS
+from meho_backplane.connectors.keycloak.rights_changes import RIGHTS_CHANGE_OPS
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
@@ -50,12 +51,16 @@ from tests.test_people_behind_approve import (
     _surfaces_agree,
 )
 
-pytestmark = pytest.mark.asyncio
-
 #: A change of one login or group.
 _MEMBER_ADD = "keycloak.group.member.add"
 #: A change of rights that is not a change of one login or group.
 _MAPPER_CREATE = "keycloak.protocol_mapper.create"
+
+
+def test_the_two_writes_are_changes_of_rights() -> None:
+    assert _MEMBER_ADD in GRANT_OPS
+    assert _MAPPER_CREATE in RIGHTS_CHANGE_OPS
+    assert _MAPPER_CREATE not in GRANT_OPS
 
 
 def _card(op_id: str) -> dict[str, Any]:

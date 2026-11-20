@@ -64,9 +64,9 @@ MEHO has five role groups. Each group gives a role:
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
 | `MEHO-Operators` | `operator` | Run actions. Risky changes wait until a second person approves. |
-| `MEHO-SA-Operators` | `operator` | Run actions, and approve their own risky changes on purpose. Also approve other people's `dangerous` and `destructive` changes. |
+| `MEHO-SA-Operators` | `operator` | An old group: MEHO reads it as `MEHO-Operators`. |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
-| `MEHO-Approvers` | `read_only`, plus `approver: true` | Approve other people's changes. Cannot run actions. |
+| `MEHO-Approvers` | `read_only` | An old group: MEHO reads it as `MEHO-Readers`. |
 
 The rule: **put each person in exactly one of these groups.**
 

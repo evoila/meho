@@ -472,8 +472,8 @@ whom, or what a sign-in asks for:
   example the one-time code set-up) makes a user's sign-in weaker.
 
 The first five are also changes of rights (next section): another admin
-(a tenant admin or a platform admin) must approve each call, and a
-MEHO-SA-Operator who is not an admin cannot. The single-operator
+(a tenant admin or a platform admin) must approve each call, and an
+Operator cannot. The single-operator
 self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them.
 The test `backend/tests/test_keycloak_identity_write_approvers.py` checks
 both rules for the first five. `user.required_actions.update` is
@@ -487,8 +487,8 @@ role, who may sign in, or how strong a sign-in is, is a change of rights.
 For such a write:
 
 - the requester never approves their own request;
-- another admin (a tenant admin or a platform admin) must approve it, so a
-  MEHO-SA-Operator who is not an admin cannot;
+- another admin (a tenant admin or a platform admin) must approve it, so an
+  Operator cannot;
 - a standing grant, an older grant row and a run approval never cover it:
   each call waits for its own approval. An agent's call waits too;
 - no operation setting turns its approval off. An edit that tries is
@@ -1052,8 +1052,7 @@ the existing mapper is changed.
   - The op is registered with `register_rights_change_op`. The requester
     never approves their own request, also as a tenant admin and with the
     self-approval switch on. The approver is another person who is a
-    tenant admin or a platform admin. A MEHO-SA-Operator who is not an
-    admin cannot approve it.
+    tenant admin or a platform admin. An Operator cannot approve it.
   - A person approves each call (`declare_per_call_approval`). No standing
     grant and no run approval covers it. An agent grant does not either:
     the op needs approval, so an agent's call always waits.

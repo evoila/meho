@@ -19,10 +19,10 @@ on each login client copies them into the token.
 | Group | Role in MEHO | What the person can do |
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
-| `MEHO-Operators` | `operator` | Run actions. Their `dangerous` and `destructive` changes wait for a MEHO-SA-Operator or an admin. |
-| `MEHO-SA-Operators` | `operator` | Run actions, and approve their own changes on purpose ([who may approve](../../guides/approvals-and-break-glass.md#who-may-approve)). |
+| `MEHO-Operators` | `operator` | Run actions. Their `dangerous` and `destructive` changes wait for an admin. |
+| `MEHO-SA-Operators` | `operator` | An old group: MEHO reads it as `MEHO-Operators` ([who may approve](../../guides/approvals-and-break-glass.md#who-may-approve)). |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
-| `MEHO-Approvers` | `read_only` + `approver` | Approve other people's changes. Cannot run actions. |
+| `MEHO-Approvers` | `read_only` | An old group: MEHO reads it as `MEHO-Readers`. |
 
 `MEHO-Platform-Admins` is separate. It adds `platform_admin` to the
 token and gives no tenant or role. Only the first admin needs it.

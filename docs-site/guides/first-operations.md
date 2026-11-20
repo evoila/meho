@@ -1,7 +1,7 @@
 # Run your first operations
 
-MEHO does not expose one tool per vendor operation — a vCenter alone
-would be thousands. Instead, every [connector](../reference/words.md#connector) publishes its [operations](../reference/words.md#operation)
+MEHO does not expose one tool per vendor [operation](../reference/words.md#operation) — a vCenter alone
+would be thousands. Instead, every [connector](../reference/words.md#connector) publishes its operations
 into one searchable catalog, and you (or your agent) reach them
 through a small, stable set of meta-tools: **discover the connector,
 list its [operation groups](../reference/words.md#operation-group), search for the operation, [preview](../reference/words.md#preview) it,

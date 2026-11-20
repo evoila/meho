@@ -462,7 +462,7 @@ Any change to how MEHO reaches or logs in to a target (for example
 logs in with the new values.
 
 The MEHO server that gets the update drops its login at once. Any
-other backplane server, and any satellite runner, drops its login on
+other backplane server, and any [satellite runner](../reference/words.md#satellite-runner), drops its login on
 its next call to that target.
 
 ## Import and verify

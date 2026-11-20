@@ -132,6 +132,10 @@ from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._short_tool_texts import LIST_TARGETS_SHORT, QUERY_TOPOLOGY_SHORT
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
+from meho_backplane.operations._target_connector_limit import (
+    allowed_connectors_var,
+    targets_within_limit,
+)
 from meho_backplane.operations.answer_ready import ANSWER_READY_OUTPUT_PROPERTIES
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -1605,6 +1609,10 @@ async def _list_targets_handler(
     A session whose MCP profile has a connector list sees only the targets
     whose connector is in the profile (#6099). Such a page can hold fewer
     targets than ``limit`` and still have a ``next_cursor``.
+
+    A hosted agent with a ``connectors`` list sees only the targets whose
+    connector is in its list
+    (:func:`~meho_backplane.operations._target_connector_limit.targets_within_limit`).
     """
     tenant_id_arg = arguments.get("tenant_id")
     legacy_tenant_arg = arguments.get("tenant")
@@ -1616,9 +1624,12 @@ async def _list_targets_handler(
     tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
     scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
 
-    # #6099: a profile with a connector list needs the whole row, so the
-    # resolver can pick each target's connector.
-    limited = profile_connectors(operator.mcp_tool_profile) is not None
+    # A profile or an agent with a connector list needs the whole row, so
+    # the resolver can pick each target's connector.
+    limited = (
+        profile_connectors(operator.mcp_tool_profile) is not None
+        or allowed_connectors_var.get() is not None
+    )
     columns: tuple[Any, ...] = (
         (TargetORM,)
         if limited
@@ -1654,6 +1665,8 @@ async def _list_targets_handler(
     # The cursor counts the rows read, so a page that the profile made
     # shorter still points to the next one.
     next_cursor = rows[-1].name if len(rows) == limit else None
+    if limited:
+        rows = await targets_within_limit(rows)
     targets = [
         {
             "id": str(t.id),

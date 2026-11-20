@@ -3272,32 +3272,42 @@
    fails. It only reports and changes nothing. On a Linux server
    install, run <code>sudo meho doctor</code> on the server too. See
    <a href="../../clients/troubleshooting/#start-with-meho-doctor">Troubleshooting</a>.</li>
-<li><strong>Read the first-start list.</strong> MEHO checks the site and shows a plain
-   list of five checks. The rest of this page explains it.</li>
+<li><strong>Sign in and read the first-start list.</strong> MEHO checks the site and
+   shows a plain list of five checks. The list needs a login. The rest of
+   this page explains it.</li>
 </ol>
 <h2 id="the-first-start-list">The first-start list<a class="headerlink" href="#the-first-start-list" title="Permanent link">&para;</a></h2>
 <p>Right after the install, MEHO checks the site and shows a plain list. Each
 line is green, yellow (a warning) or red with one sentence that says what to fix. The list is
 the same in every install form.</p>
-<p>Three ways to read it:</p>
+<p>The list is for people. It needs a person's login with the admin role of
+the tenant, or a platform admin. An operator, a reader, and an agent,
+service or runner login get the answer 403. Three ways to read it:</p>
 <ul>
-<li><code>meho status --first-start</code> prints the list. It needs no login. The exit
-  code is 6 when any line is red. Add <code>--json</code> for the raw answer.</li>
-<li>The console page <code>/ui/first-start</code> shows the same list.</li>
-<li><code>GET /first-start</code> on the backplane. It needs no login. It returns the
-  lines only: no token, no stack trace, no internal detail. A red line names
-  only the host from <code>BACKPLANE_URL</code>. The reachability line shows how many
-  systems did not answer, not their names. The console page shows the names.</li>
+<li>The console page <code>/ui/first-start</code>. Sign in to the web console first.</li>
+<li><code>meho status --first-start</code> prints the list. Run <code>meho login &lt;address&gt;</code>
+  first. The exit code is 6 when any line is red, 2 without a login, and
+  5 without the admin role.
+  Add <code>--json</code> for the raw answer.</li>
+<li><code>GET /api/v1/first-start</code> on the backplane, with the token of a login.</li>
 </ul>
-<p>Calls that arrive while a run is in progress get the result of that run.
-After a run ends, <code>GET /first-start</code> and <code>meho status --first-start</code> show
-its result for 30 seconds, and then the next call runs the checks again.
-So after you fix a problem, wait 30 seconds before you look again. The
-console page runs the checks on every load. The checks change nothing.</p>
+<p>The list shows the systems of your current tenant. A platform admin sees
+the systems of all tenants, and then the line names the tenant of each
+system, for example <code>esx-2 (tenant blue)</code>. A red line names the systems that did not
+answer. The answer holds no token, no stack trace and no internal detail.</p>
+<p><code>GET /first-start</code> needs no login. It runs no check and contacts no system.
+It answers one fixed line that says how to sign in, and nothing about the
+install. That answer has <code>"ok": false</code> and the line is <code>skipped</code>, so a
+script that reads <code>ok</code> never sees green when no check ran.</p>
+<p>The checks change nothing. The list runs at most once at a time for each
+tenant: calls that arrive during a run get the result of that run, and a
+finished list is kept for 10 seconds. The reachability check contacts at
+most 10 systems at the same time, and it stops after 15 seconds. A system
+still without an answer by then is named in the line, and the line is red.</p>
 <p>A line is <code>ok</code> (green), <code>warn</code> (a warning), <code>fail</code> (red) or <code>skipped</code>. A warning does not make the list red, and the install goes on. A line is skipped when the
 check cannot run or has no meaning: the certificate check waits until the DNS
 name is green, and it is skipped when <code>BACKPLANE_URL</code> uses plain <code>http</code>. The
-reachability line is skipped when some systems need a signed-in person (see
+reachability line is skipped when some systems could not be checked (see
 the notes) and none of the others failed.</p>
 <h2 id="the-five-checks">The five checks<a class="headerlink" href="#the-five-checks" title="Permanent link">&para;</a></h2>
 <table>
@@ -3332,7 +3342,7 @@ the notes) and none of the others failed.</p>
 <tr>
 <td><code>reachability</code></td>
 <td>Every system in the settings answers the same call that <code>meho targets probe</code> uses. With no systems added, the line is green.</td>
-<td>"2 of 5 systems did not answer." (the console page names them). Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right.</td>
+<td>"These systems did not answer: esx-2, esx-5." Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right.</td>
 </tr>
 </tbody>
 </table>
@@ -3365,12 +3375,18 @@ a firewall, and run the checks again. The install itself is not stopped.</p>
   proxy, so the line compares with the clock of the proxy.</li>
 <li>The reachability check does not store anything. <code>meho targets probe</code> also
   stores the detected product and version; this check only asks.</li>
-<li>A system whose login lives in Vault needs a person's token to read that
-  login. The console page uses the token of the signed-in person, so it checks
-  these systems too. The public list and <code>meho status --first-start</code> have no
-  person: they do not contact these systems, and the line says how many
-  systems could not be checked. That is not a red line. Sign in to the console
-  to check them, or run <code>meho targets probe &lt;name&gt;</code>.</li>
+<li>A system whose login lives in Vault needs the token of a person signed in
+  to its tenant to read that login. The list uses the token of the signed-in
+  person, so it checks these systems in the current tenant. For a platform
+  admin who sees all tenants, the systems of other tenants whose login lives
+  in Vault are not contacted, and the line names them as not checked. That
+  is not a red line. Sign in as a person to that tenant to check them, or
+  run <code>meho targets probe &lt;name&gt;</code> there.</li>
+<li>A system whose login lives in Google Secret Manager is checked in every
+  tenant. MEHO reads that login in one of two ways. Without
+  <code>GSM_WIF_AUDIENCE</code>, it uses its own Google identity. With
+  <code>GSM_WIF_AUDIENCE</code> set, it uses the token of the signed-in person, which
+  Google exchanges for a short-lived one.</li>
 </ul>
 <p>Next: <a href="../first-day/">your first day</a>.</p>
 

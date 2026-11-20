@@ -3969,6 +3969,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The first-start list needs a person's login with the admin role of the tenant, or a platform admin; an operator, a reader, and an agent, service or runner login get 403. <code>meho status --first-start</code> reads it from the new route <code>GET /api/v1/first-start</code> with the login of <code>meho login</code>. It checks the systems of the current tenant; for a platform admin, the systems of all tenants, with the tenant of each system. <code>GET /first-start</code> without a login answers one fixed line that says how to sign in, with <code>"ok": false</code> (the line is <code>skipped</code>). It runs no check. <code>meho status --first-start</code> of v0.48.0 or older reads that answer, so it shows the line and ends with exit code 6. At the end of <code>install.sh</code> (Linux server), the result names where to read the list after the first login.</td>
+<td>Update the <code>meho</code> command to this version. Read the first-start list after you sign in as a tenant admin or platform admin: open <code>/ui/first-start</code> in the web console, or run <code>meho login &lt;address&gt;</code> and then <code>meho status --first-start</code>. A script that reads <code>GET /first-start</code> without a login gets the fixed line: give it a login and call <code>GET /api/v1/first-start</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>Only a person can remove a <code>deny</code> grant or a <code>needs-approval</code> grant of an agent. A call that removes such a grant with a service, runner or agent login now gets 403 <code>human_principal_required</code>, and the grant stays. This holds for REST, MCP and the console. Over REST and MCP, any login that has the <code>tenant_admin</code> role can remove an <code>auto-execute</code> grant. On the unified console page, only a person can remove any grant.</td>
 <td>If a script removes <code>deny</code> or <code>needs-approval</code> grants, run it with a person's login. Scripts that only remove <code>auto-execute</code> grants need no change.</td>
 </tr>

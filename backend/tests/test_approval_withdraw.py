@@ -33,11 +33,17 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
+from meho_backplane.api.v1.approvals import ApprovalRequestView
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequestStatus, AuditEventClass, AuditLog
+from meho_backplane.db.models import (
+    ApprovalRequestStatus,
+    AuditEventClass,
+    AuditLog,
+    MachineLogin,
+)
 from meho_backplane.main import app
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
@@ -335,7 +341,7 @@ async def test_route_each_principal_kind_withdraws_its_own_request(
 
 
 @pytest.mark.asyncio
-async def test_route_people_behind_are_shown_only_to_a_person(
+async def test_route_a_machine_login_reads_the_answer_without_the_people_behind_keys(
     client: tuple[httpx.AsyncClient, Any],
 ) -> None:
     ac, key = client
@@ -358,11 +364,21 @@ async def test_route_people_behind_are_shown_only_to_a_person(
     assert listed.status_code == 200, listed.text
     machine_views = [withdrawn.json(), shown.json(), *listed.json()]
     assert len(machine_views) == 3
+    # The keys of the answer that MEHO gave before the two people-behind
+    # fields, in the same order: a machine login reads the same answer.
+    main_keys = [
+        name
+        for name in ApprovalRequestView.model_fields
+        if name not in {"people_behind", "people_behind_known"}
+    ]
     for view in machine_views:
-        assert view["people_behind"] is None
-        assert view["people_behind_known"] is None
+        assert list(view) == main_keys
     assert person.json()["people_behind_known"] is True
     assert person.json()["people_behind"]
+    # Each REST call of a machine login notes it; a person is not noted.
+    async with get_sessionmaker()() as session:
+        noted = set((await session.scalars(select(MachineLogin.sub))).all())
+    assert noted == {_SENDER_SUB, "agent:reader"}
 
 
 @pytest.mark.asyncio

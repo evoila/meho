@@ -247,18 +247,23 @@ the people behind it:
   for events;
 - who started or handed over the runbook run it works on.
 
+Only people count. An agent, add-on or runner login that set up, changed
+or handed over something is never one of the people behind another login.
+
 Such a person may approve the request only where they may approve their
 own change (the table above). A change of rights always needs another
 admin, also when an admin is behind the agent. Everyone else approves it
 as another person's change.
 
 When MEHO knows nobody behind the login (for example a login made only in
-Keycloak), only an Admin may approve its requests.
+Keycloak, or one that only other machine logins set up), only an Admin may
+approve its requests.
 
 The request shows these people: the request card and window in the web
 interface ("Set up by ... Grant by ..."), `meho approvals show`
 ("Behind it:"), and the REST answer (`people_behind`) when a person asks.
-An agent, add-on or runner login reads `null` there. When MEHO knows
+For an agent, add-on or runner login, the REST answer leaves the two
+fields out. When MEHO knows
 nobody, they say "Set up by: not known".
 
 Use an agent to run changes on a schedule. An agent is never a way to

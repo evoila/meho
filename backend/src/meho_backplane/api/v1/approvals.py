@@ -369,6 +369,10 @@ class OutcomeCheckRequestBody(BaseModel):
     )
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
 class PersonBehindView(BaseModel):
     """One person behind the agent, service or runner login that asked."""
 
@@ -430,15 +434,15 @@ class ApprovalRequestView(BaseModel):
     principal_kind: str | None = None
     #: The people behind the agent, service or runner login that asked
     #: (who set it up, changed it, gave its grants, made its schedules or
-    #: started its run). They count as the requester. ``None`` for a
-    #: person's request, and ``None`` when an agent, service or runner
+    #: started its run). They count as the requester. Left out of the
+    #: answer for a person's request, and when an agent, service or runner
     #: login reads the request. Additive.
-    people_behind: list[PersonBehindView] | None = None
+    people_behind: list[PersonBehindView] | None = Field(default=None, exclude_if=_is_none)
     #: ``False`` when a machine login asked and MEHO knows nobody behind it:
-    #: then only an Admin may approve. ``None`` for a person's request,
-    #: and ``None`` when an agent, service or runner login reads it.
-    #: Additive.
-    people_behind_known: bool | None = None
+    #: then only an Admin may approve. Left out of the answer for a
+    #: person's request, and when an agent, service or runner login reads
+    #: it. Additive.
+    people_behind_known: bool | None = Field(default=None, exclude_if=_is_none)
     op_id: str
     connector_id: str
     target_id: uuid.UUID | None
@@ -727,7 +731,7 @@ def _people_behind_fields(row: ApprovalRequest, operator: Operator) -> dict[str,
     """``people_behind`` and ``people_behind_known`` of *row* for *operator*.
 
     Only a person reads them: for an agent, service or runner login that
-    calls the API, both fields stay ``None``.
+    calls the API, both fields stay ``None`` and the answer leaves them out.
     """
     if not is_human_principal(operator):
         return {}

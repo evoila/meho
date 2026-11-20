@@ -31,6 +31,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -303,3 +304,101 @@ async def test_vault_to_keycloak_move_writes_credential_server_side(
     row = move_rows[0]
     assert _SENTINEL not in json.dumps(row.payload)
     assert _SENTINEL not in json.dumps(row.raw_payload)
+
+
+# ---------------------------------------------------------------------------
+# The user the target signs in with is refused
+# ---------------------------------------------------------------------------
+
+#: The stub loader signs in with a client secret, so the sign-in user is the
+#: client's service-account user, in the realm the target signs in to.
+_SIGN_IN_REALM = "master"
+_SIGN_IN_USER = "service-account-meho-admin"
+_SIGN_IN_UUID = "55555555-5555-5555-5555-555555555555"
+
+
+def _move_to(username: str) -> dict[str, Any]:
+    return {
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+        "to": f"keycloak:{_TARGET_NAME}/{_SIGN_IN_REALM}/{username}#password",
+        "reason": "rotate a password",
+    }
+
+
+def _mount_sign_in_realm(mock: respx.MockRouter) -> respx.Route:
+    """Mount the realm the target signs in to; return the reset-password route."""
+    _mount_admin_token(mock)
+    users = {
+        _SIGN_IN_UUID: {"id": _SIGN_IN_UUID, "username": _SIGN_IN_USER, "enabled": True},
+        _USER_UUID: {"id": _USER_UUID, "username": _USERNAME, "enabled": True},
+    }
+
+    def _find(request: Any) -> Any:
+        name = request.url.params.get("username", "")
+        return httpx.Response(200, json=[u for u in users.values() if u["username"] == name])
+
+    mock.get(f"/admin/realms/{_SIGN_IN_REALM}/users").mock(side_effect=_find)
+    for user_id, user in users.items():
+        mock.get(f"/admin/realms/{_SIGN_IN_REALM}/users/{user_id}").respond(200, json=user)
+    return mock.put(
+        url__regex=rf".*/admin/realms/{_SIGN_IN_REALM}/users/.*/reset-password"
+    ).respond(204)
+
+
+async def test_the_sink_refuses_the_sign_in_user_when_the_move_runs(
+    monkeypatch: pytest.MonkeyPatch, keycloak_sink_env: KeycloakConnector
+) -> None:
+    install_fake_client(monkeypatch, secret={"password": _SENTINEL})
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put_route = _mount_sign_in_realm(mock)
+        result = await _dispatch_move(_move_to(_SIGN_IN_USER))
+    assert result.status != "ok", result
+    assert (result.extras or {}).get("exception_class") == "KeycloakDeleteRefusedError", result
+    assert not put_route.called
+    assert _SENTINEL not in result.model_dump_json()
+
+
+async def test_the_sink_refuses_the_sign_in_user_before_approval(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put_route = _mount_sign_in_realm(mock)
+        refused = await dispatch(
+            operator=_OPERATOR,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params=_move_to(_SIGN_IN_USER),
+        )
+        waiting = await dispatch(
+            operator=_OPERATOR,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params=_move_to(_USERNAME),
+        )
+    assert (refused.extras or {}).get("error_code") == "refused_before_approval", refused
+    assert "logs in with" in str(refused.error)
+    assert _SIGN_IN_USER not in str(refused.error)
+    assert waiting.status == "awaiting_approval", waiting
+    assert not put_route.called
+
+
+async def test_the_sink_does_not_ask_keycloak_before_approval_in_another_realm(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    params = {
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+        "to": f"keycloak:{_TARGET_NAME}/{_REALM}/{_USERNAME}#password",
+    }
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        result = await dispatch(
+            operator=_OPERATOR,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params=params,
+        )
+        calls = len(mock.calls)
+    assert result.status == "awaiting_approval", result
+    assert calls == 0

@@ -69,7 +69,7 @@ _WHEN_TO_USE_DISABLE = (
     "Use to turn a person's account off without deleting it "
     "(``keycloak.user.disable``), so they can no longer sign in to any app "
     "that uses this realm, and the account and its history stay. Dangerous: "
-    "a MEHO-SA-Operator or a tenant admin must approve. Key on the user UUID "
+    "a tenant admin must approve. Key on the user UUID "
     "(``id``) or ``username``. Disabling does NOT end sessions that are "
     "already open. To cut access at once, run ``keycloak.user.disable`` and "
     "then ``keycloak.user.logout``. Safe to run twice."

@@ -44,6 +44,7 @@ from meho_backplane.connectors.keycloak import (
     ops_authflow_passkey,  # noqa: F401 -- the approval card of the passkey step op
     ops_authflow_touch,  # noqa: F401 -- the approval card of the touch flow op
     ops_login_check,  # noqa: F401
+    ops_user_required_actions,  # noqa: F401 -- the checks before approval of the required actions write
     ops_write_account_preview,  # noqa: F401 -- the approval cards of the user account writes
     ops_write_login_realm_rule,  # noqa: F401 -- a platform admin approves login realm writes
     ops_write_preview,  # noqa: F401

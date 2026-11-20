@@ -656,7 +656,7 @@ config:
   # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
   # single-operator answer — enabling it posture-wide re-opens, for every
   # op, the single-account request+grant hole the guard closes. The
-  # endorsed single-operator posture is the **MEHO-SA-Operators** group:
+  # endorsed single-operator posture is the **MEHO-Admins** group:
   # its members approve their own changes on purpose, with a click in the
   # web interface. Even under break-glass the self-approval is
   # forensically visible: it writes a decision audit row (requester ==
@@ -1622,7 +1622,7 @@ coreKeycloak:
   firstLogin:
     # -- User name of the first admin (in MEHO-Admins, with platform_admin).
     adminUsername: admin
-    # -- User name of the second person, who can approve (MEHO-SA-Operators).
+    # -- User name of the second person, who can approve (read as an Operator).
     approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of

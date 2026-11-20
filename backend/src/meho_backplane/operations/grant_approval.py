@@ -24,8 +24,8 @@ For these, MEHO checks when a person approves:
   is a tenant admin. It needs a platform admin when the change can give
   platform admin rights: the connector decides this from what the group or
   role gives (``platform_admin``), not from its name. No self-approval rule
-  covers it, also not the one of the MEHO-SA-Operators group. The refusal
-  and the approval card say why (:func:`platform_admin_reason`).
+  covers it. The refusal and the approval card say why
+  (:func:`platform_admin_reason`).
 * An operation registered with ``applies`` is a change of rights here only
   when its params pass that check (``secret.move`` with a Keycloak side).
 * An operation registered with ``per_call=False`` is checked here too, but

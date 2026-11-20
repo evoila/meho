@@ -1786,7 +1786,7 @@ registration at all.
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
 `tests/test_mcp_human_only_surface.py`. The approval groups
-(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+(MEHO-Operators, MEHO-Admins and the old groups read as those roles) decide only
 *which people* may approve on REST, the command line and the web
 interface; they never open an MCP path.
 
@@ -2148,7 +2148,7 @@ resolved has two more fields (#6045):
   `null` when the evaluator failed.
 * `approvers`: the login groups that may approve the call when
   `policy_verdict` is `needs-approval` (for example
-  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  `["MEHO-Admins"]`), else `[]`. `null` when the
   stored routing is not valid: the preview still answers.
 
 No new MCP tool: the default working surface stays the same. The person

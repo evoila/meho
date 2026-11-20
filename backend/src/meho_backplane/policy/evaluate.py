@@ -224,15 +224,14 @@ def approver_groups(risk: str, op_id: str) -> tuple[str, ...]:
     """The groups that may approve another person's call of *op_id* at *risk*.
 
     Today's group rule: a ``dangerous`` or ``destructive`` change only a
-    MEHO-SA-Operator or a MEHO-Admin; a lower one also a MEHO-Operator and
-    a MEHO-Approver. An operation with the ``tenant_admin`` role floor only
-    a MEHO-Admin.
+    MEHO-Admin; a lower one also a MEHO-Operator. An operation with the
+    ``tenant_admin`` role floor only a MEHO-Admin.
     """
     if role_floor_for(op_id) is TenantRole.TENANT_ADMIN:
         return ("MEHO-Admins",)
     if risk in _HIGH_RISK:
-        return ("MEHO-SA-Operators", "MEHO-Admins")
-    return ("MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers")
+        return ("MEHO-Admins",)
+    return ("MEHO-Operators", "MEHO-Admins")
 
 
 class _Steps:

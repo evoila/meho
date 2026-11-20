@@ -141,7 +141,11 @@ from meho_backplane.connectors.linux.secret_endpoint import (
     parse_linux_secret_ref,
 )
 from meho_backplane.connectors.linux.secret_sink_target import sink_target_card
-from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
+from meho_backplane.connectors.secret.endpoints import (
+    UnknownSecretKindError,
+    parse_secret_ref,
+    resolve_secret_endpoint,
+)
 from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
 from meho_backplane.connectors.secret.vault_target_endpoint import (
     VAULT_TARGET_KIND,
@@ -151,6 +155,7 @@ from meho_backplane.connectors.secret.vault_target_endpoint import (
     login_of,
     vault_target_move_preflight,
 )
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_agent_preview_filter,
@@ -358,6 +363,28 @@ def check_secret_move_sink(params: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+async def refuse_sink_before_approval(ctx: PreviewContext) -> str | None:
+    """The check before approval of ``secret.move``: ask the sink, if it has a check.
+
+    A sink with a ``refuse_before_approval(operator)`` method can refuse the
+    move before it waits for approval (a Keycloak password sink refuses the
+    user its target signs in with). A ref that does not parse is left to the
+    run, which reports it.
+    """
+    raw_to = ctx.params.get("to")
+    if not isinstance(raw_to, str):
+        return None
+    try:
+        sink = resolve_secret_endpoint(parse_secret_ref(raw_to))
+    except (ValueError, UnknownSecretKindError):
+        return None
+    check = getattr(sink, "refuse_before_approval", None)
+    if check is None:
+        return None
+    reason: str | None = await check(ctx.operator)
+    return reason
+
+
 async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Build the ref-only ``proposed_effect`` preview for ``secret.move``.
 
@@ -410,6 +437,7 @@ def _register_secret_move_preview_builder() -> None:
     register_preview_builder("secret.move", build_secret_move_preview)
     register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
+    register_park_check("secret.move", refuse_sink_before_approval)
     register_agent_preview_filter("secret.move", _hide_target_cards)
     register_rights_change_check("secret.move", has_keycloak_side)
     register_grant_op("secret.move", applies=has_keycloak_side)

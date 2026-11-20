@@ -126,6 +126,10 @@ fresh target with no asserted version still resolves.
 - `USER_REQUIRED_ACTION_OPS` + `keycloak_user_required_actions_update` +
   `keycloak_user_otp_status` (`connectors/keycloak/ops_user_required_actions.py`)
   — the one-time code ops and the approval card of the write.
+- `LOGIN_USER_WRITES` + `login_user_park_reason` + `refuse_login_user_of_write`
+  + `refuse_login_user_in_realm` (`connectors/keycloak/ops_user_login_guard.py`)
+  — the sign-in user check that the user writes which can lock MEHO out
+  share with `user.delete` (see "Writes that could lock MEHO out").
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -468,8 +472,8 @@ whom, or what a sign-in asks for:
   example the one-time code set-up) makes a user's sign-in weaker.
 
 The first five are also changes of rights (next section): another admin
-(a tenant admin or a platform admin) must approve each call, and a
-MEHO-SA-Operator who is not an admin cannot. The single-operator
+(a tenant admin or a platform admin) must approve each call, and an
+Operator cannot. The single-operator
 self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them.
 The test `backend/tests/test_keycloak_identity_write_approvers.py` checks
 both rules for the first five. `user.required_actions.update` is
@@ -483,8 +487,8 @@ role, who may sign in, or how strong a sign-in is, is a change of rights.
 For such a write:
 
 - the requester never approves their own request;
-- another admin (a tenant admin or a platform admin) must approve it, so a
-  MEHO-SA-Operator who is not an admin cannot;
+- another admin (a tenant admin or a platform admin) must approve it, so an
+  Operator cannot;
 - a standing grant, an older grant row and a run approval never cover it:
   each call waits for its own approval. An agent's call waits too;
 - no operation setting turns its approval off. An edit that tries is
@@ -1059,6 +1063,18 @@ longer sign in to any app that uses this realm.
 - Safe to run twice: setting `enabled` to the value it already has succeeds.
   A user that does not exist raises `KeycloakUserNotFoundError` and nothing
   is written.
+- **The user this target signs in with is refused.** It is the same check as
+  `keycloak.user.delete` (`check_user_guards`; see
+  `ops_user_login_guard.py`): the user name of a password login, or the
+  service-account user of a client login. It applies when the managed realm
+  is the realm the target signs in to. A disabled sign-in user would make
+  Keycloak refuse the next sign-in of MEHO. The refusal comes before
+  approval (a park check, with a reason that names no user name) and again
+  when the approved request runs. Nothing is written. When it runs, MEHO
+  reads the user once, checks that read, and writes that same read back, so
+  a rename between two reads cannot get the sign-in user past the check.
+  `keycloak.user.enable` is not checked. See "Writes that could lock MEHO
+  out" for the other writes with this check.
 - **Disabling does not end sessions that are already open.** To cut access at
   once, run `keycloak.user.disable`, then `keycloak.user.logout`.
 - Risk level `dangerous`, approval required, group `user_write`. On the
@@ -1190,8 +1206,7 @@ the existing mapper is changed.
   - The op is registered with `register_rights_change_op`. The requester
     never approves their own request, also as a tenant admin and with the
     self-approval switch on. The approver is another person who is a
-    tenant admin or a platform admin. A MEHO-SA-Operator who is not an
-    admin cannot approve it.
+    tenant admin or a platform admin. An Operator cannot approve it.
   - A person approves each call (`declare_per_call_approval`). No standing
     grant and no run approval covers it. An agent grant does not either:
     the op needs approval, so an agent's call always waits.
@@ -1260,6 +1275,53 @@ of them does not use this check.
   `username` too).
 - With only an id, or only a username, the call works as before. Each run
   now reads the user once before the write.
+- The writes in `LOGIN_USER_WRITES` also refuse the user the target signs
+  in with, in the same two places: the park check
+  (`refuse_other_user_check`) and the run (`read_user_for_write`). See the
+  next section. A card builder that only reads the user passes
+  `check_login_user=False`. An op with one more check before approval
+  passes it as `then=` (`user.required_actions.update` checks the names
+  in `add`).
+
+### Writes that could lock MEHO out
+
+A Keycloak target signs in with a user name and a password, or with a
+client secret (then the user is the client's service-account user
+`service-account-<client>`). Some writes on that user make Keycloak refuse
+MEHO's next sign-in, or take its admin rights away. Then MEHO cannot reach
+that Keycloak until a person fixes it by hand.
+
+The check (`ops_user_login_guard.py`) compares the user name and the email
+stored in Keycloak with the target's sign-in name (case does not count). A
+realm can let users sign in with their email, so the target's sign-in name
+can be the email of the user. When either one matches, the user is refused.
+It only
+applies when the realm of the write is the realm the target signs in to
+(`admin_realm`); otherwise it reads no admin credential. It refuses before
+the request waits for approval (a park check, with a reason that names no
+user name) and again when the approved request runs. Nothing is written.
+The error is `KeycloakDeleteRefusedError` with the reason
+`target_login_user`.
+
+| Write | Can it lock MEHO out? | What MEHO does |
+|---|---|---|
+| `user.delete` | yes | refused |
+| `user.disable` | yes: a disabled user cannot sign in | refused; the run checks and writes back one read |
+| `user.required_actions.update` | yes: an action such as `UPDATE_PASSWORD` stops a password sign-in | refused (add and remove) |
+| `user.reset_password` | yes: the target's stored password no longer works, and `temporary: true` adds `UPDATE_PASSWORD` | refused |
+| `secret.move` to `keycloak:<target>/<realm>/<user>#password` | yes, as `user.reset_password` | refused by the sink (`refuse_before_approval`, and again before the write) |
+| `user.credential.delete` | yes: it can delete the password, or a second factor the sign-in needs | refused |
+| `user.update` of `username` or `email` | yes: the target signs in with that name | refused; a first or last name is not |
+| `group.member.remove` | yes: the admin rights can come from a group | refused |
+| `role_mapping.client.remove` | yes: it can remove a `realm-management` role | refused |
+| removing a realm role | no such op | — |
+| `user.logout` | no: it ends open sessions; MEHO signs in again on its next call | not refused |
+| `user.enable`, `role_mapping.assign`, `role_mapping.client.assign`, `group.member.add` | no: they give, not take away | not refused |
+
+Writes on a realm, client or group, not on the user, are outside this
+check. `realm.delete` refuses the realm the target signs in to, and
+`client.delete` refuses the target's own client. `group.delete`,
+`client.update`, `realm.update` and the sign-in flow ops have no such check.
 
 ### One-time code set-up
 
@@ -1286,21 +1348,41 @@ login.
     written.
   - Each name in `add` must be an enabled required action of the realm
     (`GET .../authentication/required-actions`). An unknown or disabled
-    name is refused before any write, and the error lists the allowed
+    name is refused before approval (a park check, with no name in the
+    reason) and again before any write, and the error lists the allowed
     names. A name in both lists is refused too.
+  - The user this target signs in with is refused for every change (add
+    or remove). A required action on it, such as `UPDATE_PASSWORD`, can make
+    Keycloak refuse the next password sign-in of MEHO, and then nobody can
+    reach that Keycloak through MEHO. It is the same check as
+    `keycloak.user.delete` (`ops_user_login_guard.py`), run on the
+    username stored in Keycloak. It is before approval and when the
+    approved request runs, so a user renamed while the request waits is
+    still refused. Nothing is written.
   - When the list would not change, nothing is written (`changed: false`).
   - Answer: `{id, username, realm, changed, added, removed,
     required_actions, unrequested_changes, read_back_checked}`.
+    `required_actions` is the list read back from Keycloak after the
+    write. It is `null` when MEHO does not know the list: when the
+    read-back failed (`read_back_checked: false`), and when the read-back
+    ran but Keycloak's answer had no usable `requiredActions` list
+    (`read_back_checked: true`).
   - The approval card shows `{resource, username, id, realm, add, remove,
     current_available, user_available[, current_required_actions,
     resulting_required_actions][, warning]}`. When the user could be
     read, the card and the answer show the username stored in Keycloak.
     When the user cannot be read at park time, the card still shows the
     request, and the approved run is refused.
-  - When the realm is the one MEHO's own sign-in uses and `add` has a
-    passkey set-up (`webauthn-register` or
-    `webauthn-register-passwordless`), the card's `warning` says: "this
-    lets the next sign-in to this account add a new passkey".
+  - When the realm is the one MEHO's own sign-in uses, the card's
+    `warning` has one line for each of these (joined with `; `):
+    - `add` has a passkey set-up (`webauthn-register` or
+      `webauthn-register-passwordless`): "this lets the next sign-in to
+      this account add a new passkey";
+    - `add` has `CONFIGURE_TOTP` or `CONFIGURE_RECOVERY_AUTHN_CODES`:
+      "this gives the person a new way to sign in (...)";
+    - `remove` has `CONFIGURE_TOTP`, `CONFIGURE_RECOVERY_AUTHN_CODES` or a
+      passkey set-up: "this takes a sign-in set-up step away (...): the
+      person will not be asked to set it up".
   - Two writers at the same time can overwrite each other: Keycloak has no
     version check on a user.
 - `keycloak.user.otp_status` (safe read, group `user`). Params: `username`
@@ -1383,7 +1465,8 @@ How one delete runs:
      `security-admin-console`.
    - `target_login_client` / `target_login_user` — the client and the user
      this MEHO target logs in with: the admin credential's `client_id`, and
-     its `username` (password login) or the client's
+     its `username` (password login, matched against the stored user name
+     and the stored email) or the client's
      `service-account-<clientId>` user (client-secret login). They live in
      the target's `admin_realm`, so these guards apply when `managed_realm`
      is that same realm.

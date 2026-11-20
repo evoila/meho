@@ -176,6 +176,19 @@ func TestPrintEntryBodyEmitsBodyAndNewline(t *testing.T) {
 	}
 }
 
+// TestPrintEntryBodyEscapesControlCharacters — `meho kb show` prints a
+// body with control characters as visible escapes and keeps its line
+// breaks.
+func TestPrintEntryBodyEscapesControlCharacters(t *testing.T) {
+	var buf bytes.Buffer
+	body := "# Title\x1b]0;new title\x07\r\nline two\x1b[2K\r\x07\n\tindented\n"
+	printEntryBody(&buf, &api.KbEntry{Body: body})
+	want := "# Title\\x1b]0;new title\\x07\nline two\\x1b[2K\\x0d\\x07\n\\x09indented\n"
+	if got := buf.String(); got != want {
+		t.Errorf("unexpected render: got %q; want %q", got, want)
+	}
+}
+
 // TestPrintEntryBodyNilSafe pins the nil-guard: a nil entry is a
 // no-op rather than a panic. Defensive against a renderer that
 // somehow receives `nil` from runShow (the runner gates on

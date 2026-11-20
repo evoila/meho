@@ -202,6 +202,8 @@ func printFrameData(w io.Writer, raw string, jsonOut bool) error {
 	if err := json.Unmarshal([]byte(raw), &event); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(w, "%v\n", event)
+	// The event text comes from the server and may hold control
+	// characters; print them as visible escapes.
+	_, err := fmt.Fprintln(w, output.SafeText(fmt.Sprintf("%v", event)))
 	return err
 }

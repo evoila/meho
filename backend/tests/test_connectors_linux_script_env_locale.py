@@ -151,10 +151,14 @@ async def test_secret_env_value_reaches_the_script_byte_for_byte_in_a_multibyte_
             return_value={_SECRET_ENV_FIELD: value}
         )
 
-        async def _run_locally(_target: Any, cmd: str, **_kwargs: Any) -> Any:
+        async def _run_locally(
+            _target: Any, cmd: str, *, stdin: str | None = None, **_kwargs: Any
+        ) -> Any:
+            # The command and its stdin as the SSH session runs them on the host.
             proc = await asyncio.to_thread(
                 subprocess.run,
                 ["bash", "-c", cmd],
+                input=None if stdin is None else stdin.encode("utf-8"),
                 capture_output=True,
                 env={**_locale_env(locpath, locale), "MEHO_VAR": "APP_DB_CRED"},
                 timeout=30,

@@ -566,7 +566,24 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     or a value inside one. A map an alias names in an SNMP place is
     checked with the SNMP rule there. A text nested deeper than the
     levels the pass reads, or too deep to parse, is hidden whole when it
-    may hold a secret name. The dispatcher builds this view in a
+    may hold a secret name. Three more text forms are read the same way:
+    - a `key: value` line in a YAML comment (`# dbPassword: ...`). A `#`
+      inside a quoted or block value is no comment. Comment lines in a row
+      are read together, so a nested map or block value in a comment is
+      hidden too.
+    - a `key: value` line in a text that is not valid YAML. The lines
+      after a secret-named key that are indented deeper are taken out, and
+      the `value` of a `name: <secret name>` entry is hidden.
+    - an XML element or attribute with a secret name
+      (`<dbPassword>...</dbPassword>`, `dbPassword="..."`). All between the
+      tags becomes the marker, also child elements and CDATA. A name prefix
+      (`ns:password`) does not count. An element with no end tag (a cut
+      text) is hidden up to the next tag or line break.
+
+    In these forms a bare `community` is hidden when the text names SNMP.
+    Text of these forms without a secret-named field comes back
+    unchanged. Each scan reads the text once, so it takes time in line
+    with the size of the text. The dispatcher builds this view in a
     worker thread, like the redaction pass of a script, so a large text
     value does not hold up other requests. The audit copy
     then holds a fingerprint of the whole text. The

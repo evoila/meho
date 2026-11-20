@@ -9,12 +9,14 @@ the Helm values of a custom resource. A secret-named field inside such a
 text has no key of its own in the answer, so the key-name walk of the
 default view does not see it. This module hides it in the text.
 
-:func:`hide_secret_text` runs two steps over one string:
+:func:`hide_secret_text` runs three steps over one string:
 
 1. :func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields_in_text`:
    quoted pairs, as in JSON (``"password": "..."``), Python text and escaped
    JSON inside a JSON string.
-2. A YAML step: the text is read as YAML (JSON is YAML too) with the PyYAML
+2. An XML step (:func:`_hide_xml`): the value of an element or attribute
+   with a secret name (``<dbPassword>...</dbPassword>``, ``dbPassword="..."``).
+3. A YAML step: the text is read as YAML (JSON is YAML too) with the PyYAML
    composer, which keeps the position of every value in the text. The value
    of each secret-named key is replaced in the text by the quoted marker, and
    so is the ``value`` of a name/value pair whose ``name`` is a secret name
@@ -31,7 +33,10 @@ default view does not see it. This module hides it in the text.
    A string value inside the YAML is read again as text, so a YAML file
    inside a JSON note is covered too; such a value is written
    back as a JSON string. A text that YAML reads as one plain value is not
-   read again. Text that is not YAML keeps what step 1 made of it.
+   read again. A ``key: value`` line in a YAML comment is hidden too
+   (:func:`_comment_spans`). A text that is not YAML is read line by line
+   (:func:`_line_spans`): a ``key: value`` line with a secret name is hidden,
+   with the lines indented deeper after it.
    A text deeper than the levels the pass reads, or too deep to parse, is
    hidden whole when it may hold a secret name.
 
@@ -52,7 +57,7 @@ import bisect
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import yaml
 
@@ -108,6 +113,12 @@ def _is_snmp_community(entries: Mapping[str, Any], name: str, *, in_snmp: bool) 
     from meho_backplane.broadcast.events import is_snmp_community_key
 
     return is_snmp_community_key(entries, name, in_snmp=in_snmp)
+
+
+def _is_secret_pair_name(name: str) -> bool:
+    from meho_backplane.broadcast.events import is_secret_pair_name
+
+    return is_secret_pair_name(name)
 
 
 def _has_snmp_word(name: str) -> bool:
@@ -330,6 +341,244 @@ def _apply(text: str, spans: list[tuple[int, int, str]]) -> str:
     return "".join(parts)
 
 
+#: A ``key: value`` line (or the text of a comment): an indent, a ``#`` run
+#: and list dashes in front, a key without quotes, and the rest of the line.
+_LINE: Final[re.Pattern[str]] = re.compile(
+    r"[ \t]*(?:#+[ \t]*)?(?P<dash>(?:-[ \t]+)*)(?P<key>[A-Za-z0-9_.\-]+)[ \t]*(?P<colon>:)"
+    r"(?:[ \t]+(?P<value>.*))?$"
+)
+_INDENT: Final[re.Pattern[str]] = re.compile(r"[ \t]*")
+
+#: A ``#`` that starts a YAML comment: at the start of a line or after a space.
+_COMMENT_START: Final[re.Pattern[str]] = re.compile(r"(?:^|(?<=[ \t]))#", re.MULTILINE)
+_HASHES: Final[re.Pattern[str]] = re.compile(r"#+")
+
+#: A text that names SNMP: a bare ``community`` in it is the SNMP community
+#: string. Used where the text has no map structure to read.
+_NAMES_SNMP: Final[re.Pattern[str]] = re.compile(r"snmp", re.IGNORECASE)
+
+#: Values of a line that are no secret: a flag or a null.
+_KEPT_LINE_VALUES: Final[frozenset[str]] = frozenset({"true", "false", "null", "~"})
+
+
+class _TextLine(NamedTuple):
+    """One line of a text: where it starts and ends, and the part that is read."""
+
+    start: int
+    content_start: int
+    content_end: int
+    end: int
+
+
+def _physical_lines(text: str) -> list[list[_TextLine]]:
+    """Every line of *text*, as one run of lines."""
+    lines: list[_TextLine] = []
+    start = 0
+    while start < len(text):
+        newline = text.find("\n", start)
+        end = len(text) if newline < 0 else newline + 1
+        content_end = end - 1 if newline >= 0 else end
+        if content_end > start and text[content_end - 1] == "\r":
+            content_end -= 1
+        lines.append(_TextLine(start, start, content_end, end))
+        start = end
+    return [lines]
+
+
+def _kept_line_value(value: str) -> bool:
+    core = value.strip("\"'")
+    return core == "" or core.lower() in _KEPT_LINE_VALUES or _is_placeholder(core)
+
+
+def _line_spans(text: str, runs: list[list[_TextLine]]) -> list[tuple[int, int, str]]:
+    """Spans that hide the value of each secret-named ``key: value`` line.
+
+    *runs* are runs of lines that belong together: all lines of a text that
+    is not YAML, or the lines of one block of comments. The rules are those
+    of the YAML step, read from the indent:
+
+    * A secret-named key gets ``key: "<marker>"``. The lines after it that
+      are indented deeper (a block value or a nested map) are taken out.
+    * A bare ``community`` is hidden when the text names SNMP.
+    * The ``value`` key of a ``name: <secret name>`` entry is hidden, up to
+      the next list item at that indent.
+    * A flag, a null, an empty value and a masked value stay.
+    """
+    spans: list[tuple[int, int, str]] = []
+    snmp = _NAMES_SNMP.search(text) is not None
+    for lines in runs:
+        found = [_LINE.match(text, line.content_start, line.content_end) for line in lines]
+        pair_column: int | None = None
+        index = 0
+        while index < len(lines):
+            current = index
+            line, match = lines[index], found[index]
+            index += 1
+            if match is None:
+                continue
+            key = match["key"]
+            column = match.start("key") - line.content_start
+            value = (match["value"] or "").strip()
+            if pair_column is not None and (
+                column < pair_column or (column == pair_column and match["dash"])
+            ):
+                pair_column = None
+            hide = (
+                _is_secret_name(key)
+                or (snmp and key.lower() == "community")
+                or (key == "value" and column == pair_column)
+            )
+            if key == "name" and _is_secret_pair_name(value.strip("\"'")):
+                pair_column = column
+            if not hide:
+                continue
+            last = current
+            while index < len(lines):
+                after = lines[index]
+                indent = _INDENT.match(text, after.content_start, after.content_end)
+                if indent is not None and indent.end() < after.content_end:
+                    if indent.end() - after.content_start <= column:
+                        break
+                    last = index
+                index += 1
+            index = last + 1
+            if last == current and _kept_line_value(value):
+                continue
+            spans.append((match.end("colon"), line.content_end, f" {_QUOTED_MARKER}"))
+            spans.extend((gone.start, gone.end, "") for gone in lines[current + 1 : last + 1])
+    return spans
+
+
+def _scalar_spans(documents: list[Any]) -> tuple[list[int], list[int]]:
+    """The start and end of every scalar of the YAML *documents*, sorted."""
+    spans: list[tuple[int, int]] = []
+    seen: set[int] = set()
+    stack = [document for document in documents if document is not None]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.ScalarNode):
+            spans.append((node.start_mark.index, node.end_mark.index))
+        elif isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                stack.extend((key, value))
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+    spans.sort()
+    return [start for start, _ in spans], [end for _, end in spans]
+
+
+def _comment_spans(text: str, documents: list[Any]) -> list[tuple[int, int, str]]:
+    """Spans that hide the value of each secret-named ``key: value`` in a YAML comment.
+
+    A ``#`` inside a scalar (a quoted value or a block value) starts no
+    comment. Comments on lines that follow each other are read as one run,
+    so a nested map or a block value in a comment is hidden too.
+    """
+    starts, ends = _scalar_spans(documents)
+    runs: list[list[_TextLine]] = []
+    after_last = -1
+    #: Where the last comment that fills its whole line ends.
+    full_line_end = -1
+    for found in _COMMENT_START.finditer(text):
+        at = found.start()
+        if at < after_last:
+            continue
+        scalar = bisect.bisect_right(starts, at) - 1
+        if scalar >= 0 and at < ends[scalar]:
+            continue
+        line_start = text.rfind("\n", 0, at) + 1
+        newline = text.find("\n", at)
+        end = len(text) if newline < 0 else newline + 1
+        content_end = end - 1 if newline >= 0 else end
+        if content_end > at and text[content_end - 1] == "\r":
+            content_end -= 1
+        after_last = content_end
+        # The text of the comment starts after its ``#`` run.
+        content_start = _HASHES.match(text, at).end()  # type: ignore[union-attr]
+        if text[line_start:at].strip(" \t"):
+            # A comment after a value is a run of its own.
+            runs.append([_TextLine(at, content_start, content_end, content_end)])
+            full_line_end = -1
+            continue
+        line = _TextLine(line_start, content_start, content_end, end)
+        if full_line_end == line_start:
+            runs[-1].append(line)
+        else:
+            runs.append([line])
+        full_line_end = end
+    return _line_spans(text, runs)
+
+
+_XML_NAME: Final[str] = r"[A-Za-z_][\w.\-]*(?::[A-Za-z_][\w.\-]*)?"
+#: An XML start tag. A quoted attribute value may hold ``>``, but no ``<``.
+_XML_TAG: Final[re.Pattern[str]] = re.compile(
+    r"<(?P<name>" + _XML_NAME + r")(?P<attrs>(?:[^<>\"']|\"[^\"<]*\"|'[^'<]*')*)>"
+)
+_XML_END_TAG: Final[re.Pattern[str]] = re.compile(r"</(?P<name>" + _XML_NAME + r")\s*>")
+_XML_ATTRIBUTE: Final[re.Pattern[str]] = re.compile(
+    r"(?<=\s)(?P<name>" + _XML_NAME + r")\s*=\s*(?:\"(?P<double>[^\"<]*)\"|'(?P<single>[^'<]*)')"
+)
+#: The text of an element with no end tag: up to the next tag or line break.
+_XML_OPEN_TEXT: Final[re.Pattern[str]] = re.compile(r"[^<\n]*")
+
+
+def _local_name(name: str) -> str:
+    return name.rpartition(":")[2]
+
+
+def _hide_xml(text: str) -> str:
+    """Hide the value of each XML element and attribute with a secret name.
+
+    ``<dbPassword>...</dbPassword>`` keeps its tags; all between them (also
+    child elements and CDATA) becomes the marker. ``dbPassword="..."`` in a
+    tag keeps its quotes. A name prefix (``ns:password``) does not count. A
+    bare ``community`` is hidden when the text names SNMP. An element with
+    no end tag (a cut text) is hidden up to the next tag or line break, when
+    its text starts right after the tag. An empty or masked value stays.
+    """
+    if "<" not in text or not _MAY_HOLD_SECRET_NAME.search(text):
+        return text
+    snmp = _NAMES_SNMP.search(text) is not None
+
+    def secret(name: str) -> bool:
+        local = _local_name(name)
+        return _is_secret_name(local) or (snmp and local.lower() == "community")
+
+    end_tags: dict[str, list[int]] = {}
+    for end_tag in _XML_END_TAG.finditer(text):
+        end_tags.setdefault(end_tag["name"], []).append(end_tag.start())
+    spans: list[tuple[int, int, str]] = []
+    cursor = 0
+    for tag in _XML_TAG.finditer(text):
+        if tag.start() < cursor:
+            continue
+        for found in _XML_ATTRIBUTE.finditer(text, tag.start("attrs"), tag.end("attrs")):
+            group = "double" if found["double"] is not None else "single"
+            value = found[group]
+            if secret(found["name"]) and value.strip() and not _is_placeholder(value.strip()):
+                spans.append((found.start(group), found.end(group), SECRET_FIELD_MARKER))
+        if tag["attrs"].rstrip().endswith("/") or not secret(tag["name"]):
+            continue
+        start = tag.end()
+        closing = end_tags.get(tag["name"], [])
+        at = bisect.bisect_left(closing, start)
+        if at < len(closing):
+            end = closing[at]
+            value = text[start:end].strip()
+        else:
+            end = _XML_OPEN_TEXT.match(text, start).end()  # type: ignore[union-attr]
+            value = text[start:end]
+            if value[:1].isspace():
+                continue
+        if value and not _is_placeholder(value):
+            spans.append((start, end, SECRET_FIELD_MARKER))
+            cursor = end
+    return _apply(text, spans) if spans else text
+
+
 def _hide_yaml(text: str, depth: int) -> str:
     if ":" not in text or not _MAY_HOLD_SECRET_NAME.search(text):
         return text
@@ -344,21 +593,22 @@ def _hide_yaml(text: str, depth: int) -> str:
         for document in documents:
             if document is not None and not _is_plain_text(document):
                 finder.walk(document)
-        if not finder.spans:
-            return text
         spans = finder.spans
-        if "&" in text:
+        if spans and "&" in text:
             spans = spans + _orphan_alias_spans(text, finder.removed)
+        if "#" in text:
+            spans = spans + _comment_spans(text, documents)
     except yaml.YAMLError:
-        return text
+        # Not YAML: read it line by line.
+        return _apply(text, _line_spans(text, _physical_lines(text)))
     except RecursionError:
         # Too deep to read: hide the whole text rather than show it unread.
         return SECRET_FIELD_MARKER
-    return _apply(text, spans)
+    return _apply(text, spans) if spans else text
 
 
 def _hide_text(text: str, depth: int) -> str:
-    return _hide_yaml(scrub_secret_fields_in_text(text), depth)
+    return _hide_yaml(_hide_xml(scrub_secret_fields_in_text(text)), depth)
 
 
 def hide_secret_text(text: str) -> str:

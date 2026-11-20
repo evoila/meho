@@ -754,7 +754,7 @@ def _people_behind_fields(row: ApprovalRequest, operator: Operator) -> dict[str,
 
 #: The ops whose REST card hides person-only fields from a caller that is not
 #: a person. Every other op's card comes back as stored, for every caller.
-_PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"linux.script.run"})
+_PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"k8s.apply", "linux.script.run"})
 
 
 def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
@@ -763,7 +763,8 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     Only for the ops in :data:`_PERSON_ONLY_REST_CARD_OPS`: a person reads
     the full card, as in the console, and an agent, service or runner login
     reads what the MCP approval tools return (:func:`proposed_effect_for_agent`),
-    so the ``env`` values of ``linux.script.run`` stay out. Every other card
+    so the ``env`` values of ``linux.script.run`` and the ``run_commands``
+    of ``k8s.apply`` stay out. Every other card
     is the stored one, without the person-only keys for a caller that is not
     a person (:func:`without_person_only_effect_keys`).
     """

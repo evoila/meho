@@ -104,6 +104,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.op_classes import declare_per_call_approval
+from meho_backplane.operations.people_behind import behind_subs
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
@@ -372,7 +373,9 @@ def is_rights_change(request: ApprovalRequest) -> bool:
 
 def check_rights_change_approval(operator: Operator, request: ApprovalRequest) -> None:
     """Refuse *operator* when *request* is a change of rights they may not approve."""
-    if is_rights_change(request) and not operator.may_approve_rights_change(request.principal_sub):
+    if is_rights_change(request) and not operator.may_approve_rights_change(
+        request.principal_sub, behind_subs(request.people_behind)
+    ):
         from meho_backplane.operations.approval_queue import RightsChangeApprovalError
 
         raise RightsChangeApprovalError(

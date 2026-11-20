@@ -55,7 +55,9 @@ from meho_backplane.auth.conventions_drift_login import (
 )
 from meho_backplane.auth.current_tenant import TENANT_HEADER, bind_tenant_role_source
 from meho_backplane.auth.jwt import header_value, verify_jwt_for_audience
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.machine_logins import note_machine_login
+from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
@@ -278,4 +280,8 @@ async def verify_mcp_jwt_and_bind(
         tenant_id=str(operator.tenant_id),
     )
     bind_tenant_role_source(operator)
+    if not is_human_principal(operator):
+        # A machine login never counts as a person behind another login.
+        async with get_sessionmaker()() as session, session.begin():
+            await note_machine_login(session, operator)
     return operator

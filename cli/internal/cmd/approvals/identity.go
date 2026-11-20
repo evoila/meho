@@ -5,7 +5,9 @@ package approvals
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -66,4 +68,31 @@ func requesterScanLabel(sub string, name, kind *string) string {
 		return "[" + k + "] " + label
 	}
 	return label
+}
+
+// peopleBehindLine is the "Behind it" line of `meho approvals show`: the
+// people behind the agent, service or runner login that asked, grouped by
+// why they count ("Set up by Ann (sub-a). Grant by Bob (sub-b)."). They
+// count as the requester. "Set up by: not known" when MEHO knows nobody
+// behind the login; then only an Admin may approve. Empty for a person's
+// request.
+func peopleBehindLine(people *[]api.PersonBehindView, known *bool) string {
+	if known == nil {
+		return ""
+	}
+	if !*known || people == nil || len(*people) == 0 {
+		return "Set up by: not known. Only an Admin may approve."
+	}
+	var parts []string
+	index := map[string]int{}
+	for _, p := range *people {
+		label := principalLabel(p.Sub, p.Name)
+		if i, ok := index[p.WhyText]; ok {
+			parts[i] += ", " + label
+			continue
+		}
+		index[p.WhyText] = len(parts)
+		parts = append(parts, p.WhyText+" "+label)
+	}
+	return strings.Join(parts, ". ") + "."
 }

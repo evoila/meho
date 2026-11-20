@@ -83,6 +83,25 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     (f"APP_PASS={PW} APP_PWD={PW} APP_SECRET={PW}", PW, "APP_SECRET="),
     (f"API_TOKEN={PW} SIGNING_KEY={PW}", PW, "SIGNING_KEY="),
     (f"AWS_SECRET_ACCESS_KEY={PW} SECRET_KEY={PW}", PW, "SECRET_KEY="),
+    # Every ``_KEY`` name is hidden, except a short list of names that hold no secret.
+    *[
+        (f"{name}_KEY={PW} run", PW, f"{name}_KEY=")
+        for name in (
+            "APP",
+            "JWT",
+            "AES",
+            "ENC",
+            "TLS",
+            "SSL",
+            "RSA",
+            "KMS",
+            "DB",
+            "ROOT",
+            "COOKIE",
+            "WEBHOOK",
+            "A",
+        )
+    ],
     (f"run --session-token {PW} --page-size 50", PW, "--page-size 50"),
     (f"<SessionToken>{PW}</SessionToken>", PW, "<SessionToken>"),
     (f"<config><password>{PW}</password><user>u</user></config>", PW, "<user>u</user>"),
@@ -167,6 +186,8 @@ _KEPT: Final[list[str]] = [
     "S3_KEY=path/to/object.tar.gz aws s3 cp",
     "PARTITION_KEY=tenant-1 SORT_KEY=created_at",
     "GPG_KEY=" + _PUBLIC_KEY_ID + " gpg --recv-keys",
+    "PRIMARY_KEY=id FOREIGN_KEY=user_id CACHE_KEY=user:42",
+    "SSH_PUBLIC_KEY=ssh-ed25519 PGP_KEY=" + _PUBLIC_KEY_ID,
     "mysql -pthread",
     "gcc $(mysql_config --cflags) main.c -pthread",
     "cd /srv; pwd=/tmp",
@@ -331,19 +352,20 @@ def test_only_the_value_is_replaced(line: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("label", "expected"),
+    ("label", "hidden", "expected"),
     [
-        # The api_key rule hides ``Pwd=...`` and ``Password=...`` to the end, as on main.
-        (_PWD_IS, "Server=db;[REDACTED:api_key]"),
-        (_PASSWORD_IS, "Server=db;[REDACTED:api_key]"),
-        (_PW_IS, f"Server=db;{_PW_IS}{_MARK};Database=d"),
+        # ``Pwd=`` and ``Password=`` go with the value, so the api_key rule
+        # does not hide ``;Database=d`` too.
+        (_PWD_IS, f"{_PWD_IS}made'up", f"Server=db;{_MARK};Database=d"),
+        (_PASSWORD_IS, f"{_PASSWORD_IS}made'up", f"Server=db;{_MARK};Database=d"),
+        (_PW_IS, "made'up", f"Server=db;{_PW_IS}{_MARK};Database=d"),
     ],
 )
 def test_a_quote_inside_a_connection_string_value_does_not_end_it(
-    label: str, expected: str
+    label: str, hidden: str, expected: str
 ) -> None:
     line = f"Server=db;{label}made'up;Database=d"
-    assert [line[a:b] for a, b in COMMAND_SECRET.secret_spans(line)] == ["made'up"]
+    assert [line[a:b] for a, b in COMMAND_SECRET.secret_spans(line)] == [hidden]
     assert redact(line, get_default_policy()).redacted == expected
 
 
@@ -365,10 +387,14 @@ def test_no_part_of_a_braced_connection_value_is_left() -> None:
     ],
 )
 def test_a_connection_string_value_runs_to_its_semicolon(line: str) -> None:
-    # The finder reports the value only. Behind it, the api_key rule still
-    # hides ``Password=<placeholder>;...`` as it does without this rule.
+    # A ``;`` right after the value: the label goes with it.
     spans = COMMAND_SECRET.secret_spans(line)
-    assert [line[a:b] for a, b in spans] == ["made up long phrase"]
+    assert len(spans) == 1
+    assert line[spans[0][0] : spans[0][1]].endswith("made up long phrase")
+    out = redact(line, get_default_policy()).redacted
+    assert "phrase" not in out
+    if "Database=d" in line:
+        assert out.endswith(";Database=d")
 
 
 @pytest.mark.parametrize(
@@ -513,12 +539,22 @@ def _texts_of_other_tests() -> list[str]:
     return [text for _name, text, _hit in _PATTERN_TEST_ROWS] + _OTHER_RULE_TEXTS
 
 
+#: The next fields of a connection string after a hidden password
+#: (``[REDACTED:command_line_secret];Database=d``). Without this rule the
+#: api_key rule hid them with the password. They hold no secret.
+_NEXT_FIELDS: Final = re.compile(re.escape(_MARK) + r"(?:;[ \t]*[A-Za-z][\w .-]{0,63}=[^;\s'\"]*)+")
+
+
 def _shown(text: str) -> str:
     return _ANY_PLACEHOLDER.sub(" ", text)
 
 
 def test_the_rule_only_hides_more() -> None:
-    """No word that the policy without this rule hides is shown with it."""
+    """No word that the policy without this rule hides is shown with it.
+
+    The one exception: the next fields of a connection string after its
+    password, which hold no secret.
+    """
     before_policy = _without_command_rule()
     texts = _texts_of_other_tests() + [line for line, _gone, _kept in _HIDDEN]
     texts += [line for line, _expected in _WHOLE_OUTPUT]
@@ -526,7 +562,7 @@ def test_the_rule_only_hides_more() -> None:
     shown_now: dict[str, set[str]] = {}
     for text in texts:
         before = _shown(redact(text, before_policy).redacted)
-        now = _shown(redact(text, get_default_policy()).redacted)
+        now = _shown(_NEXT_FIELDS.sub(_MARK, redact(text, get_default_policy()).redacted))
         # A word shown now must be shown without the rule too (also as a part
         # of a longer word there: ``-p`` of ``-pvalue``), or be a label.
         more = {

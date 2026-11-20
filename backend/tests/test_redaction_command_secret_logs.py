@@ -75,6 +75,32 @@ def test_a_pretty_printed_json_document_still_parses(command: str) -> None:
         assert json.loads(out)["ts"] == "t1"
 
 
+#: A connection string password with a field after it: both labels, and a
+#: quoted, a braced and a plain value.
+_CONNECTION_COMMANDS: Final[list[str]] = [
+    f"Server=db;Uid=sa;{label}{value};Database=d"
+    for label in (_PWD_IS, "Pass" + "word=")
+    for value in (f"'{PW}'", f"{{{PW}}}", PW)
+]
+
+
+@pytest.mark.parametrize("style", ["compact", "spaced"])
+@pytest.mark.parametrize("lines", [1, 3])
+@pytest.mark.parametrize("command", _CONNECTION_COMMANDS)
+def test_a_connection_string_in_a_json_line_keeps_the_fields_after_the_password(
+    command: str, lines: int, style: str
+) -> None:
+    log = "\n".join(_json_line(command, number, style) for number in range(1, lines + 1))
+    for out in _answer_and_trace(log):
+        assert PW not in out
+        rows = [json.loads(row) for row in out.split("\n")]
+        assert len(rows) == lines
+        for number, row in enumerate(rows, start=1):
+            assert row["msg"] == "Server=db;Uid=sa;[REDACTED:command_line_secret];Database=d"
+            assert row["status"] == "failed"
+            assert row["ts"] == f"t{number}"
+
+
 # -- a quote that is never closed on its line ---------------------------------------
 
 #: (the form up to its opening quote, a closing mark on a later log line)

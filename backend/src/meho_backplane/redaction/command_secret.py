@@ -25,9 +25,11 @@ option name and the words around it stay readable:
   when a ``;`` stands before the label, or a ``;`` ends the value and a
   next field (``;Database=``) follows or no option (``-x``) or ``key=``
   word stands in the value. A label behind ``-`` is a command option.
+  When a next field follows the value, ``Password=`` and ``Pwd=`` are
+  hidden with it, so the ``api_key`` rule does not hide that field too.
   Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
-  ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``);
+  ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``, ``APP_KEY=x``);
 * the text inside an XML element named like a secret
   (``<password>x</password>``), also the content of each CDATA section in
   it, with white space or other text around it.
@@ -47,8 +49,8 @@ string. A quoted tool name (``"mysql" -px``) is not a quoted command: its
 options follow the closing quote.
 
 Names that look like a secret but are not one stay: paging tokens
-(``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), ``_KEY``
-names that do not name a secret key (``S3_KEY=``, ``PARTITION_KEY=``),
+(``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), a short list
+of ``_KEY`` names that hold no secret (``S3_KEY=``, ``PARTITION_KEY=``),
 the compiler option ``-pthread`` and a working folder ``pwd=/tmp`` that is not
 a field of a connection string.
 
@@ -630,6 +632,23 @@ def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -
     return "=" not in field
 
 
+#: The connection string labels that the ``api_key`` rule reads too.
+_API_KEY_LABELS: Final = frozenset({"password", "pwd"})
+
+
+def _with_label(text: str, match: re.Match[str], span: tuple[int, int]) -> tuple[int, int]:
+    """*span*, with the label in front of it when a next field follows the value.
+
+    The ``api_key`` rule reads ``Pwd=<placeholder>;Database=d`` as one long
+    value and hides the next fields with it, also the closing quote of a
+    JSON string. Without its label (``[REDACTED:...];Database=d``) the rule
+    finds nothing, so the next fields stay.
+    """
+    if match["label"].lower() in _API_KEY_LABELS and _NEXT_FIELD.match(text, span[1]):
+        return match.start(), span[1]
+    return span
+
+
 def _connection_span(
     text: str, match: re.Match[str], quotes: _OuterQuotes, marks: _ClosingMarks
 ) -> tuple[int, int] | None:
@@ -637,7 +656,7 @@ def _connection_span(
     if start >= len(text) or text[start] in ";\n":
         return None
     if text[start] in _CLOSING:
-        return _quoted_connection_value(text, start, marks)
+        return _with_label(text, match, _quoted_connection_value(text, start, marks))
     close = quotes.end(match.start())
     window = min(len(text) if close is None else close, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
@@ -656,7 +675,7 @@ def _connection_span(
     if earlier is not None:
         stop_at = earlier.start()
     end = start + len(text[start:stop_at].rstrip())
-    return (start, end) if _is_hidden(text[start:end]) else None
+    return _with_label(text, match, (start, end)) if _is_hidden(text[start:end]) else None
 
 
 def _connection_spans(text: str) -> list[tuple[int, int]]:
@@ -678,27 +697,27 @@ def _connection_spans(text: str) -> list[tuple[int, int]]:
 _ENVIRONMENT: Final = re.compile(
     r"(?<![A-Za-z0-9_])(?P<name>[A-Z][A-Z0-9_]{0,127})_(?P<kind>PASS|PWD|PASSWORD|SECRET|TOKEN|KEY)="
 )
-#: The word before ``_KEY`` in a name that holds a secret key. Other ``_KEY``
-#: names hold a path, an id or a public key id (``S3_KEY``, ``GPG_KEY``).
-_SECRET_KEY_WORDS: Final = frozenset(
+#: The word before ``_KEY`` in a name that holds no secret: a path, a column,
+#: a cache entry or a public key id (``S3_KEY``, ``PARTITION_KEY``,
+#: ``GPG_KEY``). Every other ``_KEY`` name is hidden.
+_PLAIN_KEY_WORDS: Final = frozenset(
     {
-        "api",
-        "secret",
-        "private",
-        "access",
-        "signing",
-        "encryption",
-        "master",
-        "auth",
-        "client",
-        "session",
-        "shared",
-        "hmac",
-        "license",
-        "account",
-        "storage",
-        "ssh",
-        "deploy",
+        "s3",
+        "object",
+        "partition",
+        "sort",
+        "primary",
+        "foreign",
+        "unique",
+        "row",
+        "range",
+        "hash",
+        "cache",
+        "routing",
+        "idempotency",
+        "gpg",
+        "pgp",
+        "public",
     }
 )
 
@@ -706,7 +725,7 @@ _SECRET_KEY_WORDS: Final = frozenset(
 def _is_secret_environment_name(match: re.Match[str]) -> bool:
     last = match["name"].rsplit("_", 1)[-1].lower()
     if match["kind"] == "KEY":
-        return last in _SECRET_KEY_WORDS
+        return last not in _PLAIN_KEY_WORDS
     return not (match["kind"] == "TOKEN" and last in _PAGING_WORDS)
 
 

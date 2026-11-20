@@ -1002,7 +1002,7 @@ rejected with `invalid_token` (Wall #2). The eight mappers:
 | `meho-mcp-audience` | `oidc-audience-mapper` | `aud` adds `<backplane-url>/mcp` | Required so a token minted via the CLI can also drive `/mcp` calls. Use **Included Custom Audience** (no client-mapper UI option exists for an arbitrary URI). Paste the URI **without** a trailing slash — MEHO normalises `MCP_RESOURCE_URI` server-side and the audience claim must match the no-trailing-slash form. |
 | `tenant-id` | `oidc-usermodel-attribute-mapper` | `tenant_id` | Reads the `tenant_id` attribute of the person's group (Step 5). Without this the backplane rejects with `missing_tenant_claim` (Wall #2). |
 | `tenant-role` | `oidc-usermodel-attribute-mapper` | `tenant_role` | Reads the `tenant_role` attribute of the person's group. Without this the backplane rejects with `missing_tenant_role_claim`. |
-| `approver` | `oidc-usermodel-attribute-mapper` (Claim JSON Type `boolean`) | `approver` | Reads `approver=true` from the `MEHO-Approvers` group. Without it a `read_only` approver cannot approve. |
+| `approver` | `oidc-usermodel-attribute-mapper` (Claim JSON Type `boolean`) | `approver` | Reads `approver=true` from the `MEHO-Approvers` group. MEHO does not read this claim for approval, so the mapper is not needed for approval. |
 | `platform-admin` | `oidc-usermodel-attribute-mapper` (User Attribute `platform_admin`, Claim JSON Type `boolean`) | `platform_admin` | Reads `platform_admin=true` from the `MEHO-Platform-Admins` group. Without it nobody gets rights across tenants. |
 | `meho-tenants` | `oidc-usermodel-attribute-mapper` (User Attribute `meho_tenant`, Claim JSON Type `String`, **Multivalued** on, **Aggregate attribute values** on) | `meho_tenants` | Lists the `meho_tenant` value of every group of the person. Without it the token does not list the person's tenants. One tenant still works. |
 | `groups-claim` | `oidc-group-membership-mapper` | `groups` | Emits the person's group names. Without this group-gated tools report empty results rather than failing — a softer failure than the above, but still misleading. |
@@ -1171,7 +1171,7 @@ a `tenant_role` attribute and a `meho_tenant` attribute:
 | `MEHO-Operators` | `operator` | `<uuid>:<name>:Operators` | – |
 | `MEHO-SA-Operators` | `operator` | `<uuid>:<name>:SA-Operators` | – |
 | `MEHO-Admins` | `tenant_admin` | `<uuid>:<name>:Admins` | – |
-| `MEHO-Approvers` | `read_only` | `<uuid>:<name>:Approvers` | `approver` = `true` |
+| `MEHO-Approvers` | `read_only` | `<uuid>:<name>:Approvers` | `approver` = `true` (MEHO does not read it; the group gives no approval right) |
 
 In `meho_tenant`, `<uuid>` is the same tenant UUID and `<name>` is the
 tenant's short name (lowercase letters, digits and dashes, for example

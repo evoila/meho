@@ -373,11 +373,15 @@ def _evaluator_class(decision: Decision) -> str:
 
 
 def _today_approvers(level: str, op_id: str) -> frozenset[str]:
-    """The login groups that may approve another person's call today (``approve_right``)."""
+    """The login groups that may approve another person's call today (``approve_right``).
+
+    The two old groups are read as Operators and Readers, so only the three
+    default groups are named.
+    """
     request = _request(requester="someone-else", op_id=op_id, level=level)
     return frozenset(
         f"MEHO-{group.value}"
-        for group in RoleGroup
+        for group in (RoleGroup.READERS, RoleGroup.OPERATORS, RoleGroup.ADMINS)
         if approve_right(_operator("person_web", group.value, "approver"), request).may_approve
     )
 

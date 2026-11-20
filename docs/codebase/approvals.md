@@ -865,7 +865,7 @@ model, or resume endpoint):
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
    on REST; the console shows the plain text) when `operator.sub ==
    request.principal_sub` and none of the self-approval rules below
-   allows it. The person is not a MEHO-SA-Operator or a MEHO-Admin, the change did not
+   allows it. The person is not a MEHO-Admin, the change did not
    wait only because it came with a token, and the audited **emergency
    break-glass** switch `APPROVAL_ALLOW_SELF_APPROVAL=true`
    (`Settings.approval_allow_self_approval`, default `False` =
@@ -889,12 +889,12 @@ model, or resume endpoint):
    **Who may approve, by group (#3328).** `_check_approver_group`
    (`approval_queue.py`) decides, after the role check. The rules come
    from [the decision record](../decisions/approval-groups-and-self-approval.md):
-   - A MEHO-SA-Operator or a MEHO-Admin (`Operator.may_self_approve`)
+   - A MEHO-Admin (`Operator.may_self_approve`)
      may approve their own change at every risk level. Everyone else gets
      `SelfApprovalForbiddenError` for their own change, unless break-glass
      covers it (`safe` and `caution` only).
    - Another person's `dangerous` or `destructive` change may be approved
-     only by a MEHO-SA-Operator or a tenant admin. Everyone else gets
+     only by a tenant admin. Everyone else gets
      `ApprovalGroupForbiddenError` (a subclass of
      `UnauthorizedApprovalError`; REST answers 403
      `approval_group_required: <text>`).
@@ -937,10 +937,10 @@ model, or resume endpoint):
    `APPROVAL_ALLOW_SELF_APPROVAL` is an **emergency** escape, not the
    endorsed single-operator posture: enabling it posture-wide re-opens,
    for every `safe` and `caution` op, the single-account request+grant
-   hole this guard closes (#1401). On a single-operator tenant, put the
-   operator in MEHO-SA-Operators: they approve their own change on
+   hole this guard closes. On a single-operator tenant, make the
+   operator an Admin (MEHO-Admins): they approve their own change on
    purpose, with a click in the web interface. See
-   [Single-operator tenants](#single-operator-tenants-a-meho-sa-operator-approves-their-own-change-3325-1738)
+   [Single-operator tenants](#single-operator-tenants-make-the-person-an-admin)
    below.
 3. **Resume target re-hydration.** The REST `…/approve` route persists
    only `target_id` on the row, so it re-loads the live `Target` by id
@@ -985,11 +985,15 @@ request field, header or command-line flag can set it.
 
 | Group | Their own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change |
 |---|---|---|---|
-| MEHO-SA-Operators | yes, at every risk level, on purpose | yes | yes |
 | MEHO-Admins | yes, at every risk level, on purpose | yes | yes |
-| MEHO-Operators | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
-| MEHO-Approvers | (they cannot run changes) | yes | no |
-| MEHO-Readers | (they cannot run changes) | no | no |
+| MEHO-Operators (also MEHO-SA-Operators, read as Operators) | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
+| MEHO-Readers (also MEHO-Approvers, read as Readers) | (they cannot run changes) | no | no |
+
+MEHO reads the old group MEHO-SA-Operators as Operators and MEHO-Approvers as
+Readers. The default groups set no `approver` flag and no self-approval flag
+(`_GROUP_GRANTS` in `auth/operator.py`). MEHO keeps the `approver` flag in the
+code. No role gives it today; roles that customers define come later. The old
+names stay known until they are removed.
 
 - Agents, service principals and runners never approve, on any path
   (`NonHumanApprovalError`, checked first).
@@ -1338,7 +1342,7 @@ gives. Send it again."
 
 A waiting request can carry one mark: "this is a change of rights"
 (`ApprovalRequest.rights_change`). No login approves its own rights
-change, at any risk level, in any group. An admin or a MEHO-SA-Operator, who may
+change, at any risk level, in any group. An admin, who may
 approve their own other changes, may not approve this one. The break-glass
 switch `APPROVAL_ALLOW_SELF_APPROVAL` does not clear the mark.
 
@@ -1439,7 +1443,7 @@ interface only show it.
   `own_change`, `wrong_group`), and the role floor of the operation
   (`role_too_low`).
   Otherwise the answer is `ok`. For an own change that a
-  MEHO-SA-Operator, a MEHO-Admin (or break-glass) may approve, the answer is yes with
+  MEHO-Admin (or break-glass) may approve, the answer is yes with
   `own_change`. So is a web click on an own `caution` change that
   waited only because it came with a token (#3980): the web interface
   says yes, the command line and REST say no. It does not check what can change before the click: the
@@ -1505,7 +1509,7 @@ switch off both columns stay empty and the line is not shown.
 
 Off by default (Helm `config.policy.approverRouting`). With it on, a
 customer can send approvals to the right team: for example only
-MEHO-SA-Operators and MEHO-Admins approve network changes. The rules are
+MEHO-Operators and MEHO-Admins approve network changes. The rules are
 the `routing` section of the policy file ([policy.md](policy.md)). The
 code is `policy/routing.py`.
 
@@ -1514,7 +1518,7 @@ dispatcher and by a step of a multi-step operation), `stamp_approver_set`
 works out who may approve it and stores it on the request:
 
 - `approver_roles` (JSON): the login group kinds that may approve, for
-  example `["SA-Operators", "Admins"]`. Group kinds only, never people.
+  example `["Operators", "Admins"]`. Group kinds only, never people.
   MEHO stores no members, so the requester is never in it. Whether the
   requester may approve their own change is today's rule (below).
 - `approver_rule` (text): the routing entries that set them, the
@@ -1545,13 +1549,23 @@ How the kinds are found:
 2. The kinds are cut to the kinds that may approve the change
    today (`today_kinds`, the same rule as `approver_groups` in
    `policy/evaluate.py`): a `dangerous` or `destructive` change only
-   SA-Operators and Admins; a lower one also Operators and Approvers; an
+   Admins; a lower one also Operators; an
    operation that needs the `tenant_admin` role only Admins. So routing
    only narrows. It never lets a group approve more than today.
 3. No entry fits: today's kinds, rule `default`. MEHO without a policy file
    therefore asks the same people as today.
 4. A change of rights is not routed (both columns stay NULL). Only another
    admin approves it, as today.
+5. An old kind (`SA-Operators`, `Approvers`) in an entry stays as written.
+   It is narrower than the kind it is read as (`covers` and `narrow` in
+   `policy/routing.py`): `[Operators, Admins]` and `[SA-Operators, Admins]`
+   give `[SA-Operators, Admins]`. `Approvers` is read as Readers, who never
+   approve, so it is never stored. At the click (`in_kinds`), an old kind
+   matches only a person whose token names that old login group for the
+   current tenant (`Operator.old_group`: the `meho_tenants` entry, or the
+   `groups` claim group `JWT_SELF_APPROVER_GROUP` / `MEHO-Approvers`; a
+   sub-group does not count), never every Operator. A request that waits
+   keeps the kinds it was stored with, read by the same rule.
 
 The risk level comes from `proposed_effect` (`safety_level`). The
 category is the one the classification gave the looked-up operation
@@ -1592,7 +1606,7 @@ it keeps today's rule until it is decided or expires. When an install
 entry fits and the
 person's kind is not in it, `ApprovalRoutingError` with one sentence, for
 example "The install's routing (`install:routing[0]`) lets only
-MEHO-SA-Operators or MEHO-Admins approve this change. You are in
+MEHO-Operators or MEHO-Admins approve this change. You are in
 MEHO-Operators. A tenant's routing can only narrow it." An install routing
 that is not valid refuses the click. A request whose category is the
 empty text (stored before migration `0173`, or the install's entries
@@ -1603,18 +1617,21 @@ entry could fit, the category does not change the answer. A change of
 rights is not checked here. `meho policy explain --request` uses the same
 install routing (`install_floor`), so it names the groups the click
 allows now. Then `_check_routed_approver`: the person's
-group kind (`kind_of`: Admins, SA-Operators, Operators, Approvers or
+group kind (`kind_of`: Admins, Operators or
 Readers) must be in the stored kinds. `kind_of` reads the role and the
-approve flags, and a binding of the policy file can set those flags
-([policy-bindings.md](policy-bindings.md)). So a binding can set the kind
-that the routing checks: a person whose group is bound to `SA-Operators`
-approves a change routed to SA-Operators. If not, `ApprovalRoutingError` (a
+`approver` flag: a `read_only` person with the flag counts as Operators,
+because they approve what an Operator approves. No role gives the flag
+today; roles that customers define come later. A binding of the policy
+file sets the role ([policy-bindings.md](policy-bindings.md)). So a
+binding can set the kind
+that the routing checks: a person whose group is bound to `Operators`
+approves a change routed to Operators. If not, `ApprovalRoutingError` (a
 subclass of `ApprovalGroupForbiddenError`, so every approve route answers
 403) with one sentence that names who may approve, for example: "Only
-MEHO-SA-Operators or MEHO-Admins may approve this change (routing rule
+MEHO-Operators or MEHO-Admins may approve this change (routing rule
 `install:routing[0]`). You are in MEHO-Operators." The fresh sign-in, the
 params check and the destructive preview binding still run after it.
-Routing also narrows an own click: a MEHO-SA-Operator whose own network
+Routing also narrows an own click: an Operator whose own network
 change is routed to Admins only cannot approve it.
 
 `approve_right` gives the same answer with the reason `not_routed`. Its
@@ -1669,7 +1686,7 @@ closed).
 **Console.** With the switch on:
 
 - the request window and the bell list show "Who can approve: Members of
-  MEHO-SA-Operators or MEHO-Admins." when the request has stored kinds
+  MEHO-Operators or MEHO-Admins." when the request has stored kinds
   (`who_can_approve`);
 - the approvals page has a **For you** tab: the pending requests the
   signed-in person may approve (the `approve_right` answer). When MEHO
@@ -1694,7 +1711,7 @@ Tests: `tests/test_policy_routing.py`, `tests/test_policy_routing_classified.py`
 categories come later. The "separated duties" file
 (`deploy/policy-profiles/separated-duties.yaml`) shows the routing:
 identity and secret changes only Admins, network and storage changes only
-SA-Operators and Admins.
+Admins.
 
 ## Delegated decisions: the reason-line convention (#3692)
 
@@ -1861,32 +1878,30 @@ person, and was a decision an agent must never make.
 - **MCP:** there is no withdraw tool. Adding one to the agent tool list
   is a separate team decision.
 
-## Single-operator tenants: a MEHO-SA-Operator approves their own change (#3325, #1738)
+## Single-operator tenants: make the person an Admin
 
 The self-approval guard enforces requester != approver on the stable
-`sub` claim. On a tenant with **one** human operator this used to be a
-deadlock: the operator's change waits, and the only person who could
-approve it is the operator. Since #3328 the main answer is the
-**MEHO-SA-Operators** group:
+`sub` claim. On a tenant with **one** human operator, the operator's
+change waits, and the only person who could approve it is the operator.
+The answer is to make the person an **Admin**:
 
-1. Put the operator in MEHO-SA-Operators (the login group,
+1. Put the operator in MEHO-Admins (the login group,
    [keycloak-realm.md](../../docs-site/install/keycloak-realm.md)).
 2. The operator's change waits as before. The wait keeps the preview
    binding, the blast-radius review and the approval record.
 3. The operator opens the request in the web interface and approves it
    with a click. The `approval.decision` row records
-   `self_approved: true` and `approval_rule: sa_operator_self_approval`.
+   `self_approved: true` and `approval_rule: sa_operator_self_approval`
+   (the stored value keeps its name).
    On the command line the same works with a fresh approval sign-in (see
    [The approval groups and how a person approves](#the-approval-groups-and-how-a-person-approves-3325)).
 
 This works at every risk level, also for `dangerous` and `destructive`
-changes. A MEHO-Admin is not a MEHO-SA-Operator (a person is in exactly
-one role group per tenant), but `Operator.may_self_approve` is also true
-for the `tenant_admin` role. So a single admin may approve their own
-change in the same way, and the row records the same rule
-`sa_operator_self_approval`. A site that wants a second person for an
-admin's risky changes keeps the admins out of risky work and gives the
-people who run changes the MEHO-Operators group.
+changes, because `Operator.may_self_approve` is true for the
+`tenant_admin` role. MEHO reads the old group MEHO-SA-Operators as
+Operators: it gives no self-approval. A site that wants a second person
+for an admin's risky changes keeps the admins out of risky work and gives
+the people who run changes the MEHO-Operators group.
 
 The break-glass switch `APPROVAL_ALLOW_SELF_APPROVAL` is still an
 **emergency** escape, not the everyday answer. Flipping it posture-wide
@@ -1919,7 +1934,7 @@ above). The two agent-run entry points in
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `approve` returns `self_approval_forbidden` | The request is your own change, and you are not in MEHO-SA-Operators or MEHO-Admins. | Ask a person in one of the groups the refusal names to approve it on the Approvals page. On a one-operator tenant, put yourself in **MEHO-SA-Operators** (the change applies at your next login), then approve with a click in the web interface. |
+| `approve` returns `self_approval_forbidden` | The request is your own change, and you are not in MEHO-Admins. | Ask a person in one of the groups the refusal names to approve it on the Approvals page. On a one-operator tenant, make yourself an **Admin** (MEHO-Admins; the change applies at your next login), then approve with a click in the web interface. |
 
 ### Where operators see this
 
@@ -3514,13 +3529,12 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   secret-version soft-delete) while still being the four-eyes-critical
   action the requirement protects, so #3290 widened the refusal to cover
   it; `caution` / `safe` still honour break-glass. Since #3328 the
-  group rules decide the rest: a MEHO-SA-Operator or a MEHO-Admin may approve their own
+  group rules decide the rest: a MEHO-Admin may approve their own
   `dangerous` or `destructive` change (`approval_rule`
   `sa_operator_self_approval`), and another person's change at these
-  levels needs a MEHO-SA-Operator or a tenant admin (see
+  levels needs a tenant admin (see
   [Who may approve, by group](#the-approval-groups-and-how-a-person-approves-3325)).
-  A single-operator tenant puts its operator in MEHO-SA-Operators or
-  MEHO-Admins.
+  A single-operator tenant makes its operator an Admin (MEHO-Admins).
 - **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
   now rejects a `destructive` descriptor declared `requires_approval=False`
   at registration time — an inconsistent row can't exist. Belt-and-suspenders
@@ -3529,7 +3543,7 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
 Conformance for the op — an agent's request waits for a person like any
 other destructive request (agent verdict `NEEDS_APPROVAL`, #3980), no standing
 grant (`ServicePrincipalGrant` refuses), no break-glass self-approval
-(only a MEHO-SA-Operator or a MEHO-Admin may approve their own), no satellite mint
+(only a MEHO-Admin may approve their own), no satellite mint
 (`MintRefusalCode.OP_NOT_SAFE`), dispatch
 refused without a matching hash, park refused without a blast-radius block,
 and the full preview→park→human-approve→audited-resume flow — is pinned in
@@ -3793,13 +3807,13 @@ before #3898. Ops that do not opt in never read the binding.
 row below except `/result` is gated by `require_approvals_access`
 (`auth/rbac.py`), which admits a principal that is **either**
 `operator`-or-higher on the linear tenant-role lattice **or** carries the
-orthogonal `approver` capability (`Operator.approver`, lifted from the
-optional fail-closed `approver` JWT claim). This lets a dedicated approver
-be provisioned as `read_only` role + `approver=true`: it can clear a
-four-eyes gate here yet is denied `POST /api/v1/operations/call` (still
-`require_role(TenantRole.OPERATOR)`, and `read_only` ranks below
-`operator`), so "approve but never operate" is now expressible at the role
-layer instead of resting on operator discipline. The gate has a
+orthogonal `approver` capability (`Operator.approver`; MEHO does not read an
+`approver` claim). MEHO keeps the flag in the code. No role gives it today;
+roles that customers define come later. A `read_only` principal with
+`approver=true` would clear a four-eyes gate here yet is denied
+`POST /api/v1/operations/call` (still `require_role(TenantRole.OPERATOR)`,
+and `read_only` ranks below `operator`), so "approve but never operate"
+stays a rule of the role layer. The gate has a
 service-layer twin (`_check_reviewer_role`) applying the same rule for
 direct queue callers, and the `sub`-keyed self-approval refusal (#1401) is
 unchanged — an approver cannot approve a request it parked. A refused
@@ -3965,18 +3979,15 @@ CLI) the token must prove it:
   `one_time_code_acr_values`). `GET /api/v1/auth-config` names the
   approval client as `cli_approve_client_id`.
 
-The realm-side provisioning path for the `approver` claim — a group-based
-Keycloak protocol-mapper recipe (`kcadm.sh` primary, Admin Console
-secondary), claim-name alignment with `JWT_APPROVER_CLAIM_NAME`,
-token-decode + live decouple verification, and a rollback note — lives in
-[`../cross-repo/keycloak-tenant-claims.md`](../cross-repo/keycloak-tenant-claims.md#the-approver-approve-only-capability--group-based-recipe-3243).
+MEHO does not read an `approver` claim from the token, so the realm needs
+no claim recipe for approval.
 
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. Optional `order=oldest\|newest` (default `newest`, #3596): `oldest` lists `created_at ASC`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and no self-approval rule allows it: a MEHO-SA-Operator may approve their own change at every risk level, break-glass covers only `safe` and `caution` (G11.7-T1, #3328); 403 `approval_group_required` for another person's `dangerous` or `destructive` change when the approver is neither a MEHO-SA-Operator nor a tenant admin; 403 `human_principal_required` for a machine `principal_kind`. |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver, **fresh approval sign-in** | Approve. 401 `fresh_sign_in_required` / `fresh_sign_in_already_used` without a fresh approval sign-in, or for a destructive request without a sign-in of its own (#3979, #5515). Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and no self-approval rule allows it: only an Admin may approve their own change at every risk level, break-glass covers only `safe` and `caution` (G11.7-T1, #3328); 403 `approval_group_required` for another person's `dangerous` or `destructive` change when the approver is not an Admin; 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver; **fresh sign-in** for `approved` | Decide (`approved` / `rejected`) by id alone. `approved` needs a fresh approval sign-in like `/approve` (#3979, #5515). On every approval it runs the op with the **stored** params (#1503) and returns the outcome in `dispatch_*`. This is the same for a direct op and an agent-run request (#2293): `claim_resume` lets only one caller run it, so when the waiting agent ran it first, `dispatch_status` is `already_resumed`. 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind`. |
 | `POST` | `/api/v1/approvals/{id}/withdraw` | **request sender** (any role, any principal kind) | The sender takes back its own pending request (#4987). Not a decision. 403 `not_request_sender` for anyone else; 409 on a closed request. Writes an `approval.withdraw` audit row. |
@@ -4130,19 +4141,21 @@ those). Every read + decision derives `tenant_id` from the validated
 `UISessionContext` only, and calls the `approval_queue` service
 in-process (same in-process-audit binding the REST routes get).
 
-**Access model — operator-or-approver, parity with REST (#3243 / #3270 /
+**Access model — operator-or-approver flag, parity with REST (#3243 / #3270 /
 #3282).** The console decide path carries the **same** access model the
 Bearer REST plane adopted in #3243/#3270, reached through the *same*
 shared service gate rather than a console-local role check. The BFF
 reconstructs the full `Operator` via `_resolve_operator` →
 `verify_access_token_with_refresh` → `_operator_from_claims` (which lifts
-the orthogonal `approver` claim, `Operator.approver`), then calls
+the orthogonal `approver` flag, `Operator.approver`; MEHO does not read an
+`approver` claim, and no role gives the flag today), then calls
 `approve_request` / `reject_request`; their `_check_reviewer_role` admits
 a principal that is `operator`-or-higher **or** carries `approver`, and
 refuses only a `read_only` principal *without* the flag (403, re-rendered
-in the modal banner naming both levers). So a dedicated approver
-provisioned as `read_only` role + `approver=true` can clear a four-eyes
-gate through the console exactly as it can over REST/CLI. The read
+in the modal banner naming both levers). So a `read_only` principal
+with `approver=true` would clear a four-eyes gate through the console
+exactly as over REST/CLI. MEHO keeps the flag in the code; no role gives
+it today, and roles that customers define come later. The read
 surfaces (badge / panel / history / detail) stay gated on the BFF session
 alone — any authenticated console session may glance the tenant-scoped
 queue, unchanged. Two invariants are preserved and pinned in
@@ -4633,7 +4646,13 @@ database. So each subscription keeps the person's login facts in its tenant:
 `tenant_role`, `approver`, `self_approver`, `platform_admin`, and when they
 were read (`facts_read_at`). MEHO reads them from the login when the person
 switches the messages on, at each console sign-in (also when they pick a
-tenant), and each time they open the account page.
+tenant), and each time they open the account page. No default group sets
+`approver` or `self_approver`: a login in MEHO-Approvers or
+MEHO-SA-Operators stores both as false. MEHO does not read the `approver`
+claim of the token. No role gives the flag today; roles that customers
+define come later. Migration `0177` set
+both flags to false on the rows that existed at the upgrade; the next
+sign-in stores the person's current flags.
 
 For each request, `web_push/recipients.py` builds a person from each row's
 facts and asks `approve_right_any_status` (`operations/approval_rights.py`)
@@ -4643,6 +4662,9 @@ own-change rules, the rule for a change of rights (only another admin), and
 the role an operation needs from its approver (for example `tenant_admin`
 for `targets.register`). It only leaves out the "still pending" check, so
 the decision message goes to the same people as the first message.
+A row stores no login group, so with approver routing on, a request whose
+stored kinds name an old kind (`SA-Operators`) sends no message to the
+members of that old group; the other stored kinds still get it.
 
 Only subscriptions of the request's tenant count. A row whose facts are
 more than 7 days old gets no message, because the person's groups may have
@@ -4941,6 +4963,32 @@ of the steps each run went through (`operations/composite_steps.py`):
   name (`scrub_secret_fields` with `hide_numbers=True`); otherwise the
   entry stays `started`. A `call`
   that raises leaves its entry `started` too.
+- **Credential steps.** MEHO never stores the result of a credential step,
+  and never a credential value. The entry holds only the connector, op id,
+  target and the keyed params hash. The rule:
+  - A step that **writes or makes** a credential (`credential_write`,
+    `credential_mint`) and ended well becomes `done_no_result`. "Ended
+    well": the `call` of `run_governed_subop` returned, or the
+    `dispatch_child` result is `ok` and not `execution_outcome:
+    "uncertain"`. The entry says only that the step is finished.
+  - A step that **reads** a credential (`credential_read`, or an answer
+    that hides its values) is `run_again` only when both hold:
+    - the read is on the short list of reads that only read, and change and
+      store nothing on any system (`_READS_SAFE_TO_SEND_AGAIN`:
+      `vault.kv.read`, `vault.kv.list`, `vault.kv.compare`);
+    - its policy let it go ahead with no person: the verdict was "go
+      ahead", and no person's approval cleared it (its own, or the approval
+      of the run). For a `dispatch_child` read the dispatcher tells the
+      record when the approval of the run let it go ahead
+      (`mark_child_cleared_by_person`).
+  - Every other credential read stays `started`, like a change with no
+    stored result: a read that is not on the list (some reads also store a
+    value, for example `k8s.secret.read_to_ref` writes the value it reads
+    to Vault), and a read that a person approved. Its result is not stored
+    either. A resume does not send it again.
+  - A credential write whose end MEHO does not know (the call raised, a
+    timeout after it was sent, an error or `uncertain` result) stays
+    `started`, like any other step.
 - **Storing.** When a step waits, the record goes on the new request as
   `resume_parent["steps"]` (left out when it is empty). Like the rest of
   `resume_parent` it is internal and never shown. For a credential write
@@ -4955,9 +5003,40 @@ of the steps each run went through (`operations/composite_steps.py`):
   - `done`: it returns the stored result (`run_governed_subop` gives
     `SubopStep(value=<stored>, replayed=True)`, `dispatch_child` gives the
     stored `OperationResult`);
+  - `done_no_result`: the step is not sent again and gives back no result
+    (`run_governed_subop` gives `SubopStep(value=None, replayed=True)`,
+    `dispatch_child` gives an `ok` `OperationResult` with `result=None`
+    and `extras["result_kept"] = False`). A later step does not get the
+    credential step's answer on a resume;
+  - `run_again`: `run_governed_subop` and `enforce_subop_policy` first
+    check the read's policy again (`apply_step_policy` and `policy_gate`,
+    the same check as a first send). Only when the answer is "go ahead"
+    with no person is the read sent again, with the same target and params.
+    An approval of the run does not count here. Any other answer (it must
+    wait, or it is denied) stops the run with
+    `composite_resume_read_not_sent`, which names the read, and the read is
+    not sent. A `dispatch_child` read runs through the dispatcher again,
+    with its normal checks, but the approval of the run does not cover it
+    (`child_read_sent_again`): when its policy now needs a person, the
+    dispatcher refuses it with a `denied` result that names
+    `composite_resume_read_not_sent`. The new answer goes to the handler
+    and is not stored. A stored `run_again` entry whose operation is not on
+    the list is taken as `started`;
   - `started`: the run stops with `composite_resume_step_outcome_unknown`
     (`execution_outcome: "uncertain"`, `retry: false`). MEHO does not know
-    if that change happened.
+    if that change happened. For a credential read a person approved, the
+    run stops with `composite_resume_read_not_sent` (`retry: false`), which
+    names the read: MEHO does not send it again under another approval.
+
+  **What the approver's card shows when a read runs again.** The card of
+  the waiting step shows that step and its params. The read is
+  not on the card. On the run after the approval MEHO reads again, and the
+  approved step goes ahead only when its params are exactly the ones on the
+  card (the params hash). When the new answer of the read changes those
+  params, the approved step does not match: the run stops with
+  `composite_resume_repeats_write` and the step is not sent. So the
+  approved step runs only with the values on its card. A later step of the
+  run, after the approved one, may use the new answer of the read.
 - **Before the approved step.** Until the approved step has run, every step
   must come from the record. A governed step that is not in it, and is not
   `after_main_effect`, is refused before it runs
@@ -4969,9 +5048,14 @@ of the steps each run went through (`operations/composite_steps.py`):
   after that approval could only stop at that step. So MEHO asks no person
   and stops at once with `composite_resume_step_outcome_unknown`. Not for an
   `after_main_effect` step: its run after the approval continues at that
-  step and does not reach the earlier one. A step that reads, writes or
-  makes a credential has no stored end too, so a later step of the same
-  run that needs approval stops the run this way.
+  step and does not reach the earlier one. A finished credential write
+  (`done_no_result`) and a listed credential read that needed no person
+  (`run_again`) do not stop a later wait; a credential write with no known
+  end does. Every other credential read (not on the list, or a person
+  approved it) also stops a later wait at once, with
+  `composite_resume_read_not_sent`: the error names the read and the step
+  that would wait, and no approval request is made. So such a read reaches
+  the target once in the whole run.
 - **A second wait.** A step that needs its own approval during a resume
   waits again. Its request stores the whole record so far: the replayed
   steps, the approved step and the steps after it. Two, three or more
@@ -4992,8 +5076,9 @@ approval request.
 The same holds on every resume path: the person's approval in the console,
 REST, MCP or CLI, the agent that waited (`agent/approval_wait.py`), and a
 scheduled run (its request is approved and run on the person's path). Tests:
-`test_operations_composite_steps_resume.py` (through the real dispatcher,
-counting each change that reached the target).
+`test_operations_composite_steps_resume.py` and
+`test_operations_composite_credential_steps_resume.py` (through the real
+dispatcher, counting each request that reached the target).
 
 #### Continuing where it stopped (#4217)
 
@@ -5254,8 +5339,8 @@ and `/preview`. Paths are under `backend/src/meho_backplane/`.
    lives on the row's `proposed_effect`. The add-on gets
    `status="awaiting_approval"` and `extras.approval_request_id`. It should
    store that id.
-4. **A human approves.** A MEHO-SA-Operator or a MEHO-Admin may approve their own delete.
-   Everyone else needs a MEHO-SA-Operator or a tenant admin to approve it,
+4. **A human approves.** A MEHO-Admin may approve their own delete.
+   Everyone else needs a tenant admin to approve it,
    and break-glass never covers this tier
    (`operations/approval_queue.py` `_check_self_approval`,
    `_check_approver_group`, #3328). The approve
@@ -5347,7 +5432,7 @@ by a service principal. The instance holds only disposable test systems,
 so nothing waits for a person there. Everything else in this document
 stays as it is: people and agents keep their rules, a run approval never
 covers a delete, satellites get no delete, and self-approval follows the
-group rules (only a MEHO-SA-Operator or a MEHO-Admin approves their own delete).
+group rules (only a MEHO-Admin approves their own delete).
 
 - The mode is one instance-wide switch, set at install time and fixed for
   the life of the database (`meho_backplane/sandbox_mode.py`). Every other

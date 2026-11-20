@@ -13,6 +13,10 @@ Safe to run twice: setting ``enabled`` to the value it already has is a
 success. A user that does not exist raises
 :exc:`~meho_backplane.connectors.keycloak.ops_write.KeycloakUserNotFoundError`.
 
+Disabling the user this target logs in with is refused, before approval and
+again when the approved request runs
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`).
+
 Disabling a user does **not** end sessions that are already open. To cut
 access at once, run ``keycloak.user.disable``, then ``keycloak.user.logout``.
 
@@ -27,7 +31,6 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
@@ -51,6 +54,8 @@ async def _set_enabled(
     enabled: bool,
 ) -> dict[str, Any]:
     realms = resolve_realm_config(target)
+    # Check and write the same read, so a rename between two reads cannot
+    # slip the sign-in user past the check (read_user_for_write runs it).
     user = await read_user_for_write(connector, operator, target, params, op_id=op_id)
     uuid = user.uuid
     try:
@@ -58,8 +63,9 @@ async def _set_enabled(
             connector,
             operator,
             target,
-            path=fill_path(_USER_PATH, {"realm": realms.managed_realm, "user-id": uuid}),
+            path=user.path,
             requested={"enabled": enabled},
+            before=user.user,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:

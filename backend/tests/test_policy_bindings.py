@@ -89,7 +89,7 @@ def _entry(
     )
 
 
-_NETWORK = _entry(RoleGroup.SA_OPERATORS, {"network"}, group="/MEHO-Operators/Network")
+_NETWORK = _entry(RoleGroup.OPERATORS, {"network"}, group="/MEHO-Operators/Network")
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ def test_a_file_with_bindings_parses_and_stores_them() -> None:
     assert document_of(parsed.model)["bindings"] == [
         {
             "match": {"group": "/MEHO-Operators/Network"},
-            "kind": "SA-Operators",
+            "kind": "Operators",
             "categories": ["network"],
         },
         {
@@ -153,8 +153,7 @@ def test_a_file_with_bindings_parses_and_stores_them() -> None:
         ),
         (
             "{match: {group: /A}, kind: operators, categories: [network]}",
-            "`bindings[0].kind` is not a group kind; use Readers, Operators, SA-Operators, "
-            "Admins, Approvers.",
+            "`bindings[0].kind` is not a group kind; use Readers, Operators, Admins.",
         ),
         (
             "{match: {group: /A}, kind: Operators, categories: ['*', network]}",
@@ -222,7 +221,7 @@ def _binding(kind: str, **extra: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("principal", ["agent", "service"])
-@pytest.mark.parametrize("kind", ["Operators", "SA-Operators", "Admins", "Approvers"])
+@pytest.mark.parametrize("kind", ["Operators", "SA-Operators", "Admins"])
 def test_an_agent_or_service_with_a_kind_that_may_approve_is_refused(
     principal: str, kind: str
 ) -> None:
@@ -233,8 +232,10 @@ def test_an_agent_or_service_with_a_kind_that_may_approve_is_refused(
 
 
 @pytest.mark.parametrize("principal", ["agent", "service"])
-def test_an_agent_or_service_may_be_a_reader(principal: str) -> None:
-    assert _check([_binding("Readers", principal=principal)]) == []
+@pytest.mark.parametrize("kind", ["Readers", "Approvers"])
+def test_an_agent_or_service_may_be_a_reader(principal: str, kind: str) -> None:
+    """The old kind ``Approvers`` is read as ``Readers``."""
+    assert _check([_binding(kind, principal=principal)]) == []
 
 
 @pytest.mark.parametrize("kind", ["Readers", "Operators", "Admins"])
@@ -273,9 +274,9 @@ def test_the_install_file_holds_no_bindings() -> None:
 
 def test_a_full_path_gives_the_kind_and_the_categories() -> None:
     operator = bind(_operator(), {"groups": ["/MEHO-Operators/Network"]}, [_NETWORK])
-    assert operator.bound_kind is RoleGroup.SA_OPERATORS
+    assert operator.bound_kind is RoleGroup.OPERATORS
     assert operator.bound_categories == frozenset({"network"})
-    assert operator.self_approver is True
+    assert operator.self_approver is False
     assert operator.tenant_role is TenantRole.OPERATOR
 
 
@@ -353,23 +354,23 @@ def test_a_groups_claim_that_is_not_a_list_of_texts_matches_no_binding(
 
 
 def test_categories_add_up_and_star_means_every_category() -> None:
-    storage = _entry(RoleGroup.SA_OPERATORS, {"storage"}, group="/MEHO-Operators/Storage")
+    storage = _entry(RoleGroup.OPERATORS, {"storage"}, group="/MEHO-Operators/Storage")
     claims = {"groups": ["/MEHO-Operators/Network", "/MEHO-Operators/Storage"]}
     assert bind(_operator(), claims, [_NETWORK, storage]).bound_categories == frozenset(
         {"network", "storage"}
     )
-    every = _entry(RoleGroup.SA_OPERATORS, {"*"}, group="/MEHO-Operators/Storage")
+    every = _entry(RoleGroup.OPERATORS, {"*"}, group="/MEHO-Operators/Storage")
     assert bind(_operator(), claims, [_NETWORK, every]).bound_categories == frozenset({"*"})
 
 
 def test_two_kinds_in_one_tenant_refuse_the_login() -> None:
-    plain = _entry(RoleGroup.OPERATORS, {"storage"}, group="/MEHO-Operators/Storage")
+    admins = _entry(RoleGroup.ADMINS, {"storage"}, group="/MEHO-Operators/Storage")
     claims = {"groups": ["/MEHO-Operators/Network", "/MEHO-Operators/Storage"]}
     with pytest.raises(BoundKindConflictError) as caught:
-        bind(_operator(), claims, [_NETWORK, plain])
+        bind(_operator(), claims, [_NETWORK, admins])
     assert str(caught.value).startswith(
         "multiple_bound_kinds: this login matches bindings with 2 group kinds "
-        "(Operators, SA-Operators) in this tenant."
+        "(Operators, Admins) in this tenant."
     )
 
 
@@ -379,7 +380,7 @@ def test_kinds_of_two_base_levels_refuse_the_login(role: TenantRole) -> None:
     claims = {"groups": ["/MEHO-Operators/Network", "/MEHO-Readers/Storage"]}
     with pytest.raises(BoundKindConflictError) as caught:
         bind(_operator(tenant_role=role), claims, [_NETWORK, readers])
-    assert caught.value.kinds == (RoleGroup.READERS, RoleGroup.SA_OPERATORS)
+    assert caught.value.kinds == (RoleGroup.READERS, RoleGroup.OPERATORS)
 
 
 def test_a_kind_of_another_base_level_is_left_out() -> None:
@@ -390,11 +391,13 @@ def test_a_kind_of_another_base_level_is_left_out() -> None:
     assert after.tenant_role is TenantRole.OPERATOR
 
 
-def test_an_approver_binding_gives_the_approver_flag_and_a_reader_binding_takes_it() -> None:
+def test_an_approvers_binding_is_read_as_readers_and_a_reader_binding_takes_the_flag() -> None:
     claims = {"groups": ["/Audit"]}
     reader = _operator(tenant_role=TenantRole.READ_ONLY)
     approvers = _entry(RoleGroup.APPROVERS, {"network"}, group="/Audit")
-    assert bind(reader, claims, [approvers]).approver is True
+    bound = bind(reader, claims, [approvers])
+    assert bound.bound_kind is RoleGroup.READERS
+    assert bound.approver is False
     flagged = _operator(tenant_role=TenantRole.READ_ONLY, approver=True)
     readers = _entry(RoleGroup.READERS, {"network"}, group="/Audit")
     assert bind(flagged, claims, [readers]).approver is False
@@ -411,7 +414,7 @@ def test_an_operators_binding_takes_the_self_approval_flag() -> None:
 def test_a_bad_tenants_claim_keeps_the_self_approval_flag_off() -> None:
     operator = _operator(tenants_claim_malformed=True)
     after = bind(operator, {"groups": ["/MEHO-Operators/Network"]}, [_NETWORK])
-    assert after.bound_kind is RoleGroup.SA_OPERATORS
+    assert after.bound_kind is RoleGroup.OPERATORS
     assert after.self_approver is False
 
 
@@ -443,8 +446,14 @@ def test_a_status_answer_without_a_tenant_is_not_bound() -> None:
 
 def test_the_shipped_bindings_come_from_the_two_settings() -> None:
     assert shipped_binding_documents(get_settings()) == [
-        {"match": {"group": f"/MEHO-{kind}"}, "kind": kind, "categories": ["*"]}
-        for kind in ("Readers", "Operators", "SA-Operators", "Admins", "Approvers")
+        {"match": {"group": f"/MEHO-{name}"}, "kind": kind, "categories": ["*"]}
+        for name, kind in (
+            ("Readers", "Readers"),
+            ("Operators", "Operators"),
+            ("SA-Operators", "Operators"),
+            ("Admins", "Admins"),
+            ("Approvers", "Readers"),
+        )
     ]
 
 
@@ -455,26 +464,20 @@ def test_the_shipped_bindings_follow_renamed_groups(monkeypatch: pytest.MonkeyPa
     assert shipped_binding_documents(get_settings()) == [
         {"match": {"group": "/Corp-Readers"}, "kind": "Readers", "categories": ["*"]},
         {"match": {"group": "/Corp-Admins"}, "kind": "Admins", "categories": ["*"]},
-        {"match": {"group": "/Corp-Self"}, "kind": "SA-Operators", "categories": ["*"]},
+        {"match": {"group": "/Corp-Self"}, "kind": "Operators", "categories": ["*"]},
     ]
 
 
-def test_a_shipped_operator_group_and_the_self_approval_group_give_sa_operators(
+def test_a_shipped_operator_group_and_the_old_self_approval_group_give_operators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Today such a person is an operator who may approve their own changes."""
+    """Both groups are read as Operators: the person approves no own change."""
     monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
     get_settings.cache_clear()
     claims = {"groups": ["/MEHO-Operators", "/Ops-Self-Approve"]}
-    after = bind(_operator(self_approver=True), claims, shipped_bindings(get_settings()))
-    assert after.bound_kind is RoleGroup.SA_OPERATORS
-    assert after.self_approver is True
-    stored = [
-        _entry(RoleGroup.OPERATORS, {"*"}, group="/MEHO-Operators"),
-        _entry(RoleGroup.SA_OPERATORS, {"*"}, group="/Ops-Self-Approve"),
-    ]
-    with pytest.raises(BoundKindConflictError):
-        bind(_operator(), claims, stored)
+    after = bind(_operator(), claims, shipped_bindings(get_settings()))
+    assert after.bound_kind is RoleGroup.OPERATORS
+    assert after.self_approver is False
 
 
 @pytest.mark.parametrize(
@@ -578,7 +581,7 @@ async def test_the_stored_bindings_of_the_tenant_count() -> None:
     await _store(_STORED)
     try:
         hit = await bind_current_tenant(_operator(), {"groups": ["/MEHO-Operators/Network"]})
-        assert hit.bound_kind is RoleGroup.SA_OPERATORS
+        assert hit.bound_kind is RoleGroup.OPERATORS
         assert hit.bound_categories == frozenset({"network"})
         miss = await bind_current_tenant(_operator(), {"groups": ["Network"]})
         assert miss.bound_kind is None
@@ -594,10 +597,10 @@ async def test_the_stored_bindings_of_the_tenant_count() -> None:
 async def test_without_stored_bindings_the_shipped_ones_count() -> None:
     await _store(None)
     claims = {"groups": ["/MEHO-SA-Operators"]}
-    hit = await bind_current_tenant(_operator(self_approver=True), claims)
-    assert hit.bound_kind is RoleGroup.SA_OPERATORS
+    hit = await bind_current_tenant(_operator(), claims)
+    assert hit.bound_kind is RoleGroup.OPERATORS
     assert hit.bound_categories == frozenset({"*"})
-    assert hit.self_approver is True
+    assert hit.self_approver is False
     short = await bind_current_tenant(_operator(), {"groups": ["MEHO-SA-Operators"]})
     assert short.bound_kind is None
 
@@ -621,7 +624,7 @@ async def test_two_kinds_give_a_401(monkeypatch: pytest.MonkeyPatch) -> None:
         {
             "bindings": [
                 *_STORED["bindings"],
-                {"match": {"attribute": "net"}, "kind": "Operators", "categories": ["*"]},
+                {"match": {"attribute": "net"}, "kind": "Admins", "categories": ["*"]},
             ]
         }
     )
@@ -683,7 +686,7 @@ async def test_subgroups_of_two_base_levels_give_a_401(
         assert caught.value.status_code == 401
         assert str(caught.value.detail).startswith(
             "multiple_bound_kinds: this login matches bindings with 2 group kinds "
-            "(Readers, SA-Operators)"
+            "(Readers, Operators)"
         )
     finally:
         await _store(None)

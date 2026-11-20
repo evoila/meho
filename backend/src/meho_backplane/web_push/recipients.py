@@ -5,7 +5,7 @@
 
 The login groups are in the login token, not in the database. So each
 subscription keeps the person's login facts in its tenant
-(:class:`LoginFacts`: role, approver flag, SA-Operator flag, platform admin
+(:class:`LoginFacts`: role, approver flag, self-approval flag, platform admin
 flag) and when they were read. MEHO reads them from the login when the
 person switches the notifications on, at each console sign-in and each
 time the account page opens.

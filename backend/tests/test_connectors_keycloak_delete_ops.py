@@ -452,6 +452,35 @@ async def test_user_delete_refuses_target_password_login_user(kc: KeycloakConnec
     assert not del_route.called
 
 
+def _email_creds_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
+    async def _load() -> KeycloakAdminCredentials:
+        return KeycloakPasswordCredentials(
+            username="Break-Glass@Example.invalid", password="stub-password"
+        )
+
+    return _load()
+
+
+async def test_user_delete_refuses_target_email_login_user(kc: KeycloakConnector) -> None:
+    """The target logs in with the user's email, not its username."""
+    connector = _wire_connector(_email_creds_loader)
+    try:
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            _mount_token(mock)
+            mock.get(f"/admin/realms/{_ADMIN_REALM}/users/{_USER_UUID}").respond(
+                200, json={**_user("ops-admin"), "email": "break-glass@example.invalid"}
+            )
+            del_route = mock.delete(url__regex=r".*/users/.*").respond(204)
+            result = await _run(
+                "keycloak.user.delete", {"id": _USER_UUID}, target=_ADMIN_REALM_TARGET_NAME
+            )
+    finally:
+        await connector.aclose()
+    assert result["status"] == "error", result
+    assert "(target_login_user)" in result["extras"]["exception_message"]
+    assert not del_route.called
+
+
 async def test_login_guard_does_not_apply_in_another_realm(kc: KeycloakConnector) -> None:
     """A same-named user in the managed realm is not the target's login user."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:

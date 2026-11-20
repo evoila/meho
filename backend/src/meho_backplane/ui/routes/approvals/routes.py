@@ -94,9 +94,9 @@ the badge -- the projection in :mod:`.render` omits them by construction.
 The modal shows, for a pending request, whether this person may approve
 it and why not. The answer comes from
 :func:`~meho_backplane.operations.approval_rights.approve_right`, which
-runs the same service checks as ``approve_request``: a MEHO-SA-Operator
+runs the same service checks as ``approve_request``: a MEHO-Admin
 may approve their own change; another person's ``dangerous`` or
-``destructive`` change needs a MEHO-SA-Operator or an admin; the
+``destructive`` change needs an admin; the
 break-glass switch covers only an own ``safe`` / ``caution`` change. The
 **Approve** button is disabled when the answer is no. **Deny** stays
 enabled (an operator withdrawing their own request is not an escalation).

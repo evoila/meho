@@ -20,6 +20,12 @@ gives the same way to a person who works through an AI tool over MCP:
 * ``connector_id`` and ``op_id`` must be the ones of the request. Otherwise
   the fetch is refused before it uses up the one-time permission.
 * An agent is refused, as for ``reveal_secret`` itself.
+* With a hosted agent's connector list bound
+  (:mod:`~meho_backplane.operations._target_connector_limit`), a request
+  whose connector, or the connector of whose stored target, is not in the
+  list is refused first with ``connector_not_allowed``. The answer names
+  no connector outside the list, and the try writes one
+  ``approval.reveal`` audit row. Nothing runs.
 * The rest is :func:`~meho_backplane.operations.approved_reveal.fetch_approved_reveal`:
   same person and tenant, once, within the fetch window after the approval.
   Each try writes an ``approval.reveal`` audit row.
@@ -31,7 +37,8 @@ gives the same way to a person who works through an AI tool over MCP:
 
 A refused fetch answers ``status="denied"`` with ``extras.error_code``
 (``approval_request_not_found``, ``not_request_owner``,
-``reveal_wrong_operation``, ``reveal_agent_refused``, or
+``reveal_wrong_operation``, ``reveal_agent_refused``,
+``connector_not_allowed``, or
 ``reveal_<code>`` of a refused fetch) and ``extras.approval_request_id``.
 Nothing ran.
 """
@@ -49,6 +56,7 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.mcp.registry import ToolDefinition
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations._target_connector_limit import allowed_connectors_var
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ResultAccessForbiddenError,
@@ -57,8 +65,10 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.approved_reveal import (
     RevealFetchRefusedError,
     fetch_approved_reveal,
+    refuse_reveal_outside_limit,
     reveal_fetch_window,
 )
+from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
 
@@ -174,6 +184,15 @@ async def fetch_reveal_over_mcp(operator: Operator, arguments: dict[str, Any]) -
     request_id = _parse_request_id(arguments[APPROVAL_REQUEST_ID])
     connector_id = str(arguments.get("connector_id", ""))
     op_id = str(arguments.get("op_id", ""))
+    allowed = allowed_connectors_var.get()
+    if allowed is not None and await refuse_reveal_outside_limit(operator, request_id):
+        return _refused(
+            op_id,
+            request_id,
+            CONNECTOR_NOT_ALLOWED,
+            "The request is not for a target of this agent's allowed connectors "
+            f"({', '.join(sorted(allowed)) or 'none'}). Nothing ran.",
+        )
     if operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None:
         return _refused(
             op_id, request_id, "reveal_agent_refused", "Only a person can get a secret value."

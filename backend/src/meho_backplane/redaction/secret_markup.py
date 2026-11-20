@@ -17,7 +17,8 @@ hides them in the text:
   goes on over more lines. A quoted value ends at its closing quote, also
   when it holds an escaped quote (``\\"`` or ``''``). A note after the value
   (``# rotate monthly``) stays, and so does a comment line below the key
-  that is not part of a block value.
+  that is not part of a block value or of a quoted value that is still
+  open. A secret-named value in such a comment line is hidden too.
 * :func:`hide_secret_xml` reads XML tags: the text of an element with a
   secret name (``<password>...</password>``, also with child elements), an
   attribute with a secret name (``dbPassword="..."``), and the ``value``
@@ -64,6 +65,13 @@ _TRAILING_NOTE: Final[re.Pattern[str]] = re.compile(r"[ \t]*+(?<![^ \t])#")
 #: A value in quotes that close on the line: ``\"`` inside double quotes and
 #: ``''`` inside single quotes are escaped quotes, not the closing quote.
 _QUOTED_VALUE: Final[re.Pattern[str]] = re.compile(r"\"(?:[^\"\\]|\\.)*+\"|'(?:[^']|'')*+'")
+
+#: The rest of a quoted value that goes on over more lines, up to and with
+#: its closing quote, by the quote that opened it.
+_QUOTE_CLOSE: Final[dict[str, re.Pattern[str]]] = {
+    '"': re.compile(r"(?:[^\"\\]|\\.)*+\""),
+    "'": re.compile(r"(?:[^']|'')*+'"),
+}
 
 #: The indicator of a YAML block value, such as ``|``, ``>-`` or ``|2+``.
 _BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][0-9+\-]{0,2}")
@@ -172,6 +180,29 @@ def _split_value(value: str) -> tuple[str, str]:
     return value[: note.start()], value[note.start() :]
 
 
+def _mark_quoted_lines(
+    text: str, lines: list[tuple[int, int, bool]], value: str
+) -> list[tuple[int, int, bool]]:
+    """*lines* with each line inside a quoted value that is still open marked as no comment.
+
+    A quoted value that does not close on the line of its key goes on until
+    its closing quote, so a line in it that starts with ``#`` is part of the
+    value.
+    """
+    if value[:1] not in ('"', "'") or _QUOTED_VALUE.match(value) is not None:
+        return lines
+    closing: re.Pattern[str] | None = _QUOTE_CLOSE[value[0]]
+    marked: list[tuple[int, int, bool]] = []
+    for line_start, end, is_comment in lines:
+        if closing is None:
+            marked.append((line_start, end, is_comment))
+            continue
+        marked.append((line_start, end, False))
+        if closing.match(text, line_start, end) is not None:
+            closing = None
+    return marked
+
+
 def _key_name(match: re.Match[str]) -> str:
     for group in ("key", "double_key", "single_key"):
         if match[group] is not None:
@@ -186,7 +217,8 @@ def _line_value_span(text: str, match: re.Match[str]) -> tuple[int, int, str] | 
     belong to the value (a block value such as ``password: |``, or a value
     that goes on over more lines) and are hidden with it. A note after the
     value (``# rotate monthly``) stays. Below a value that is not a block
-    value, a comment line stays where it is.
+    value and not an open quoted value, a comment line stays where it is,
+    with its own secret-named value hidden.
     """
     value, note = _split_value(match["value"].rstrip(" \t\r"))
     start = match.start("value")
@@ -194,6 +226,7 @@ def _line_value_span(text: str, match: re.Match[str]) -> tuple[int, int, str] | 
     if match["comment"] is None:
         column = match.start("key_token") - match.start()
         lines = _deeper_lines(text, _line_end(text, match.start()), column)
+        lines = _mark_quoted_lines(text, lines, value)
         if _BLOCK_INDICATOR.fullmatch(value.strip()) is not None:
             lines = [(line_start, end, False) for line_start, end, _ in lines]
         while lines and lines[-1][2]:
@@ -214,7 +247,8 @@ def _line_value_span(text: str, match: re.Match[str]) -> tuple[int, int, str] | 
     for line_start, end, is_comment in lines:
         if is_comment:
             line_break = "\r\n" if text[line_start - 2 : line_start] == "\r\n" else "\n"
-            kept.append(line_break + text[line_start:end])
+            comment = hide_secret_lines(text[line_start:end], comments_only=True)
+            kept.append(line_break + comment)
     return start, lines[-1][1], "".join(kept)
 
 

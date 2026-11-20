@@ -563,7 +563,8 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     deeper are hidden with the value; a quoted value ends at its closing
     quote, also when it holds an escaped quote (`\"` or `''`); a note after
     the value such as `# rotate monthly` stays, and so does a comment line
-    below the key that is not part of a block value), and XML text: the text of a secret-named
+    below the key that is not part of a block value or of a quoted value
+    that is still open, with its own secret-named value hidden), and XML text: the text of a secret-named
     element (`<password>...</password>`, child elements and CDATA
     included; a closing tag closes the nearest open element with its
     name, tags inside CDATA are text, and the text of an XML comment is

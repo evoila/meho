@@ -287,6 +287,50 @@ def test_comment_line_below_a_secret_key_stays(text: str, expected: str) -> None
     assert hide_secret_text(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f'bad: [\ndbPassword: "first\n  # {_FAKE_BLOCK}\n  tail"\nport: 1\n',
+            f"bad: [\ndbPassword: {_MARKER}\nport: 1\n",
+        ),
+        (
+            f"bad: [\ndbPassword: 'first\n  # {_FAKE_BLOCK}\n  tail'\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER}\nport: 1\n",
+        ),
+        (
+            f'bad: [\ndbPassword: "first\n  # {_FAKE_BLOCK}"\nport: 1\n',
+            f"bad: [\ndbPassword: {_MARKER}\nport: 1\n",
+        ),
+        (
+            f"bad: [\ndbPassword: 'it''s\n  more'\n  # rotate monthly\n  {_FAKE_BLOCK}\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER}\n  # rotate monthly\nport: 1\n",
+        ),
+    ],
+    ids=["double-quotes", "single-quotes", "comment-line-is-last", "after-closing-quote"],
+)
+def test_hash_line_inside_an_open_quoted_value_is_hidden(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"bad: [\ndbPassword: first\n  # dbPassword: {_FAKE_COMMENT}\n  tail\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER}\n  # dbPassword: {_MARKER}\nport: 1\n",
+        ),
+        (
+            f"bad: [\r\ndbPassword: first\r\n  # apiToken: '{_FAKE_COMMENT}'\r\n  tail\r\n",
+            f"bad: [\r\ndbPassword: {_MARKER}\r\n  # apiToken: {_MARKER}\r\n",
+        ),
+    ],
+    ids=["plain", "quoted-crlf"],
+)
+def test_kept_comment_line_hides_its_own_secret_value(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
 def test_broken_yaml_keeps_flags_empty_and_masked_values() -> None:
     text = "bad: [\npassword: true\ndbSecret:\ntoken: '[REDACTED:api_key]'\nnext: 1\n"
     assert hide_secret_text(text) == text

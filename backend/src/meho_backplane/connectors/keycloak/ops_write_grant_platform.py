@@ -29,7 +29,7 @@ attribute change: the new attributes in the request.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from meho_backplane.connectors.keycloak._paths import (
     _GROUP_PATH,
@@ -43,14 +43,28 @@ from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
-    from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
     "PARENT_CAP",
+    "GroupReader",
     "attributes_set_platform_admin",
     "group_gives_platform_admin",
+    "group_marks_platform_admin",
+    "user_flag_marks_platform_admin",
 ]
+
+
+class GroupReader(Protocol):
+    """Who reads the group, and on which target: a preview context, or any object with both."""
+
+    @property
+    def target(self) -> Any: ...
+
+    @property
+    def operator(self) -> Operator: ...
+
 
 _PLATFORM_GROUP: Final[str] = ADMIN_GROUPS[1].casefold()
 _PLATFORM_PATH: Final[str] = f"/{_PLATFORM_GROUP}"
@@ -102,8 +116,21 @@ def _in_platform_group(rep: dict[str, Any]) -> bool:
     )
 
 
+def group_marks_platform_admin(rep: dict[str, Any]) -> bool:
+    """True when the group itself is, or is under, the platform admin group, or has the flag.
+
+    Only the group's own fields count: a parent group's flag is not read here.
+    """
+    return _in_platform_group(rep) or _flag_is_true(rep, _attribute_names())
+
+
+def user_flag_marks_platform_admin(rep: dict[str, Any]) -> bool:
+    """True when the user's own attributes set the platform admin flag to ``true``."""
+    return _flag_is_true(rep, _attribute_names())
+
+
 async def _read_group(
-    connector: KeycloakConnector, ctx: PreviewContext, realm: str, group_id: str
+    connector: KeycloakConnector, ctx: GroupReader, realm: str, group_id: str
 ) -> dict[str, Any] | None:
     return await get_or_none(
         connector,
@@ -115,7 +142,7 @@ async def _read_group(
 
 async def _maps_platform_role(
     connector: KeycloakConnector,
-    ctx: PreviewContext,
+    ctx: GroupReader,
     realm: str,
     group_id: str,
     roles: set[str],
@@ -133,7 +160,7 @@ async def _maps_platform_role(
 
 
 async def group_gives_platform_admin(
-    connector: KeycloakConnector, ctx: PreviewContext, group_id: str
+    connector: KeycloakConnector, ctx: GroupReader, group_id: str
 ) -> bool | None:
     """Whether a login in the group gets platform admin rights; ``None`` when unknown."""
     try:

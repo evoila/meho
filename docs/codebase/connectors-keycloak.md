@@ -1169,6 +1169,55 @@ check. `realm.delete` refuses the realm the target signs in to, and
 `client.delete` refuses the target's own client. `group.delete`,
 `client.update`, `realm.update` and the sign-in flow ops have no such check.
 
+### Writes that could take MEHO's own access away
+
+In MEHO's own login realm (the realm in `KEYCLOAK_ISSUER_URL` and
+`KEYCLOAK_ADMIN_URL`), a user write must not take MEHO's own access
+away. The check is `ops_user_meho_access_guard.py`. It refuses three
+cases:
+
+| Case | The user | The writes MEHO refuses |
+|---|---|---|
+| A login MEHO itself uses | the service-account user of `KEYCLOAK_ADMIN_CLIENT_ID` or `CHECK_RUNNER_CLIENT_ID` (`service-account-<client>`) | `user.disable`, `user.delete`, `user.required_actions.update`, `user.reset_password`, `user.credential.delete`, `secret.move` into its password, `group.member.remove`, `role_mapping.client.remove`, `user.update` of `username` or `email` |
+| The last active platform admin | an enabled person with platform admin rights, when no other enabled person has them | the same lock-out writes (`user.disable`, `user.delete`, `user.required_actions.update`, `user.reset_password`, `user.credential.delete`, `secret.move` into its password), and `group.member.remove` from a group that gives platform admin rights when the user has them from no other group |
+| The account that asks | the user whose id is the caller's `sub`, or the service-account user of the caller's client; in an approved run also the person who asked and the person who runs it | the lock-out writes |
+
+- **When.** Before the request waits for approval (the park check of
+  `refuse_other_user_check`, and `refuse_before_approval` of the secret
+  move sink) and again when the call runs (`read_user_for_write`,
+  `keycloak_user_delete`, `write_secret`). A call that a standing grant
+  runs at once still meets the run-time check, so no standing grant and
+  no run approval lets these writes through. A delete builds its preview
+  again right before the approved run, and that preview runs the same
+  check, so a delete is refused there (`preview_changed_since_approval`).
+- **Who has platform admin rights.** The rules of MEHO's login: the
+  user's own `platform_admin` attribute is `true`, or the user is in a
+  group that gives the rights (the group `MEHO-Platform-Admins` or a group
+  under it, or a group whose own or parent's `platform_admin` attribute is
+  `true`; `ops_write_grant_platform.py`). MEHO counts the others when the
+  check runs: the enabled members of those groups who are not a client's
+  service-account user. A person with only the user attribute is not
+  counted as another admin.
+- **On doubt MEHO refuses.** A failed or odd Keycloak read, too many
+  groups or pages, a group MEHO cannot read, or settings MEHO cannot read
+  refuse the write (`meho_access_not_checked`). Only a user MEHO cannot
+  read before approval is let through to wait: the card says MEHO could
+  not read the user, and the approved run is refused. When
+  `JWT_PLATFORM_ADMIN_ROLE_NAME` is set, the rights can come from a realm
+  role in ways MEHO cannot count, so a lock-out write on a platform admin
+  is always refused; a Keycloak administrator makes it in the Keycloak
+  admin console. When MEHO finds no realm in its own settings, every realm
+  counts as its login realm.
+- **The refusal.** `MehoAccessRefusedError` (a `KeycloakDeleteRefusedError`)
+  with the reason `meho_service_login`, `last_platform_admin`,
+  `own_account` or `meho_access_not_checked`. The text names no user and
+  says what to do instead: set up a new login for MEHO first, give a
+  second person platform admin rights first, or ask another admin to send
+  the request. Nothing is written.
+- **Who approves.** With a second platform admin the write waits for
+  approval as any other user write in the login realm.
+- **Other realms.** The check reads nothing and refuses nothing.
+
 ### One-time code set-up
 
 Two ops in `ops_user_required_actions.py`. The usual use is to make users

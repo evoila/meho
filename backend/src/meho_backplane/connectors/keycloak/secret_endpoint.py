@@ -144,6 +144,10 @@ from meho_backplane.connectors.keycloak.ops_user_login_guard import (
     park_refusal_for_login_user,
     refuse_login_user_in_realm,
 )
+from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import (
+    MehoAccessRefusedError,
+    is_meho_login_realm,
+)
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import KeycloakDeleteRefusedError
 from meho_backplane.connectors.keycloak.secret_move_target import check_approved_keycloak_target
@@ -340,6 +344,10 @@ class KeycloakCredentialSecretEndpoint:
     def _in_sign_in_realm(self, target: KeycloakTargetLike) -> bool:
         return self._realm == resolve_realm_config(target).admin_realm
 
+    def _guarded(self, target: KeycloakTargetLike) -> bool:
+        """The realm the target signs in to, or a realm of MEHO's own login."""
+        return self._in_sign_in_realm(target) or is_meho_login_realm(self._realm)
+
     async def _refuse_login_user(
         self,
         connector: KeycloakConnector,
@@ -347,7 +355,7 @@ class KeycloakCredentialSecretEndpoint:
         target: KeycloakTargetLike,
         uuid: str,
     ) -> None:
-        if self._in_sign_in_realm(target):
+        if self._guarded(target):
             await refuse_login_user_in_realm(
                 connector,
                 operator,
@@ -361,15 +369,17 @@ class KeycloakCredentialSecretEndpoint:
     async def refuse_before_approval(self, operator: Operator) -> str | None:
         """The check before approval: the reason to refuse the sign-in user, or ``None``.
 
-        Calls Keycloak only in the realm the target signs in to. A target or
-        user that is not found is left to the run. The reason names no user.
+        In MEHO's own login realm it also refuses a password that takes
+        MEHO's own access away. Calls Keycloak only in the realm the target
+        signs in to and in MEHO's login realm. A target or user that is not
+        found is left to the run. The reason names no user.
         """
         connector = get_or_create_connector_instance(KeycloakConnector)
         if not isinstance(connector, KeycloakConnector):  # pragma: no cover -- registry invariant
             return None
         try:
             target = await self._resolve_target(operator)
-            if not self._in_sign_in_realm(target):
+            if not self._guarded(target):
                 return None
             uuid = await connector._find_user_uuid(
                 target, self._realm, self._username, operator=operator
@@ -378,6 +388,8 @@ class KeycloakCredentialSecretEndpoint:
                 await self._refuse_login_user(connector, operator, target, uuid)
         except (TargetNotFoundError, AmbiguousTargetError):
             return None
+        except MehoAccessRefusedError as exc:
+            return exc.reason
         except KeycloakDeleteRefusedError:
             return park_refusal_for_login_user(_MOVE_OP_ID, SECRET_SINK_ACTION)
         return None

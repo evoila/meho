@@ -65,6 +65,11 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _OP_ID = "keycloak.user.required_actions.update"
 _OTP_OP_ID = "keycloak.user.otp_status"

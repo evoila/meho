@@ -1,0 +1,5 @@
+## Note
+In MEHO's own login realm, MEHO now refuses a Keycloak user write that would take MEHO's own access away: a write that disables, deletes or locks out a login MEHO itself uses (the service-account user of `KEYCLOAK_ADMIN_CLIENT_ID` or `CHECK_RUNNER_CLIENT_ID`), the last active platform admin, or the account that asks. Removing the last active platform admin from the group that gives the rights is refused too. MEHO refuses before the request waits for approval and again when it runs, also under a standing grant, and refuses when it cannot read Keycloak or count the platform admins. A request that waits for approval from before the upgrade is refused when it runs if it hits one of these users. The refusal says what to do instead.
+
+## Action
+Keep at least two people with platform admin rights. To replace a login MEHO uses, set up the new login in MEHO's settings first. When platform admin rights come from a realm role (`JWT_PLATFORM_ADMIN_ROLE_NAME`), make writes on a platform admin in the Keycloak admin console. No schema action.

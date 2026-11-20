@@ -109,8 +109,12 @@ boundary redaction:
     approval (park check `refuse_sink_before_approval` in
     `move_preview.py`, which calls the sink's `refuse_before_approval`),
     and `write_secret` checks again before the PUT. It is the same check as
-    `keycloak.user.reset_password` (`ops_user_login_guard.py`). In another
-    realm the park check calls no Keycloak.
+    `keycloak.user.reset_password` (`ops_user_login_guard.py`). In MEHO's
+    own login realm the sink also refuses a login MEHO itself uses, the
+    last active platform admin, and the account that asks
+    (`ops_user_meho_access_guard.py`, see "Writes that could take MEHO's
+    own access away" in `connectors-keycloak.md`). In another realm the
+    park check calls no Keycloak.
   - **`KeycloakClientSecretSourceEndpoint`** (source, #3619). **Source-only**:
     unlike a user password, a confidential client's secret IS served by
     the Admin REST API (`GET .../clients/{uuid}/client-secret` →

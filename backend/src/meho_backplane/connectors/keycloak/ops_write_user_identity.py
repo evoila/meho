@@ -18,7 +18,10 @@ user. This module is the one place that checks it, for these ops:
 
 The writes that can lock the target out also refuse the user the target
 signs in with, before approval and when the call runs
-(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`).
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`). In
+MEHO's own login realm they also refuse a write that takes MEHO's own
+access away
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_meho_access_guard`).
 
 Three pieces, used at three moments:
 
@@ -47,6 +50,7 @@ from meho_backplane.connectors.keycloak.ops_user_login_guard import (
     login_user_park_reason,
     refuse_login_user_of_write,
 )
+from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import meho_access_park_reason
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import ParkCheck, register_park_check
@@ -258,6 +262,11 @@ def refuse_other_user_check(
         connector = _live_connector(ctx)
         if connector is not None:
             reason = await login_user_park_reason(
+                connector, ctx.operator, ctx.target, ctx.params, op_id=op_id, id_key=id_key
+            )
+            if reason is not None:
+                return reason
+            reason = await meho_access_park_reason(
                 connector, ctx.operator, ctx.target, ctx.params, op_id=op_id, id_key=id_key
             )
             if reason is not None:

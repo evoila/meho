@@ -7,7 +7,17 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_no_secret_value, declare_op_classes
+from collections.abc import Mapping
+from typing import Any, Final
+
+import yaml
+
+from meho_backplane.op_classes import (
+    declare_credential_capable,
+    declare_credential_check,
+    declare_no_secret_value,
+    declare_op_classes,
+)
 
 declare_op_classes(
     credential_read=(
@@ -38,3 +48,53 @@ declare_op_classes(
 # The compare read returns only "same" or "different", never a value. So it
 # runs without waiting for approval (meho_backplane.operations.credential_read).
 declare_no_secret_value(("k8s.secret.compare_to_ref",))
+
+# A command in a container can read or write any credential the container
+# holds. So every call waits for a person, and no standing grant, agent
+# grant or run approval covers it.
+declare_credential_capable(("k8s.exec",))
+
+#: Kinds whose objects hold a credential, in lower case. A ServiceAccount
+#: token is a Secret too.
+CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
+
+
+def _holds_credential(doc: Any) -> bool:
+    """True when *doc* is a credential kind, a list with one, or cannot be read."""
+    if not isinstance(doc, Mapping):
+        return True
+    kind = doc.get("kind")
+    if not isinstance(kind, str) or not kind:
+        return True
+    if kind.lower() in CREDENTIAL_KINDS:
+        return True
+    items = doc.get("items")
+    if items is None:
+        return False
+    if not isinstance(items, list):
+        return True
+    return any(_holds_credential(item) for item in items)
+
+
+def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
+    """True when the ``k8s.apply`` manifest in *params* holds a credential kind.
+
+    Any document of a multi-document manifest counts, and any item of a
+    list. A manifest MEHO cannot read counts too: it is not text, it is not
+    YAML or JSON, or a document has no kind.
+    """
+    manifest = params.get("manifest")
+    if not isinstance(manifest, str):
+        return True
+    try:
+        docs = [doc for doc in yaml.safe_load_all(manifest) if doc is not None]
+    except (yaml.YAMLError, RecursionError):
+        return True
+    if not docs:
+        return True
+    return any(_holds_credential(doc) for doc in docs)
+
+
+# A k8s.apply of a Secret writes a credential. Such a call waits for a
+# person on every call; an apply of other kinds keeps the rules of k8s.apply.
+declare_credential_check("k8s.apply", manifest_holds_credential)

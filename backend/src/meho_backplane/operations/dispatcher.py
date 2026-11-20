@@ -521,7 +521,10 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
-from meho_backplane.operations.service_grants import credential_call_waits
+from meho_backplane.operations.service_grants import (
+    CREDENTIAL_CARD_LINE,
+    descriptor_credential_waits,
+)
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
@@ -3481,6 +3484,9 @@ async def _build_proposed_effect(
         # approve it with a click in the web interface.
         if waits_only_for_token_call(operator, descriptor):
             base["waits_because"] = TOKEN_CALL_WAIT
+        # The approval card says in one line why a credential call waits.
+        if descriptor_credential_waits(descriptor):
+            base["credential_wait"] = CREDENTIAL_CARD_LINE
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -4471,9 +4477,7 @@ async def _dispatch_now(
                 elif (
                     descriptor.safety_level != "destructive"
                     and not descriptor.requires_approval
-                    and not credential_call_waits(
-                        descriptor.op_id, getattr(descriptor, "op_class", None)
-                    )
+                    and not descriptor_credential_waits(descriptor)
                 ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                     mark_child_cleared_by_person(op_id)

@@ -1,0 +1,5 @@
+## Note
+Every `k8s.exec` call and every `proxmox.api.write` call waits for a person, and a `k8s.apply` call waits for a person when its manifest holds a `kind: Secret` (in any document or any item of a `List`) or when MEHO cannot read the manifest. No standing grant, no agent grant and no run approval covers these calls, also one made before the upgrade: such a grant stays stored, but each call waits. An override that turns approval off for `k8s.exec` or `proxmox.api.write` leaves it on. Grant create, agent grant create (an exact op id with `auto-execute`) and run approval create refuse `k8s.exec` and `proxmox.api.write`. A `k8s.apply` of other kinds keeps its rules. The approval card says in one line why such a call waits.
+
+## Action
+Find the grants that name `k8s.exec` or `proxmox.api.write` with `meho service-principals grants list`, `meho agent grant list` and `meho approvals runs list`, and remove them or leave them. An automation run that uses these calls, or applies a Secret, waits for a person on each such call: approve each call in the console or the CLI. No schema action.

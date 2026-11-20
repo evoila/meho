@@ -130,6 +130,8 @@ def op_class_state() -> Iterator[None]:
     saved_per_call = set(op_classes._PER_CALL_APPROVAL)
     saved_no_secret_value = set(op_classes._NO_SECRET_VALUE)
     saved_wait_when_set = dict(op_classes._WAIT_WHEN_SET)
+    saved_credential_capable = set(op_classes._CREDENTIAL_CAPABLE)
+    saved_credential_checks = dict(op_classes._CREDENTIAL_CHECKS)
     try:
         yield
     finally:
@@ -140,6 +142,8 @@ def op_class_state() -> Iterator[None]:
         op_classes._PER_CALL_APPROVAL.update(saved_per_call)
         op_classes._NO_SECRET_VALUE.update(saved_no_secret_value)
         op_classes._WAIT_WHEN_SET.update(saved_wait_when_set)
+        op_classes._CREDENTIAL_CAPABLE.update(saved_credential_capable)
+        op_classes._CREDENTIAL_CHECKS.update(saved_credential_checks)
 
 
 @pytest.fixture

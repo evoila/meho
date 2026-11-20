@@ -584,6 +584,11 @@
         </dl>
       {% endif %}
 
+      {#- Why a call that reads, writes or makes a credential waits. -#}
+      {% if effect.get("credential_wait") %}
+        <p class="mt-2 text-xs" data-testid="approval-credential-wait">{{ effect.get("credential_wait") }}</p>
+      {% endif %}
+
       {% if effect.get("write_capability_warning") %}
         {#- #2331: the permission preflight found the connector identity likely
             lacks write capability. A warning, not a gate -- the approver may

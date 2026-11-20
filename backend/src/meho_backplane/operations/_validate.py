@@ -512,13 +512,13 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     level, also ``safe``: a standing grant can still cover it, a run
     approval never does.
     A call that reads, writes or makes a credential
-    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    (:func:`~meho_backplane.operations.service_grants.descriptor_credential_waits`)
     parks at every level, also ``safe``: no standing grant and no run
     approval covers it.
 
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
-    from meho_backplane.operations.service_grants import credential_call_waits
+    from meho_backplane.operations.service_grants import descriptor_credential_waits
 
     if descriptor.safety_level == "destructive":
         if sandbox_mode_active():
@@ -549,7 +549,7 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
             "root on the host, so it waits for approval unless a standing grant "
             "covers it"
         )
-    if credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None)):
+    if descriptor_credential_waits(descriptor):
         return f"safety_level={descriptor.safety_level}; {CREDENTIAL_WAIT_NOTE}"
     return None
 
@@ -666,7 +666,7 @@ async def _service_grant_verdict(
     """
     from meho_backplane.operations.service_grants import (
         consult_and_record_grant,
-        credential_grant_reason,
+        descriptor_credential_reason,
     )
 
     grant_id = await consult_and_record_grant(
@@ -718,9 +718,7 @@ async def _service_grant_verdict(
             "the operation connects to an address the caller gives, so no "
             "standing grant covers it; a person approves each call"
         )
-    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and credential_grant_reason(
-        descriptor.op_id, getattr(descriptor, "op_class", None)
-    ):
+    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and descriptor_credential_reason(descriptor):
         notes.append(CREDENTIAL_WAIT_NOTE)
     if notes:
         note = "; ".join(notes)
@@ -1263,14 +1261,14 @@ async def _agent_verdict(
     """Resolve the per-(principal, op, target) verdict for an agent principal.
 
     A call that reads, writes or makes a credential
-    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    (:func:`~meho_backplane.operations.service_grants.descriptor_credential_waits`)
     is at least ``needs-approval``, also at level ``safe``, whatever the
     agent's grant rows say. The check sits here and not in
     :func:`~meho_backplane.auth.permissions.resolve_verdict`, because only
     the row here carries the class a connector's floor stored on an
     ingested operation.
     """
-    from meho_backplane.operations.service_grants import credential_call_waits
+    from meho_backplane.operations.service_grants import descriptor_credential_waits
 
     target_id = getattr(target, "id", target) if target is not None else None
     sessionmaker = get_sessionmaker()
@@ -1287,7 +1285,7 @@ async def _agent_verdict(
         if floored is not verdict:
             reason = f"{reason}; floored to needs-approval (descriptor.requires_approval)"
             verdict = floored
-    if credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None)):
+    if descriptor_credential_waits(descriptor):
         floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
         if floored is not verdict:
             reason = f"{reason}; floored to needs-approval ({CREDENTIAL_WAIT_NOTE})"

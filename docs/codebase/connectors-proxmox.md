@@ -93,6 +93,15 @@ dispatch to needs-approval (an agent refusal stays a refusal); the handler
 runs only on the `_approved=True` resume path. The connector adds no refusal
 of its own — the descriptor flag is the only knob the connector controls.
 
+The raw write can reach any path of the Proxmox API, also the ones that set
+a password or make an API token. So `op_classes.py` of the connector marks
+it with `declare_credential_capable`: each call waits for a person, and no
+standing grant, no agent grant and no run approval covers it. Grant create,
+agent grant create and run approval create refuse it, and an override does
+not turn its approval off
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The approval card says in one line why the call waits.
+
 ### Async writes → UPID → task poll
 
 Most Proxmox writes run as background tasks and return a `UPID` string.

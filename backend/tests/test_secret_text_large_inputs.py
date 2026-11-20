@@ -174,6 +174,8 @@ _MANY = 100_000
         + f"<dbPassword>{_FAKE_MARKUP}</dbPassword></config>",
         "".join(f"<apiKey{i}><token>" for i in range(_MANY)) + f'<db password="{_FAKE_MARKUP}"/>',
         '<a x="' + "<b " * _MANY + f'"> <c token="{_FAKE_MARKUP}"/>',
+        f"# dbPassword: {_FAKE_MARKUP}" + " " * 300_000 + f"{_FAKE_MARKUP}\nhost: db\n",
+        f"bad: [\ndbPassword: {_FAKE_MARKUP}" + "\t" * 300_000 + f"{_FAKE_MARKUP}\n",
     ],
     ids=[
         "yaml-comments",
@@ -182,6 +184,8 @@ _MANY = 100_000
         "xml-elements",
         "xml-unclosed-secret-elements",
         "xml-open-quote",
+        "yaml-comment-long-white-space",
+        "broken-yaml-long-white-space",
     ],
 )
 def test_large_comment_broken_yaml_and_xml_texts_are_hidden_in_time(text: str) -> None:

@@ -51,6 +51,7 @@ _FAKE_BLOCK = "FAKE" + "-made-up-block-3326"
 _FAKE_ELEMENT = "FAKE" + "-made-up-element-4437"
 _FAKE_ATTR = "FAKE" + "-made-up-attr-5548"
 _FAKE_PAIR = "FAKE" + "-made-up-pair-6659"
+_FAKE_DEEP = "FAKE" + "-made-up-deep-7760"
 _MARKER = "[REDACTED:param_name]"
 _FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 
@@ -67,14 +68,25 @@ _PAIR_XML = (
     f'  <add key="DbPassword" value="{_FAKE_PAIR}"/>\n'
     "</appSettings>"
 )
+#: XML comments do not nest: thousands of comment starts are read in one pass.
+_MANY_COMMENTS_XML = f"<config><dbPassword>{_FAKE_DEEP}</dbPassword></config>" + "<!--" * 5000
 _DATA = {
     "comment.yaml": _COMMENT_YAML,
     "broken.yaml": _BROKEN_YAML,
     "element.xml": _ELEMENT_XML,
     "attr.xml": _ATTR_XML,
     "pair.xml": _PAIR_XML,
+    "many-comments.xml": _MANY_COMMENTS_XML,
 }
-_FAKES = (_FAKE_COMMENT, _FAKE_BROKEN, _FAKE_BLOCK, _FAKE_ELEMENT, _FAKE_ATTR, _FAKE_PAIR)
+_FAKES = (
+    _FAKE_COMMENT,
+    _FAKE_BROKEN,
+    _FAKE_BLOCK,
+    _FAKE_ELEMENT,
+    _FAKE_ATTR,
+    _FAKE_PAIR,
+    _FAKE_DEEP,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -331,6 +343,47 @@ def test_kept_comment_line_hides_its_own_secret_value(text: str, expected: str) 
     assert hide_secret_text(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"\ufeff# dbPassword: {_FAKE_COMMENT}\nhost: db\n",
+            f"\ufeff# dbPassword: {_MARKER}\nhost: db\n",
+        ),
+        (
+            f"\ufeffdbPassword: {_FAKE_BROKEN}\nhosts: [db-1\n",
+            f"\ufeffdbPassword: {_MARKER}\nhosts: [db-1\n",
+        ),
+    ],
+    ids=["comment-line", "broken-yaml-line"],
+)
+def test_text_that_starts_with_a_byte_order_mark_is_read(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"db:\n  host: db\n  # dbSecret: |\n  #   {_FAKE_BLOCK}\n  #   {_FAKE_COMMENT}\n"
+            "  # port: 5432\n",
+            f"db:\n  host: db\n  # dbSecret: {_MARKER}\n  # port: 5432\n",
+        ),
+        (
+            f"db:\n  host: db\n  # dbPassword: first\n  #   {_FAKE_COMMENT}\n  port: 5432\n",
+            f"db:\n  host: db\n  # dbPassword: {_MARKER}\n  port: 5432\n",
+        ),
+        (
+            f"bad: [\n# dbSecret: >\n#\n#   {_FAKE_BLOCK}\n# port: 1\n",
+            f"bad: [\n# dbSecret: {_MARKER}\n# port: 1\n",
+        ),
+    ],
+    ids=["block-value", "value-on-more-lines", "broken-yaml-block-value"],
+)
+def test_commented_out_value_over_more_lines_is_hidden_whole(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
 def test_broken_yaml_keeps_flags_empty_and_masked_values() -> None:
     text = "bad: [\npassword: true\ndbSecret:\ntoken: '[REDACTED:api_key]'\nnext: 1\n"
     assert hide_secret_text(text) == text
@@ -418,6 +471,55 @@ def test_xml_secret_element_ends_at_its_own_closing_tag(text: str, expected: str
     assert hide_secret_text(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f'<props><entry key="dbPassword">{_FAKE_PAIR}</entry><entry key="timeout">30</entry>'
+            "</props>",
+            f'<props><entry key="dbPassword">{_MARKER}</entry><entry key="timeout">30</entry>'
+            "</props>",
+        ),
+        (
+            f'<c><property name="hibernate.connection.password">{_FAKE_PAIR}</property></c>',
+            f'<c><property name="hibernate.connection.password">{_MARKER}</property></c>',
+        ),
+        (
+            "<configuration>\n  <property>\n"
+            "    <name>javax.jdo.option.ConnectionPassword</name>\n"
+            f"    <value>{_FAKE_PAIR}</value>\n  </property>\n"
+            "  <property>\n    <name>fs.defaultFS</name>\n    <value>hdfs://nn:8020</value>\n"
+            "  </property>\n</configuration>",
+            "<configuration>\n  <property>\n"
+            "    <name>javax.jdo.option.ConnectionPassword</name>\n"
+            f"    <value>{_MARKER}</value>\n  </property>\n"
+            "  <property>\n    <name>fs.defaultFS</name>\n    <value>hdfs://nn:8020</value>\n"
+            "  </property>\n</configuration>",
+        ),
+    ],
+    ids=["key-attribute-text", "name-attribute-text", "name-and-value-children"],
+)
+def test_xml_pair_element_text_is_hidden(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+def test_xml_tags_in_two_json_strings_keep_the_json_between() -> None:
+    text = json.dumps(
+        {"start": "<password>", "host": "db", "port": 5432, "end": "</password>"}, indent=2
+    )
+    assert hide_secret_text(text) == text
+
+
+def test_too_deep_step_hides_the_whole_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meho_backplane.redaction import secret_text
+
+    def too_deep(text: str) -> str:
+        raise RecursionError
+
+    monkeypatch.setattr(secret_text, "hide_secret_xml", too_deep)
+    assert hide_secret_text(f"<dbPassword>{_FAKE_ELEMENT}</dbPassword>") == _MARKER
+
+
 def test_xml_keeps_empty_flag_and_unclosed_secret_elements() -> None:
     text = (
         "<c><password/><token></token><apiKey>true</apiKey>"
@@ -446,8 +548,22 @@ def test_xml_inside_a_json_text_is_hidden_and_the_text_stays_json() -> None:
             "  <!-- port: 5432 -->\n</config>\n"
         ),
         "<p>Read the <a href='https://example.test/'>guide</a> &amp; go on.</p>",
+        '<props><entry key="timeout">30</entry><entry name="LogLevel">info</entry></props>',
+        (
+            "<configuration><property><name>fs.defaultFS</name>"
+            "<value>hdfs://nn:8020</value></property></configuration>"
+        ),
     ],
-    ids=["yaml-comment", "script-comment", "broken-yaml", "broken-yaml-tab", "xml", "html"],
+    ids=[
+        "yaml-comment",
+        "script-comment",
+        "broken-yaml",
+        "broken-yaml-tab",
+        "xml",
+        "html",
+        "xml-pair-text",
+        "xml-name-value-children",
+    ],
 )
 def test_text_of_each_kind_without_a_secret_field_is_unchanged(text: str) -> None:
     assert hide_secret_text(text) == text

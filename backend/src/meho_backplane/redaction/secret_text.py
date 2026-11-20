@@ -41,7 +41,12 @@ default view does not see it. This module hides it in the text.
 4. An XML step (:func:`~meho_backplane.redaction.secret_markup.hide_secret_xml`):
    the text of a secret-named element, a secret-named attribute, and the
    ``value`` attribute of an element whose ``name`` or ``key`` is a secret
-   name. Each step runs on every text the YAML step reads again, too.
+   name, and the text of such an element; the ``<value>`` child of an
+   element whose ``<name>`` child is a secret name. In a JSON text each
+   string is read on its own. Each step runs on every text the YAML step
+   reads again, too.
+
+A step that is too deep to read hides the whole text.
 
 The name rule is the shared
 :func:`~meho_backplane.broadcast.events.is_secret_param_name`. Like the
@@ -367,9 +372,13 @@ def _hide_yaml(text: str, depth: int) -> str:
 
 
 def _hide_text(text: str, depth: int) -> str:
-    hidden = _hide_yaml(scrub_secret_fields_in_text(text), depth)
-    if "<" in hidden and _MAY_HOLD_SECRET_NAME.search(hidden):
-        return hide_secret_xml(hidden)
+    try:
+        hidden = _hide_yaml(scrub_secret_fields_in_text(text), depth)
+        if "<" in hidden and _MAY_HOLD_SECRET_NAME.search(hidden):
+            return hide_secret_xml(hidden)
+    except RecursionError:
+        # Too deep to read: hide the whole text rather than show it unread.
+        return SECRET_FIELD_MARKER
     return hidden
 
 

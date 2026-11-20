@@ -14,7 +14,10 @@ hides them in the text:
   reads every line, and the lines below a secret-named key that are
   indented deeper are hidden with the value: a block value
   (``password: |``), a value that starts on the next line, and a value that
-  goes on over more lines. A quoted value ends at its closing quote, also
+  goes on over more lines. In a commented-out line, the comment lines below
+  whose text after the ``#`` is indented deeper than the key are hidden
+  with the value. A byte order mark at the start of the text is skipped.
+  A quoted value ends at its closing quote, also
   when it holds an escaped quote (``\\"`` or ``''``). A note after the value
   (``# rotate monthly``) stays, and so does a comment line below the key
   that is not part of a block value or of a quoted value that is still
@@ -22,11 +25,13 @@ hides them in the text:
 * :func:`hide_secret_xml` reads XML tags: the text of an element with a
   secret name (``<password>...</password>``, also with child elements), an
   attribute with a secret name (``dbPassword="..."``), and the ``value``
-  attribute of an element whose ``name`` or ``key`` attribute is a secret
-  name (``<add key="DbPassword" value="..."/>``). A closing tag closes the
+  attribute and the text of an element whose ``name`` or ``key`` attribute
+  is a secret name (``<add key="DbPassword" value="..."/>``), and the text
+  of a ``<value>`` child of an element whose ``<name>`` child is a secret
+  name. In a JSON text, each string is read on its own. A closing tag closes the
   nearest open element with its name, so a child with the same name does
   not end its parent. Tags inside CDATA are text. The text of an XML
-  comment is read on its own.
+  comment is read on its own, in one pass: comments do not nest.
 
 The name rule is the shared
 :func:`~meho_backplane.broadcast.events.is_secret_param_name`, and for the
@@ -41,18 +46,21 @@ they take grows in line with the size of the text.
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass, field
 from typing import Final
 
 from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER, _is_placeholder
 
 __all__ = ["hide_secret_lines", "hide_secret_xml"]
 
-#: One ``key: value`` line: an indent, then an optional ``#`` (a comment), an
-#: optional ``- `` (a list item), the key (bare, or in double or single
-#: quotes) and a colon that ends the key.
+#: One ``key: value`` line: a byte order mark at the start of the text, an
+#: indent, then an optional ``#`` (a comment), an optional ``- `` (a list
+#: item), the key (bare, or in double or single quotes) and a colon that ends
+#: the key.
 _FIELD_LINE: Final[re.Pattern[str]] = re.compile(
-    r"^(?P<indent>[ \t]*+)(?P<comment>#[ \t#]*+)?(?:-[ \t]++)?"
+    r"^(?:\A\ufeff)?(?P<indent>[ \t]*+)(?P<comment>#[ \t#]*+)?(?:-[ \t]++)?"
     r"(?P<key_token>\"(?P<double_key>[^\"\r\n]{1,128}+)\"|'(?P<single_key>[^'\r\n]{1,128}+)'"
     r"|(?P<key>[A-Za-z0-9_.\-]{1,128}+))"
     r"[ \t]*+:(?=[ \t\r]|$)[ \t]*+(?P<value>[^\r\n]*)",
@@ -60,7 +68,9 @@ _FIELD_LINE: Final[re.Pattern[str]] = re.compile(
 )
 
 #: A YAML comment after a value: ``#`` at the start or after white space.
-_TRAILING_NOTE: Final[re.Pattern[str]] = re.compile(r"[ \t]*+(?<![^ \t])#")
+#: The white space before it is found by stepping back, so a long run of
+#: spaces is read once.
+_TRAILING_NOTE: Final[re.Pattern[str]] = re.compile(r"(?<![^ \t])#")
 
 #: A value in quotes that close on the line: ``\"`` inside double quotes and
 #: ``''`` inside single quotes are escaped quotes, not the closing quote.
@@ -72,6 +82,9 @@ _QUOTE_CLOSE: Final[dict[str, re.Pattern[str]]] = {
     '"': re.compile(r"(?:[^\"\\]|\\.)*+\""),
     "'": re.compile(r"(?:[^']|'')*+'"),
 }
+
+#: A string in a JSON text.
+_JSON_STRING: Final[re.Pattern[str]] = re.compile(r"\"(?:[^\"\\]|\\.)*+\"")
 
 #: The indicator of a YAML block value, such as ``|``, ``>-`` or ``|2+``.
 _BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][0-9+\-]{0,2}")
@@ -163,6 +176,33 @@ def _deeper_lines(text: str, line_end: int, column: int) -> list[tuple[int, int,
     return lines
 
 
+def _deeper_comment_lines(text: str, line_end: int, column: int) -> list[tuple[int, int, bool]]:
+    """The comment lines after *line_end* whose text after the ``#`` is deeper than *column*.
+
+    They hold the rest of a commented-out value: a block value or a value
+    that goes on over more lines. Each line is (start, end without the line
+    break, False). Blank lines and lines with only ``#`` are left out.
+    """
+    lines: list[tuple[int, int, bool]] = []
+    cursor = line_end
+    while cursor < len(text):
+        start = cursor + 1
+        cursor = _line_end(text, start)
+        end = _content_end(text, cursor)
+        line = text[start:end]
+        if not line.lstrip(" \t"):
+            continue
+        if not line.lstrip(" \t").startswith("#"):
+            break
+        content = line.lstrip(" \t#")
+        if not content:
+            continue
+        if len(line) - len(content) <= column:
+            break
+        lines.append((start, end, False))
+    return lines
+
+
 def _split_value(value: str) -> tuple[str, str]:
     """*value* as (the value itself, the note after it with its white space).
 
@@ -177,7 +217,8 @@ def _split_value(value: str) -> tuple[str, str]:
     note = _TRAILING_NOTE.search(value)
     if note is None:
         return value, ""
-    return value[: note.start()], value[note.start() :]
+    end = len(value[: note.start()].rstrip(" \t"))
+    return value[:end], value[end:]
 
 
 def _mark_quoted_lines(
@@ -218,13 +259,19 @@ def _line_value_span(text: str, match: re.Match[str]) -> tuple[int, int, str] | 
     that goes on over more lines) and are hidden with it. A note after the
     value (``# rotate monthly``) stays. Below a value that is not a block
     value and not an open quoted value, a comment line stays where it is,
-    with its own secret-named value hidden.
+    with its own secret-named value hidden. In a comment, the comment lines
+    below whose text after the ``#`` is indented deeper than the key belong
+    to the value too.
     """
     value, note = _split_value(match["value"].rstrip(" \t\r"))
     start = match.start("value")
+    column = match.start("key_token") - match.start("indent")
     lines: list[tuple[int, int, bool]] = []
-    if match["comment"] is None:
-        column = match.start("key_token") - match.start()
+    strip = " \t"
+    if match["comment"] is not None:
+        lines = _deeper_comment_lines(text, _line_end(text, match.start()), column)
+        strip = " \t#"
+    else:
         lines = _deeper_lines(text, _line_end(text, match.start()), column)
         lines = _mark_quoted_lines(text, lines, value)
         if _BLOCK_INDICATOR.fullmatch(value.strip()) is not None:
@@ -232,7 +279,7 @@ def _line_value_span(text: str, match: re.Match[str]) -> tuple[int, int, str] | 
         while lines and lines[-1][2]:
             lines.pop()
     parts = [value] + [
-        text[line_start:end].strip() for line_start, end, is_comment in lines if not is_comment
+        text[line_start:end].strip(strip) for line_start, end, is_comment in lines if not is_comment
     ]
     if len(parts) == 1:
         if _keeps(value):
@@ -283,8 +330,12 @@ def _local_name(name: str) -> str:
     return name.rpartition(":")[2]
 
 
-def _attribute_spans(attrs: str, offset: int) -> list[tuple[int, int]]:
-    """The spans of the attribute values in *attrs* that are to be hidden."""
+def _attribute_spans(attrs: str, offset: int) -> tuple[list[tuple[int, int]], bool]:
+    """The spans of the attribute values in *attrs* that are to be hidden.
+
+    Also True when a ``name`` or ``key`` attribute is a secret name: the
+    ``value`` attribute and the text of such an element are a secret value.
+    """
     values: dict[str, tuple[str, int, int]] = {}
     spans: list[tuple[int, int]] = []
     for attr in _XML_ATTR.finditer(attrs):
@@ -295,31 +346,34 @@ def _attribute_spans(attrs: str, offset: int) -> list[tuple[int, int]]:
         values[name] = (value, start, end)
         if _is_secret_name(_local_name(name)) and not _keeps(value):
             spans.append((start, end))
+    pair_named = any(
+        (named := values.get(name_attr)) is not None and _is_secret_pair_name(named[0])
+        for name_attr in _PAIR_NAME_ATTRS
+    )
     pair_value = values.get("value")
-    if pair_value is not None and not _keeps(pair_value[0]):
-        for name_attr in _PAIR_NAME_ATTRS:
-            named = values.get(name_attr)
-            if named is not None and _is_secret_pair_name(named[0]):
-                spans.append(pair_value[1:])
-                break
-    return spans
+    if pair_named and pair_value is not None and not _keeps(pair_value[0]):
+        spans.append(pair_value[1:])
+    return spans, pair_named
 
 
-def _xml_tags(text: str, offset: int, spans: list[tuple[int, int]]) -> list[re.Match[str]]:
+def _xml_tags(
+    text: str, offset: int, spans: list[tuple[int, int]], *, in_comment: bool = False
+) -> list[re.Match[str]]:
     """The start, end and empty tags of *text*, outside comments and CDATA.
 
     The text of each comment is read on its own, and the spans to hide in it
-    go to *spans* (shifted by *offset*). A comment or CDATA section that does
+    go to *spans* (shifted by *offset*). Comments do not nest, so in the text
+    of a comment ``<!--`` is plain text. A comment or CDATA section that does
     not close runs to the end of *text*.
     """
     tags: list[re.Match[str]] = []
     cursor = 0
     while (start := text.find("<", cursor)) != -1:
-        if text.startswith(_COMMENT_START, start):
+        if not in_comment and text.startswith(_COMMENT_START, start):
             inner = start + len(_COMMENT_START)
             end = text.find(_COMMENT_END, inner)
             stop = len(text) if end == -1 else end
-            spans.extend(_element_spans(text[inner:stop], offset + inner))
+            spans.extend(_element_spans(text[inner:stop], offset + inner, in_comment=True))
             cursor = stop + len(_COMMENT_END)
         elif text.startswith(_CDATA_START, start):
             end = text.find(_CDATA_END, start + len(_CDATA_START))
@@ -332,7 +386,48 @@ def _xml_tags(text: str, offset: int, spans: list[tuple[int, int]]) -> list[re.M
     return tags
 
 
-def _element_spans(text: str, offset: int = 0) -> list[tuple[int, int]]:
+@dataclass(slots=True)
+class _OpenElement:
+    """An element whose closing tag is not read yet."""
+
+    name: str
+    #: Where the text of the element starts.
+    text_start: int
+    #: The text of the element is a secret value.
+    secret: bool
+    #: A ``<name>`` child holds a secret name.
+    secret_name_child: bool = False
+    #: The text spans of the ``<value>`` children.
+    value_spans: list[tuple[int, int]] = field(default_factory=list)
+
+
+def _hides(text: str, start: int, end: int) -> bool:
+    """True when the element text *text[start:end]* is a value to hide."""
+    return end - start > _KEPT_MAX_LENGTH or not _keeps(text[start:end])
+
+
+def _close(
+    text: str, element: _OpenElement, end: int, parent: _OpenElement | None
+) -> list[tuple[int, int]]:
+    """The spans to hide when *element* closes at *end*; notes a pair child in *parent*."""
+    spans: list[tuple[int, int]] = []
+    if element.secret and _hides(text, element.text_start, end):
+        spans.append((element.text_start, end))
+    if element.secret_name_child:
+        spans.extend(element.value_spans)
+    if parent is not None:
+        local = _local_name(element.name).lower()
+        if local == "name" and end - element.text_start <= _KEPT_MAX_LENGTH:
+            name = text[element.text_start : end].strip()
+            parent.secret_name_child |= _is_secret_pair_name(name)
+        elif local == "value" and _hides(text, element.text_start, end):
+            parent.value_spans.append((element.text_start, end))
+    return spans
+
+
+def _element_spans(
+    text: str, offset: int = 0, *, in_comment: bool = False
+) -> list[tuple[int, int]]:
     """The spans of the attribute values and element texts that are to be hidden.
 
     Each closing tag closes the nearest open element with its name, so a
@@ -340,36 +435,34 @@ def _element_spans(text: str, offset: int = 0) -> list[tuple[int, int]]:
     in between have no closing tag and are not touched.
     """
     spans: list[tuple[int, int]] = []
-    #: The open elements: (name, start of their text, the name is a secret name).
-    stack: list[tuple[str, int, bool]] = []
+    stack: list[_OpenElement] = []
     open_names: dict[str, int] = {}
-    for tag in _xml_tags(text, offset, spans):
+    for tag in _xml_tags(text, offset, spans, in_comment=in_comment):
         name = tag["name"]
         if tag["close"]:
             if not open_names.get(name):
                 continue
             while True:
-                open_name, text_start, secret = stack.pop()
-                open_names[open_name] -= 1
-                if open_name == name:
+                element = stack.pop()
+                open_names[element.name] -= 1
+                if element.name == name:
                     break
-            long = tag.start() - text_start > _KEPT_MAX_LENGTH
-            if secret and (long or not _keeps(text[text_start : tag.start()])):
-                spans.append((offset + text_start, offset + tag.start()))
+            parent = stack[-1] if stack else None
+            closed = _close(text, element, tag.start(), parent)
+            spans.extend((offset + start, offset + end) for start, end in closed)
             continue
         attrs = tag["attrs"]
-        spans.extend(_attribute_spans(attrs, offset + tag.start("attrs")))
+        attr_spans, pair_named = _attribute_spans(attrs, offset + tag.start("attrs"))
+        spans.extend(attr_spans)
         if attrs.rstrip().endswith("/"):
             continue
-        stack.append((name, tag.end(), _is_secret_name(_local_name(name))))
+        secret = pair_named or _is_secret_name(_local_name(name))
+        stack.append(_OpenElement(name, tag.end(), secret))
         open_names[name] = open_names.get(name, 0) + 1
     return spans
 
 
-def hide_secret_xml(text: str) -> str:
-    """Return *text* with secret-named values in its XML tags hidden."""
-    if "<" not in text:
-        return text
+def _hide_xml(text: str) -> str:
     spans = _element_spans(text)
     if not spans:
         return text
@@ -383,3 +476,47 @@ def hide_secret_xml(text: str) -> str:
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts)
+
+
+def _is_json_collection(text: str) -> bool:
+    if text.lstrip()[:1] not in ("{", "["):
+        return False
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _hide_xml_in_json_strings(text: str) -> str:
+    """*text* (a JSON text) with the XML step run on each of its strings on its own."""
+    parts: list[str] = []
+    cursor = 0
+    for token in _JSON_STRING.finditer(text):
+        start, end = token.start() + 1, token.end() - 1
+        if text.find("<", start, end) == -1:
+            continue
+        hidden = _hide_xml(text[start:end])
+        if hidden == text[start:end]:
+            continue
+        parts.append(text[cursor:start])
+        parts.append(hidden)
+        cursor = end
+    if not parts:
+        return text
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def hide_secret_xml(text: str) -> str:
+    """Return *text* with secret-named values in its XML tags hidden.
+
+    In a JSON text each string is read on its own, so a start tag and a
+    closing tag in two different strings are no element, and the JSON
+    between them stays.
+    """
+    if "<" not in text:
+        return text
+    if _is_json_collection(text):
+        return _hide_xml_in_json_strings(text)
+    return _hide_xml(text)

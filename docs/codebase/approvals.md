@@ -669,7 +669,7 @@ targets import`, `meho event-source`, `meho broadcast watch`, `meho
 status --watch`). The retry after a token refresh sends it again.
 
 A parked approval request stores `session_from_client=true` when its
-session id came from the CLI header (migration 0175). When the approved
+session id came from the CLI header (migration 0179). When the approved
 operation runs, `resume_dispatch_after_approval()` binds that id to
 `client_session_id_var`, not to `agent_session_id_var`. So the audit rows
 of the run carry the requester's CLI session, and the run is not an agent

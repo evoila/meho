@@ -7523,7 +7523,7 @@ class ApprovalRequest(Base):
     # sent (client_session_id_var), not an agent run or MCP session. The
     # re-dispatch then binds it onto client_session_id_var, so it labels
     # the audit rows only. NULL on older rows reads as False. Added by
-    # migration 0175.
+    # migration 0179.
     session_from_client: Mapped[bool | None] = mapped_column(
         sa.Boolean(), nullable=True, default=None
     )

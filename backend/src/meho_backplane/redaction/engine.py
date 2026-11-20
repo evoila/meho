@@ -204,10 +204,17 @@ def _pattern_for(
     """The named pattern of *rule*, given the rule that runs right after it.
 
     ``command_line_secret`` leaves a value that the ``api_key`` rule hides
-    whole to that rule, but only when that rule runs right after it.
-    Without it, the finder hides every value it reads.
+    whole to that rule, but only when that rule runs right after it and
+    replaces what it matches in full (``redact`` or ``hash``). A ``mask``
+    action keeps the last characters of its match, so with it, and
+    without the ``api_key`` rule, the finder hides every value it reads.
     """
-    if rule.pattern == "command_line_secret" and following and following[0].pattern == "api_key":
+    if (
+        rule.pattern == "command_line_secret"
+        and following
+        and following[0].pattern == "api_key"
+        and following[0].action != "mask"
+    ):
         return COMMAND_SECRET_BEFORE_API_KEY
     return get_pattern(rule.pattern)
 

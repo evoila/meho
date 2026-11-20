@@ -358,8 +358,9 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
 }
 
 #: The ``command_line_secret`` finder for a policy where the ``api_key`` rule
-#: runs right after it: a value that rule hides whole is left to it, so that
-#: part of the answer stays as it was without this rule.
+#: runs right after it with a ``redact`` or ``hash`` action: a value that rule
+#: hides whole is left to it, so that part of the answer stays as it was
+#: without this rule.
 COMMAND_SECRET_BEFORE_API_KEY: Final[SecretFinder] = CommandSecretFinder(next_rule=_API_KEY)
 
 #: Stable, sorted tuple of pattern names; what the Pydantic policy

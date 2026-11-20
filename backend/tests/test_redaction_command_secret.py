@@ -816,6 +816,25 @@ def test_a_rule_between_this_rule_and_api_key_ends_the_handoff() -> None:
     assert out == f"run --password={_MARK}"
 
 
+@pytest.mark.parametrize(
+    ("command_action", "expected"),
+    [
+        ("redact", f"run --password={_MARK}"),
+        ("mask", "run --" + "*" * 21 + "word"),
+    ],
+)
+def test_a_masking_api_key_rule_ends_the_handoff(command_action: str, expected: str) -> None:
+    """A masking api_key rule keeps the last characters, so this rule hides the value itself."""
+    rules = (
+        RedactionRule(
+            name="cmd", pattern="command_line_secret", action=command_action, reason="test"
+        ),
+        RedactionRule(name="key", pattern="api_key", action="mask", reason="test"),
+    )
+    policy = get_default_policy().model_copy(update={"rules": rules})
+    assert redact("run --password=example-password", policy).redacted == expected
+
+
 #: Ordinary command lines with no secret in them.
 _ORDINARY: Final[list[str]] = [
     *_KEPT,

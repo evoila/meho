@@ -59,7 +59,8 @@ backslash there. So ``{"msg":"run --password \\"made up\\""}`` hides
 way, up to three levels deep.
 
 The named pattern (:mod:`.patterns`) reports every value it reads. When the
-``api_key`` rule runs right after this one in a policy, the engine uses
+``api_key`` rule runs right after this one in a policy and replaces its
+match in full (``redact`` or ``hash``, not ``mask``), the engine uses
 :data:`.patterns.COMMAND_SECRET_BEFORE_API_KEY` instead: a value that this rule
 reads and that rule hides whole is left to it, so the answer stays as it
 was. A value that the ``api_key`` rule hides only in part is hidden whole,

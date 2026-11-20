@@ -5,13 +5,15 @@
 
 The migration adds four nullable columns: ``approval_request.people_behind``,
 ``agent_definition.updated_by_sub``, ``runbook_runs.reassigned_by`` and
-``run_approval.principal_client_id``. It
-fills ``updated_by_sub`` from the newest successful ``agent.edit`` audit row
-of the definition, else from ``created_by_sub``. An edit from before the
+``run_approval.principal_client_id``, and the table ``machine_login``. It
+fills ``machine_login`` from the requests of machine logins and from the
+``client`` block of the audit rows. It fills ``updated_by_sub`` from the
+newest successful ``agent.edit`` audit row of the definition by a login that
+is not a machine login, else from ``created_by_sub``. An edit from before the
 definition was created (an edit of a deleted definition with the same name)
-does not count. ``downgrade()`` removes the
-columns again. Every step targets this migration's own revision (``0178``)
-and its ``down_revision`` (``0177``), never ``head``.
+does not count. ``downgrade()`` removes the columns and the table again.
+Every step targets this migration's own revision (``0178``) and its
+``down_revision`` (``0177``), never ``head``.
 
 The PostgreSQL twin is
 ``tests/integration/test_migration_0178_people_behind_pg.py``; it uses the
@@ -20,6 +22,7 @@ seed helpers of this module.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -56,9 +59,11 @@ DEFINITIONS = (
 )
 
 #: The audit rows to seed: (operator_sub, tenant, op_id, agent_name, status, occurred_at).
-#: The newest successful edit of "triage" in its tenant is by "editor-new". A
-#: failed edit, an edit in another tenant and an edit of another agent are newer
-#: and do not count.
+#: The newest successful edit of "triage" in its tenant by a person is by
+#: "editor-new". A failed edit, an edit in another tenant, an edit of another
+#: agent and the edits of two machine logins are newer and do not count: the
+#: audit row of "agent-editor" names an agent login, and "agent:x" is the
+#: login of the seeded definitions.
 AUDIT_ROWS = (
     ("editor-old", _TENANT, "agent.edit", "triage", 200, "2026-11-01 10:00:00"),
     ("editor-new", _TENANT, "agent.edit", "triage", 200, "2026-11-02 10:00:00"),
@@ -67,7 +72,12 @@ AUDIT_ROWS = (
     ("editor-of-other", _TENANT, "agent.edit", "other", 200, "2026-11-05 10:00:00"),
     ("creator-a", _TENANT, "agent.create", "triage", 201, "2026-11-06 10:00:00"),
     ("editor-of-deleted", _TENANT, "agent.edit", "helper", 200, "2026-11-07 10:00:00"),
+    ("agent-editor", _TENANT, "agent.edit", "triage", 200, "2026-11-08 10:00:00"),
+    ("agent:x", _TENANT, "agent.edit", "nightly", 200, "2026-11-09 10:00:00"),
 )
+
+#: The audit row of these logins carries a ``client`` block that names an agent.
+MACHINE_EDITORS = frozenset({"agent-editor"})
 
 #: What the fill gives each definition.
 EXPECTED = [
@@ -104,6 +114,14 @@ def _columns(sync_url: str, table: str) -> dict[str, bool]:
         engine.dispose()
 
 
+def _tables(sync_url: str) -> list[str]:
+    engine = sa_create_engine(sync_url)
+    try:
+        return inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
 def _run(sync_url: str, sql: str, **params: object) -> list[tuple[object, ...]]:
     engine = sa_create_engine(sync_url)
     try:
@@ -127,12 +145,15 @@ AUDIT_SQL = (
 )
 
 
-def audit_payload(op_id: str, agent_name: str) -> str:
+def audit_payload(op_id: str, agent_name: str, sub: str) -> str:
     """The JSON payload of one seeded audit row."""
-    return f'{{"op_id": "{op_id}", "agent_name": "{agent_name}"}}'
+    payload: dict[str, object] = {"op_id": op_id, "agent_name": agent_name}
+    if sub in MACHINE_EDITORS:
+        payload["client"] = {"principal_kind": "agent", "channel": "token"}
+    return json.dumps(payload)
 
 
-def test_up_adds_four_nullable_columns_and_down_drops_them(
+def test_up_adds_four_nullable_columns_and_a_table_and_down_drops_them(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg
@@ -143,10 +164,12 @@ def test_up_adds_four_nullable_columns_and_down_drops_them(
     command.upgrade(cfg, _REVISION)
     for table, column in _NEW.items():
         assert _columns(sync_url, table)[column] is True
+    assert set(_columns(sync_url, "machine_login")) == {"tenant_id", "sub", "kind", "first_seen_at"}
 
     command.downgrade(cfg, _DOWN_REVISION)
     for table, column in _NEW.items():
         assert column not in _columns(sync_url, table)
+    assert "machine_login" not in _tables(sync_url)
 
 
 def test_updated_by_sub_comes_from_the_newest_edit_or_the_creator(
@@ -172,7 +195,7 @@ def test_updated_by_sub_comes_from_the_newest_edit_or_the_creator(
             at=at,
             sub=sub,
             status=status,
-            payload=audit_payload(op_id, agent_name),
+            payload=audit_payload(op_id, agent_name, sub),
             tenant=tenant,
         )
 
@@ -180,3 +203,40 @@ def test_updated_by_sub_comes_from_the_newest_edit_or_the_creator(
 
     rows = _run(sync_url, "SELECT id, updated_by_sub FROM agent_definition ORDER BY id")
     assert rows == EXPECTED
+
+
+def test_machine_login_comes_from_machine_requests_and_audit_rows(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
+    cfg, sync_url = alembic_cfg
+    copy_migrated_db(cfg, _DOWN_REVISION)
+    for index, (sub, kind) in enumerate(
+        (("service-sender", "service"), ("person-sender", "user"), ("person-old", None))
+    ):
+        _run(
+            sync_url,
+            "INSERT INTO approval_request (id, tenant_id, principal_sub, principal_kind, op_id, "
+            "connector_id, params_hash, proposed_effect, status, created_at) VALUES (:id, "
+            ":tenant, :sub, :kind, 'x.write', 'x-1.0', 'h', '{}', 'pending', :at)",
+            id=f"00000000-0000-0000-0000-0000000002{index:02d}",
+            tenant=_TENANT,
+            sub=sub,
+            kind=kind,
+            at="2026-11-01 10:00:00",
+        )
+    for index, (sub, tenant, op_id, agent_name, status, at) in enumerate(AUDIT_ROWS):
+        _run(
+            sync_url,
+            AUDIT_SQL,
+            id=f"00000000-0000-0000-0000-{index:012d}",
+            at=at,
+            sub=sub,
+            status=status,
+            payload=audit_payload(op_id, agent_name, sub),
+            tenant=tenant,
+        )
+
+    command.upgrade(cfg, _REVISION)
+
+    rows = _run(sync_url, "SELECT sub, kind FROM machine_login ORDER BY sub")
+    assert rows == [("agent-editor", "agent"), ("service-sender", "service")]

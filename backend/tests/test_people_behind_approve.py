@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import select
 
+from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -251,6 +252,66 @@ async def test_only_an_admin_approves_when_nobody_is_known_behind_the_agent() ->
     request_id = await _park(_agent())
     row = await _load(request_id)
     assert row.people_behind == []
+    operator = _login(_OTHER)
+    admin = _login("some-admin", role=TenantRole.TENANT_ADMIN)
+
+    assert not await _surfaces_agree(request_id, operator)
+    with pytest.raises(UnknownRequesterApprovalError):
+        await _approve(request_id, operator)
+    assert await _surfaces_agree(request_id, admin)
+    assert (await _approve(request_id, admin)).status == "approved"
+
+
+@pytest.mark.parametrize("known_as", ["signed_in", "agent_login"])
+async def test_only_an_admin_approves_when_only_a_machine_login_set_up_the_agent(
+    known_as: str,
+) -> None:
+    machine = _login("machine-admin-sa", kind=PrincipalKind.AGENT, role=TenantRole.TENANT_ADMIN)
+    definition_id = uuid.uuid4()
+    rows: list[object] = [
+        AgentDefinition(
+            id=definition_id,
+            tenant_id=_TENANT,
+            name="made-by-a-machine",
+            identity_ref=_AGENT_CLIENT,
+            model_tier="standard",
+            system_prompt="p",
+            toolset={},
+            turn_budget=5,
+            created_by_sub=machine.sub,
+            updated_by_sub=machine.sub,
+        ),
+        ScheduledTrigger(
+            tenant_id=_TENANT,
+            agent_definition_id=definition_id,
+            kind="cron",
+            cron_expr="*/5 * * * *",
+            status="active",
+            identity_sub=_AGENT_SUB,
+            created_by_sub=machine.sub,
+        ),
+    ]
+    if known_as == "agent_login":
+        rows.append(
+            AgentDefinition(
+                tenant_id=_TENANT,
+                name="the-machine-admin",
+                identity_ref=machine.sub,
+                model_tier="standard",
+                system_prompt="p",
+                toolset={},
+                turn_budget=5,
+                created_by_sub="someone",
+            )
+        )
+    await _add(*rows)
+    if known_as == "signed_in":
+        async with get_sessionmaker()() as session:
+            await note_machine_login(session, machine)
+            await session.commit()
+
+    request_id = await _park(_agent())
+    assert (await _load(request_id)).people_behind == []
     operator = _login(_OTHER)
     admin = _login("some-admin", role=TenantRole.TENANT_ADMIN)
 

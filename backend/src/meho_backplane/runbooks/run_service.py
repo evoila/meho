@@ -123,6 +123,7 @@ import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.machine_logins import is_machine_login
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -856,7 +857,9 @@ class RunbookRunService:
             self._refuse_if_terminal(run)
             now = datetime.now(UTC)
             run.assigned_to = request.new_assignee
-            run.reassigned_by = operator_sub
+            if not await is_machine_login(session, tenant_id, operator_sub):
+                # A machine handover keeps the person who last handed the run over.
+                run.reassigned_by = operator_sub
             await session.commit()
 
         structlog.get_logger().info(

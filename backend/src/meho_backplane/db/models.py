@@ -4277,6 +4277,7 @@ class AgentDefinition(Base):
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # The person who last changed the definition. NULL until the first
     # change after migration ``0178`` on a row the migration could not fill.
+    # An edit by a machine login keeps the person.
     updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -5251,6 +5252,30 @@ class RunnerPrincipal(Base):
             "last_seen_at",
             postgresql_using="btree",
         ),
+    )
+
+
+class MachineLogin(Base):
+    """A login id that MEHO has seen as an agent, service or runner login.
+
+    MEHO adds a row when such a login signs in
+    (:func:`~meho_backplane.auth.machine_logins.note_machine_login`).
+    The people-behind lookup reads it: a machine login never counts as a
+    person behind another login, and a change by a machine login does not
+    replace the person who last changed an agent definition or handed over
+    a runbook run. ``tenant_id`` has no foreign key: an MCP call notes the
+    login before any other write of the tenant.
+    """
+
+    __tablename__ = "machine_login"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -8943,7 +8968,8 @@ class RunbookRun(Base):
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
     # The person who last handed the run to a new assignee. NULL when the
-    # run was never handed over. Added by migration ``0178``.
+    # run was never handed over. A handover by a machine login keeps the
+    # person. Added by migration ``0178``.
     reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

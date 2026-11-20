@@ -1982,10 +1982,20 @@ request is made (`create_pending_request`):
 | Every machine login | who started (`started_run`) or last handed over (`handed_over_run`) a runbook run assigned to it that has not ended |
 | A person, or a delegated call | nobody: the person is the requester |
 
+**A machine login never counts as a person behind another login.**
+`machine_subs` (`backend/src/meho_backplane/auth/machine_logins.py`)
+leaves out every id that MEHO knows as an agent, service or runner login:
+a row of the `machine_login` table, or the login of an agent definition,
+an agent, an add-on or a runner of the tenant. Each REST call
+(`verify_jwt_and_bind`) and each MCP call (`verify_mcp_jwt_and_bind`) of
+a machine login adds its id to `machine_login` (`note_machine_login`,
+safe to run twice). When MEHO finds only machine logins, the list is
+empty and only an admin may approve.
+
 The checks investigator runs as an agent (`run_scheduled`), so its
 requests follow the agent row. A sensor never makes a request.
 
-**What MEHO stores.** Migration `0178` adds four columns:
+**What MEHO stores.** Migration `0178` adds four columns and a table:
 
 - `approval_request.people_behind` — JSON list of
   `{"sub", "name", "why"}`, one entry per person and reason. `NULL` for a
@@ -1993,17 +2003,24 @@ requests follow the agent row. A sensor never makes a request.
   The name is the newest `principal_name` of the person in the tenant's
   audit log, or `null`. A step of a multi-step operation that waits
   again keeps the list of the first request (`ResumeRequester`).
-- `agent_definition.updated_by_sub` — set by every edit
-  (`AgentDefinitionService.update`). The migration fills it from the
-  newest successful `agent.edit` audit row of the definition, else from
-  `created_by_sub`. It reads only audit rows from the time the definition
+- `agent_definition.updated_by_sub` — set by every edit of a person
+  (`AgentDefinitionService.update`). An edit by a machine login keeps the
+  person who was there. The migration fills it from the newest successful
+  `agent.edit` audit row of the definition by a login that is not a
+  machine login, else from `created_by_sub`. It reads only audit rows from the time the definition
   was created, so an edit of a deleted definition with the same name does
   not count.
-- `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`.
+- `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`
+  when a person hands the run over. A handover by a machine login keeps
+  the person who was there.
 - `run_approval.principal_client_id` — the client id of the add-on login
   that asked for a run approval list. At approve time MEHO finds the
   add-on pairing by the login id and by this client id. `NULL` on a list
   from before the upgrade: then MEHO uses the login id alone.
+- `machine_login` — one row per tenant and login id that MEHO has seen
+  as an agent, service or runner login. The migration fills it from
+  the requests of such logins (`approval_request.principal_kind`) and
+  from the `client` block of the audit rows.
 
 **The rule.** One shared check, `_check_approver_group`, used by every
 approve door (`approve_request`, so REST approve and decide, the CLI and
@@ -2044,9 +2061,10 @@ codes). The `approval.approved` step event of an add-on carries only
 `self_approved: true`.
 
 **Where people see it.** REST `ApprovalRequestView.people_behind`
-(`sub`, `name`, `why`, `why_text`) and `people_behind_known`, filled only
-when a person calls the API (an agent, service or runner login reads
-`null`); the web
+(`sub`, `name`, `why`, `why_text`) and `people_behind_known`, only
+when a person calls the API: for a person's request, and for an agent,
+service or runner login that reads the request, the answer leaves both
+keys out; the web
 console request card ("Set up by Ann. Grant by Bob.") and the request
 modal ("Behind it"); `meho approvals show` ("Behind it:"). When MEHO
 knows nobody, each says "Set up by: not known".

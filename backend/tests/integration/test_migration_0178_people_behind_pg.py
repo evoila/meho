@@ -8,10 +8,13 @@ The SQLite twin is
 holds the seed data. On PostgreSQL the fill reads the ``jsonb`` payload of
 the audit rows with ``->>``. The tests check:
 
-* the upgrade adds the four columns and the downgrade drops them;
+* the upgrade adds the four columns and the table, and the downgrade drops them;
 * ``agent_definition.updated_by_sub`` comes from the newest successful
-  ``agent.edit`` audit row of the definition, else from ``created_by_sub``;
-  an edit from before the definition was created does not count.
+  ``agent.edit`` audit row of the definition by a login that is not a
+  machine login, else from ``created_by_sub``; an edit from before the
+  definition was created does not count;
+* ``machine_login`` holds the agent login named by the ``client`` block of
+  an audit row.
 
 Tests are sync because :func:`alembic.command.upgrade` runs its own
 :func:`asyncio.run`. Every test leaves the container at ``head``.
@@ -20,7 +23,6 @@ Tests are sync because :func:`alembic.command.upgrade` runs its own
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -43,6 +45,7 @@ from tests.migrations.test_migration_0178_add_people_behind_columns import (
     AUDIT_ROWS,
     DEFINITIONS,
     EXPECTED,
+    audit_payload,
 )
 
 pytestmark = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
@@ -111,7 +114,7 @@ async def _seed(url: str) -> None:
                         "at": datetime.fromisoformat(at).replace(tzinfo=UTC),
                         "sub": sub,
                         "status": status,
-                        "payload": json.dumps({"op_id": op_id, "agent_name": agent_name}),
+                        "payload": audit_payload(op_id, agent_name, sub),
                         "tenant": uuid.UUID(tenant),
                     },
                 )
@@ -131,6 +134,19 @@ async def _updated_by(url: str) -> list[tuple[str, str | None]]:
                 {"tenant": uuid.UUID(_TENANT)},
             )
             return [(str(row[0]), row[1]) for row in result]
+    finally:
+        await engine.dispose()
+
+
+async def _machine_logins(url: str) -> list[tuple[str, str]]:
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT sub, kind FROM machine_login WHERE tenant_id = :tenant ORDER BY sub"),
+                {"tenant": uuid.UUID(_TENANT)},
+            )
+            return [(row[0], row[1]) for row in result]
     finally:
         await engine.dispose()
 
@@ -178,6 +194,7 @@ def test_up_fills_updated_by_sub_and_down_drops_the_columns(
     command.upgrade(cfg, _REVISION)
     assert all(asyncio.run(_has_columns(url)).values())
     assert asyncio.run(_updated_by(url)) == EXPECTED
+    assert asyncio.run(_machine_logins(url)) == [("agent-editor", "agent")]
 
     command.downgrade(cfg, _DOWN_REVISION)
     assert not any(asyncio.run(_has_columns(url)).values())

@@ -25,6 +25,10 @@ another person (:func:`~meho_backplane.operations.approval_queue._check_self_app
 * **Every machine login:** who started or handed over a runbook run that
   is assigned to it and has not ended.
 
+A machine login never counts as a person behind another login
+(:mod:`meho_backplane.auth.machine_logins`): when MEHO finds only machine
+logins, the list is empty.
+
 The answer is ``None`` for a person: the person is the requester already.
 For a machine login it is a list of ``{"sub", "name", "why"}`` entries,
 one per person and reason. An empty list means MEHO knows nobody behind
@@ -42,6 +46,7 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.machine_logins import machine_subs
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS, PrincipalKind
 from meho_backplane.db.models import (
     AddonPairing,
@@ -251,7 +256,7 @@ async def find_people_behind(
     *kind* is the login's ``principal_kind``; *client_id* its OAuth client
     id, when known; *runner_id* the verified ``runner_id`` of a runner
     token. See the module docstring for who counts. The requester itself
-    is never in the list.
+    and every other machine login are never in the list.
     """
     machine = _machine_kind(kind)
     if machine is None:
@@ -266,8 +271,13 @@ async def find_people_behind(
     else:
         found += await _runner_people(session, tenant_id, ids, runner_id)
     found += await _runbook_people(session, tenant_id, ids)
+    machines = await machine_subs(session, tenant_id, {person for person, _ in found if person})
     pairs = sorted(
-        {(person, why) for person, why in found if person and person not in ids},
+        {
+            (person, why)
+            for person, why in found
+            if person and person not in ids and person not in machines
+        },
         key=lambda pair: (list(WHY_TEXT).index(pair[1]), pair[0]),
     )
     names: dict[str, str | None] = {}

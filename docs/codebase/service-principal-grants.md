@@ -156,7 +156,8 @@ and no run approval covers it.
 - A connector can also tell from the params of one call that it writes a
   credential: `declare_credential_check` (`op_classes.py`). Today
   `k8s.apply` uses it: a manifest that holds a `kind: Secret` (any
-  document, any item of a `List`), or a manifest MEHO cannot read, makes
+  document, any item of a list object such as
+  `kind: List`), or a manifest MEHO cannot read, makes
   the call a credential call
   (`connectors/kubernetes/op_classes.py::manifest_holds_credential`). The
   dispatcher, the preview and a step of a multi-step operation check the

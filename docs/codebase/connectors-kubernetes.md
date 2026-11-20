@@ -32,9 +32,12 @@ agent grant and no run approval covers them
   credential the container holds. Grant create, agent grant create and
   run approval create refuse `k8s.exec`.
 - a `k8s.apply` whose manifest holds a `kind: Secret` (also a
-  ServiceAccount token Secret), in any document or any item of a `List`,
-  or a manifest MEHO cannot read. MEHO reads the manifest when the call
-  is made. An apply of other kinds keeps the rules of `k8s.apply`.
+  ServiceAccount token Secret), in any document or any item of a list
+  object (`kind: List` or `<Kind>List`), or a manifest MEHO cannot read.
+  MEHO reads the manifest when the call is made. It reads each object
+  once, also when YAML aliases name it many times, and at most 10,000
+  objects; a larger manifest counts as one MEHO cannot read. The `items`
+  field of any other kind (for example a custom resource) is not read. An apply of other kinds keeps the rules of `k8s.apply`.
 
 Both are declared in `op_classes.py` of the connector. The approval card
 says in one line why the call waits.

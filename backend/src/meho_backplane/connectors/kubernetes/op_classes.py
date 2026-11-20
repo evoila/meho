@@ -59,29 +59,55 @@ declare_credential_capable(("k8s.exec",))
 CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
 
 
-def _holds_credential(doc: Any) -> bool:
-    """True when *doc* is a credential kind, a list with one, or cannot be read."""
-    if not isinstance(doc, Mapping):
-        return True
-    kind = doc.get("kind")
-    if not isinstance(kind, str) or not kind:
-        return True
-    if kind.lower() in CREDENTIAL_KINDS:
-        return True
-    items = doc.get("items")
-    if items is None:
-        return False
-    if not isinstance(items, list):
-        return True
-    return any(_holds_credential(item) for item in items)
+#: The most objects the check reads in one manifest. A manifest with more
+#: counts as one MEHO cannot read. YAML aliases let a small text name the
+#: same object many times; the check reads each object once.
+MAX_CHECKED_OBJECTS: Final[int] = 10_000
+
+
+def _is_list_kind(kind: str) -> bool:
+    """True for a Kubernetes list object: ``List`` or ``<Kind>List``."""
+    return kind.endswith("List")
+
+
+def _holds_credential(docs: list[Any]) -> bool:
+    """True when a doc is a credential kind, a list with one, or cannot be read.
+
+    Only a list object (``kind: List`` or ``<Kind>List``) has its ``items``
+    read. The ``items`` field of any other kind is part of its spec.
+    """
+    stack = list(docs)
+    seen: set[int] = set()
+    while stack:
+        doc = stack.pop()
+        if id(doc) in seen:
+            continue
+        seen.add(id(doc))
+        if len(seen) > MAX_CHECKED_OBJECTS or not isinstance(doc, Mapping):
+            return True
+        kind = doc.get("kind")
+        if not isinstance(kind, str) or not kind:
+            return True
+        if kind.lower() in CREDENTIAL_KINDS:
+            return True
+        if not _is_list_kind(kind):
+            continue
+        items = doc.get("items")
+        if items is None:
+            continue
+        if not isinstance(items, list):
+            return True
+        stack.extend(items)
+    return False
 
 
 def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
     """True when the ``k8s.apply`` manifest in *params* holds a credential kind.
 
     Any document of a multi-document manifest counts, and any item of a
-    list. A manifest MEHO cannot read counts too: it is not text, it is not
-    YAML or JSON, or a document has no kind.
+    list object. A manifest MEHO cannot read counts too: it is not text, it is not
+    YAML or JSON, a document has no kind, or it has more than
+    :data:`MAX_CHECKED_OBJECTS` objects.
     """
     manifest = params.get("manifest")
     if not isinstance(manifest, str):
@@ -92,7 +118,7 @@ def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
         return True
     if not docs:
         return True
-    return any(_holds_credential(doc) for doc in docs)
+    return _holds_credential(docs)
 
 
 # A k8s.apply of a Secret writes a credential. Such a call waits for a

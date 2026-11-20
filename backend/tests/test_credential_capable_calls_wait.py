@@ -15,6 +15,7 @@ the rules of ``k8s.apply``.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -23,7 +24,11 @@ import pytest
 from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.agents.grants import GrantValidationError as AgentGrantValidationError
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.kubernetes.op_classes import manifest_holds_credential
+from meho_backplane.connectors.kubernetes import op_classes as k8s_op_classes
+from meho_backplane.connectors.kubernetes.op_classes import (
+    MAX_CHECKED_OBJECTS,
+    manifest_holds_credential,
+)
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations import dispatcher
 from meho_backplane.operations._audit import work_ref_var
@@ -200,10 +205,59 @@ def test_a_manifest_with_a_secret_or_that_meho_cannot_read_counts(manifest: Any)
         _CONFIG_MAP + "\n---\n" + _CONFIG_MAP.replace("web-settings", "other"),
         "apiVersion: v1\nkind: List\nitems:\n  - apiVersion: v1\n    kind: ConfigMap\n"
         "    metadata: {name: a}\n",
+        "apiVersion: example.com/v1\nkind: Playlist\nmetadata: {name: a}\nitems: [one, two]\n",
+        "apiVersion: example.com/v1\nkind: Basket\nmetadata: {name: a}\n"
+        "items:\n  - {kind: Secret, name: not-a-k8s-object}\n",
     ],
-    ids=["config-map", "two-config-maps", "list-of-config-maps"],
+    ids=[
+        "config-map",
+        "two-config-maps",
+        "list-of-config-maps",
+        "custom-resource-with-items",
+        "custom-resource-items-are-spec",
+    ],
 )
 def test_a_manifest_of_other_kinds_does_not_count(manifest: str) -> None:
+    assert manifest_holds_credential({"manifest": manifest}) is False
+
+
+def _alias_manifest(levels: int, width: int) -> str:
+    """A small manifest whose aliases name the same list objects many times."""
+    lines = [
+        "apiVersion: v1",
+        "kind: List",
+        "x0: &l0 {apiVersion: v1, kind: List, items: [{apiVersion: v1, kind: ConfigMap}]}",
+    ]
+    for level in range(1, levels):
+        refs = ", ".join([f"*l{level - 1}"] * width)
+        lines.append(f"x{level}: &l{level} {{apiVersion: v1, kind: List, items: [{refs}]}}")
+    lines.append(f"items: [{', '.join([f'*l{levels - 1}'] * width)}]")
+    return "\n".join(lines) + "\n"
+
+
+def test_a_manifest_of_many_aliases_is_read_once_per_object() -> None:
+    manifest = _alias_manifest(levels=30, width=10)
+    assert len(manifest) < 4096
+    started = time.perf_counter()
+    assert manifest_holds_credential({"manifest": manifest}) is False
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_manifest_with_too_many_objects_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert MAX_CHECKED_OBJECTS == 10_000
+    monkeypatch.setattr(k8s_op_classes, "MAX_CHECKED_OBJECTS", 5)
+    items = "".join(
+        f"  - {{apiVersion: v1, kind: ConfigMap, metadata: {{name: c{i}}}}}\n" for i in range(4)
+    )
+    manifest = "apiVersion: v1\nkind: List\nitems:\n" + items
+    assert manifest_holds_credential({"manifest": manifest}) is False
+    items += "  - {apiVersion: v1, kind: ConfigMap, metadata: {name: c4}}\n"
+    manifest = "apiVersion: v1\nkind: List\nitems:\n" + items
+    assert manifest_holds_credential({"manifest": manifest}) is True
+
+
+def test_a_list_object_that_refers_to_itself_is_read_once() -> None:
+    manifest = "&self {apiVersion: v1, kind: List, items: [*self]}\n"
     assert manifest_holds_credential({"manifest": manifest}) is False
 
 

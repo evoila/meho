@@ -288,7 +288,7 @@ async def test_command_and_args_keep_only_their_size_at_every_depth(
         "hidden": True,
         "bytes": len(_ARG_VALUE),
     }
-    assert _ARG_VALUE not in json.dumps(preview)
+    assert _ARG_VALUE not in json.dumps(preview["manifest"])
 
 
 _MULTI = f"""

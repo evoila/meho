@@ -36,7 +36,9 @@ from typing import Any, Final
 
 __all__ = [
     "DECLARABLE_OP_CLASSES",
+    "call_always_waits",
     "declare_credential_capable",
+    "declare_credential_capable_match",
     "declare_credential_check",
     "declare_hidden_stored_param",
     "declare_no_secret_value",
@@ -73,6 +75,7 @@ _PER_CALL_APPROVAL: set[str] = set()
 _NO_SECRET_VALUE: set[str] = set()
 _WAIT_WHEN_SET: dict[str, frozenset[str]] = {}
 _CREDENTIAL_CAPABLE: set[str] = set()
+_CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
 _HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
 
@@ -218,9 +221,36 @@ def declare_credential_capable(op_ids: Iterable[str]) -> None:
     _CREDENTIAL_CAPABLE.update(op_ids)
 
 
+def declare_credential_capable_match(match: Callable[[str], bool]) -> None:
+    """Mark every op id for which *match* returns ``True`` as credential capable.
+
+    The same rule as :func:`declare_credential_capable`, for a family of op
+    ids that a connector cannot list one by one, for example the operations
+    an ingest makes from a vendor API file (``POST:/api/v1/...``). A match
+    that raises counts as ``True``. Safe to call twice with the same
+    function.
+    """
+    if match not in _CREDENTIAL_CAPABLE_MATCHES:
+        _CREDENTIAL_CAPABLE_MATCHES.append(match)
+
+
+def _matches_credential_capable(op_id: str) -> bool:
+    for match in _CREDENTIAL_CAPABLE_MATCHES:
+        try:
+            if match(op_id):
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def is_credential_capable(op_id: str) -> bool:
-    """Return ``True`` when a connector marked *op_id* with :func:`declare_credential_capable`."""
-    return op_id in _CREDENTIAL_CAPABLE
+    """Return ``True`` when a connector marked *op_id* as credential capable.
+
+    By :func:`declare_credential_capable` or by a match of
+    :func:`declare_credential_capable_match`.
+    """
+    return op_id in _CREDENTIAL_CAPABLE or _matches_credential_capable(op_id)
 
 
 def declare_credential_check(op_id: str, check: Callable[[Mapping[str, Any]], bool]) -> None:
@@ -248,6 +278,21 @@ def params_make_credential_call(op_id: str, params: Mapping[str, Any]) -> bool:
         return bool(check(params))
     except Exception:
         return True
+
+
+def call_always_waits(op_id: str, params: Mapping[str, Any]) -> bool:
+    """Return ``True`` when a call of *op_id* with *params* waits for a person every time.
+
+    The call of an operation marked credential capable, a call whose params
+    a credential check flags (:func:`params_make_credential_call`), and a
+    call that sets a param of :func:`declare_wait_when_set`. A sensor never
+    runs such a call: it runs with no person.
+    """
+    return (
+        is_credential_capable(op_id)
+        or params_make_credential_call(op_id, params)
+        or waits_when_set(op_id, params)
+    )
 
 
 def declare_hidden_stored_param(
@@ -296,5 +341,6 @@ def _reset_declared_op_classes_for_testing() -> None:
     _NO_SECRET_VALUE.clear()
     _WAIT_WHEN_SET.clear()
     _CREDENTIAL_CAPABLE.clear()
+    _CREDENTIAL_CAPABLE_MATCHES.clear()
     _CREDENTIAL_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()

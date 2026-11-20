@@ -3495,12 +3495,12 @@ dangerous risk level (decision record:
 <ul>
 <li><strong>Putting a person in a group</strong> is a change of rights. Another
   admin (a tenant admin or a platform admin) must approve it, never
-  the person who asked. A MEHO-SA-Operator who is not an admin cannot
+  the person who asked. An Operator cannot
   approve it. See
   <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>.</li>
 <li><strong>Taking a person out of a group</strong> only takes rights away. A
-  MEHO-SA-Operator or a MEHO-Admin may approve their own; anyone else
-  needs a second person (a MEHO-SA-Operator or an admin).</li>
+  MEHO-Admin may approve their own; anyone else
+  needs a second person (an admin).</li>
 </ul>
 </div>
 <h2 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">&para;</a></h2>
@@ -3566,7 +3566,7 @@ UUID once and keep it:</p>
 <tr>
 <td><code>MEHO-team-b-SA-Operators</code></td>
 <td><code>&lt;tenant-uuid&gt;:team-b:SA-Operators</code></td>
-<td><code>operator</code>, may approve their own changes, but not a change of rights</td>
+<td><code>operator</code> (the old group: read as Operators)</td>
 </tr>
 <tr>
 <td><code>MEHO-team-b-Admins</code></td>
@@ -3576,7 +3576,7 @@ UUID once and keep it:</p>
 <tr>
 <td><code>MEHO-team-b-Approvers</code></td>
 <td><code>&lt;tenant-uuid&gt;:team-b:Approvers</code></td>
-<td><code>read_only</code>, may approve</td>
+<td><code>read_only</code> (the old group: read as Readers)</td>
 </tr>
 </tbody>
 </table>
@@ -3844,7 +3844,7 @@ also in at least one role group.</p>
   tenant, the role of that group applies instead.</li>
 <li>approve their own changes in a tenant where they act as <code>tenant_admin</code>.
   They count as an admin there, so they may approve their own changes
-  like members of <code>MEHO-SA-Operators</code> and <code>MEHO-Admins</code>. This does not
+  like members of <code>MEHO-Admins</code>. This does not
   cover a change of rights: another admin must approve that.</li>
 <li>use the cross-tenant options, for example <code>--tenant</code> on the commands
   that have it. For a tenant where the person has a role group, MEHO
@@ -3853,8 +3853,8 @@ also in at least one role group.</p>
 </ul>
 <p>A platform admin <strong>may not</strong>:</p>
 <ul>
-<li>get the <code>approver</code> flag from the platform admin group. It comes only
-  from an <code>Approvers</code> group of the current tenant.</li>
+<li>get the <code>approver</code> flag from the platform admin group. No role gives
+  this flag today (the old <code>Approvers</code> group is read as Readers).</li>
 <li>pick a tenant that does not exist. MEHO answers
   <code>403 tenant_not_found</code> and never makes a tenant from a typo.</li>
 <li>move a machine login. Agent, service and runner logins always stay in

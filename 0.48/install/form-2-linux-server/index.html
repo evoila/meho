@@ -3938,7 +3938,7 @@ sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span 
 </tr>
 <tr>
 <td><code>--approver-user &lt;name&gt;</code></td>
-<td>The user name of the approver (in <code>MEHO-SA-Operators</code>), who approves the admin's risky changes but not a change of rights.</td>
+<td>The user name of the approver (in <code>MEHO-SA-Operators</code>), whom MEHO reads as an Operator: they approve the admin's <code>safe</code> and <code>caution</code> changes, but not a change of rights.</td>
 <td><code>approver</code></td>
 </tr>
 <tr>
@@ -4048,9 +4048,10 @@ the first login (<a href="#step-4-first-login">Step 4</a>).</p>
 says <code>First-start list: not in this version yet</code>.</p>
 <h2 id="step-4-first-login">Step 4: First login<a class="headerlink" href="#step-4-first-login" title="Permanent link">&para;</a></h2>
 <p>The install made two users with temporary passwords: the first admin
-(in <code>MEHO-Admins</code>) and an approver (in <code>MEHO-SA-Operators</code>). The approver
-is not an admin. The approver can approve the admin's risky changes, but
-not a change of rights: a change of rights needs a second admin. See
+(in <code>MEHO-Admins</code>) and an approver (in <code>MEHO-SA-Operators</code>). The approver is not an admin. MEHO reads the old group <code>MEHO-SA-Operators</code> as
+Operators, so the approver can approve the admin's <code>safe</code> and <code>caution</code>
+changes. The admin approves their own <code>dangerous</code> and <code>destructive</code>
+changes. A change of rights needs a second admin. See
 <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.</p>
 <ol>
 <li>

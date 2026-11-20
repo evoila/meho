@@ -3668,9 +3668,10 @@ login to see which backplane you talk to.</p>
 <p>The CLI prints a verification URL and a code. You approve it in a
 browser. The install made two users with temporary passwords: the first
 admin (<code>admin</code>, in <code>MEHO-Admins</code>) and an approver (<code>approver</code>, in
-<code>MEHO-SA-Operators</code>). The approver is not an admin. The approver can
-approve the admin's risky changes, but not a change of rights: a change
-of rights needs a second admin. See
+<code>MEHO-SA-Operators</code>). The approver is not an admin. MEHO reads the old group <code>MEHO-SA-Operators</code> as
+Operators, so the approver can approve the admin's <code>safe</code> and <code>caution</code>
+changes. The admin approves their own <code>dangerous</code> and <code>destructive</code>
+changes. A change of rights needs a second admin. See
 <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.
 Both logins are in the Secret <code>meho-core-first-login</code>. Read the
 admin's login with:</p>

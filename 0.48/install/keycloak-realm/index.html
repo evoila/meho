@@ -4149,7 +4149,7 @@ the end, then return to the trail.</p>
 <tr>
 <td>A user in <code>MEHO-SA-Operators</code></td>
 <td>Realm user</td>
-<td>A second person for daily work: runs changes, approves their own risky changes and other people's</td>
+<td>A second person for daily work: MEHO reads the old group as Operators, so the person runs changes and approves other people's <code>safe</code> and <code>caution</code> changes</td>
 </tr>
 <tr>
 <td>A user of realm <code>master</code> with every role of the client <code>meho-realm</code> except <code>impersonation</code></td>
@@ -5065,7 +5065,7 @@ rejected on every call. Add these eight mappers to the client:</p>
 <td><code>approver</code></td>
 <td>User Attribute (<strong>User Attribute</strong> = <code>approver</code>, <strong>Claim JSON Type</strong> <code>boolean</code>)</td>
 <td><code>approver</code>, only for <code>MEHO-Approvers</code></td>
-<td>Nobody with the <code>read_only</code> role can approve.</td>
+<td>MEHO does not read this claim for approval, so the mapper is not needed for approval.</td>
 </tr>
 <tr>
 <td><code>platform-admin</code></td>
@@ -5229,29 +5229,29 @@ five groups for you. On a later run, pass the same <code>--tenant-id</code>:
 without it, the command writes the all-zero UUID to the five groups.
 <code>--tenant-name</code> sets the short name in <code>meho_tenant</code> (default <code>main</code>).</p>
 <h3 id="who-may-approve-their-own-changes">Who may approve their own changes<a class="headerlink" href="#who-may-approve-their-own-changes" title="Permanent link">&para;</a></h3>
-<p>A person in <strong><code>MEHO-SA-Operators</code></strong> or in <strong><code>MEHO-Admins</code></strong> may approve
-their own changes, on purpose: with a click in the web interface, or on
-the command line after a fresh sign-in. They may also approve other
-people's <code>dangerous</code> and <code>destructive</code> changes. Agents and other machine
-logins never approve. The rules for every group are in
+<p>A person in <strong><code>MEHO-Admins</code></strong> may approve their own changes, on purpose:
+with a click in the web interface, or on the command line after a fresh
+sign-in. They may also approve other people's <code>dangerous</code> and
+<code>destructive</code> changes. MEHO reads the old group <code>MEHO-SA-Operators</code> as
+Operators and the old group <code>MEHO-Approvers</code> as Readers. Agents and other
+machine logins never approve. The rules for every group are in
 <a href="../../guides/approvals-and-break-glass/#who-may-approve">Approvals and break-glass</a>.</p>
-<p>To make a person a MEHO-SA-Operator:</p>
+<p>To make a person an Admin:</p>
 <ol>
 <li>In the Keycloak admin console, open the person: <strong>Users</strong> → the
    person → <strong>Groups</strong>.</li>
 <li>Leave their current role group (a person is in exactly one of the
-   five groups) and join <strong><code>MEHO-SA-Operators</code></strong>. With <code>bootstrap-clients</code>
+   five groups) and join <strong><code>MEHO-Admins</code></strong>. With <code>bootstrap-clients</code>
    the group already exists.</li>
 <li>The person signs in again. MEHO reads the group from the new login
    token; an older token still has the old group.</li>
 </ol>
 <p>With a company login, put the person in the company group that your
-setup maps to <code>MEHO-SA-Operators</code> instead
+setup maps to <code>MEHO-Admins</code> instead
 (<a href="../login/">Company login</a>). The design of the five groups is in
 the <a href="https://github.com/evoila/meho/blob/main/docs/decisions/login-role-groups.md">login groups decision record</a>
 (<a href="https://github.com/evoila/meho/issues/3959">#3959</a>).</p>
-<p>A person is in exactly one role group per tenant, so an admin is not a
-MEHO-SA-Operator. Both groups may approve their own changes. The rules
+<p>A person is in exactly one role group per tenant. The rules
 are in the
 <a href="https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md">decision record on approval groups</a>.</p>
 <h3 id="more-than-one-tenant">More than one tenant<a class="headerlink" href="#more-than-one-tenant" title="Permanent link">&para;</a></h3>
@@ -5310,18 +5310,17 @@ one. Create at least one user with:</p>
   <code>tenant_admin</code> role, and in <strong><code>MEHO-Platform-Admins</code></strong>.</li>
 </ul>
 <p>A <code>dangerous</code> or <code>destructive</code> change waits until a person approves it
-with a click. A member of <strong><code>MEHO-SA-Operators</code></strong> or <strong><code>MEHO-Admins</code></strong>
+with a click. A member of <strong><code>MEHO-Admins</code></strong>
 may approve their own risky change, on purpose, in the web interface. So
 the first admin can approve their own changes. A person in
-<code>MEHO-Operators</code> needs a MEHO-SA-Operator or an admin to approve their
-risky changes. A login holds exactly one role group, so an admin is not
-also a MEHO-SA-Operator; both groups may approve their own changes (see
+<code>MEHO-Operators</code> needs an admin to approve their
+risky changes. A login holds exactly one role group (see
 <a href="#who-may-approve-their-own-changes">Who may approve their own changes</a>
 and the
 <a href="https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md">decision record on approval groups</a>).</p>
-<p>Also create a second person in <strong><code>MEHO-SA-Operators</code></strong>, for daily work
-without admin rights. This person runs changes, approves their own risky
-changes, and may approve the admin's changes too.</p>
+<p>Also create a second person in <strong><code>MEHO-Operators</code></strong>, for daily work
+without admin rights. This person runs changes and may approve other
+people's <code>safe</code> and <code>caution</code> changes.</p>
 <p>The user's email does not need to be verified for device-code login to
 complete.</p>
 <h2 id="the-console-admin">The console admin<a class="headerlink" href="#the-console-admin" title="Permanent link">&para;</a></h2>
@@ -5777,23 +5776,21 @@ realm settings. So on a running realm, do one of these:</p>
 meho<span class="w"> </span>keycloak<span class="w"> </span>realm<span class="w"> </span>update<span class="w"> </span>--target<span class="w"> </span>&lt;your-keycloak-target&gt;<span class="w"> </span>-f<span class="w"> </span>realm-sessions.json
 </code></pre></div>
 <h2 id="approve-only-principal">Approve-only principal<a class="headerlink" href="#approve-only-principal" title="Permanent link">&para;</a></h2>
-<p>By default, clearing the approval queue needs the <strong>operator</strong> role. For
-separation of duties you can instead grant a dedicated approver the
-<strong><code>approver</code></strong> capability — an optional claim, orthogonal to the tenant
-role. A principal provisioned as <code>read_only</code> role <strong>plus</strong>
-<code>approver=true</code> may approve and reject parked requests but is refused
-<code>call_operation</code>: "approve, but never operate." (See
-<a href="../../guides/approvals-and-break-glass/#a-segregated-approver">Approvals and break-glass</a>.)</p>
-<p>The claim is fail-closed — absent or malformed means <em>not</em> an approver.
-To make a person an approver, put them in the <strong><code>MEHO-Approvers</code></strong>
-group (<a href="#step-5-create-the-five-groups">Step 5</a>), and in no other of the
-five groups. That group carries <code>tenant_role</code> = <code>read_only</code> and
-<code>approver</code> = <code>true</code>, and the <code>approver</code> mapper from
-<a href="#step-3-add-the-protocol-mappers">Step 3</a> copies it into the
-token. Its <strong>Token Claim Name</strong> must match the backplane's
-<code>JWT_APPROVER_CLAIM_NAME</code> (default <code>approver</code>). The person keeps a low
-tenant role (<code>read_only</code>), so the capability adds approval power
-without adding dispatch power.</p>
+<p>Clearing the approval queue needs the <strong>operator</strong> role. MEHO keeps an
+<strong><code>approver</code></strong> capability in the code: a <code>read_only</code> login with it would
+approve and reject waiting requests but is refused <code>call_operation</code>
+(see
+<a href="../../guides/approvals-and-break-glass/#a-segregated-approver">Approvals and break-glass</a>).
+No role gives it today. Roles that customers define come later:</p>
+<ul>
+<li>MEHO reads the old group <strong><code>MEHO-Approvers</code></strong> as Readers. Its members
+  do not approve and do not see the Approvals pages.</li>
+<li>MEHO does not read the <code>approver</code> claim of the token, in any token
+  form. A token that carries it gets no approval right from it.</li>
+</ul>
+<p>To let a person approve, put them in <code>MEHO-Operators</code> (other people's
+<code>safe</code> and <code>caution</code> changes) or <code>MEHO-Admins</code> (also <code>dangerous</code> and
+<code>destructive</code> changes, and their own changes).</p>
 <h2 id="remember-the-browser-and-passkeys">Remember the browser, and passkeys<a class="headerlink" href="#remember-the-browser-and-passkeys" title="Permanent link">&para;</a></h2>
 <p>Two realm settings make a login rare for a person:</p>
 <ul>

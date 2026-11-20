@@ -4218,9 +4218,10 @@ bash<span class="w"> </span>install-verify.sh<span class="w"> </span>--host<span
 <h2 id="step-6-the-first-two-users-meho-login-meho-status">Step 6: The first two users, <code>meho login</code>, <code>meho status</code><a class="headerlink" href="#step-6-the-first-two-users-meho-login-meho-status" title="Permanent link">&para;</a></h2>
 <p>The install made two users with temporary passwords: the first admin
 (<code>admin</code>, in <code>MEHO-Admins</code>) and an approver (<code>approver</code>, in
-<code>MEHO-SA-Operators</code>). The approver is not an admin. The approver can
-approve the admin's risky changes, but not a change of rights: a change
-of rights needs a second admin. See
+<code>MEHO-SA-Operators</code>). The approver is not an admin. MEHO reads the old group <code>MEHO-SA-Operators</code> as
+Operators, so the approver can approve the admin's <code>safe</code> and <code>caution</code>
+changes. The admin approves their own <code>dangerous</code> and <code>destructive</code>
+changes. A change of rights needs a second admin. See
 <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.
 Write the two logins into a file that only you can read:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>

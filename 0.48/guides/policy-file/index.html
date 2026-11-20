@@ -3406,7 +3406,7 @@
 <p>The policy file says which category each connector, operation group and
 operation is in, which labels it has, and which operations always wait
 for approval. It can also route approvals: for example, only
-MEHO-SA-Operators and MEHO-Admins approve network changes.</p>
+MEHO-Admins approve network changes.</p>
 <p>You keep the policy as one file, <code>policy: v1</code>. You can:</p>
 <ul>
 <li><strong>validate</strong> a file and see every mistake,</li>
@@ -3494,21 +3494,25 @@ both parts: the bindings at sign-in (next section) and the routing at the
 click.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">routing</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">category</span><span class="p">:</span><span class="w"> </span><span class="nv">network</span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">SA-Operators</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">Operators</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">connector</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;connector-id-pattern&gt;"</span><span class="p p-Indicator">,</span><span class="nt"> risk</span><span class="p">:</span><span class="w"> </span><span class="nv">destructive</span><span class="p p-Indicator">}</span>
 <span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
 </code></pre></div>
 <ul>
 <li><code>match</code> names a <code>category</code>, a <code>connector</code> (<code>*</code> is any text) and a
   <code>risk</code> level, or some of them. All that it names must fit.</li>
-<li><code>approvers</code> lists login group kinds: <code>Readers</code>, <code>Operators</code>,
-  <code>SA-Operators</code>, <code>Admins</code>, <code>Approvers</code>.</li>
+<li><code>approvers</code> lists login group kinds: <code>Readers</code>, <code>Operators</code>, <code>Admins</code>.
+  A file may still use the old kinds <code>SA-Operators</code> and <code>Approvers</code>. Such
+  a kind matches only the people whose login token names that old group,
+  never every Operator or Reader. <code>SA-Operators</code> may approve only what an
+  Operator may approve. <code>Approvers</code> lets nobody approve: MEHO reads its
+  members as Readers.</li>
 <li>In each file, the first entry that fits wins. When no entry fits, the
   same people as today may approve.</li>
 <li><strong>The install's routing is a floor.</strong> A tenant can make it narrower,
   never wider (see below).</li>
 <li>Routing only makes the list shorter. A group never approves more than it
-  may today: for example, Operators and Approvers never approve another
+  may today: for example, Operators never approve another
   person's <code>dangerous</code> or <code>destructive</code> change.</li>
 <li>MEHO refuses an entry that asks a group that may approve none of its
   changes, and an entry that leaves a risk level that nobody may approve.</li>
@@ -3531,13 +3535,13 @@ that the install does not route, the tenant is free.</p>
 <p>Example. The install's file says:</p>
 <div class="highlight"><pre><span></span><code><span class="nt">routing</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">category</span><span class="p">:</span><span class="w"> </span><span class="nv">network</span><span class="p p-Indicator">}</span>
-<span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">SA-Operators</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">approvers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">Operators</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">Admins</span><span class="p p-Indicator">]</span>
 </code></pre></div>
 <p>A tenant's file may then say <code>approvers: [Admins]</code> for network changes.
 MEHO refuses the tenant's file when an entry:</p>
 <ul>
-<li>adds a group, for example <code>[Operators, SA-Operators, Admins]</code>;</li>
-<li>names another group, for example <code>[Approvers]</code>;</li>
+<li>adds a group, for example <code>[Readers, Operators, Admins]</code>;</li>
+<li>names another group, for example <code>[Readers]</code>;</li>
 <li>takes the network changes away from the install's entry, for example
   <code>match: {risk: caution}</code> with every group.</li>
 </ul>
@@ -3597,15 +3601,16 @@ fits no change, so the other install entries decide.</p>
 <p>MEHO ships a starting file, "separated duties"
 (<code>deploy/policy-profiles/separated-duties.yaml</code>): identity and secret
 changes only Admins approve, network and storage changes only
-SA-Operators and Admins.</p>
+Admins.</p>
 <h2 id="which-login-group-is-which-team">Which login group is which team<a class="headerlink" href="#which-login-group-is-which-team" title="Permanent link">&para;</a></h2>
 <p>A tenant's file can say which login group is which team, in <code>bindings</code>.
-A binding gives a group one of the five group kinds (<code>Readers</code>,
-<code>Operators</code>, <code>SA-Operators</code>, <code>Admins</code>, <code>Approvers</code>) and a set of
-categories.</p>
+A binding gives a group one of the three group kinds (<code>Readers</code>,
+<code>Operators</code>, <code>Admins</code>) and a set of categories. A file may still use the
+old kinds <code>SA-Operators</code> and <code>Approvers</code>: MEHO reads them as <code>Operators</code>
+and <code>Readers</code>.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">bindings</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">group</span><span class="p">:</span><span class="w"> </span><span class="nv">/MEHO-Operators/Network</span><span class="p p-Indicator">}</span><span class="w">   </span><span class="c1"># the full path of the group</span>
-<span class="w">    </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SA-Operators</span>
+<span class="w">    </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Operators</span>
 <span class="w">    </span><span class="nt">categories</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">network</span><span class="p p-Indicator">]</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">attribute</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;tenant&gt;-storage"</span><span class="p p-Indicator">}</span><span class="w">    </span><span class="c1"># the group attribute meho_group</span>
 <span class="w">    </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Operators</span>
@@ -3618,8 +3623,8 @@ categories.</p>
   the attribute: see <a href="../../install/keycloak-realm/">Keycloak realm setup</a>.</li>
 <li><code>categories: ["*"]</code> means every category.</li>
 <li>A binding never changes a person's base level (read-only, operator or
-  admin). It can only pick between the kinds of that level: <code>Operators</code>
-  or <code>SA-Operators</code>, <code>Readers</code> or <code>Approvers</code>.</li>
+  admin). Each base level has one kind: <code>Readers</code>, <code>Operators</code> or
+  <code>Admins</code>.</li>
 <li>A person whose groups match two kinds in one tenant cannot log in. Fix
   the bindings or the groups.</li>
 <li>A person whose groups match no binding keeps the kind they have today.</li>
@@ -3632,24 +3637,21 @@ categories.</p>
   tenant list (<code>meho_tenants</code>, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
   <code>meho policy export</code> shows them.</li>
-<li>A shipped binding counts only when it agrees with the token. The group
-  alone never gives or takes the right to approve: a person in the
-  shipped approver group may approve only when the token also says
-  <code>approver: true</code>, and a person with <code>approver: true</code> keeps that right in
-  the shipped readers group. So a shipped binding on its own gives or
-  takes no right to approve. Approver routing by category can still make
-  the list of people who may approve a change shorter.</li>
+<li>A shipped binding counts only when it agrees with the login. MEHO does
+  not read an <code>approver</code> claim, and no shipped group gives that right.
+  So a shipped binding on its own gives or takes no right to approve.
+  Approver routing by category can still make the list of people who may
+  approve a change shorter.</li>
 <li>The self-approval group (the setting <code>JWT_SELF_APPROVER_GROUP</code>) can be
   a group that is not in <code>JWT_ROLE_GROUPS</code>. Then a person can be in it
-  and in one role group. Next to an operator group the person gets
-  <code>SA-Operators</code>, as today. Next to any other group, that group's kind
-  stays.</li>
+  and in one role group. The old self-approval group counts as <code>Operators</code>.
+  Next to any other group, that group's kind stays.</li>
 <li>With the default settings the self-approval group is a role group. A
   person in it and in a second role group cannot log in
   (<code>multiple_role_groups</code>), with the setting on or off.</li>
 <li>A binding in your file (a stored binding) is your own choice. There the
-  group alone gives the flags of the kind: a read-only person in a group
-  bound to <code>Approvers</code> may approve, whatever the token says.</li>
+  group alone gives the flags of the kind: a group bound to <code>Readers</code>
+  or <code>Operators</code> gives no right to approve, whatever the token says.</li>
 <li><code>meho policy export</code> with the setting on writes the shipped bindings into
   your file. After an import they are stored bindings, and then they count
   for every person, also for a person with a tenant list, whose groups may
@@ -3800,7 +3802,7 @@ meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"
 <p>An example answer, for a person with a token who asks for a <code>caution</code>
 operation that a file makes always wait:</p>
 <div class="highlight"><pre><span></span><code>Answer: wait (today's checks decide)
-Who may approve: MEHO-Operators, MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers (rule: default)
+Who may approve: MEHO-Operators, MEHO-Admins (rule: default)
 Today: needs-approval: &lt;today's reason&gt;
 Policy evaluator (shadow): wait, same as today
 Decided by: floor token_runs_only_safe: wait (&lt;rule text&gt;)

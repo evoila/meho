@@ -3422,13 +3422,13 @@ first people log in.</p>
 <strong>dangerous</strong> risk level, so each one waits for approval.</p>
 <p>Two kinds of step get different approvers:</p>
 <ul>
-<li><strong>Create a group</strong> (Step 2): a MEHO-SA-Operator or a MEHO-Admin
-  may approve their own. Anyone else needs a second person: a
-  MEHO-SA-Operator or an admin.</li>
+<li><strong>Create a group</strong> (Step 2): a MEHO-Admin
+  may approve their own. Anyone else needs a second person: an
+  admin.</li>
 <li><strong>Create a user</strong> (Step 4) and <strong>add a person to a group</strong>
   (Step 5): these are changes of rights. Another admin (a tenant
   admin or a platform admin) must approve them, never the person who
-  asked. A MEHO-SA-Operator who is not an admin cannot approve them.
+  asked. An Operator cannot approve them.
   See <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>.</li>
 </ul>
 <p>For Steps 4 and 5, an admin who is not the person who asked approves
@@ -3437,11 +3437,10 @@ admin adds a second admin first (see
 <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">An install with only one admin</a>).</p>
 <p>For the group step, pick one of these before you start:</p>
 <ul>
-<li><strong>You are a MEHO-SA-Operator or a MEHO-Admin</strong> in your current
+<li><strong>You are a MEHO-Admin</strong> in your current
   tenant, and you approve it yourself, on purpose, in the web
   interface.</li>
-<li><strong>A second person</strong> in your current tenant (a MEHO-SA-Operator or
-  an admin) approves it.</li>
+<li><strong>A second person</strong> in your current tenant (an admin) approves it.</li>
 </ul>
 <p>The group operations stay at the dangerous risk level (decision
 record:
@@ -3781,7 +3780,7 @@ meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class=
 </tr>
 <tr>
 <td><code>approve</code> answers <code>self_approval_forbidden</code></td>
-<td>You asked for the group step and tried to approve it yourself, and you are not a MEHO-SA-Operator or a MEHO-Admin.</td>
+<td>You asked for the group step and tried to approve it yourself, and you are not a MEHO-Admin.</td>
 <td>Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface.</td>
 </tr>
 <tr>

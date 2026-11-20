@@ -3268,12 +3268,12 @@ on each login client copies them into the token.</p>
 <tr>
 <td><code>MEHO-Operators</code></td>
 <td><code>operator</code></td>
-<td>Run actions. Their <code>dangerous</code> and <code>destructive</code> changes wait for a MEHO-SA-Operator or an admin.</td>
+<td>Run actions. Their <code>dangerous</code> and <code>destructive</code> changes wait for an admin.</td>
 </tr>
 <tr>
 <td><code>MEHO-SA-Operators</code></td>
 <td><code>operator</code></td>
-<td>Run actions, and approve their own changes on purpose (<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>).</td>
+<td>An old group: MEHO reads it as <code>MEHO-Operators</code> (<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>).</td>
 </tr>
 <tr>
 <td><code>MEHO-Admins</code></td>
@@ -3282,8 +3282,8 @@ on each login client copies them into the token.</p>
 </tr>
 <tr>
 <td><code>MEHO-Approvers</code></td>
-<td><code>read_only</code> + <code>approver</code></td>
-<td>Approve other people's changes. Cannot run actions.</td>
+<td><code>read_only</code></td>
+<td>An old group: MEHO reads it as <code>MEHO-Readers</code>.</td>
 </tr>
 </tbody>
 </table>

@@ -162,6 +162,7 @@ More rules:
     call and tells the agent which connectors it may use.
   - `meho_connector_list` shows only the connectors in the list.
   - `list_targets` shows only the targets of connectors in the list.
+    Its page cursor also names only such a target.
   - When the agent names a target that MEHO does not find, or a name
     that fits more than one target, the answer lists close target names.
     It lists only targets of connectors in the list.

@@ -170,6 +170,53 @@ async def test_list_targets_filter_on_a_connector_outside_the_list_shows_no_targ
     assert answer["targets"] == []
 
 
+async def _pages(connectors: list[str] | None, limit: int) -> list[tuple[list[str], str | None]]:
+    """Every page of ``list_targets`` from the start: (names, next_cursor)."""
+    tool = _tool("list_targets", connectors)
+    pages: list[tuple[list[str], str | None]] = []
+    cursor: str | None = None
+    while True:
+        args: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            args["cursor"] = cursor
+        answer = await tool.function(_ctx(), **args)
+        pages.append(([t["name"] for t in answer["targets"]], answer["next_cursor"]))
+        cursor = answer["next_cursor"]
+        if cursor is None:
+            return pages
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("targets")
+async def test_list_targets_pages_hold_and_name_only_targets_in_the_list() -> None:
+    # The targets sort as lab-fence-a, lab-fence-b, lab-nomatch-a,
+    # lab-other-a: the first two rows are outside the list.
+    assert await _pages([_OTHER], 1) == [(["lab-other-a"], "lab-other-a"), ([], None)]
+    # Here the rows outside the list come last, after a full page.
+    assert await _pages([_FENCE], 1) == [
+        (["lab-fence-a"], "lab-fence-a"),
+        (["lab-fence-b"], "lab-fence-b"),
+        ([], None),
+    ]
+    assert await _pages([_FENCE], 3) == [(["lab-fence-a", "lab-fence-b"], None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("targets")
+async def test_list_targets_pages_with_an_empty_list_name_no_target() -> None:
+    assert await _pages([], 1) == [([], None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("targets")
+async def test_list_targets_pages_without_a_list_keep_the_row_cursor() -> None:
+    assert await _pages(None, 2) == [
+        (["lab-fence-a", "lab-fence-b"], "lab-fence-b"),
+        (["lab-nomatch-a", "lab-other-a"], "lab-other-a"),
+        ([], None),
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("targets")
 async def test_list_targets_without_a_list_shows_every_target() -> None:

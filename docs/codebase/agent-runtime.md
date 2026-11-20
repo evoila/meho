@@ -213,7 +213,10 @@ JSON-shaped (so it can grow without a migration):
     bound.
   - `list_targets` shows only the targets whose connector is in the list
     (`targets_within_limit` in `operations/_target_connector_limit.py`).
-    A target that picks no single connector is left out.
+    A target that picks no single connector is left out. Each page holds
+    up to `limit` such targets, and its `next_cursor` is the name of the
+    last of them (`_read_target_page` in `mcp/tools/topology.py` reads on
+    past the targets outside the list).
   - The target resolver (`targets/resolver.py`) names only targets of
     connectors in the list in the near-matches of a `no_target` answer and
     the hits of an `ambiguous_target` answer. Every tool that looks a

@@ -679,6 +679,49 @@ def _make_cert(
     return cert_pem, key_pem
 
 
+def _private_ca_chain(ip: str) -> tuple[bytes, bytes, bytes]:
+    """(server certificate and CA, server key, CA) of a private CA as many
+    customers have one: no key identifiers and no key usage. Python's
+    default ``VERIFY_X509_STRICT`` refuses this chain ("Missing Authority
+    Key Identifier"); OpenSSL checks key identifiers only in a chain of more
+    than one certificate."""
+    now = datetime.now(UTC)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Customer Test CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=900))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+    key = ec.generate_private_key(ec.SECP256R1())
+    server = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "meho-test")]))
+        .issuer_name(ca_name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=90))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ip_address(ip))]), critical=False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_pem = ca.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return server.public_bytes(serialization.Encoding.PEM) + ca_pem, key_pem, ca_pem
+
+
 @asynccontextmanager
 async def _tls_server(
     monkeypatch: pytest.MonkeyPatch,
@@ -686,7 +729,12 @@ async def _tls_server(
     dns_name: str | None = None,
     ip: str | None = "127.0.0.1",
     days_left: int = 90,
+    ca_file: Path | None = None,
 ) -> AsyncIterator[int]:
+    """A local TLS server. By default its certificate is self-signed, and the
+    check trusts it through a patched ``_trust_context``. With *ca_file*, it
+    serves a chain of ``_private_ca_chain``, the CA goes to *ca_file*, and
+    the check runs with the real ``_trust_context``."""
     now = datetime.now(UTC)
     cert_pem, key_pem = _make_cert(
         dns_name=dns_name,
@@ -694,6 +742,9 @@ async def _tls_server(
         not_before=now - timedelta(days=400),
         not_after=now + timedelta(days=days_left),
     )
+    if ca_file is not None:
+        cert_pem, key_pem, ca_pem = _private_ca_chain(ip or "127.0.0.1")
+        ca_file.write_bytes(ca_pem)
     with tempfile.TemporaryDirectory() as folder:
         cert_file, key_file = Path(folder, "c.pem"), Path(folder, "k.pem")
         cert_file.write_bytes(cert_pem)
@@ -707,7 +758,8 @@ async def _tls_server(
             ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
             return ctx
 
-        monkeypatch.setattr(first_start, "_trust_context", trust)
+        if ca_file is None:
+            monkeypatch.setattr(first_start, "_trust_context", trust)
 
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             writer.close()
@@ -761,6 +813,87 @@ def test_untrusted_certificate_is_red(monkeypatch: pytest.MonkeyPatch) -> None:
     line = asyncio.run(run())
     assert line.status == "fail"
     assert "not trusted" in line.message
+    assert "trust bundle of MEHO" in line.message
+
+
+def _console_ca_file(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """Set ``CONSOLE_CA_FILE``, as ``values-single-node.yaml`` does on form 2."""
+    monkeypatch.setenv("CONSOLE_CA_FILE", str(path))
+    get_settings.cache_clear()
+
+
+def _check_with_console_ca(
+    monkeypatch: pytest.MonkeyPatch, setting: Path, written: Path
+) -> first_start.FirstStartLine:
+    """The certificate line when ``CONSOLE_CA_FILE`` is *setting* and the
+    server's CA is written to *written*."""
+    _console_ca_file(monkeypatch, setting)
+
+    async def run() -> first_start.FirstStartLine:
+        async with _tls_server(monkeypatch, ca_file=written) as port:
+            return await first_start.check_certificate(f"https://127.0.0.1:{port}", dns_ok=True)
+
+    return asyncio.run(run())
+
+
+def test_the_ca_in_console_ca_file_makes_the_certificate_green(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The CA of _private_ca_chain has no key identifiers, as many private
+    # CAs: the check passes only with VERIFY_X509_STRICT cleared.
+    ca_file = tmp_path / "ca.crt"
+
+    line = _check_with_console_ca(monkeypatch, ca_file, ca_file)
+
+    assert line.status == "ok", line.message
+
+
+def test_a_missing_console_ca_file_names_the_command_of_form_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A fresh form-2 install: the setting is set, but meho-host certificate
+    # has not written the CA yet, so the optional ConfigMap has no file.
+    line = _check_with_console_ca(monkeypatch, tmp_path / "missing.crt", tmp_path / "ca.crt")
+
+    assert line.status == "fail"
+    assert line.message == (
+        "The certificate of 127.0.0.1 is not trusted. Install a certificate from your own CA "
+        "on the server: sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
+    )
+
+
+def test_the_console_ca_adds_to_the_system_trust_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    ca_pem, _ = _make_cert(
+        dns_name="ca.test", ip=None, not_before=now, not_after=now + timedelta(days=30)
+    )
+    ca_file = tmp_path / "ca.crt"
+    ca_file.write_bytes(ca_pem)
+    _console_ca_file(monkeypatch, ca_file)
+    system = ssl.create_default_context()
+
+    context = first_start._trust_context()
+
+    assert context.cert_store_stats()["x509_ca"] == system.cert_store_stats()["x509_ca"] + 1
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname
+    assert not context.verify_flags & ssl.VERIFY_X509_STRICT
+
+
+def test_a_console_ca_file_that_cannot_be_read_keeps_the_system_trust_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ca_file = tmp_path / "ca.crt"
+    ca_file.write_text("not a certificate\n")
+    _console_ca_file(monkeypatch, ca_file)
+    system = ssl.create_default_context()
+
+    context = first_start._trust_context()
+
+    assert context.cert_store_stats() == system.cert_store_stats()
+    assert context.verify_flags & ssl.VERIFY_X509_STRICT
 
 
 def test_closed_port_is_red() -> None:

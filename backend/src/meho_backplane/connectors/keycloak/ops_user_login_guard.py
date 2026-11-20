@@ -44,6 +44,10 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import (
+    is_meho_login_realm,
+    refuse_meho_access_loss,
+)
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     FoundObject,
     KeycloakDeleteRefusedError,
@@ -184,11 +188,14 @@ async def refuse_login_user_of_write(
 ) -> None:
     """The run-time check: refuse *user* when *op_id* must not touch the sign-in user.
 
-    *user* is the user the write then acts on, as Keycloak stores it.
+    *user* is the user the write then acts on, as Keycloak stores it. In
+    MEHO's own login realm the write must not take MEHO's own access away
+    either (:func:`~.ops_user_meho_access_guard.refuse_meho_access_loss`).
     """
     action = login_user_action(op_id, params)
     if action is not None:
         await refuse_login_user_rep(connector, operator, target, user, op_id=op_id, action=action)
+    await refuse_meho_access_loss(connector, operator, target, user, op_id=op_id, params=params)
 
 
 def park_refusal_for_login_user(op_id: str, action: str) -> str:
@@ -253,16 +260,22 @@ async def refuse_login_user_in_realm(
     """Refuse the user *user_id* of *realm* when the target signs in with it.
 
     For a write whose realm is not the target's managed realm (the secret
-    move sink names its own realm). A user that cannot be read is let
-    through: the write then fails with "not found".
+    move sink names its own realm). In MEHO's own login realm the write must
+    not take MEHO's own access away either. A user that cannot be read is
+    let through: the write then fails with "not found".
     """
     realms = replace(resolve_realm_config(target), managed_realm=realm)
-    if realms.managed_realm != realms.admin_realm:
+    sign_in_realm = realms.managed_realm == realms.admin_realm
+    if not sign_in_realm and not is_meho_login_realm(realm):
         return
     path = fill_path(_USER_PATH, {"realm": realm, "user-id": user_id})
     user = await get_or_none(connector, target, path, operator)
     if user is None:
         return
-    await refuse_login_user_rep(
-        connector, operator, target, user, op_id=op_id, action=action, realms=realms
+    if sign_in_realm:
+        await refuse_login_user_rep(
+            connector, operator, target, user, op_id=op_id, action=action, realms=realms
+        )
+    await refuse_meho_access_loss(
+        connector, operator, target, user, op_id=op_id, params={}, realm=realm
     )

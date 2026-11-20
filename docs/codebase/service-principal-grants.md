@@ -144,6 +144,32 @@ and no run approval covers it.
   operation reads, writes or makes a credential, so no standing grant, no
   agent grant and no run approval covers it; a person approves each
   call" (`_validate.CREDENTIAL_WAIT_NOTE`).
+- Some operations can read, write or make any credential, because the
+  caller says what they do. A connector marks them with
+  `declare_credential_capable` (`op_classes.py`; today `k8s.exec` and
+  `proxmox.api.write`). Their class stays as it is, so the approval card
+  and the feed still show the call. `credential_grant_reason` and
+  `credential_call_waits` count them as credential calls, so every rule
+  in this list holds for them: each call waits for a person, grant
+  create, agent grant create and run approval create refuse them with
+  the same reason, and an override does not turn their approval off.
+- A connector can also tell from the params of one call that it writes a
+  credential: `declare_credential_check` (`op_classes.py`). Today
+  `k8s.apply` uses it: a manifest that holds a `kind: Secret` (any
+  document, any item of a list object such as
+  `kind: List`), or a manifest MEHO cannot read, makes
+  the call a credential call
+  (`connectors/kubernetes/op_classes.py::manifest_holds_credential`). The
+  dispatcher, the preview and a step of a multi-step operation check the
+  params when the call is made (`operations/wait_when_set.py`). They set
+  `requires_approval` and `credential_call` on the row of that call, and
+  `descriptor_credential_reason` and `descriptor_credential_waits` read
+  it. So such a call waits for a person, and no grant and no run approval
+  covers it. Grant create still takes `k8s.apply`: an apply of other
+  kinds keeps the rules of `k8s.apply`.
+- The approval request of a credential call has `credential_wait` in its
+  proposed effect: one line that says why it waits
+  (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
 - A grant row that names such an op stays stored, but it never runs the
   call. `meho service-principals grants list` shows it as before.
 - The child operation check (`governed_subops.classify_subop_grantability`)

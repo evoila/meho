@@ -213,6 +213,9 @@ class UpdateFlowTests(UpdateTestCase):
         helm = calls[index(HELM_UPGRADE)]
         self.assertIn(f"chart/meho-{NEW_VERSION}.tgz", helm)
         self.assertIn(f"--set image.tag=v{NEW_VERSION}", helm)
+        # The new download's values: they mount the CA that meho-host
+        # certificate wrote, so an update keeps that trust (#6698).
+        self.assertIn(f"-f {self.machine.download}/chart/values-single-node.yaml -f ", helm)
         self.assertIn(f"-f {self.machine.root}{PLACE_VALUES}", helm)
 
     def test_the_checks_an_installed_machine_fails_are_skipped(self) -> None:

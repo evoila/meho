@@ -5,7 +5,8 @@
 go into the console's TLS Secret only when every check passes, the key is
 never on a command line or in the output, and the certificate line of the
 check is printed at the end. The CA of the new certificate goes to the CA
-file that install.sh writes."""
+file that install.sh writes, and to the ConfigMap that the meho pod mounts,
+and the meho pod restarts, so the first-start list trusts it (#6698)."""
 
 from __future__ import annotations
 
@@ -34,11 +35,16 @@ GREEN_LINE = (
 CA_FILE = "/var/lib/meho/console-ca.crt"
 # What install.sh wrote to the CA file: the CA of the install's certificate.
 INSTALL_CA = "-----BEGIN CERTIFICATE-----\nMIIBfakeInstallCA\n-----END CERTIFICATE-----\n"
+TRUST_CONFIGMAP = "meho-console-trust"
+TRUSTED = (
+    "[ok]   MEHO restarts and then trusts your CA in its first-start list. The console is "
+    "away for about a minute.\n"
+)
 INSTALLED = (
     "[ok]   installed the certificate for meho.example.com in the Secret meho-core-tls: the "
     "console, the API and the login show it within a minute\n"
-    f"[ok]   wrote your CA to {CA_FILE}\n"
-    "[note] browsers and the meho CLI trust it when the computer trusts your CA.\n"
+    f"[ok]   wrote your CA to {CA_FILE}\n" + TRUSTED + "[note] browsers and the meho CLI trust "
+    "it when the computer trusts your CA.\n"
 )
 
 
@@ -82,6 +88,14 @@ class CertificateTestCase(ClusterTestCase):
         self.assertEqual(self.before, self.host.secret(TLS_SECRET))
         self.assertEqual([], self.kubectl_calls(" patch "))
         self.assertEqual(INSTALL_CA, self.ca_file.read_text())
+        self.assert_meho_unchanged()
+
+    def assert_meho_unchanged(self) -> None:
+        """No ConfigMap with a CA, and no restart of the meho pod."""
+        self.assertIsNone(self.host.configmap(TRUST_CONFIGMAP))
+        self.assertEqual(0, self.host.deployment_restarts())
+        self.assertEqual([], self.kubectl_calls(" apply "))
+        self.assertEqual([], self.kubectl_calls(" rollout "))
 
 
 class CertificateTests(CertificateTestCase):
@@ -154,6 +168,69 @@ class CertificateTests(CertificateTestCase):
         assert secret is not None
         self.assertEqual(self.root, secret["data"]["ca.crt"])
 
+    def test_the_ca_goes_to_the_configmap_of_the_meho_pod_and_meho_restarts(self) -> None:
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual({"ca.crt": self.root}, self.host.configmap(TRUST_CONFIGMAP))
+        self.assertEqual(1, self.host.deployment_restarts())
+        (apply_call,) = self.kubectl_calls(" apply ")
+        self.assertTrue(apply_call.endswith(" -n meho apply -f -"), apply_call)
+        (restart_call,) = self.kubectl_calls(" rollout ")
+        self.assertTrue(
+            restart_call.endswith(" -n meho rollout restart deployment/meho"), restart_call
+        )
+        calls = self.host.calls().splitlines()
+        patch = next(i for i, line in enumerate(calls) if " patch " in line)
+        apply = next(i for i, line in enumerate(calls) if " apply " in line)
+        restart = next(i for i, line in enumerate(calls) if " rollout " in line)
+        self.assertLess(patch, apply)
+        self.assertLess(apply, restart)
+
+    def test_a_new_certificate_replaces_the_ca_of_the_configmap(self) -> None:
+        self.assertEqual(0, self.install(self.chain + self.root, self.key).returncode)
+        chain, root, key = certificate_with_key(ca="Second Customer CA")
+
+        result = self.install(chain + root, key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual({"ca.crt": root}, self.host.configmap(TRUST_CONFIGMAP))
+        self.assertEqual(2, self.host.deployment_restarts())
+
+    def test_a_configmap_that_cannot_be_written_only_warns(self) -> None:
+        self.host.fail("apply")
+
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            f"[WARN] the ConfigMap {TRUST_CONFIGMAP} could not be written, so the first-start "
+            "list of MEHO does not trust your CA yet. Run the command again.\n",
+            result.stderr,
+        )
+        self.assertNotIn(TRUSTED, result.stdout)
+        self.assertTrue(result.stdout.endswith(GREEN_LINE + "\n"), result.stdout)
+        self.assertIsNone(self.host.configmap(TRUST_CONFIGMAP))
+        self.assertEqual(0, self.host.deployment_restarts())
+        secret = self.host.secret(TLS_SECRET)
+        assert secret is not None
+        self.assertEqual(self.root, secret["data"]["ca.crt"])
+
+    def test_a_failed_restart_of_meho_only_warns(self) -> None:
+        self.host.fail("restart")
+
+        result = self.install(self.chain + self.root, self.key)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(
+            "[WARN] MEHO could not be restarted, so its first-start list trusts your CA only "
+            "after its next restart. Run the command again.\n",
+            result.stderr,
+        )
+        self.assertNotIn(TRUSTED, result.stdout)
+        self.assertEqual({"ca.crt": self.root}, self.host.configmap(TRUST_CONFIGMAP))
+        self.assertEqual(0, self.host.deployment_restarts())
+
     def test_other_text_and_windows_line_ends_are_left_out_of_tls_crt(self) -> None:
         dirty = "subject=CN = meho.example.com\n" + self.chain + self.key + self.root
         dirty = dirty.replace("\n", "\r\n")
@@ -164,6 +241,7 @@ class CertificateTests(CertificateTestCase):
         secret = self.host.secret(TLS_SECRET)
         assert secret is not None
         self.assertEqual(self.chain + self.root, secret["data"]["tls.crt"])
+        self.assertEqual({"ca.crt": self.root}, self.host.configmap(TRUST_CONFIGMAP))
 
     def test_a_certificate_with_20_days_left_is_installed_with_a_warning(self) -> None:
         chain, root, key = customer_certificate(end=20)
@@ -311,6 +389,7 @@ class RefusedCertificateTests(CertificateTestCase):
                 self.assertIn(fragment, result.stderr)
                 self.assertEqual(self.before, self.host.secret(TLS_SECRET))
                 self.assertEqual([], self.kubectl_calls(" patch "))
+                self.assert_meho_unchanged()
 
     def test_a_file_that_cannot_be_read_is_refused(self) -> None:
         chain_file, _ = self.files(self.chain + self.root, self.key)
@@ -348,6 +427,7 @@ class RefusedCertificateTests(CertificateTestCase):
         )
         self.assertEqual(self.before, self.host.secret(TLS_SECRET))
         self.assertEqual(INSTALL_CA, self.ca_file.read_text())
+        self.assert_meho_unchanged()
 
     def test_not_root_changes_nothing(self) -> None:
         self.host.answer("uid", "1000")

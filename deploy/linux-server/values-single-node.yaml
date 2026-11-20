@@ -40,3 +40,20 @@ config:
   # The schema requires the client of the console when uiConsole is on. With
   # the built-in Keycloak the chart uses meho-web either way (#4766).
   uiKeycloakClientId: meho-web
+# The CA of the customer's certificate (#6698). `meho-host certificate`
+# writes it to the ConfigMap meho-console-trust and restarts the meho pod,
+# so the first-start list trusts it at the console address. The install
+# makes no ConfigMap, so the volume is optional and the file is missing
+# then. No subPath: a subPath mount never sees a change of the ConfigMap.
+extraVolumes:
+  - name: console-trust
+    configMap:
+      name: meho-console-trust
+      optional: true
+extraVolumeMounts:
+  - name: console-trust
+    mountPath: /var/run/meho/console-trust
+    readOnly: true
+extraEnv:
+  - name: CONSOLE_CA_FILE
+    value: /var/run/meho/console-trust/ca.crt

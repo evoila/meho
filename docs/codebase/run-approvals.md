@@ -184,7 +184,10 @@ or `vault.kv.read`), `credential_write` (for example `vault.kv.put`) and
 `credential_mint` (for example `vault.token.create`). The class comes from
 the class stored on the row of an ingested operation, or from the op id (a
 connector's `declare_op_classes`, or the core lists of
-`broadcast/events.py`). The rule is the one of the standing grants
+`broadcast/events.py`). An operation a connector marks with
+`declare_credential_capable` counts too (today `k8s.exec` and
+`proxmox.api.write`), and so does a `k8s.apply` whose manifest holds a
+Secret or cannot be read. The rule is the one of the standing grants
 (`service_grants.credential_grant_reason`,
 [service-principal-grants.md](service-principal-grants.md#credential-calls)):
 

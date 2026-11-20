@@ -466,6 +466,8 @@
   "tests/test_connectors_keycloak_group_ops.py": 17.83,
   "tests/test_connectors_keycloak_lock_status.py": 40.49,
   "tests/test_connectors_keycloak_login_guard_writes.py": 90.57,
+  "tests/test_connectors_keycloak_meho_access_count.py": 90.0,
+  "tests/test_connectors_keycloak_meho_access_guard.py": 205.0,
   "tests/test_connectors_keycloak_path_encoding.py": 4.71,
   "tests/test_connectors_keycloak_realm_delete.py": 37.9,
   "tests/test_connectors_keycloak_realm_smtp_password.py": 19.64,

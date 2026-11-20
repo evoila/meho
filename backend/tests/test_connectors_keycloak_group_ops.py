@@ -55,6 +55,11 @@ from meho_backplane.operations._preview import PreviewContext, build_proposed_ef
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "keycloak-group-e2e"

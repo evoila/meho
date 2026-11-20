@@ -27,6 +27,7 @@ from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.operations._preview import build_proposed_effect
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
 from meho_backplane.settings import get_settings
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )
@@ -47,6 +48,10 @@ from tests.test_approval_grant_to_self import (
     _person,
     _status,
 )
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _PARENT = "66666666-6666-6666-6666-666666666666"
 _ROLE = "meho-platform"

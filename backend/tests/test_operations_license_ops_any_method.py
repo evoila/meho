@@ -427,7 +427,9 @@ def test_broadcast_params_hide_licence_key_lists() -> None:
 
 
 def test_approval_params_hide_licence_key_lists() -> None:
-    hidden = params_with_secret_fields_hidden({"spec": {"licenceKeys": [_FAKE_KEY]}, "n": 1})
+    hidden = params_with_secret_fields_hidden(
+        {"spec": {"licenceKeys": [_FAKE_KEY]}, "n": 1}, op_id="fixture.license.assign"
+    )
 
     assert hidden is not None
     assert _FAKE_KEY not in json.dumps(hidden)

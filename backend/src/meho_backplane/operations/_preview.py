@@ -966,10 +966,15 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
     through the same two-pass redaction as the generic params echo. The
     connector applies its size limit after that redaction, so the stored
     echo is what is measured. ``subject`` names the objects for the
-    reviewer context.
+    reviewer context. ``run_commands`` names what each container runs, with
+    secret values hidden (``ops_write_preview.apply_run_commands``). Only a
+    person reads it: an agent's own preview has no such key, and the
+    stored request an agent reads leaves it out.
     """
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
+        RUN_COMMANDS_KEY,
         apply_manifest_echo,
+        apply_run_commands,
         apply_subject,
     )
 
@@ -985,6 +990,10 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
         return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
 
     echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    if not ctx.agent_preview:
+        run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
+        if run_commands:
+            echo[RUN_COMMANDS_KEY] = run_commands
     subject = apply_subject(result.get("applied"))
     if subject is not None:
         echo["subject"] = subject

@@ -31,9 +31,23 @@ agent grant and no run approval covers them
 - every `k8s.exec` call: a command in a container can read or write any
   credential the container holds. Grant create, agent grant create and
   run approval create refuse `k8s.exec`.
-- a `k8s.apply` whose manifest holds a `kind: Secret` (also a
-  ServiceAccount token Secret), in any document or any item of a list
-  object (`kind: List` or `<Kind>List`), or a manifest MEHO cannot read.
+- a `k8s.apply` whose manifest holds, in any document or any item of a
+  list object (`kind: List` or `<Kind>List`), one of these kinds, or a
+  manifest MEHO cannot read:
+  - a `Secret` (also a ServiceAccount token Secret);
+  - an object that runs a pod: `Pod`, `Deployment`, `StatefulSet`,
+    `DaemonSet`, `ReplicaSet`, `ReplicationController`, `Job`, `CronJob`,
+    `PodTemplate`. A pod runs any command its manifest names, with every
+    Secret of its namespace it mounts, so such an apply is a credential
+    call like `k8s.job.create`;
+  - an object that gives rights: `Role`, `ClusterRole`, `RoleBinding`,
+    `ClusterRoleBinding`;
+  - an object that makes a Secret, reads one out of the cluster or reaches
+    a secret store: `ExternalSecret`, `ClusterExternalSecret`,
+    `SecretStore`, `ClusterSecretStore`, `PushSecret`, `SealedSecret`,
+    `Certificate`. MEHO reads the kind only, not the API group.
+
+  MEHO reads the kind in lower case.
   MEHO reads the manifest when the call is made. It reads each object
   and each `items` array once, also when YAML aliases name them many
   times. It reads at most 10,000 objects (each document and each entry
@@ -43,12 +57,29 @@ agent grant and no run approval covers them
   of `k8s.apply`.
 
 Both are declared in `op_classes.py` of the connector. The approval card
-says in one line why the call waits; only a person reads that line.
-The stored request of such a `k8s.apply` keeps its manifest only until
-the run starts, or until the request is rejected, withdrawn or expires.
-Then MEHO replaces the manifest with the same marker it writes for a
-secret-named value, so no `data` or `stringData` value of the Secret
-stays in it. A new run of a failed apply needs the params sent again.
+says in one line why the call waits; only a person reads that line. The
+card of a `k8s.apply` also names, for a person only, what each container
+runs: the object, the container, the image, and the `command` and `args`
+with secret values hidden (`run_commands`, see `approvals.md`).
+The stored request of a `k8s.apply` of a Secret keeps its manifest only
+in the encrypted one-time handoff of the run, as a credential write does.
+The row of the request keeps no copy, also not when the request is
+approved and never runs, and a step of a multi-step run keeps no copy of
+the parent's params either. A row stored before this rule keeps its
+manifest until the run starts or the request ends; then MEHO replaces it
+with the same marker it writes for a secret-named value. A new run of a
+failed apply needs the params sent again.
+
+`k8s.cronjob.run` keeps its rules: it starts the Job that the CronJob
+defines, unchanged, so the caller does not choose what runs. Writing the
+CronJob with `k8s.apply` waits for a person. The card shows the job
+template of the CronJob.
+
+An operator can also ingest a Kubernetes API file as a generic connector.
+The operations it makes that read or write a Secret, run a command in a
+pod, open a proxy or a port forward, make a token, or write a pod, a role
+or a binding get the same rule
+(`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 

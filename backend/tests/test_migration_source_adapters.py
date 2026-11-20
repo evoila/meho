@@ -54,8 +54,10 @@ from meho_backplane.connectors.inventory.source_register import (
     SOURCE_ADAPTERS,
     _llm_instructions,
 )
+from meho_backplane.connectors.proxmox import op_classes as _proxmox_rules  # noqa: F401
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.op_classes import call_always_waits
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.reducer import full_result_capture_var
 from meho_backplane.settings import get_settings
@@ -534,6 +536,24 @@ async def test_proxmox_inventory(store: ResultHandleStore) -> None:
     assert batch.os is not None and batch.os.family == "windows" and batch.os.name is None
     assert batch.missing["os.name"] == "powered_off"
     assert batch.snapshot_count is None and batch.missing["snapshot_count"] == "collection_failed"
+
+
+async def test_proxmox_inventory_reads_run_with_no_person(store: ResultHandleStore) -> None:
+    """Every read of the inventory is a plain read: none waits for a person."""
+    guest_file = {"path": "nodes/pve1/qemu/100/agent/file-read"}
+    assert call_always_waits("proxmox.api.get", guest_file), "the Proxmox check is loaded"
+    children = _proxmox_children()
+    await _run(proxmox_migration_inventory, children, "pve-a", store)
+
+    reads = [params for _connector, op_id, params in children.calls if op_id == "proxmox.api.get"]
+    assert {params["path"].rsplit("/", 1)[-1] for params in reads} >= {
+        "nodes",
+        "qemu",
+        "config",
+        "snapshot",
+        "get-osinfo",
+    }
+    assert [params for params in reads if call_always_waits("proxmox.api.get", params)] == []
 
 
 async def test_proxmox_counts_match_only_when_every_node_was_read(

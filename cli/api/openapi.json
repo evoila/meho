@@ -28077,6 +28077,19 @@
             "nullable": true,
             "title": "Principal Kind"
           },
+          "people_behind": {
+            "items": {
+              "$ref": "#/components/schemas/PersonBehindView"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "People Behind"
+          },
+          "people_behind_known": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "People Behind Known"
+          },
           "op_id": {
             "type": "string",
             "title": "Op Id"
@@ -40014,6 +40027,35 @@
         ],
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
+      },
+      "PersonBehindView": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Name"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why"
+          },
+          "why_text": {
+            "type": "string",
+            "title": "Why Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "why",
+          "why_text"
+        ],
+        "title": "PersonBehindView",
+        "description": "One person behind the agent, service or runner login that asked."
       },
       "PolicyExplainBody": {
         "properties": {

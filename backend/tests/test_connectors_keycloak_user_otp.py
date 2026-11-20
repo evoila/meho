@@ -65,6 +65,11 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _OP_ID = "keycloak.user.required_actions.update"
 _OTP_OP_ID = "keycloak.user.otp_status"
@@ -96,7 +101,7 @@ def _approver() -> Operator:
     # The write is dangerous: only a tenant admin or a MEHO-SA-Operator may approve it.
     # A change of rights is approved with a click in the web console.
     return _operator("kc-otp-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"web_session": True}
+        update={"platform_admin": True, "web_session": True}
     )
 
 
@@ -505,7 +510,9 @@ async def test_approved_run_acts_on_the_user_id_on_the_card(kc: KeycloakConnecto
         resumed = await _approve_and_resume(request_id)
     assert resumed.status == "ok", resumed
     assert put.call_count == 1
-    assert not other_get.called
+    # The approver check builds the card again before the run, so it may read
+    # the account the name names now. The run writes nothing to it.
+    assert other_get.call_count <= 1
     assert not other_put.called
 
 

@@ -46,6 +46,7 @@ from meho_backplane.connectors.keycloak import (
     ops_login_check,  # noqa: F401
     ops_user_required_actions,  # noqa: F401 -- the checks before approval of the required actions write
     ops_write_account_preview,  # noqa: F401 -- the approval cards of the user account writes
+    ops_write_login_realm_rule,  # noqa: F401 -- a platform admin approves login realm writes
     ops_write_preview,  # noqa: F401
     ops_write_realm_smtp,  # noqa: F401 -- refuses an inline SMTP password before approval
     ops_write_rights_card,  # noqa: F401 -- cards with the object now and the new values

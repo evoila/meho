@@ -184,7 +184,7 @@ same in one line.
 
 Your login group decides. MEHO reads it only from your signed login
 token, never from a request field or a command-line flag. The groups
-come from the [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-five-groups).
+come from the [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-three-groups).
 
 | Your group | Your own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change | Another person's [change of rights](#changes-of-rights) |
 |---|---|---|---|---|
@@ -234,6 +234,41 @@ the web interface. Another
 person's `dangerous` or `destructive` change, approved by someone who is
 neither, gets `403 approval_group_required`.
 
+### A request of an agent counts as a request of the people behind it
+
+An agent, an add-on (a service login) or a satellite runner does not ask
+on its own. People set it up. So MEHO treats its request as a request of
+the people behind it:
+
+- who registered or owns the agent, add-on or runner;
+- who gave one of its grants that are in force;
+- who wrote or last changed its agent definition;
+- who made one of its schedules, or an event source when a schedule waits
+  for events;
+- who started or handed over the runbook run it works on.
+
+Only people count. An agent, add-on or runner login that set up, changed
+or handed over something is never one of the people behind another login.
+
+Such a person may approve the request only where they may approve their
+own change (the table above). A change of rights always needs another
+admin, also when an admin is behind the agent. Everyone else approves it
+as another person's change.
+
+When MEHO knows nobody behind the login (for example a login made only in
+Keycloak, or one that only other machine logins set up), only an Admin may
+approve its requests.
+
+The request shows these people: the request card and window in the web
+interface ("Set up by ... Grant by ..."), `meho approvals show`
+("Behind it:"), and the REST answer (`people_behind`) when a person asks.
+For an agent, add-on or runner login, the REST answer leaves the two
+fields out. When MEHO knows
+nobody, they say "Set up by: not known".
+
+Use an agent to run changes on a schedule. An agent is never a way to
+approve your own change.
+
 To take back your *own* pending request, withdraw it:
 `meho approvals withdraw <id> [--reason TEXT]` (or
 `POST /api/v1/approvals/{id}/withdraw`). The request then shows
@@ -266,6 +301,12 @@ manages, not only in MEHO's own login realm:
   click in the web console.** The admin may be the person who asked.
   MEHO then records it as a self-approval. The command line and REST do
   not approve a change of rights.
+- **A change of rights asked by an agent follows the rule of the person
+  behind it.** An admin who stands behind the agent, add-on or runner
+  that asked (who set it up, owns it, or gave it a grant) may approve its
+  change of rights in the web console, after a fresh sign-in, the same
+  as their own change. An Operator behind it never approves a change of
+  rights. In MEHO's own login realm only a platform admin behind it may.
 - An Operator cannot approve it.
 - A standing grant or a run approval never covers it. Each call that
   waits needs its own approval, also the call of an agent or a service
@@ -326,8 +367,41 @@ and for the approval of a waiting request:
   `platform_admin=true` on the group or a parent group, a place under
   `/MEHO-Platform-Admins/`, or the realm role in
   `JWT_PLATFORM_ADMIN_ROLE_NAME`. A group MEHO cannot read counts too.
-  A tenant admin who is not a platform admin is refused with the same
-  text in the web console and on the approval.
+- In MEHO's own login realm, in `master` and in the target's admin realm,
+  a platform admin approves every Keycloak write, and every `secret.move`
+  that reads from or writes to one of these realms. A Keycloak admin in
+  `master` can change every realm. The target's admin realm holds the
+  login MEHO uses for that target. So the same rule holds there.
+  The one exception is a write that sets only keys from a short list that
+  cannot touch sign-in or rights: the display name of the realm
+  (`keycloak.realm.update`), the name and description of a client
+  (`keycloak.client.update`), and the first and last name of a user
+  (`keycloak.user.update`). Such a write needs a tenant admin, unless it
+  is for a login with platform admin rights. When a param names the realm,
+  MEHO reads that realm from Keycloak and judges the name Keycloak answers
+  with. When MEHO cannot read which realm a write changes, it counts as the
+  login realm. The name of a new realm (`keycloak.realm.create`) may hold
+  only plain ASCII characters: letters `a` to `z` and `A` to `Z`, digits,
+  the space and the other ASCII signs except `/`, `\`, `?`, `#` and `%`.
+  No letters with accents. When the name of one of these protected realms
+  has a letter with an accent, every `secret.move` with a Keycloak source
+  or sink on that target needs a platform admin. The approval card
+  says why, in the row "Platform admin must approve". No standing grant
+  and no run approval clears such a write: each call waits for a person.
+  A person never approves a `secret.move` that sets the password of their
+  own login.
+- In MEHO's own login realm, a platform admin makes such a change alone
+  in the web console, after a fresh sign-in. Without a fresh sign-in the
+  change waits. A tenant admin who is not a platform admin cannot make
+  it alone: the change waits, and only a platform admin approves it.
+- In MEHO's own login realm, a change that waits is never approved by
+  the login that asked. A change asked with a token (the command line,
+  REST, MCP) waits for a second person who is a platform admin. A change
+  asked by an agent, an add-on or a runner may be approved by a platform
+  admin who stands behind that login, in the web console, after a fresh
+  sign-in.
+- A Keycloak write approved before this rule does not run: MEHO refuses it
+  when the run starts, in every realm. Send the request again.
 
 The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group
@@ -655,6 +729,17 @@ and you are not in `MEHO-Admins`. Ask a person in
 one of the groups the text names to approve it on the Approvals page of
 the web interface. If you are the only operator, see
 [When you are the only operator](#when-you-are-the-only-operator).
+
+**`approve` refuses with "You set up, changed or started the agent,
+add-on or runner that asked for it".** You are one of the people behind
+the login that asked (see
+[A request of an agent counts as a request of the people behind it](#a-request-of-an-agent-counts-as-a-request-of-the-people-behind-it)),
+so the change counts as your own change. Ask another person the text
+names to approve it.
+
+**`approve` refuses with "MEHO does not know who set up the login".** An
+agent, add-on or runner asked, and MEHO knows nobody behind it. Ask an
+Admin to approve it.
 
 **`approve` returns `approval_group_required`.** The change is another
 person's `dangerous` or `destructive` change, and you are not a

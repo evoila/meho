@@ -515,8 +515,10 @@ class Operator(BaseModel):
         (:mod:`~meho_backplane.operations.rights_change_console`). True
         only for a person in a chosen current tenant who is an admin there
         (the ``tenant_admin`` role or a platform admin). The admin may be
-        the person who asked. No group, no risk level and no break-glass
-        switch changes that. The approve also needs a click in the web
+        the person who asked, or a person behind the agent, service or
+        runner login that asked
+        (:mod:`~meho_backplane.operations.people_behind`). No group, no risk
+        level and no break-glass switch changes that. The approve also needs a click in the web
         console
         (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
         """

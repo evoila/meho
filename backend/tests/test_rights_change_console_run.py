@@ -6,15 +6,15 @@
 ``keycloak.group.member.add`` goes through the full dispatch stack against
 a respx-mocked Keycloak Admin REST API:
 
-* an admin (tenant admin or platform admin) in the web console: it runs at
+* an admin in the web console (a tenant admin outside MEHO's own login
+  realm, a platform admin in it): it runs at
   once, no request waits, and the audit row says it ran at once from the
   web console;
 * the same admin with a token, an operator in the console, an agent, and a
   hosted agent run: the call waits;
-* a tenant admin who is not a platform admin adds a person to the platform
-  admin group: refused with the same text as the approve, nothing written;
-* a group MEHO cannot read counts as the strict case: refused for a tenant
-  admin.
+* in MEHO's own login realm only a platform admin runs it at once; a
+  tenant admin who is not a platform admin waits, nothing written, also
+  for the platform admin group and a group MEHO cannot read.
 
 The gate keeps the wait for a change of rights that reads, writes or makes
 a credential, for one whose params carry a credential (a client secret, a
@@ -209,13 +209,18 @@ async def _run_rows() -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "operator",
-    [_person(), _person(platform_admin=True)],
-    ids=["tenant-admin", "platform-admin"],
+    ("operator", "login_realm"),
+    [(_person(), False), (_person(platform_admin=True), True)],
+    ids=["tenant-admin-outside-the-login-realm", "platform-admin-in-the-login-realm"],
 )
 async def test_an_admin_in_the_console_adds_a_member_at_once(
-    keycloak: KeycloakConnector, operator: Operator
+    keycloak: KeycloakConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    operator: Operator,
+    login_realm: bool,
 ) -> None:
+    if not login_realm:
+        monkeypatch.setattr(_LOGIN_REALMS, lambda: {"another-login-realm"})
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount(mock, group=_PLAIN_GROUP)
         result = await _add(operator)
@@ -277,36 +282,27 @@ async def test_a_hosted_agent_run_of_an_admin_waits(keycloak: KeycloakConnector)
     assert await _run_rows() == []
 
 
-# -- refused ------------------------------------------------------------------
+# -- a tenant admin in the login realm waits for a platform admin ---------------
 
 
 @pytest.mark.asyncio
-async def test_a_tenant_admin_cannot_add_a_member_to_the_platform_admin_group(
-    keycloak: KeycloakConnector,
+@pytest.mark.parametrize(
+    "group",
+    [_PLAIN_GROUP, _PLATFORM_GROUP, None],
+    ids=["plain-group", "platform-admin-group", "group-that-cannot-be-read"],
+)
+async def test_a_tenant_admin_s_change_in_the_login_realm_waits(
+    keycloak: KeycloakConnector, group: dict[str, Any] | None
 ) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        put = _mount(mock, group=_PLATFORM_GROUP)
+        put = _mount(mock, group=group)
         result = await _add(_person())
 
-    assert result["status"] == "denied", result
-    assert "Only a platform admin may make this change." in result["error"]
-    assert "approve" not in result["error"]
+    assert result["status"] == "awaiting_approval", result
     assert not put.called
-    assert await _requests() == []
+    (request,) = await _requests()
+    assert request.rights_change is True
     assert await _run_rows() == []
-
-
-@pytest.mark.asyncio
-async def test_a_group_that_cannot_be_read_counts_as_the_strict_case(
-    keycloak: KeycloakConnector,
-) -> None:
-    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
-        put = _mount(mock, group=None)
-        result = await _add(_person())
-
-    assert result["status"] == "denied", result
-    assert "platform admin" in result["error"]
-    assert not put.called
 
 
 # -- the console session needs the sign-in of a console approve -----------------
@@ -316,7 +312,7 @@ async def test_a_group_that_cannot_be_read_counts_as_the_strict_case(
 async def test_a_console_session_with_an_old_sign_in_waits(keycloak: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount(mock, group=_PLAIN_GROUP)
-        result = await _add(_person(sign_in_age=_OLD_SIGN_IN_AGE))
+        result = await _add(_person(platform_admin=True, sign_in_age=_OLD_SIGN_IN_AGE))
 
     assert result["status"] == "awaiting_approval", result
     assert not put.called
@@ -331,7 +327,7 @@ async def test_a_console_session_with_a_fresh_sign_in_runs_at_once(
 ) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount(mock, group=_PLAIN_GROUP)
-        result = await _add(_person(sign_in_age=5))
+        result = await _add(_person(platform_admin=True, sign_in_age=5))
 
     assert result["status"] == "ok", result
     assert put.called
@@ -358,7 +354,7 @@ async def test_a_direct_run_uses_the_sign_in_limit_of_the_approve(
     get_settings.cache_clear()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount(mock, group=_PLAIN_GROUP)
-        result = await _add(_person(sign_in_age=300))
+        result = await _add(_person(platform_admin=True, sign_in_age=300))
 
     assert result["status"] == status, result
     assert put.called is (status == "ok")
@@ -368,7 +364,7 @@ async def test_a_direct_run_uses_the_sign_in_limit_of_the_approve(
 async def test_the_audit_row_of_a_direct_run_records_the_sign_in(
     keycloak: KeycloakConnector,
 ) -> None:
-    operator = _person(sign_in_age=5)
+    operator = _person(platform_admin=True, sign_in_age=5)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount(mock, group=_PLAIN_GROUP)
         result = await _add(operator)
@@ -415,7 +411,7 @@ async def test_the_approval_sign_in_level_is_asked_where_it_is_required(
 
     monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
     get_settings.cache_clear()
-    operator = _person().model_copy(update={"web_session_id": uuid.uuid4()})
+    operator = _person(platform_admin=True).model_copy(update={"web_session_id": uuid.uuid4()})
     with (
         patch(_APPROVAL_OPERATOR, new_callable=AsyncMock, return_value=approval),
         respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock,
@@ -675,3 +671,49 @@ async def test_a_client_update_without_a_credential_is_not_a_credential_write(
     asked = asked_of(descriptor, connector_id=_CONNECTOR_ID, target=None, params=params)
     assert "credential_waits" not in asked.op_class
     assert evaluate(_asker(), asked, Lookups()).verdict is Verdict.RUN
+
+
+# -- a tenant admin's protocol mapper in the login realm ------------------------
+
+_MAPPER_CREATE = "keycloak.protocol_mapper.create"
+_CLIENT_UUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+
+@pytest.mark.asyncio
+async def test_a_tenant_admin_s_protocol_mapper_in_the_login_realm_writes_nothing(
+    keycloak: KeycloakConnector,
+) -> None:
+    params = {
+        "id": _CLIENT_UUID,
+        "representation": {
+            "name": "tenant-role",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-usermodel-attribute-mapper",
+            "config": {"claim.name": "tenant_role", "user.attribute": "tenant_role"},
+        },
+    }
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, group=_PLAIN_GROUP)
+        mock.get(f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}").respond(
+            200, json={"id": _CLIENT_UUID, "clientId": "meho-web"}
+        )
+        mock.get(f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}/protocol-mappers/models").respond(
+            200, json=[]
+        )
+        post = mock.post(
+            f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}/protocol-mappers/models"
+        ).respond(201)
+        result = await dispatch(
+            operator=_person(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_MAPPER_CREATE,
+            target=target,
+            params=params,
+        )
+
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] in {"awaiting_approval", "denied"}, dumped
+    assert not post.called
+    assert await _run_rows() == []

@@ -64,6 +64,7 @@ from meho_backplane.operations.composite_steps import (
     StepJournal,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person, give_service_a_known_person
 
 from . import _composite_steps_helpers as s
 from . import _composite_wait_audit_helpers as h
@@ -139,8 +140,9 @@ async def _requests() -> list[ApprovalRequest]:
         return list((await s_.execute(stmt)).scalars().all())
 
 
-def _requester(kind: str) -> Operator:
+async def _requester(kind: str) -> Operator:
     if kind == "scheduled":
+        await give_service_a_known_person(h.TENANT_ID, "svc-scheduler")
         return h.operator(sub="svc-scheduler", principal_kind=PrincipalKind.SERVICE)
     return h.operator()
 
@@ -159,7 +161,7 @@ async def test_child_change_before_a_waiting_step_is_sent_once(
         stub_embedding_service, session, s.CHILD_THEN_WAIT_OP_ID, "child_change_then_wait_composite"
     )
 
-    first = await h.run(s.CHILD_THEN_WAIT_OP_ID, _requester(who))
+    first = await h.run(s.CHILD_THEN_WAIT_OP_ID, await _requester(who))
     assert s.sent == [s.CHANGE_CHILD_OP_ID]
 
     second = await _approve_and_resume(first)
@@ -188,7 +190,7 @@ async def test_change_before_a_waiting_credential_step_is_sent_once(
         "change_then_credential_composite",
     )
 
-    first = await h.run(s.STEP_THEN_CREDENTIAL_OP_ID, _requester(who))
+    first = await h.run(s.STEP_THEN_CREDENTIAL_OP_ID, await _requester(who))
     assert s.sent == [s.CHANGE_STEP]
 
     second = await _approve_and_resume(first)
@@ -209,6 +211,7 @@ async def test_change_before_a_waiting_step_is_sent_once_on_the_agents_path(
         "change_then_credential_composite",
     )
     agent = h.operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(h.TENANT_ID, "agent-requester")
     first = await h.run(s.STEP_THEN_CREDENTIAL_OP_ID, agent)
     assert first.status == "awaiting_approval", first.error
     assert s.sent == [s.CHANGE_STEP]

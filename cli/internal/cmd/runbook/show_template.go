@@ -182,22 +182,22 @@ func printTemplateBlock(w io.Writer, r *api.ShowTemplateResponse) error {
 	if r == nil {
 		return nil
 	}
-	fmt.Fprintf(w, "Template: %s@%d\n", r.Slug, r.Version)
-	fmt.Fprintf(w, "Title:       %s\n", r.Title)
+	fmt.Fprintf(w, "Template: %s@%d\n", output.SafeText(r.Slug), r.Version)
+	fmt.Fprintf(w, "Title:       %s\n", output.SafeText(r.Title))
 	fmt.Fprintf(w, "Status:      %s\n", string(r.Status))
 	targetKind := "-"
 	if r.TargetKind != nil && *r.TargetKind != "" {
 		targetKind = *r.TargetKind
 	}
-	fmt.Fprintf(w, "Target kind: %s\n", targetKind)
+	fmt.Fprintf(w, "Target kind: %s\n", output.SafeText(targetKind))
 	fmt.Fprintf(w, "Created by:  %s (%s)\n",
-		r.CreatedBy, r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		output.SafeText(r.CreatedBy), r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "Edited by:   %s (%s)\n",
-		r.EditedBy, r.EditedAt.UTC().Format("2006-01-02T15:04:05Z"))
+		output.SafeText(r.EditedBy), r.EditedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Description:")
 	for _, line := range strings.Split(strings.TrimRight(r.Description, "\n"), "\n") {
-		fmt.Fprintf(w, "  %s\n", line)
+		fmt.Fprintf(w, "  %s\n", output.SafeText(line))
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Steps (%d):\n", len(r.Steps))
@@ -231,7 +231,7 @@ func printStep(w io.Writer, n int, item api.ShowTemplateResponse_Steps_Item) err
 		if err != nil {
 			return fmt.Errorf("step %d: decode manual step: %w", n, err)
 		}
-		fmt.Fprintf(w, "  %d. [manual] %s (id: %s)\n", n, step.Title, step.Id)
+		fmt.Fprintf(w, "  %d. [manual] %s (id: %s)\n", n, output.SafeText(step.Title), output.SafeText(step.Id))
 		printIndentedBody(w, step.Body)
 		printManualVerify(w, step.Verify)
 	case "operation_call":
@@ -240,7 +240,7 @@ func printStep(w io.Writer, n int, item api.ShowTemplateResponse_Steps_Item) err
 			return fmt.Errorf("step %d: decode operation_call step: %w", n, err)
 		}
 		fmt.Fprintf(w, "  %d. [operation_call] %s (id: %s, op_id: %s)\n",
-			n, step.Title, step.Id, step.OpId)
+			n, output.SafeText(step.Title), output.SafeText(step.Id), output.SafeText(step.OpId))
 		printIndentedBody(w, step.Body)
 		printOpCallVerify(w, step.Verify)
 	default:
@@ -257,7 +257,7 @@ func printIndentedBody(w io.Writer, body string) {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
-		fmt.Fprintf(w, "      %s\n", line)
+		fmt.Fprintf(w, "      %s\n", output.SafeText(line))
 	}
 }
 
@@ -273,10 +273,10 @@ func printManualVerify(w io.Writer, v api.ManualStep_Verify) {
 	switch discriminator {
 	case "confirm":
 		c, _ := v.AsConfirmVerify()
-		fmt.Fprintf(w, "      verify: confirm — %s\n", truncate(c.Prompt, 80))
+		fmt.Fprintf(w, "      verify: confirm — %s\n", output.SafeText(truncate(c.Prompt, 80)))
 	case "operation_call":
 		c, _ := v.AsOperationCallVerify()
-		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", c.OpId)
+		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", output.SafeText(c.OpId))
 	default:
 		fmt.Fprintf(w, "      verify: (unknown type %q)\n", discriminator)
 	}
@@ -296,10 +296,10 @@ func printOpCallVerify(w io.Writer, v api.OperationCallStep_Verify) {
 	switch discriminator {
 	case "confirm":
 		c, _ := v.AsConfirmVerify()
-		fmt.Fprintf(w, "      verify: confirm — %s\n", truncate(c.Prompt, 80))
+		fmt.Fprintf(w, "      verify: confirm — %s\n", output.SafeText(truncate(c.Prompt, 80)))
 	case "operation_call":
 		c, _ := v.AsOperationCallVerify()
-		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", c.OpId)
+		fmt.Fprintf(w, "      verify: operation_call op_id=%s\n", output.SafeText(c.OpId))
 	default:
 		fmt.Fprintf(w, "      verify: (unknown type %q)\n", discriminator)
 	}

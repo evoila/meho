@@ -1948,15 +1948,17 @@ type ApprovalRequestView struct {
 	OutcomeCheck *OutcomeCheckView `json:"outcome_check,omitempty"`
 
 	// OutcomeUnknown Why an approved request is on the "outcome unknown" list (#5026).
-	OutcomeUnknown *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
-	ParamsHash     string                 `json:"params_hash"`
-	PreviewHash    *string                `json:"preview_hash"`
-	PrincipalAct   *string                `json:"principal_act"`
-	PrincipalKind  *string                `json:"principal_kind"`
-	PrincipalName  *string                `json:"principal_name"`
-	PrincipalSub   string                 `json:"principal_sub"`
-	ProposedEffect map[string]interface{} `json:"proposed_effect"`
-	ReleaseId      *string                `json:"release_id"`
+	OutcomeUnknown    *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
+	ParamsHash        string                 `json:"params_hash"`
+	PeopleBehind      *[]PersonBehindView    `json:"people_behind"`
+	PeopleBehindKnown *bool                  `json:"people_behind_known"`
+	PreviewHash       *string                `json:"preview_hash"`
+	PrincipalAct      *string                `json:"principal_act"`
+	PrincipalKind     *string                `json:"principal_kind"`
+	PrincipalName     *string                `json:"principal_name"`
+	PrincipalSub      string                 `json:"principal_sub"`
+	ProposedEffect    map[string]interface{} `json:"proposed_effect"`
+	ReleaseId         *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -8993,6 +8995,14 @@ type PairingHealth struct {
 // require a code + migration change, which is the cheapest way to
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
+
+// PersonBehindView One person behind the agent, service or runner login that asked.
+type PersonBehindView struct {
+	Name    *string `json:"name"`
+	Sub     string  `json:"sub"`
+	Why     string  `json:"why"`
+	WhyText string  `json:"why_text"`
+}
 
 // PolicyExplainBody The question of “POST /api/v1/policy/explain“.
 //

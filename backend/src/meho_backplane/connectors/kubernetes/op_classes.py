@@ -7,7 +7,18 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_no_secret_value, declare_op_classes
+from collections.abc import Mapping
+from typing import Any, Final
+
+import yaml
+
+from meho_backplane.op_classes import (
+    declare_credential_capable,
+    declare_credential_check,
+    declare_hidden_stored_param,
+    declare_no_secret_value,
+    declare_op_classes,
+)
 
 declare_op_classes(
     credential_read=(
@@ -38,3 +49,96 @@ declare_op_classes(
 # The compare read returns only "same" or "different", never a value. So it
 # runs without waiting for approval (meho_backplane.operations.credential_read).
 declare_no_secret_value(("k8s.secret.compare_to_ref",))
+
+# A command in a container can read or write any credential the container
+# holds. So every call waits for a person, and no standing grant, agent
+# grant or run approval covers it.
+declare_credential_capable(("k8s.exec",))
+
+#: Kinds whose objects hold a credential, in lower case. A ServiceAccount
+#: token is a Secret too.
+CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
+
+
+#: The most objects the check reads in one manifest: each document and each
+#: entry of an ``items`` array counts. A manifest with more counts as one MEHO
+#: cannot read. YAML aliases let a small text name the same object or the same
+#: ``items`` array many times; the check reads each of them once.
+MAX_CHECKED_OBJECTS: Final[int] = 10_000
+
+
+def _is_list_kind(kind: str) -> bool:
+    """True for a Kubernetes list object: ``List`` or ``<Kind>List``."""
+    return kind.endswith("List")
+
+
+def _items_to_read(doc: Any) -> list[Any] | None:
+    """The ``items`` the check reads next, or ``None`` when *doc* counts.
+
+    *doc* counts when it is a credential kind or cannot be read. Only a list
+    object (``kind: List`` or ``<Kind>List``) has its ``items`` read. The
+    ``items`` field of any other kind is part of its spec.
+    """
+    if not isinstance(doc, Mapping):
+        return None
+    kind = doc.get("kind")
+    if not isinstance(kind, str) or not kind or kind.lower() in CREDENTIAL_KINDS:
+        return None
+    items = doc.get("items") if _is_list_kind(kind) else []
+    if items is None:
+        return []
+    return items if isinstance(items, list) else None
+
+
+def _holds_credential(docs: list[Any]) -> bool:
+    """True when a doc is a credential kind, a list with one, or cannot be read.
+
+    Each object and each ``items`` array is read once. Each document and each
+    ``items`` entry counts toward :data:`MAX_CHECKED_OBJECTS`.
+    """
+    budget = len(docs)
+    stack = list(docs)
+    seen: set[int] = set()
+    while stack and budget <= MAX_CHECKED_OBJECTS:
+        doc = stack.pop()
+        if id(doc) in seen:
+            continue
+        seen.add(id(doc))
+        items = _items_to_read(doc)
+        if items is None:
+            return True
+        if not items or id(items) in seen:
+            continue
+        seen.add(id(items))
+        budget += len(items)
+        stack.extend(items)
+    return budget > MAX_CHECKED_OBJECTS
+
+
+def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
+    """True when the ``k8s.apply`` manifest in *params* holds a credential kind.
+
+    Any document of a multi-document manifest counts, and any item of a
+    list object. A manifest MEHO cannot read counts too: it is not text, it is not
+    YAML or JSON, a document has no kind, or it has more than
+    :data:`MAX_CHECKED_OBJECTS` objects.
+    """
+    manifest = params.get("manifest")
+    if not isinstance(manifest, str):
+        return True
+    try:
+        docs = [doc for doc in yaml.safe_load_all(manifest) if doc is not None]
+    except (yaml.YAMLError, RecursionError):
+        return True
+    if not docs:
+        return True
+    return _holds_credential(docs)
+
+
+# A k8s.apply of a Secret writes a credential. Such a call waits for a
+# person on every call; an apply of other kinds keeps the rules of k8s.apply.
+declare_credential_check("k8s.apply", manifest_holds_credential)
+
+# The manifest of such an apply holds the Secret's values. A stored request
+# keeps it only until the run starts or the request ends without a run.
+declare_hidden_stored_param("k8s.apply", "manifest", manifest_holds_credential)

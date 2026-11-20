@@ -215,7 +215,7 @@ func printListTable(w io.Writer, r *api.KbListResponse) {
 		fmt.Fprintf(w, "%-40s %-32s %s\n",
 			truncate(e.Slug, 40),
 			e.UpdatedAt,
-			truncate(e.Preview, 80),
+			output.SafeText(truncate(e.Preview, 80)),
 		)
 	}
 }

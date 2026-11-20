@@ -402,3 +402,73 @@ async def test_the_sink_does_not_ask_keycloak_before_approval_in_another_realm(
         calls = len(mock.calls)
     assert result.status == "awaiting_approval", result
     assert calls == 0
+
+
+# ---------------------------------------------------------------------------
+# A login MEHO itself uses, in MEHO's own login realm, is refused
+# ---------------------------------------------------------------------------
+
+#: MEHO's own login realm (the realm in ``KEYCLOAK_ISSUER_URL``).
+_MEHO_REALM = "meho"
+_MEHO_ADMIN_CLIENT = "meho-backplane-admin"
+_MEHO_LOGIN = f"service-account-{_MEHO_ADMIN_CLIENT}"
+_MEHO_LOGIN_UUID = "66666666-6666-6666-6666-666666666666"
+
+
+def _mount_meho_realm(mock: respx.MockRouter) -> respx.Route:
+    """Mount MEHO's login realm with MEHO's own service login; return the reset route."""
+    _mount_admin_token(mock)
+    user = {"id": _MEHO_LOGIN_UUID, "username": _MEHO_LOGIN, "enabled": True}
+
+    def _find(request: Any) -> Any:
+        name = request.url.params.get("username", "")
+        return httpx.Response(200, json=[user] if name == _MEHO_LOGIN else [])
+
+    mock.get(f"/admin/realms/{_MEHO_REALM}/users").mock(side_effect=_find)
+    mock.get(f"/admin/realms/{_MEHO_REALM}/users/{_MEHO_LOGIN_UUID}").respond(200, json=user)
+    return mock.put(url__regex=rf".*/admin/realms/{_MEHO_REALM}/users/.*/reset-password").respond(
+        204
+    )
+
+
+def _move_to_meho_login() -> dict[str, Any]:
+    return {
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+        "to": f"keycloak:{_TARGET_NAME}/{_MEHO_REALM}/{_MEHO_LOGIN}#password",
+        "reason": "rotate a password",
+    }
+
+
+async def test_the_sink_refuses_a_meho_service_login_before_approval(
+    monkeypatch: pytest.MonkeyPatch, keycloak_sink_env: KeycloakConnector
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", _MEHO_ADMIN_CLIENT)
+    get_settings.cache_clear()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put_route = _mount_meho_realm(mock)
+        refused = await dispatch(
+            operator=_OPERATOR,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params=_move_to_meho_login(),
+        )
+    assert (refused.extras or {}).get("error_code") == "refused_before_approval", refused
+    assert "a login that MEHO itself uses" in str(refused.error)
+    assert _MEHO_LOGIN not in str(refused.error)
+    assert not put_route.called
+
+
+async def test_the_sink_refuses_a_meho_service_login_when_the_move_runs(
+    monkeypatch: pytest.MonkeyPatch, keycloak_sink_env: KeycloakConnector
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", _MEHO_ADMIN_CLIENT)
+    get_settings.cache_clear()
+    install_fake_client(monkeypatch, secret={"password": _SENTINEL})
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put_route = _mount_meho_realm(mock)
+        result = await _dispatch_move(_move_to_meho_login())
+    assert result.status != "ok", result
+    assert (result.extras or {}).get("exception_class") == "MehoAccessRefusedError", result
+    assert not put_route.called
+    assert _SENTINEL not in result.model_dump_json()

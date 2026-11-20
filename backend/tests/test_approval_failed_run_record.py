@@ -83,12 +83,13 @@ def _rest_may_approve_the_write(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ``keycloak.user.create`` is a change of rights, which an admin approves
     only in the web console (``test_approval_rights_change.py`` checks that).
-    Here it is taken off the change-of-rights list, so the REST ``/decide``
-    route can approve it and run it.
+    Here it is taken off the change-of-rights list and the list of writes
+    with login facts, so the REST ``/decide`` route can approve it and run it.
     """
     monkeypatch.setattr(
         grant_approval, "_RIGHTS_CHANGE_OPS", grant_approval._RIGHTS_CHANGE_OPS - {_OP_ID}
     )
+    monkeypatch.delitem(grant_approval._GRANT_OPS, _OP_ID, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -172,6 +173,7 @@ def _approve(request_id: uuid.UUID, *, users_status: int) -> tuple[dict[str, Any
             fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.TENANT_ADMIN.value,
+            platform_admin=True,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:
@@ -337,6 +339,7 @@ def _approve_in_background(request_id: uuid.UUID, *, users_status: int) -> dict[
             fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.TENANT_ADMIN.value,
+            platform_admin=True,
             tenant_id=str(_TENANT_ID),
         )
         headers = {"Authorization": f"Bearer {token}"}

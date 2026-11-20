@@ -198,6 +198,9 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "Part of:      %s\n", output.SafeText(*rc.ParentCompositeOpId))
 	}
 	fmt.Fprintf(w, "Principal:    %s\n", requesterLabel(d.PrincipalSub, d.PrincipalName, d.PrincipalKind))
+	if line := peopleBehindLine(d.PeopleBehind, d.PeopleBehindKnown); line != "" {
+		fmt.Fprintf(w, "Behind it:    %s\n", output.SafeText(line))
+	}
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", output.SafeText(*d.PrincipalAct))
 	}

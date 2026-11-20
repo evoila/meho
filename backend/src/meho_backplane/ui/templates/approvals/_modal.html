@@ -405,6 +405,14 @@
           <dd class="text-right font-semibold">An admin approves it in the web console</dd>
         </div>
       {% endif %}
+      {#- A change in MEHO's own login realm that can give platform admin
+          rights: only a platform admin approves it, and the card says why. -#}
+      {% if request.get("platform_admin_reason") %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-platform-admin>
+          <dt class="shrink-0 text-base-content/55">Platform admin must approve</dt>
+          <dd class="text-right [overflow-wrap:anywhere]">{{ request.get("platform_admin_reason") }}</dd>
+        </div>
+      {% endif %}
       {#- Approver routing: the login groups the request went to. Shown only
           when routing stored them; otherwise today's rule applies. -#}
       {% if request.who_can_approve %}
@@ -462,6 +470,23 @@
         <dt class="shrink-0 text-base-content/55">Requested by</dt>
         <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
+      {#- The people behind an agent, service or runner login: they count as
+          the requester, so the approver sees who is really asking. -#}
+      {% if request.people_behind is not none %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-people-behind>
+          <dt class="shrink-0 text-base-content/55">Behind it</dt>
+          <dd class="flex flex-col items-end gap-1 text-right">
+            {% for entry in request.people_behind %}
+              <span class="flex flex-wrap items-baseline justify-end gap-1">
+                <span class="text-base-content/55">{{ entry.why_text }}</span>
+                {{ subject(entry.person) }}
+              </span>
+            {% else %}
+              <span data-approval-people-behind-unknown>Set up by: not known. Only an Admin may approve.</span>
+            {% endfor %}
+          </dd>
+        </div>
+      {% endif %}
       {#- Run context (#3353): the external change-ticket ref the automation
           stamps and the originating run id, so the reviewer can trace the
           request to the work that issued it. -#}
@@ -582,6 +607,11 @@
             </div>
           {% endif %}
         </dl>
+      {% endif %}
+
+      {#- Why a call that reads, writes or makes a credential waits. -#}
+      {% if effect.get("credential_wait") %}
+        <p class="mt-2 text-xs" data-testid="approval-credential-wait">{{ effect.get("credential_wait") }}</p>
       {% endif %}
 
       {% if effect.get("write_capability_warning") %}

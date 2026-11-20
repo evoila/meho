@@ -24,6 +24,32 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
+Two of these calls always wait for a person, and no standing grant, no
+agent grant and no run approval covers them
+([service-principal-grants.md](service-principal-grants.md#credential-calls)):
+
+- every `k8s.exec` call: a command in a container can read or write any
+  credential the container holds. Grant create, agent grant create and
+  run approval create refuse `k8s.exec`.
+- a `k8s.apply` whose manifest holds a `kind: Secret` (also a
+  ServiceAccount token Secret), in any document or any item of a list
+  object (`kind: List` or `<Kind>List`), or a manifest MEHO cannot read.
+  MEHO reads the manifest when the call is made. It reads each object
+  and each `items` array once, also when YAML aliases name them many
+  times. It reads at most 10,000 objects (each document and each entry
+  of an `items` array counts); a larger manifest counts as one MEHO
+  cannot read. The `items` field of any other kind (for example a
+  custom resource) is not read. An apply of other kinds keeps the rules
+  of `k8s.apply`.
+
+Both are declared in `op_classes.py` of the connector. The approval card
+says in one line why the call waits; only a person reads that line.
+The stored request of such a `k8s.apply` keeps its manifest only until
+the run starts, or until the request is rejected, withdrawn or expires.
+Then MEHO replaces the manifest with the same marker it writes for a
+secret-named value, so no `data` or `stringData` value of the Secret
+stays in it. A new run of a failed apply needs the params sent again.
+
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Key types

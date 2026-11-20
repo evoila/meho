@@ -50,6 +50,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations.approval_queue import (
+    ApprovalRoleFloorError,
     RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
@@ -535,15 +536,19 @@ async def test_a_card_without_the_target_a_connection_field_or_secret_ref_refuse
     assert fake.secrets.kv.v2.read_calls == []  # the sink check runs before the source read
 
 
-async def test_a_name_with_no_target_at_park_refuses_the_run_once_it_finds_one(
+async def test_a_name_with_no_target_at_park_cannot_be_approved_once_it_finds_one(
     monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
 ) -> None:
+    """MEHO cannot read the target's admin realm, so it cannot name the login either."""
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
     row = await _ask(
         {"from": _VAULT_PLACE, "to": f"keycloak:new-idp/{_REALM}/{_USERNAME}#password"}
     )
     await _update("kc-b", aliases=["new-idp"])
 
-    result = await _approve_and_run(row.id)
+    with pytest.raises(ApprovalRoleFloorError, match="could not establish which login"):
+        await _approve(row.id, _OTHER_ADMIN)
 
-    _assert_refused(result, "cannot tell what was approved", fake, keycloak)
+    assert await _status(row.id) == ApprovalRequestStatus.PENDING.value
+    assert keycloak.hosts_called() == set()
+    assert fake.secrets.kv.v2.put_calls == []

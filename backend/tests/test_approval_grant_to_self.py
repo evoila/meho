@@ -29,6 +29,7 @@ from sqlalchemy import select
 import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import REASON_KEYS
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
@@ -105,6 +106,7 @@ def _grant(
                 "group_id": group_id,
                 "login_realm": login_realm,
                 "platform_admin": platform_admin,
+                "harmless_keys_only": False,
                 **more,
             }
         },
@@ -744,7 +746,10 @@ async def test_the_connector_resolves_a_user_name_to_its_id(
         "user_id": _USER,
         "group_id": _GROUP,
         "login_realm": True,
-        "platform_admin": False,
+        # The group gives no platform admin rights; the harmless keys rule asks for one.
+        "platform_admin": True,
+        "platform_admin_reason": REASON_KEYS,
+        "harmless_keys_only": False,
     }
 
 
@@ -795,7 +800,9 @@ async def test_a_group_id_wins_over_a_group_name_as_in_the_handler(
     )
 
     assert (by_id["group_id"], by_id["platform_admin"]) == (_PLATFORM_GROUP, True)
-    assert (reverse["group_id"], reverse["platform_admin"]) == (_GROUP, False)
+    assert by_id["platform_admin_reason"] != REASON_KEYS
+    assert reverse["group_id"] == _GROUP
+    assert reverse["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -858,7 +865,9 @@ async def test_the_connector_marks_the_platform_admin_group_and_role(
 
     assert group["platform_admin"] is True
     assert role["platform_admin"] is True
-    assert plain["platform_admin"] is False
+    assert group["platform_admin_reason"] != REASON_KEYS
+    assert role["platform_admin_reason"] != REASON_KEYS
+    assert plain["platform_admin_reason"] == REASON_KEYS
     assert "members" not in role
 
 

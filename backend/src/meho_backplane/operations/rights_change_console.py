@@ -19,7 +19,7 @@ The call still waits when:
 * it has the "always wait" mark (an override or a classification rule):
   such a call always waits for a person;
 * it reads, writes or makes a credential
-  (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
+  (:func:`~meho_backplane.operations.service_grants.descriptor_credential_waits`):
   such a call always waits for a person;
 * its params carry a credential, such as a client secret or a password
   (:func:`params_write_credential`, with a check that the connector
@@ -38,7 +38,9 @@ gives rights to. Then it runs the checks of who may make the change
 (:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`,
 the same rule as the approve): in MEHO's own login realm the admin must
 be a tenant admin, and a platform admin when the change can give platform
-admin rights. A refused call does not run.
+admin rights. When the admin lacks that role, the call waits, and a
+second person with that role approves it. A call that the op's own check
+refuses does not run.
 
 The audit row of such a run carries ``rights_change_run`` with the value
 :data:`CONSOLE_RUN_AUDIT_VALUE`: a change of rights that an admin ran at
@@ -122,13 +124,13 @@ def runs_at_once_in_console(
     Reads no I/O. The caller still runs :func:`console_check` before the
     call runs.
     """
-    from meho_backplane.operations.service_grants import credential_call_waits
+    from meho_backplane.operations.service_grants import descriptor_credential_waits
 
     return (
         is_rights_change_op(descriptor.op_id)
         and descriptor.safety_level != "destructive"
         and not getattr(descriptor, "policy_always_wait", False)
-        and not credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None))
+        and not descriptor_credential_waits(descriptor)
         and not params_write_credential(descriptor.op_id, params)
         and operator.web_session
         and is_human_principal(operator)
@@ -232,11 +234,12 @@ async def console_check(
       live system, or the card does not say who the change gives rights
       to. Only an operation registered with
       :func:`register_no_login_realm_op` needs no such facts;
-    * the call is refused when the admin may not make the change
+    * the call waits when the admin may not make the change alone
       (:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`):
       in MEHO's own login realm the admin must be a tenant admin, and a
       platform admin when the change can give platform admin rights, or
-      when MEHO could not read whether it can.
+      when MEHO could not read whether it can. The approve then needs a
+      second person with that role.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._park_check import park_check_refusal
@@ -281,6 +284,6 @@ async def console_check(
         return ConsoleCheck(waits=True)
     refusal = who_may_make_refusal(operator, request)
     if refusal is not None:
-        _log.info("rights_change_console_refused", op_id=op_id, operator_sub=operator.sub)
-        return ConsoleCheck(refusal=refusal)
+        _log.info("rights_change_console_waits_for_role", op_id=op_id, operator_sub=operator.sub)
+        return ConsoleCheck(waits=True)
     return ConsoleCheck(sign_in=sign_in)

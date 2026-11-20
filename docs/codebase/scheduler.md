@@ -505,6 +505,17 @@ resolution lowers `SCHEDULER_TICK_INTERVAL_SECONDS` per deployment (floor
 1 s, e.g. via the chart's `extraEnv`); worst-case latency drops to the chosen
 interval at the cost of one extra scan query per elapsed tick.
 
+## A scheduled run's requests and the people behind them
+
+A scheduled or event run asks as the agent (`principal_sub=<agent-sub>`).
+The person who made any schedule of the agent's definitions, active or not,
+counts as a person behind its requests, and so does the person who made an
+event source when one of those schedules waits for events
+(`scheduled_trigger.created_by_sub`, `event_source.created_by_sub`). The run
+does not store which schedule started it, so MEHO counts them all. A
+schedule is a way to run changes on a timer; it is never a way to approve
+your own change. See [The people behind a request](approvals.md#the-people-behind-a-request).
+
 ## Known issues / limitations
 
 - **One-off resolution is "to the second"** — `next_fire_at <= now`

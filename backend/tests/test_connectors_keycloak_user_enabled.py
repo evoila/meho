@@ -53,6 +53,11 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-enable-e2e"
@@ -330,7 +335,9 @@ async def test_a_vendor_server_error_is_an_error_not_success(kc: KeycloakConnect
 
 async def test_disable_waits_for_approval_then_runs(kc: KeycloakConnector) -> None:
     requester = _operator("kc-enable-requester")
-    approver = _operator("kc-enable-approver", TenantRole.TENANT_ADMIN)
+    approver = _operator("kc-enable-approver", TenantRole.TENANT_ADMIN).model_copy(
+        update={"platform_admin": True}
+    )
     args = {
         "connector_id": _CONNECTOR_ID,
         "op_id": _DISABLE,
@@ -348,7 +355,12 @@ async def test_disable_waits_for_approval_then_runs(kc: KeycloakConnector) -> No
         request_id = uuid.UUID(call["extras"]["approval_request_id"])
 
         async with get_sessionmaker()() as session:
-            approved = await approve_request(session, request_id, operator=approver, params=None)
+            approved = await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         assert approved.status == "approved"
 
@@ -356,7 +368,7 @@ async def test_disable_waits_for_approval_then_runs(kc: KeycloakConnector) -> No
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "ok", resumed
     assert put.call_count == 1

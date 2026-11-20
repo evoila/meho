@@ -13,12 +13,22 @@ For these, MEHO checks when a person approves:
   could not, the request cannot be approved: MEHO does not know whose
   rights the change would raise. The requester sends a new request.
 * Only an admin approves it (see "The rights-change mark" below). The
-  admin may approve a change of their own login or of a group they are in,
-  also a change they asked for themselves.
+  admin may approve a change of their own login or of a group they are
+  in, but never a ``secret.move`` that sets the password of their own
+  login (:data:`FOR_LOGIN`). Outside MEHO's own login realm, the admin may
+  also approve a change they asked for themselves.
 * In MEHO's own login realm, the change needs a tenant admin. It needs a
   platform admin when the change can give platform admin rights: the
   connector decides this from what the group or role gives
   (``platform_admin``), not from its name. No self-approval rule covers it.
+  The refusal and the approval card say why (:func:`platform_admin_reason`).
+  There the person who asked never approves the change. A person behind
+  the agent, service or runner login that asked may approve it.
+* An operation registered with ``applies`` is a change of rights here only
+  when its params pass that check (``secret.move`` with a Keycloak side).
+* An operation registered with ``per_call=False`` is checked here too, but
+  it is not marked for per-call approval, and outside the login realm it
+  is not a change of rights.
 
 The connector describes each parked request in
 ``proposed_effect["preview"]["grant"]``: ``user_id`` (the login the change
@@ -42,6 +52,10 @@ they also bind the run:
 * A change that acts on a list of objects shown on the card (for example
   the credentials a credential delete removes, registered with
   ``bound_ids``) does not run when the live card lists other ids.
+* For an operation registered with :func:`register_harmless_keys_rule`,
+  a request whose approved card has no :data:`HARMLESS_KEYS_ONLY` fact
+  does not run (:data:`GRANT_REASON_OLD_CARD`): the card was made before
+  MEHO decided its approver with that rule. This holds in every realm.
 
 The decision audit row names the login the change is for and says whether
 it is the approver (:func:`grant_audit_fields`).
@@ -95,9 +109,13 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
+    "FOR_LOGIN",
     "GRANT_REASON_CHANGED",
+    "GRANT_REASON_OLD_CARD",
     "GRANT_REASON_STRICTER",
     "GRANT_REASON_UNREADABLE",
+    "HARMLESS_KEYS_ONLY",
+    "PLATFORM_ADMIN_REASON_DEFAULT",
     "RIGHTS_CHANGE_CONSOLE_ONLY",
     "RIGHTS_CHANGE_REFUSAL",
     "GrantFacts",
@@ -108,7 +126,9 @@ __all__ = [
     "grant_facts",
     "is_rights_change",
     "is_rights_change_op",
+    "platform_admin_reason",
     "register_grant_op",
+    "register_harmless_keys_rule",
     "register_rights_change_check",
     "register_rights_change_op",
     "who_may_make_refusal",
@@ -145,6 +165,23 @@ GRANT_REASON_STRICTER: Final[str] = (
 )
 
 
+#: Why a run was refused: the approved card was made before the harmless keys rule.
+GRANT_REASON_OLD_CARD: Final[str] = (
+    "This request was approved before MEHO changed who must approve this Keycloak "
+    "write. The operation did not run. Send a new request."
+)
+
+#: The fact on the ``grant`` block that the call sets only harmless keys
+#: (:func:`register_harmless_keys_rule`).
+HARMLESS_KEYS_ONLY: Final[str] = "harmless_keys_only"
+
+#: The fact on the ``grant`` block that this request acts on the login in
+#: ``user_id``, for an operation whose params name no login id (a
+#: ``secret.move`` that sets a user's password). Then that login never
+#: approves the request, and an unknown login cannot be approved.
+FOR_LOGIN: Final[str] = "for_login"
+
+
 @dataclass(frozen=True)
 class _GrantOp:
     #: The params that can hold the id of the login the change is for.
@@ -157,6 +194,11 @@ class _GrantOp:
     #: The refusal when the approved card has no list under the ``bound_ids``
     #: key: the request was made before MEHO put that list on the card.
     bound_ids_missing: str | None = None
+    #: A check of the params (no I/O): the request is a change of rights only
+    #: when it passes. ``None``: every request of the op is one.
+    applies: Callable[[dict[str, Any]], bool] | None = None
+    #: A person approves each call (:func:`declare_per_call_approval`).
+    per_call: bool = True
 
 
 #: op_id -> where its params carry the login and the group.
@@ -170,6 +212,8 @@ def register_grant_op(
     group_id_params: tuple[str, ...] = (),
     bound_ids: tuple[str, str] | None = None,
     bound_ids_missing: str | None = None,
+    applies: Callable[[dict[str, Any]], bool] | None = None,
+    per_call: bool = True,
 ) -> None:
     """Record that *op_id* changes the rights of a login or a group.
 
@@ -179,11 +223,29 @@ def register_grant_op(
     of objects shown on the card: the run is refused with the refusal when
     the live card lists other ids than the approved card.
     *bound_ids_missing* is the refusal when the approved card has no list
-    under that key at all: the request is older than the list. A person
-    approves each call of *op_id* (:func:`declare_per_call_approval`).
+    under that key at all: the request is older than the list. *applies*
+    checks the params of a request (no I/O): only a request that passes it
+    is a change of rights here. A person approves each call of *op_id*
+    (:func:`declare_per_call_approval`), unless *per_call* is ``False``.
     """
-    _GRANT_OPS[op_id] = _GrantOp(user_id_params, group_id_params, bound_ids, bound_ids_missing)
-    declare_per_call_approval((op_id,))
+    _GRANT_OPS[op_id] = _GrantOp(
+        user_id_params, group_id_params, bound_ids, bound_ids_missing, applies, per_call
+    )
+    if per_call:
+        declare_per_call_approval((op_id,))
+
+
+#: Operations whose approval card must carry :data:`HARMLESS_KEYS_ONLY`.
+_HARMLESS_KEYS_RULE_OPS: set[str] = set()
+
+
+def register_harmless_keys_rule(op_id: str) -> None:
+    """Record that the ``grant`` block of *op_id* carries :data:`HARMLESS_KEYS_ONLY`.
+
+    The connector sets it on every card it builds. A request whose approved
+    card does not have it does not run (:data:`GRANT_REASON_OLD_CARD`).
+    """
+    _HARMLESS_KEYS_RULE_OPS.add(op_id)
 
 
 #: Operations that are always a change of rights, but not of one login or
@@ -254,9 +316,11 @@ def grant_facts(request: ApprovalRequest) -> GrantFacts | None:
     if op is None:
         return None
     params = request.params if isinstance(request.params, dict) else {}
+    if op.applies is not None and not op.applies(params):
+        return None
     stamp = _stamp(request)
     return GrantFacts(
-        for_login=bool(op.user_id_params),
+        for_login=bool(op.user_id_params) or stamp.get(FOR_LOGIN) is True,
         for_group=bool(op.group_id_params),
         user_id=_first_text(params, op.user_id_params) or _text(stamp.get("user_id")),
         group_id=_first_text(params, op.group_id_params) or _text(stamp.get("group_id")),
@@ -270,9 +334,13 @@ def is_rights_change_op(op_id: str) -> bool:
 
     For a place that knows the operation but not the parked request (a run
     approval list). The login realm is not known there, so every
-    registered operation counts.
+    registered operation counts. An operation registered with a params
+    check (``applies``) does not: only some of its requests are changes of
+    rights. Nor does one registered with ``per_call=False``: it is a change
+    of rights only in the login realm.
     """
-    return op_id in _GRANT_OPS or op_id in _RIGHTS_CHANGE_OPS
+    op = _GRANT_OPS.get(op_id)
+    return (op is not None and op.applies is None and op.per_call) or op_id in _RIGHTS_CHANGE_OPS
 
 
 def is_rights_change(request: ApprovalRequest) -> bool:
@@ -298,7 +366,9 @@ def check_rights_change_approval(operator: Operator, request: ApprovalRequest) -
 
     Only an admin approves it, and only with a click in the web console
     (:attr:`~meho_backplane.auth.operator.Operator.web_session`). The admin
-    may be the person who asked.
+    may be the person who asked, or a person behind the agent, service or
+    runner login that asked (in MEHO's own login realm only the latter:
+    :func:`check_grant_approval`).
     """
     if not is_rights_change(request):
         return
@@ -337,7 +407,11 @@ def check_grant_approval(operator: Operator, request: ApprovalRequest) -> None:
 def _check_who_the_change_is_for(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
-    """The login and the group the change is for are known."""
+    """The login and the group the change is for are known.
+
+    A request that sets the password of a login (:data:`FOR_LOGIN`) is
+    never approved by that login.
+    """
     if facts.for_login and facts.user_id is None:
         raise _refusal(
             request,
@@ -351,6 +425,13 @@ def _check_who_the_change_is_for(
             operator,
             "MEHO could not establish which group this change is for when the request "
             "was made. It cannot be approved. Send a new request",
+        )
+    if _stamp(request).get(FOR_LOGIN) is True and _same_login(facts.user_id, operator.sub):
+        raise _refusal(
+            request,
+            operator,
+            "this change sets the password of your own login. A second person must "
+            "approve it, and a second login of the same person does not count",
         )
 
 
@@ -373,14 +454,59 @@ def _login_realm_need(operator: Operator, facts: GrantFacts) -> tuple[str, str] 
     return None
 
 
+#: Why a platform admin must approve, when the card does not say it.
+PLATFORM_ADMIN_REASON_DEFAULT: Final[str] = (
+    "It can give platform admin rights in MEHO's own login realm, or MEHO could not "
+    "read whether it does"
+)
+
+
+def platform_admin_reason(request: ApprovalRequest) -> str | None:
+    """Why only a platform admin may approve *request*; ``None`` when a tenant admin may.
+
+    The text comes from the approval card (``platform_admin_reason`` in the
+    ``grant`` block), or is :data:`PLATFORM_ADMIN_REASON_DEFAULT` when the
+    card does not say it.
+    """
+    facts = grant_facts(request)
+    if facts is None or not facts.login_realm or not facts.platform_admin:
+        return None
+    return _text(_stamp(request).get("platform_admin_reason")) or PLATFORM_ADMIN_REASON_DEFAULT
+
+
 def _check_login_realm_approver(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
-    """In the login realm: a tenant admin; a platform admin when it gives platform admin."""
-    need = _login_realm_need(operator, facts)
-    if need is not None:
-        change, role = need
-        raise _refusal(request, operator, f"{change}. Only {role} may approve it")
+    """In the login realm: a tenant admin; a platform admin when it gives platform admin.
+
+    The approver is never the login that asked. A person behind the agent,
+    service or runner login that asked may approve it.
+    """
+    if facts.platform_admin:
+        if not operator.platform_admin:
+            why = platform_admin_reason(request) or PLATFORM_ADMIN_REASON_DEFAULT
+            raise _refusal(
+                request,
+                operator,
+                "it changes who has rights in MEHO's own login realm. "
+                "A second person who is a platform admin must approve it. "
+                f"Why: {why.rstrip('.')}",
+            )
+    elif operator.tenant_role != TenantRole.TENANT_ADMIN:
+        raise _refusal(
+            request,
+            operator,
+            "it changes who has rights in MEHO's own login realm. "
+            "A second person who is a tenant admin must approve it",
+        )
+    if _same_login(request.principal_sub, operator.sub):
+        role = "a platform admin" if facts.platform_admin else "a tenant admin"
+        raise _refusal(
+            request,
+            operator,
+            "it changes who has rights in MEHO's own login realm, and you asked for it. "
+            f"A second person who is {role} must approve it",
+        )
 
 
 def who_may_make_refusal(operator: Operator, request: ApprovalRequest) -> str | None:
@@ -442,7 +568,9 @@ async def grant_changed_since_request(
     and compares the login and the group it names with the ones the
     approver saw. Returns :data:`GRANT_REASON_UNREADABLE` when the card
     does not build, names no login or group, or cannot say who is in the
-    group, :data:`GRANT_REASON_CHANGED` when a name now names another id,
+    group, :data:`GRANT_REASON_OLD_CARD` when the approved card has no
+    :data:`HARMLESS_KEYS_ONLY` fact that its operation needs,
+    :data:`GRANT_REASON_CHANGED` when a name now names another id,
     :data:`GRANT_REASON_STRICTER` when the change now needs a stricter
     approval, and ``None`` for a request that
     is not a change of rights or for which all of this still holds.
@@ -450,6 +578,14 @@ async def grant_changed_since_request(
     facts = grant_facts(request)
     if facts is None:
         return None
+    log_fields = {
+        "approval_request_id": str(request.id),
+        "op_id": request.op_id,
+        "connector_id": request.connector_id,
+    }
+    if request.op_id in _HARMLESS_KEYS_RULE_OPS and HARMLESS_KEYS_ONLY not in _stamp(request):
+        _log.warning("approval_resume_grant_old_card", **log_fields)
+        return GRANT_REASON_OLD_CARD
     from meho_backplane.operations.approval_object_check import live_card
 
     card = await live_card(
@@ -461,11 +597,6 @@ async def grant_changed_since_request(
     )
     preview = card.get("preview") if isinstance(card, dict) else None
     live = preview.get("grant") if isinstance(preview, dict) else None
-    log_fields = {
-        "approval_request_id": str(request.id),
-        "op_id": request.op_id,
-        "connector_id": request.connector_id,
-    }
     if not isinstance(live, dict):
         _log.warning("approval_resume_grant_unreadable", **log_fields)
         return GRANT_REASON_UNREADABLE

@@ -518,7 +518,7 @@ async def test_change_waits_for_approval_then_runs_and_audit_names_both(
 ) -> None:
     requester = _operator("kc-mapper-requester")
     approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"web_session": True}
+        update={"platform_admin": True, "web_session": True}
     )
     args = {
         "connector_id": _CONNECTOR_ID,
@@ -584,7 +584,7 @@ async def _card(request_id: uuid.UUID) -> dict[str, Any]:
 
 async def _approve_and_resume(request_id: uuid.UUID) -> Any:
     approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"web_session": True}
+        update={"platform_admin": True, "web_session": True}
     )
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
@@ -683,25 +683,45 @@ async def test_card_shows_the_ids_and_the_stored_names(
     assert not put.called
 
 
+@pytest.fixture
+def _outside_login_realm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The managed realm is not one of MEHO's own login.
+
+    In the login realm MEHO reads the mapper by the names of the request
+    again right before the run, to check for the platform admin claim; a
+    mapper it cannot read refuses the run there. These tests check how the
+    handler itself binds the run to the card.
+    """
+
+    async def _not_login_realm(_ctx: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.ops_write_grant.is_login_realm", _not_login_realm
+    )
+
+
+@pytest.mark.usefixtures("_outside_login_realm")
 async def test_approved_run_acts_on_the_mapper_id_on_the_card(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount_all(mock)
         call = await _park(
             {"scope_name": _SCOPE_NAME, "mapper_name": _MAPPER_NAME, "representation": _CHANGE}
         )
-        # While the request waits, the lookups would find other objects.
-        scopes = mock.get(f"/admin/realms/{_REALM}/client-scopes").respond(200, json=[])
-        mappers = mock.get(_MAPPERS_PATH).respond(200, json=[])
+        # While the request waits, the lookups would find other objects. The
+        # check before the run builds the card again (it looks the names up);
+        # the run itself acts on the ids on the card.
+        mock.get(f"/admin/realms/{_REALM}/client-scopes").respond(200, json=[])
+        mock.get(_MAPPERS_PATH).respond(200, json=[])
         mock.reset()  # count only the calls of the approved run
         resumed = await _approve_and_resume(uuid.UUID(call["extras"]["approval_request_id"]))
     assert resumed.status == "ok", resumed
-    assert not scopes.called
-    assert not mappers.called
     assert put.call_count == 1
     assert put.calls.last.request.url.path == _MAPPER_PATH
     assert resumed.result["mapper_name"] == _MAPPER_NAME
 
 
+@pytest.mark.usefixtures("_outside_login_realm")
 @pytest.mark.parametrize("renamed", ["scope", "mapper"])
 async def test_approved_run_is_refused_when_a_name_changed_after_approval(
     kc: KeycloakConnector, renamed: str
@@ -721,6 +741,7 @@ async def test_approved_run_is_refused_when_a_name_changed_after_approval(
     assert not put.called
 
 
+@pytest.mark.usefixtures("_outside_login_realm")
 async def test_approved_run_is_refused_when_the_card_has_no_ids(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount_all(mock)

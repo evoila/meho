@@ -2578,6 +2578,32 @@ def test_modal_names_a_classification_conflict() -> None:
     assert "tenant:classifications[0]" in conflict
 
 
+def test_modal_says_in_one_line_why_a_credential_call_waits() -> None:
+    from meho_backplane.operations.service_grants import CREDENTIAL_CARD_LINE
+
+    body = _render_modal(
+        {
+            "op_id": "k8s.exec",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "credential_wait": CREDENTIAL_CARD_LINE,
+        }
+    )
+    line = body.split('data-testid="approval-credential-wait">')[1].split("</p>")[0]
+    assert line == CREDENTIAL_CARD_LINE
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-credential-wait"' not in plain
+
+
 def test_modal_shows_no_classification_without_one() -> None:
     """A request made with the switch off has no classification block."""
     plain = _render_modal(

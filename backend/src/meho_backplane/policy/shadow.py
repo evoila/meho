@@ -118,20 +118,19 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
     from meho_backplane.operations.service_grants import (
-        credential_call_waits,
-        credential_grant_reason,
         delete_grant_reason,
+        descriptor_credential_reason,
+        descriptor_credential_waits,
     )
 
     op_id = descriptor.op_id
-    stored_class = getattr(descriptor, "op_class", None)
     patterns = get_settings().service_grant_delete_shaped_patterns
     marks = {
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
-        "credential": credential_grant_reason(op_id, stored_class) is not None,
+        "credential": descriptor_credential_reason(descriptor) is not None,
         "credential_waits": (
-            credential_call_waits(op_id, stored_class) or params_write_credential(op_id, params)
+            descriptor_credential_waits(descriptor) or params_write_credential(op_id, params)
         ),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
@@ -189,8 +188,15 @@ async def _service_lookups(
     connector_id: str | None,
     preview_hash: str | None,
     decide_only: bool,
+    params: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Read scope, standing grant and run approval of a service login. Writes nothing."""
+    """Read scope, standing grant and run approval of a service login. Writes nothing.
+
+    When the op's check by params says no grant may clear the call
+    (:func:`~meho_backplane.operations.grant_cover_check.grant_cover_refusal`),
+    neither is looked up, the same as in the policy gate.
+    """
+    from meho_backplane.operations.grant_cover_check import grant_cover_refusal
     from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
     from meho_backplane.operations.service_grants import consult_and_record_grant
     from meho_backplane.operations.service_read_scopes import read_scope_denial
@@ -200,6 +206,8 @@ async def _service_lookups(
     }
     if connector_id is None:
         return found
+    if await grant_cover_refusal(operator, descriptor, target, connector_id, params) is not None:
+        return {**found, "standing_grant": None, "run_approval": None}
     # A real destructive call uses a delete grant only with the hash of its
     # preview; without one, today's gate never uses the grant.
     if decide_only or descriptor.safety_level != "destructive" or preview_hash is not None:
@@ -259,6 +267,7 @@ async def evaluate_call(
                 connector_id=connector_id,
                 preview_hash=preview_hash,
                 decide_only=decide_only,
+                params=params,
             )
         )
     if admin_console_rights_change(asker, asked):
@@ -353,6 +362,7 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
         approval_risk_level,
     )
     from meho_backplane.operations.grant_approval import check_grant_approval, is_rights_change
+    from meho_backplane.operations.people_behind import behind_subs, people_behind_unknown
 
     effect = request.proposed_effect or {}
     waits_because = effect.get("waits_because")
@@ -370,6 +380,8 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
         rights_change=is_rights_change(request),
         grant_refusal=grant_refusal,
         break_glass=get_settings().approval_allow_self_approval,
+        people_behind=behind_subs(request.people_behind),
+        requester_unknown=people_behind_unknown(request.principal_kind, request.people_behind),
     )
 
 

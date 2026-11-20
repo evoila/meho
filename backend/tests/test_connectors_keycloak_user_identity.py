@@ -56,6 +56,11 @@ from meho_backplane.operations.meta_tools import call_operation, preview_operati
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-identity-e2e"
@@ -284,7 +289,7 @@ async def _park(op_id: str, params: dict[str, Any]) -> uuid.UUID:
     return uuid.UUID(call["extras"]["approval_request_id"])
 
 
-async def _approve_and_resume(request_id: uuid.UUID, *, platform_admin: bool = False) -> Any:
+async def _approve_and_resume(request_id: uuid.UUID, *, platform_admin: bool = True) -> Any:
     # A change of rights is approved with a click in the web console.
     approver = _operator(
         "kc-identity-approver", TenantRole.TENANT_ADMIN, platform_admin=platform_admin

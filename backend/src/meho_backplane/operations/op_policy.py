@@ -81,6 +81,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.op_classes import is_credential_capable
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -420,7 +421,9 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
     or :func:`~meho_backplane.operations.grant_approval.register_grant_op`)
     always waits for approval, also when an older override turned it off.
     An operation that writes or makes a credential keeps the approval its
-    code turns on, also when an install or tenant override turns it off.
+    code turns on, also when an install or tenant override turns it off. So
+    does an operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable`.
     """
     stored_op_class = getattr(row, "op_class", None)
     safety_level, requires_approval = raise_for_credential_read(
@@ -429,9 +432,9 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         requires_approval=policy.requires_approval,
         stored_op_class=stored_op_class,
     )
-    if (
-        row.requires_approval
-        and resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
+    if row.requires_approval and (
+        is_credential_capable(row.op_id)
+        or resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
     ):
         requires_approval = True
     safety_level, requires_approval = raise_for_caller_address(

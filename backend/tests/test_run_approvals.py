@@ -62,6 +62,7 @@ from meho_backplane.operations.run_approvals import (
 )
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_service_a_known_person
 
 _TENANT_A = uuid.UUID("00000000-0000-0000-0000-00000000412a")
 _TENANT_B = uuid.UUID("00000000-0000-0000-0000-00000000412b")
@@ -121,6 +122,13 @@ async def _descriptors(_settings_env: None) -> None:
     await _seed_descriptor(_OTHER_OP)
     await _seed_descriptor(_DANGEROUS_OP, safety_level="dangerous")
     await _seed_descriptor("targets.register", product="meho", version="", impl_id="")
+
+
+@pytest.fixture(autouse=True)
+async def _known_person_behind(_settings_env: None) -> None:
+    """The service login has a known person behind it, who approves nothing here."""
+    for tenant_id in (_TENANT_A, _TENANT_B):
+        await give_service_a_known_person(tenant_id, _PRINCIPAL)
 
 
 @pytest.fixture

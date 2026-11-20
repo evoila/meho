@@ -120,6 +120,9 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     # A quote inside a value that is never closed is part of the value.
     (f"Server=db;{_PWD_IS}made'up;Database=d", "up", "Server=db;"),
     ("run --password made'up --user a", "up", "--user a"),
+    # A connection string password that starts with ``/`` is not a working folder.
+    (f"Server=db;{_PWD_IS}/made up phrase;Database=d", "made up phrase", "Server=db;"),
+    (f"Server=db;{_PWD_IS}/made-up-pw", "made-up-pw", "Server=db;"),
 ]
 
 #: Harmless text that looks like one of the forms.
@@ -167,6 +170,8 @@ _KEPT: Final[list[str]] = [
     "mysql -pthread",
     "gcc $(mysql_config --cflags) main.c -pthread",
     "cd /srv; pwd=/tmp",
+    "pwd=/tmp",
+    "echo pwd=/srv/app; ls",
     "export PWD=/tmp; ls",
 ]
 
@@ -428,10 +433,6 @@ def _closing_mark_by_reading(text: str, start: int) -> int | None:
     return None
 
 
-def _ends_a_string(text: str, index: int) -> bool:
-    return index >= len(text) or text[index].isspace() or text[index] in ";|&<>(),:]}'\""
-
-
 def test_the_closing_mark_is_the_one_found_by_reading_the_text() -> None:
     texts = ["".join(p) for n in range(1, 8) for p in itertools.product("'{}a\n", repeat=n)]
     for text in texts:
@@ -440,9 +441,6 @@ def test_the_closing_mark_is_the_one_found_by_reading_the_text() -> None:
         if line[start] not in "'{":
             continue
         end = _closing_mark_by_reading(line, start)
-        if end is not None and "\n" in line[start:end] and not _ends_a_string(line, end):
-            # A mark on a later line that a word follows does not close the value.
-            end = None
         if end is None:
             line_end = line.find("\n", start)
             end = len(line) if line_end < 0 else line_end

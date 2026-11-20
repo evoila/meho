@@ -100,15 +100,38 @@ def test_one_unclosed_quote_does_not_hide_the_log_lines_after_it(form: str, late
         assert out.endswith(f"\n{later}\n")
 
 
-@pytest.mark.parametrize(("form", "later"), _UNCLOSED)
-def test_a_closing_mark_with_a_word_behind_it_on_a_later_line_does_not_close(
-    form: str, later: str
-) -> None:
-    # Only a few lines down, but the mark is an apostrophe inside a word.
-    text = f"{form}{PW}\nnext line\n{later}\n"
+@pytest.mark.parametrize("form", [form for form, _later in _UNCLOSED])
+def test_a_closing_mark_at_the_end_of_the_text_far_down_does_not_close(form: str) -> None:
+    closing = {"'": "'", '"': '"', "{": "}"}[form[-1]]
+    body = "".join(f"line {n} ordinary text\n" for n in range(_ORDINARY_LINES))
+    text = f"{form}{PW}\n{body}done{closing}"
     for out in _answer_and_trace(text):
         assert PW not in out
-        assert out.endswith(f"\nnext line\n{later}\n")
+        assert out.count("ordinary text") == _ORDINARY_LINES
+        assert out.endswith(f"\ndone{closing}")
+
+
+#: Shell forms whose quoted value runs over a line break and goes on after it.
+_JOINED_FORMS: Final[list[str]] = [
+    "run --password '",
+    'run --password "',
+    "run --password=x'",
+    "mysql -p'",
+    "sshpass -p '",
+    "ldapsearch -w '",
+    "DB_PASSWORD='",
+]
+
+
+@pytest.mark.parametrize("form", _JOINED_FORMS)
+def test_a_quoted_part_over_a_line_break_keeps_the_parts_joined_to_it(form: str) -> None:
+    quote = form[-1]
+    text = f"{form}made-up\nsecond-part{quote}joined-tail more\nnext line"
+    for out in _answer_and_trace(text):
+        assert "made-up" not in out
+        assert "second-part" not in out
+        assert "joined-tail" not in out
+        assert out.endswith(" more\nnext line")
 
 
 @pytest.mark.parametrize("form", [form for form, _later in _UNCLOSED])

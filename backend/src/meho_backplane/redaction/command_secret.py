@@ -35,9 +35,9 @@ option name and the words around it stay readable:
 A value is read the way a shell reads one word: it ends at white space or
 at an operator (``; | & < > ( )``) that is not quoted or escaped. Quoted
 parts, escaped characters (``\\ `` and ``\\"``) and several parts joined
-together are one value, and a quoted part may run over a line break. A
-quote that closes on a later line must end the word and stand at most
-64 lines later; otherwise it is an apostrophe of a later log line
+together are one value, and a quoted part may run over a line break, also
+when more parts follow it (``'made<line break>up'tail``). A quote that
+closes more than 64 lines later is an apostrophe of a later log line
 (``it's done``), and the quote is never closed. A quote that is never
 closed is a plain character inside a value; a value that starts with one
 runs to the end of the line. A form that stands in a quoted command
@@ -49,7 +49,8 @@ options follow the closing quote.
 Names that look like a secret but are not one stay: paging tokens
 (``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), ``_KEY``
 names that do not name a secret key (``S3_KEY=``, ``PARTITION_KEY=``),
-the compiler option ``-pthread`` and a working folder ``pwd=/tmp``.
+the compiler option ``-pthread`` and a working folder ``pwd=/tmp`` that is not
+a field of a connection string.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
@@ -104,16 +105,13 @@ def _ends_string(text: str, index: int) -> bool:
     return _ends_word(text, index) or text[index] in ",:]}'\""
 
 
-def _closes_value(text: str, opening: int, after: int, lines: int | None = None) -> bool:
+def _closes_value(text: str, opening: int, after: int) -> bool:
     """True when the quote that ends before *after* closes the one at *opening*.
 
-    On the same line it always does. On a later line it must end the word
-    and stand at most ``_MAX_VALUE_LINES`` lines further down. *lines* is the
-    number of line breaks between them when the caller knows it.
+    It does when it stands at most ``_MAX_VALUE_LINES`` lines further down,
+    also at the end of the text.
     """
-    if lines is None:
-        lines = text.count("\n", opening, after)
-    return lines == 0 or (lines <= _MAX_VALUE_LINES and _ends_string(text, after))
+    return text.count("\n", opening, after) <= _MAX_VALUE_LINES
 
 
 def _value_end(text: str, start: int, size: int | None = None) -> int:
@@ -139,7 +137,7 @@ def _value_end(text: str, start: int, size: int | None = None) -> int:
                 if char == "'"
                 else _skip_double_quoted(text, pos, size)
             )
-            if closing > 0 and (closing >= size or _closes_value(text, pos, closing)):
+            if closing > 0 and _closes_value(text, pos, closing):
                 pos = closing
                 continue
             if pos > start:
@@ -586,15 +584,12 @@ class _ClosingMarks:
 def _quoted_connection_value(text: str, start: int, marks: _ClosingMarks) -> tuple[int, int]:
     """Span of a quoted connection string value, through its closing mark.
 
-    A value that is never closed, or closed too far down (see
-    ``_closes_value``), ends at the end of its line.
+    A value that is never closed, or closed more than ``_MAX_VALUE_LINES``
+    lines further down, ends at the end of its line.
     """
     end = marks.end(start)
     line_end = text.find("\n", start, len(text) if end is None else end)
-    if end is not None and (
-        line_end == -1
-        or (_ends_string(text, end) and marks.lines_between(start, end) <= _MAX_VALUE_LINES)
-    ):
+    if end is not None and (line_end == -1 or marks.lines_between(start, end) <= _MAX_VALUE_LINES):
         return start, end
     return start, len(text) if line_end < 0 else line_end
 
@@ -618,14 +613,28 @@ def _is_connection_field(text: str, match: re.Match[str], start: int, stop: int)
     )
 
 
+def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -> bool:
+    """True for ``pwd=/tmp``: a folder path that is not a connection string field.
+
+    A field stands before it (``Server=db;Pwd=/x``) or after it
+    (``Pwd=/x;Database=d``) in a connection string.
+    """
+    if match["label"].lower() != "pwd" or not text.startswith("/", start):
+        return False
+    if _NEXT_FIELD.match(text, stop) is not None:
+        return False
+    before = text[max(0, match.start() - 256) : match.start()].rstrip(" \t")
+    if not before.endswith(";"):
+        return True
+    field = before[:-1].rsplit("\n", 1)[-1].rsplit(";", 1)[-1]
+    return "=" not in field
+
+
 def _connection_span(
     text: str, match: re.Match[str], quotes: _OuterQuotes, marks: _ClosingMarks
 ) -> tuple[int, int] | None:
     start = match.end()
     if start >= len(text) or text[start] in ";\n":
-        return None
-    if match["label"].lower() == "pwd" and text[start] == "/":
-        # ``pwd=/tmp`` names the working folder.
         return None
     if text[start] in _CLOSING:
         return _quoted_connection_value(text, start, marks)
@@ -633,6 +642,8 @@ def _connection_span(
     window = min(len(text) if close is None else close, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
     stop_at = window if stop is None else stop.start()
+    if _is_working_folder(text, match, start, stop_at):
+        return None
     if not _is_connection_field(text, match, start, stop_at):
         # A command option or word (``--password=x --user a``, ``password=x user=a``):
         # the value is one shell word, so the words after it stay. ``pwd`` and ``pw``

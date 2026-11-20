@@ -401,6 +401,19 @@ def test_text_without_a_secret_field_is_unchanged(text: str) -> None:
     assert hide_secret_text(text) == text
 
 
+_PLAIN_LINES = "Log in at https://keycloak.example.org/realms/main{gap}Then open the console."
+
+
+def test_plain_text_with_blank_lines_is_unchanged() -> None:
+    text = _PLAIN_LINES.format(gap="\n\n\n\n")
+    assert hide_secret_text(text) == text
+
+
+def test_plain_text_with_blank_lines_inside_a_json_text_is_unchanged() -> None:
+    note = json.dumps({"note": _PLAIN_LINES.format(gap="\n\n\n")})
+    assert hide_secret_text(note) == note
+
+
 def test_yaml_inside_a_json_note_is_hidden_and_the_note_stays_json() -> None:
     note = json.dumps({"data": {"app.yaml": _APP_YAML, "env.yaml": _ENV_YAML}})
     shown = hide_secret_text(note)

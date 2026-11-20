@@ -30,7 +30,8 @@ default view does not see it. This module hides it in the text.
    A map an alias names is checked again in each SNMP place it is used.
    A string value inside the YAML is read again as text, so a YAML file
    inside a JSON note is covered too; such a value is written
-   back as a JSON string. Text that is not YAML keeps what step 1 made of it.
+   back as a JSON string. A text that YAML reads as one plain value is not
+   read again. Text that is not YAML keeps what step 1 made of it.
    A text deeper than the levels the pass reads, or too deep to parse, is
    hidden whole when it may hold a secret name.
 
@@ -126,6 +127,16 @@ def _nothing_to_hide(node: Any) -> bool:
     if isinstance(node, (yaml.MappingNode, yaml.SequenceNode)):
         return not node.value
     return True
+
+
+def _is_plain_text(document: Any) -> bool:
+    """True when YAML reads the whole document as one plain (unquoted) value.
+
+    Such a value is the text itself, only with its line breaks folded, so
+    reading it again finds nothing new. The style is ``None`` from the
+    Python loader and ``""`` from the C loader.
+    """
+    return isinstance(document, yaml.ScalarNode) and not document.style
 
 
 def _anchors(span: str) -> str:
@@ -331,7 +342,7 @@ def _hide_yaml(text: str, depth: int) -> str:
         # id(), and a freed document lets a later node reuse an id.
         documents = list(yaml.compose_all(text, Loader=_LOADER))
         for document in documents:
-            if document is not None:
+            if document is not None and not _is_plain_text(document):
                 finder.walk(document)
         if not finder.spans:
             return text

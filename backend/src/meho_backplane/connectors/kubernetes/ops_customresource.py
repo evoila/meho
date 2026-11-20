@@ -64,6 +64,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_customresource_fields import (
     FIELD_PATH_PATTERN,
@@ -72,11 +73,14 @@ from meho_backplane.connectors.kubernetes.ops_customresource_fields import (
     select_fields,
 )
 from meho_backplane.connectors.kubernetes.redaction import (
-    HELM_CHART_KIND,
+    HELM_CHART_KINDS,
+    HELM_CHART_VALUE_FIELDS,
     LAST_APPLIED_ANNOTATION,
     SECRET_KIND,
     redact_kubernetes_payload,
 )
+from meho_backplane.operations._secret_values import reveal_requested
+from meho_backplane.redaction.secret_text import hide_secret_text, hide_secret_text_leaves
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -101,6 +105,7 @@ __all__ = [
     "crd_row",
     "crd_version_row",
     "custom_resource_row",
+    "custom_resource_rows",
 ]
 
 
@@ -184,12 +189,15 @@ def _bounded_json_excerpt(value: Any) -> tuple[str | None, bool]:
     return _cap_utf8(json.dumps(value, sort_keys=True, default=str), CR_SPEC_EXCERPT_MAX_BYTES)
 
 
-def _bounded_annotations(annotations: Any) -> tuple[dict[str, str], bool]:
+def _bounded_annotations(annotations: Any, *, reveal: bool) -> tuple[dict[str, str], bool]:
     """Return ``(annotations, truncated)`` for a CR's ``metadata.annotations``.
 
     Each value is capped at :data:`CR_ANNOTATION_VALUE_MAX_BYTES`;
     ``truncated`` is ``True`` when a value was cut. ``LAST_APPLIED_ANNOTATION``
     is left out: it repeats the whole manifest (on a Secret, every value).
+    The secret-named fields in a value are hidden before the cut (a cut text
+    may lose the field name). On a reveal (*reveal*) a value that fits stays
+    whole; the dispatcher hides it in the default view and the audit copy.
     """
     if not isinstance(annotations, dict):
         return {}, False
@@ -199,8 +207,103 @@ def _bounded_annotations(annotations: Any) -> tuple[dict[str, str], bool]:
         if key == LAST_APPLIED_ANNOTATION:
             continue
         out[key], cut = _cap_utf8(str(value), CR_ANNOTATION_VALUE_MAX_BYTES)
+        if cut or not reveal:
+            out[key], cut = _cap_utf8(hide_secret_text(str(value)), CR_ANNOTATION_VALUE_MAX_BYTES)
         truncated = truncated or cut
     return out, truncated
+
+
+def _excerpt(raw: Any, hidden: Any, *, reveal: bool) -> tuple[str | None, bool]:
+    """The excerpt of a ``spec`` or ``status`` block, made from *hidden*.
+
+    On a reveal (*reveal*) an excerpt of *raw* that fits is returned whole:
+    the dispatcher hides it in the default view and the audit copy, and a
+    person who asked with ``reveal_secret: true`` gets it back. A cut
+    excerpt is always made from *hidden*, because the dispatcher cannot
+    read a cut text.
+    """
+    if reveal:
+        excerpt, cut = _bounded_json_excerpt(raw)
+        if not cut:
+            return excerpt, cut
+    return _bounded_json_excerpt(hidden)
+
+
+def _hide_secret_fields(block: Any, *, masked: tuple[str, ...] = ()) -> Any:
+    """*block* (a ``spec`` or ``status``) with every secret-named value hidden.
+
+    The values under secret-shaped key names, numbers included, and the
+    secret-named fields inside each text value (a YAML or JSON file in a
+    string). The excerpt is a JSON string that may be cut, so this runs on
+    the data, before the excerpt is made. The top-level keys in *masked*
+    already hold the Kubernetes placeholders (the Helm values of a chart)
+    and keep them, so their fingerprints stay.
+    """
+    shown, _ = scrub_secret_named_values(block, hide_numbers=True)
+    shown = hide_secret_text_leaves(shown)
+    if isinstance(block, dict) and isinstance(shown, dict):
+        shown.update({key: block[key] for key in masked if key in block})
+    return shown
+
+
+def _with_hidden_blocks(obj: dict[str, Any], *, is_chart: bool) -> dict[str, Any]:
+    """A copy of *obj* with :func:`_hide_secret_fields` run on ``spec`` and ``status``."""
+    masked = {"spec": HELM_CHART_VALUE_FIELDS} if is_chart else {}
+    return {
+        **obj,
+        **{
+            block: _hide_secret_fields(obj[block], masked=masked.get(block, ()))
+            for block in ("spec", "status")
+            if block in obj
+        },
+    }
+
+
+def _keep_raw_where_hidden(raw: Any, view: Any, hidden: Any) -> Any:
+    """*hidden*, with the raw value put back where *view* hides it.
+
+    *view* is the dispatcher's default view of *raw*. Where it hides a
+    value, the dispatcher also hides it in the audit copy and gives it back
+    on a reveal, so the raw value can stay. Everywhere else the value comes
+    from *hidden*. Where *view* hides a whole block, the raw block stays;
+    where only the shapes differ, *hidden* stays.
+    """
+    if type(raw) is type(view) and raw == view:
+        return hidden
+    if isinstance(raw, dict) and isinstance(view, dict) and isinstance(hidden, dict):
+        return {
+            key: _keep_raw_where_hidden(value, view.get(key), hidden.get(key))
+            for key, value in raw.items()
+        }
+    if (
+        isinstance(raw, list)
+        and isinstance(view, list)
+        and isinstance(hidden, list)
+        and len(raw) == len(view) == len(hidden)
+    ):
+        return [_keep_raw_where_hidden(*items) for items in zip(raw, view, hidden, strict=True)]
+    if isinstance(view, dict | list):
+        return hidden
+    return raw
+
+
+def _revealed_fields(
+    obj: dict[str, Any], hidden: dict[str, Any], paths: list[str]
+) -> tuple[dict[str, Any], list[str]]:
+    """``(fields, fields_missing)`` of a reveal call.
+
+    A path's value is cut out of its object, so the dispatcher no longer
+    sees the names around it (the ``name`` of an env entry, the SNMP
+    setting next to a ``community``). So a raw value stays only where the
+    dispatcher's default view of ``fields`` hides it; every other value
+    comes from *hidden*. The ``k8s.cr`` operations declare no plain fields,
+    so this view is the one the dispatcher builds.
+    """
+    raw_found, missing = select_fields(obj, paths)
+    hidden_found, _ = select_fields(hidden, paths)
+    view, _ = scrub_secret_named_values({"fields": raw_found}, hide_numbers=True)
+    view = hide_secret_text_leaves(view)
+    return _keep_raw_where_hidden(raw_found, view["fields"], hidden_found), missing
 
 
 def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) -> dict[str, Any]:
@@ -232,10 +335,19 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
     ``spec.set`` value are placeholders in the spec excerpt (``set`` keys
     kept), and its annotation values are placeholders too, because Helm
     values and the last-applied copy of the chart often hold passwords.
-    A list item gets its ``kind`` from the list envelope before it
-    reaches this function (``list_items``), so a ``HelmChartList`` item
-    is masked as well. Any other CR gets no ``data`` field and is
-    otherwise untouched by the walk.
+    A ``kind: HelmChartConfig`` object is masked the same way. A list
+    item gets its ``kind`` from the list envelope before it reaches this
+    function (``list_items``), so a ``HelmChartList`` or
+    ``HelmChartConfigList`` item is masked as well. Any other CR gets no
+    ``data`` field.
+
+    For every kind, the values under secret-shaped key names in ``spec``
+    and ``status`` (numbers included), and the secret-named fields inside
+    their text values, are hidden before ``spec_excerpt``,
+    ``status_excerpt`` and ``fields`` are built
+    (:func:`_hide_secret_fields`). So is a secret-named field inside an
+    annotation value, before the value is cut. A reveal keeps what is not
+    cut raw, for the dispatcher (:func:`_excerpt`, :func:`_revealed_fields`).
     ``k8s.secret.list`` / ``k8s.secret.info`` are the dedicated way to
     look at a core Secret's key names.
 
@@ -246,14 +358,22 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
     """
     kind = obj.get("kind")
     is_secret = kind == SECRET_KIND
-    if is_secret or kind == HELM_CHART_KIND:
-        # Only a Secret or a HelmChart carries values to scrub; redacting
-        # a copy (never the caller's dict) keeps the walk off every other CR.
+    is_chart = kind in HELM_CHART_KINDS
+    if is_secret or is_chart:
+        # Only a Secret or a Helm chart object carries values to scrub;
+        # redacting a copy (never the caller's dict) keeps the walk off every
+        # other CR.
         obj = redact_kubernetes_payload(obj)
+    reveal = reveal_requested()
+    hidden = _with_hidden_blocks(obj, is_chart=is_chart)
     metadata = obj.get("metadata") or {}
-    excerpt, truncated = _bounded_json_excerpt(obj.get("spec"))
-    status_excerpt, status_truncated = _bounded_json_excerpt(obj.get("status"))
-    annotations, annotations_truncated = _bounded_annotations(metadata.get("annotations"))
+    excerpt, truncated = _excerpt(obj.get("spec"), hidden.get("spec"), reveal=reveal)
+    status_excerpt, status_truncated = _excerpt(
+        obj.get("status"), hidden.get("status"), reveal=reveal
+    )
+    annotations, annotations_truncated = _bounded_annotations(
+        metadata.get("annotations"), reveal=reveal
+    )
     row: dict[str, Any] = {
         "name": metadata.get("name"),
         "namespace": metadata.get("namespace"),
@@ -279,7 +399,8 @@ def custom_resource_row(obj: dict[str, Any], fields: list[str] | None = None) ->
             obj.get("status"), CR_SPEC_EXCERPT_MAX_BYTES
         )
     if fields:
-        row["fields"], row["fields_missing"] = select_fields(obj, fields)
+        read = _revealed_fields(obj, hidden, fields) if reveal else select_fields(hidden, fields)
+        row["fields"], row["fields_missing"] = read
     if is_secret:
         row["data"] = obj.get("data") or {}
         row["string_data"] = obj.get("stringData") or {}
@@ -655,3 +776,10 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
 
 #: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
 OPS: tuple[KubernetesOp, ...] = CUSTOM_RESOURCE_OPS
+
+
+def custom_resource_rows(
+    items: list[dict[str, Any]], fields: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Build one :func:`custom_resource_row` for each object in *items*."""
+    return [custom_resource_row(obj, fields) for obj in items]

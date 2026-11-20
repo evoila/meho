@@ -293,6 +293,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ssl
 import time
@@ -1132,7 +1133,7 @@ async def _execute_and_audit_inner(
             secret_view=secret_view,
         )
 
-    redaction = _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
+    redaction = await _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
     return await _reduce_and_audit_success(
         op_id=op_id,
         descriptor=descriptor,
@@ -1154,7 +1155,7 @@ async def _execute_and_audit_inner(
 SecretView = Literal["hidden", "revealed"]
 
 
-def _protect_secret_values(
+async def _protect_secret_values(
     redaction: RedactionMiddlewareResult,
     *,
     op_id: str,
@@ -1174,6 +1175,10 @@ def _protect_secret_values(
     marked (:func:`~meho_backplane.no_store.mark_answer_holds_secret`), so
     the HTTP answer that carries it says ``Cache-Control: no-store``.
 
+    The default view runs in a worker thread, like the redaction pass of a
+    script: a large text value in the answer takes time to read, and the
+    event loop keeps serving other requests meanwhile.
+
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
     the caller saw the value or not. So no secret value is stored in the
@@ -1187,7 +1192,7 @@ def _protect_secret_values(
     fails; the caller then withholds the envelope.
     """
     redacted = redaction.redacted
-    shown = hide_secret_values(op_id, redacted, raw=redaction.raw)
+    shown = await asyncio.to_thread(hide_secret_values, op_id, redacted, raw=redaction.raw)
     if error_cleanup:
         redacted, shown = redact_error_payload(redacted), redact_error_payload(shown)
     if secret_view == "hidden":
@@ -1543,7 +1548,7 @@ async def _reduce_and_audit_composite_error(
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
-        redaction = _protect_secret_values(
+        redaction = await _protect_secret_values(
             redaction, op_id=op_id, secret_view=secret_view, error_cleanup=True
         )
     except Exception as exc:

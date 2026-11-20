@@ -58,7 +58,7 @@
           "health"
         ],
         "summary": "First Start",
-        "description": "The first-start list. No login: it shows the verdict lines only.",
+        "description": "No login: one fixed line that says how to sign in. Runs no check.",
         "operationId": "first_start_first_start_get",
         "responses": {
           "200": {
@@ -67,6 +67,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/first-start": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start Signed In",
+        "description": "The first-start list for a person who is a tenant admin or a platform admin.",
+        "operationId": "first_start_signed_in_api_v1_first_start_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }

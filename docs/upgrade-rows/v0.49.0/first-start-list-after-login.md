@@ -1,0 +1,5 @@
+## Note
+The first-start list needs a person's login with the admin role of the tenant, or a platform admin; an operator, a reader, and an agent, service or runner login get 403. `meho status --first-start` reads it from the new route `GET /api/v1/first-start` with the login of `meho login`. It checks the systems of the current tenant; for a platform admin, the systems of all tenants, with the tenant of each system. `GET /first-start` without a login answers one fixed line that says how to sign in, with `"ok": false` (the line is `skipped`). It runs no check. `meho status --first-start` of v0.48.0 or older reads that answer, so it shows the line and ends with exit code 6. At the end of `install.sh` (Linux server), the result names where to read the list after the first login.
+
+## Action
+Update the `meho` command to this version. Read the first-start list after you sign in as a tenant admin or platform admin: open `/ui/first-start` in the web console, or run `meho login <address>` and then `meho status --first-start`. A script that reads `GET /first-start` without a login gets the fixed line: give it a login and call `GET /api/v1/first-start`.

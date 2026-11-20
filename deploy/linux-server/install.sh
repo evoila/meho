@@ -106,8 +106,8 @@ installs and starts RKE2 (the built-in Kubernetes) with its CIS hardening
 profile, installs the MEHO core, writes the first-login passwords and the
 unseal key to two files for root only, and installs the meho command. At
 the end it writes the CA of the console certificate to
-/var/lib/meho/console-ca.crt and shows the first-start list. A red line in
-the list does not stop the install.
+/var/lib/meho/console-ca.crt and names where to read the first-start list
+after the first login.
 
 Run it as root from the folder of the unpacked download:
   sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
@@ -420,14 +420,13 @@ update_meho() {
         "$CLUSTER_CIDR" "$SERVICE_CIDR"
     install_core "$DOWNLOAD_DIR"
 
-    update_step "install the meho command and meho-host, write the install record and read the first-start list"
+    update_step "install the meho command and meho-host, and write the install record"
     install_cli "$DOWNLOAD_DIR"
     install_meho_host "$DOWNLOAD_DIR"
     write_console_ca
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
         "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$RECORD_FROM_DISK"
-    read_first_start_list "$HOSTNAME_FQDN"
     print_update_result "$HOSTNAME_FQDN" "$installed_version"
 }
 
@@ -480,13 +479,12 @@ main() {
     local unseal_key_written=1
     copy_unseal_key || unseal_key_written=0
 
-    step "Step 6: install the meho command, write the install record and read the first-start list"
+    step "Step 6: install the meho command and write the install record"
     install_cli "$DOWNLOAD_DIR"
     write_console_ca
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
         "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$FROM_DISK"
-    read_first_start_list "$HOSTNAME_FQDN"
     print_result "$HOSTNAME_FQDN" "$unseal_key_written"
 }
 

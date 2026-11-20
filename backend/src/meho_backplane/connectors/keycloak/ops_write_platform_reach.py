@@ -556,13 +556,17 @@ async def _is_login_realm(ctx: PreviewContext, side: tuple[str, str] | None) -> 
 
     MEHO calls no Keycloak for a ``secret.move`` before its run checks the
     target (:mod:`.secret_move_target`), so it judges the realm name as
-    typed. A name that is not plain ASCII
-    (:func:`~.realm_params.is_plain_realm_name`) counts as protected: a
-    Keycloak database can match a letter with an accent with the plain one.
-    ``True`` also when MEHO cannot read the side, or the target it names
-    (then MEHO cannot read the target's ``admin_realm``).
+    typed. A Keycloak database can match a letter with an accent with the
+    plain one. So the side counts as protected when its realm name is not
+    plain ASCII (:func:`~.realm_params.is_plain_realm_name`), and also when
+    a protected realm name (:func:`~.ops_write_grant.protected_realm_names`)
+    is not plain ASCII. ``True`` also when MEHO cannot read the side, or the
+    target it names (then MEHO cannot read the target's ``admin_realm``).
     """
-    from meho_backplane.connectors.keycloak.ops_write_grant import is_login_realm_name
+    from meho_backplane.connectors.keycloak.ops_write_grant import (
+        is_login_realm_name,
+        protected_realm_names,
+    )
     from meho_backplane.connectors.keycloak.realm_params import is_plain_realm_name
 
     if side is None:
@@ -571,7 +575,11 @@ async def _is_login_realm(ctx: PreviewContext, side: tuple[str, str] | None) -> 
     try:
         if is_login_realm_name(realm) or not is_plain_realm_name(realm):
             return True
-        return is_login_realm_name(realm, await _side_target(ctx, target_name))
+        target = await _side_target(ctx, target_name)
+        names = protected_realm_names(target)
+        if not all(is_plain_realm_name(name) for name in names):
+            return True
+        return is_login_realm_name(realm, target)
     except Exception:
         return True
 

@@ -106,6 +106,7 @@ __all__ = [
     "is_login_realm",
     "is_login_realm_name",
     "named_realm_is_protected",
+    "protected_realm_names",
     "register_grant_ops",
     "with_grant_facts",
 ]
@@ -260,6 +261,12 @@ def is_login_realm_name(realm: str, target: object = None, *, own_only: bool = F
     for that target. With *own_only*, only the realms of MEHO's own login
     count.
     """
+    names = protected_realm_names(target, own_only=own_only)
+    return realm.strip().casefold() in {name.strip().casefold() for name in names}
+
+
+def protected_realm_names(target: object = None, *, own_only: bool = False) -> set[str]:
+    """The realm names :func:`is_login_realm_name` protects, as configured."""
     names = set(_backplane_login_realms())
     if not own_only:
         names.add(DEFAULT_ADMIN_REALM)
@@ -267,7 +274,7 @@ def is_login_realm_name(realm: str, target: object = None, *, own_only: bool = F
         admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
         if isinstance(admin, str) and admin.strip():
             names.add(admin)
-    return realm.strip().casefold() in {name.strip().casefold() for name in names}
+    return names
 
 
 async def login_realm_facts(ctx: PreviewContext) -> tuple[bool, bool]:

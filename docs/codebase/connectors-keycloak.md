@@ -630,7 +630,9 @@ another realm, MEHO reads the target the ref names, to know its
 the login realm. MEHO calls no Keycloak for a `secret.move` before its run
 checks the target, so it judges a side's realm by the name as typed: a
 name that is not plain ASCII (`is_plain_realm_name`) counts as one in the
-login realm. A ref is a
+login realm. When a protected realm name (`protected_realm_names`: MEHO's
+own login realms, `master` and the target's `admin_realm`) is not plain
+ASCII, every side on that target counts as one in the login realm. A ref is a
 client-secret source or a user-password sink by its address shape, the
 same way as `build_keycloak_secret_endpoint`: a sink in a realm named
 `clients` is still a sink. A user-password sink in the login realm also

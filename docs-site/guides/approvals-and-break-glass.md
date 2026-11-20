@@ -324,7 +324,9 @@ group has more rules:
   login realm. The name of a new realm (`keycloak.realm.create`) may hold
   only plain ASCII characters: letters `a` to `z` and `A` to `Z`, digits,
   the space and the other ASCII signs except `/`, `\`, `?`, `#` and `%`.
-  No letters with accents. The approval card
+  No letters with accents. When the name of one of these protected realms
+  has a letter with an accent, every `secret.move` with a Keycloak source
+  or sink on that target needs a platform admin. The approval card
   says why, in the row "Platform admin must approve". A tenant admin, also
   an admin who may change other rights alone, cannot approve these. No
   standing grant and no run approval clears such a write: each call waits

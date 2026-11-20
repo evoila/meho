@@ -11,9 +11,9 @@
 //     `acr`).
 //  2. The public `meho-mcp` authorization-code+PKCE client +
 //     the same 8 mappers + 4 default scopes.
-//  3. The five MEHO role groups. Their attributes give each person
+//  3. The three MEHO role groups. Their attributes give each person
 //     their tenant and role (docs/decisions/login-role-groups.md).
-//     Also `MEHO-Platform-Admins`, and on request the five groups of
+//     Also `MEHO-Platform-Admins`, and on request the three groups of
 //     one more tenant (`--add-tenant`).
 //  4. An admin user in `MEHO-Admins` and `MEHO-Platform-Admins` with a
 //     password.
@@ -63,7 +63,7 @@ func NewRootCmd() *cobra.Command {
 			"verb is `bootstrap-clients`, which idempotently " +
 			"provisions the public device-code client, the public " +
 			"MCP browser-flow client, their 8 protocol mappers, " +
-			"their 4 default client scopes, the five MEHO role " +
+			"their 4 default client scopes, the three MEHO role " +
 			"groups, MEHO-Platform-Admins, and an admin user — the realm-side prerequisites " +
 			"for `meho login` and the MCP onramp.",
 		SilenceUsage: true,
@@ -129,19 +129,17 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
 			"  * `offline_access` as an optional scope on the CLI client, with a 48-hour idle limit, so `meho login` gets a login that renews itself (`--cli-offline-access=0` turns it off, also on an existing client)\n" +
-			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
-			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
-			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only)\n" +
+			"  * the three MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
+			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-Admins (tenant_admin)\n" +
 			"  * the group MEHO-Platform-Admins (platform_admin=true): rights across all tenants\n" +
 			"  * an admin user in MEHO-Admins and MEHO-Platform-Admins with a password\n\n" +
 			"A person gets their tenant and role from their group. Put each " +
-			"person in exactly one of the five groups. A person in no group " +
+			"person in exactly one of the three groups. A person in no group " +
 			"gets no tenant, and MEHO refuses the login (401 " +
 			"missing_tenant_claim). `--tenant-id` sets the `tenant_id` " +
-			"attribute on all five groups.\n\n" +
-			"More tenants: `--add-tenant <name>` makes the five groups " +
-			"MEHO-<name>-Readers, -Operators, -SA-Operators, -Admins and " +
-			"-Approvers. They carry only `meho_tenant` " +
+			"attribute on all three groups.\n\n" +
+			"More tenants: `--add-tenant <name>` makes the three groups " +
+			"MEHO-<name>-Readers, -Operators and -Admins. They carry only `meho_tenant` " +
 			"(`<tenant-uuid>:<name>:<Role>`). Give the tenant's UUID with " +
 			"`--add-tenant-id`; without it the command reuses the UUID the " +
 			"groups already carry, or makes a new one and prints it. A person " +
@@ -309,13 +307,13 @@ func newBootstrapClientsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mcpResourceURI, "mcp-resource-uri", "",
 		"audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)")
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
-		"tenant UUID written as the `tenant_id` attribute on the five MEHO role groups "+
+		"tenant UUID written as the `tenant_id` attribute on the three MEHO role groups "+
 			"(default: the all-zero UUID). Changing it later moves everyone to a new tenant")
 	cmd.Flags().StringVar(&tenantName, "tenant-name", defaultTenantName,
 		"the first tenant's short name (lowercase letters, digits, dashes), written into "+
-			"the `meho_tenant` attribute of the five MEHO role groups")
+			"the `meho_tenant` attribute of the three MEHO role groups")
 	cmd.Flags().StringVar(&addTenantName, "add-tenant", "",
-		"also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name")
+		"also make the three groups `MEHO-<name>-<Role>` of one more tenant with this short name")
 	cmd.Flags().StringVar(&addTenantID, "add-tenant-id", "",
 		"the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, "+
 			"else a new one, printed at the end)")
@@ -326,7 +324,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"optional email for the new admin user")
 	cmd.Flags().BoolVar(&skipUserProvisioning, "skip-user-provisioning", false,
 		"skip the admin user step (use when people come from a directory or another login system); "+
-			"the five role groups are still created")
+			"the three role groups are still created")
 	cmd.Flags().StringSliceVar(&mcpRedirectURIs, "mcp-redirect-uri", nil,
 		"redirect URI(s) for the MCP browser-flow client (default: loopback localhost + 127.0.0.1, any port/path)")
 	cmd.Flags().StringSliceVar(&mcpWebOrigins, "mcp-web-origin", nil,

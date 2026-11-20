@@ -21,16 +21,15 @@ the way the public docs say accepts both logins:
 5. Check the token through the backplane's own JWT check, and check that
    ``mcp:admin`` is in the session's scopes only when it was asked for.
 
-#4590 adds the login role groups. ``bootstrap-clients`` creates five
-groups (MEHO-Readers, MEHO-Operators, MEHO-SA-Operators, MEHO-Admins,
-MEHO-Approvers). Each group carries ``tenant_id`` and ``tenant_role`` as
-group attributes, and MEHO-Approvers also carries ``approver=true``. The
+#4590 adds the login role groups. ``bootstrap-clients`` creates three
+groups (MEHO-Readers, MEHO-Operators, MEHO-Admins). Each group carries
+``tenant_id`` and ``tenant_role`` as group attributes. The
 stock User Attribute mapper reads them into the token. The tests below
 prove, against a real Keycloak:
 
 - a person in each group gets that group's tenant and role in a token
-  from ``meho-cli`` and from a real ``meho-mcp`` login; only the
-  MEHO-Approvers person gets ``approver``;
+  from ``meho-cli`` and from a real ``meho-mcp`` login; no person gets
+  ``approver``;
 - a person in no group gets no ``tenant_id``, and MEHO answers
   ``401 missing_tenant_claim``;
 - on a realm made by the older command (fixed-value ``tenant-id`` /
@@ -40,7 +39,7 @@ prove, against a real Keycloak:
 For several tenants (docs/decisions/2026-10-28-several-tenants-per-person.md)
 the role groups also carry ``meho_tenant``, the ``meho-tenants`` mapper
 lists them in the ``meho_tenants`` claim, and ``--add-tenant`` makes the
-five groups of one more tenant. The tests prove:
+three groups of one more tenant. The tests prove:
 
 - a person in ``MEHO-Readers`` and ``MEHO-lab-b-Operators`` gets both
   tenants in ``meho_tenants``;
@@ -102,13 +101,11 @@ _LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
 # last test in this file checks that.
 _HTTP_TIMEOUT = httpx.Timeout(60.0)
 
-# The five role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The three role groups and what a member must get (docs/decisions/login-role-groups.md).
 _ROLE_GROUPS = {
     "MEHO-Readers": ("read_only", False),
     "MEHO-Operators": ("operator", False),
-    "MEHO-SA-Operators": ("operator", False),
     "MEHO-Admins": ("tenant_admin", False),
-    "MEHO-Approvers": ("read_only", True),
 }
 
 

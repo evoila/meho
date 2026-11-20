@@ -176,8 +176,15 @@ async def _service_lookups(
     connector_id: str | None,
     preview_hash: str | None,
     decide_only: bool,
+    params: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Read scope, standing grant and run approval of a service login. Writes nothing."""
+    """Read scope, standing grant and run approval of a service login. Writes nothing.
+
+    When the op's check by params says no grant may clear the call
+    (:func:`~meho_backplane.operations.grant_cover_check.grant_cover_refusal`),
+    neither is looked up, the same as in the policy gate.
+    """
+    from meho_backplane.operations.grant_cover_check import grant_cover_refusal
     from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
     from meho_backplane.operations.service_grants import consult_and_record_grant
     from meho_backplane.operations.service_read_scopes import read_scope_denial
@@ -187,6 +194,8 @@ async def _service_lookups(
     }
     if connector_id is None:
         return found
+    if await grant_cover_refusal(operator, descriptor, target, connector_id, params) is not None:
+        return {**found, "standing_grant": None, "run_approval": None}
     # A real destructive call uses a delete grant only with the hash of its
     # preview; without one, today's gate never uses the grant.
     if decide_only or descriptor.safety_level != "destructive" or preview_hash is not None:
@@ -218,6 +227,7 @@ async def evaluate_call(
     connector_id: str | None,
     preview_hash: str | None = None,
     decide_only: bool = False,
+    params: dict[str, Any] | None = None,
 ) -> Decision:
     """Do the lookups for one call and return the evaluator's decision. Writes nothing."""
     from meho_backplane.sandbox_mode import sandbox_mode_active
@@ -245,6 +255,7 @@ async def evaluate_call(
                 connector_id=connector_id,
                 preview_hash=preview_hash,
                 decide_only=decide_only,
+                params=params,
             )
         )
     return evaluate(asker, asked, Lookups(**found))
@@ -271,6 +282,7 @@ async def shadow_call(
     today: tuple[PermissionVerdict, str | None],
     preview_hash: str | None = None,
     decide_only: bool = False,
+    params: dict[str, Any] | None = None,
 ) -> None:
     """Compare the evaluator with today's verdict *today* for one call. Never raises.
 
@@ -289,6 +301,7 @@ async def shadow_call(
             connector_id=connector_id,
             preview_hash=preview_hash,
             decide_only=decide_only,
+            params=params,
         )
         keep_rule(_shadow_stamp(decision))
         today_verdict, today_reason = today

@@ -28,10 +28,10 @@ from meho_backplane.connectors.keycloak.ops_write_effective_roles import (
     ROLE_PARTS_CHANGED,
     ROLE_PARTS_NOT_READ,
 )
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import REASON_KEYS
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
 from meho_backplane.operations.grant_approval import (
-    GRANT_REASON_STRICTER,
     grant_changed_since_request,
 )
 from tests.test_api_v1_approvals_fresh_sign_in import (
@@ -169,13 +169,14 @@ async def test_a_composite_role_lists_its_parts_and_marks_the_realm_admin_role()
 
 
 @pytest.mark.asyncio
-async def test_a_plain_role_keeps_the_usual_rule() -> None:
+async def test_a_plain_role_gives_nothing_by_its_parts() -> None:
     connector, _ = _connector()
 
     card = await _card(_realm_ctx("viewer", connector))
 
     assert [r["name"] for r in card["effective_roles"]] == ["viewer"]
-    assert card["grant"]["platform_admin"] is False
+    # The roles give nothing; the harmless keys rule still asks for a platform admin.
+    assert card["grant"]["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -218,7 +219,8 @@ async def test_only_the_exact_configured_role_name_is_marked(
         card = await _card(_realm_ctx(role, connector))
 
         assert not any(r["login_role"] for r in card["effective_roles"])
-        assert card["grant"]["platform_admin"] is False
+        # The roles give nothing; the harmless keys rule still asks for a platform admin.
+        assert card["grant"]["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -228,7 +230,8 @@ async def test_a_role_named_like_a_platform_role_without_rights_needs_no_platfor
     card = await _card(_realm_ctx("platform_admin", connector))
 
     assert [r["name"] for r in card["effective_roles"]] == ["platform_admin"]
-    assert card["grant"]["platform_admin"] is False
+    # The roles give nothing; the harmless keys rule still asks for a platform admin.
+    assert card["grant"]["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -244,7 +247,8 @@ async def test_a_client_role_named_like_a_platform_role_needs_no_platform_admin(
     card = await _card(ctx)
 
     assert card["effective_roles"][0]["login_role"] is False
-    assert card["grant"]["platform_admin"] is False
+    # The roles give nothing; the harmless keys rule still asks for a platform admin.
+    assert card["grant"]["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -260,7 +264,8 @@ async def test_a_client_role_is_expanded_too() -> None:
     card = await _card(ctx)
 
     assert [(r["client_id"], r["name"]) for r in card["effective_roles"]] == [("app", "editor")]
-    assert card["grant"]["platform_admin"] is False
+    # The roles give nothing; the harmless keys rule still asks for a platform admin.
+    assert card["grant"]["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -362,12 +367,15 @@ async def test_a_tenant_admin_cannot_approve_a_composite_role_that_holds_realm_a
 
 
 @pytest.mark.asyncio
-async def test_a_tenant_admin_approves_a_plain_role() -> None:
+async def test_a_plain_role_in_the_login_realm_needs_a_platform_admin() -> None:
     params, effect = await _parked_card("viewer")
     request_id = await _park(params, effect, op_id=_REALM_ROLE)
 
-    await _approve(request_id, _person("person-admin", role=TenantRole.TENANT_ADMIN), params)
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(request_id, _person("person-admin", role=TenantRole.TENANT_ADMIN), params)
+    assert REASON_KEYS.rstrip(".") in exc.value.reason_text
 
+    await _approve(request_id, _person("person-platform", platform_admin=True), params)
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
 
 
@@ -431,7 +439,7 @@ async def test_the_run_is_refused_when_a_plain_role_became_a_composite_with_admi
 
     reason = await grant_changed_since_request(_person("person-platform"), request, None, params)
 
-    assert reason == GRANT_REASON_STRICTER
+    assert reason == ROLE_PARTS_CHANGED
 
 
 @pytest.mark.asyncio

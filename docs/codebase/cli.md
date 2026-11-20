@@ -1048,6 +1048,19 @@ lines (indented JSON, an error message) and keeps the line breaks.
   human output through `SafeText`. A stored request path with control
   codes shows as visible escapes, so each field stays on its own line
   and reads as the server holds it.
+- The commands that print text an agent or another member of the tenant
+  wrote use them too: `meho status --watch` (every text field of a feed
+  line, and the "unparseable event" line), `meho broadcast watch` (each
+  line without `--json`), `meho kb show`, `kb list`, the hit table of
+  `kb search` (its wiki hits print as they are), `meho conventions show`,
+  `list`, `history`, `meho list`, `meho recall`
+  (the body of one entry and the hit table), `meho runbook
+  show-template`, and `meho runbook start` and `next` (the template
+  slug, the step id, title and body, the op_id, the verify prompt and
+  the "Run complete" lines). A body goes through `SafeLines`, so its
+  line breaks stay; a tab in a body shows as `\x09`.
+- `meho docs ask` uses its own helpers (`sanitizeText`, `sanitizeBlock`
+  in `cmd/docs/ask.go`) for the answer and the sources.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control
@@ -1064,14 +1077,8 @@ lines (indented JSON, an error message) and keeps the line breaks.
   to its width. The `server_text_escape_test.go` file of each package
   lists these renderers and checks that ESC and BEL show as `\x1b` and
   `\x07`.
-- Not escaped yet (text from a target or an API description): the
-  success output of `meho operation call` and of every vendor command;
-  the `operation search` table of the vendor commands (vmware, nsx,
-  sddc-manager, vcf-automation, vcf-fleet, vcf-logs, vcf-operations,
-  harbor, hetzner-robot); `meho approvals result`; `meho operation
-  result-query` and `subops`; `meho targets probe`, `list`, `discover`
-  and `import`; `meho connector review`, `list` and `catalog`;
-  `meho topology`; `meho vcf-automation about`.
+- Commands not named here may print text from a server, a target or an
+  API description as it is.
 
 ### Sensitive-data discipline
 
@@ -2948,7 +2955,7 @@ have to trust to run `meho login` against their secrets.
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
 public MCP browser-flow client + the **8 protocol mappers + 4 default
-client scopes + five MEHO role groups + `MEHO-Platform-Admins` + admin
+client scopes + three MEHO role groups + `MEHO-Platform-Admins` + admin
 user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
@@ -3024,16 +3031,13 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      **not** auto-inherit the realm's default-default scopes, so an
      explicit assignment is the only way to guarantee `sub` lands in
      the access token (RFC 9068 §2.2.1 requires it).
-  5. The five MEHO role groups (`roleGroups` in `bootstrap.go`):
-     `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
-     `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
-     `MEHO-Approvers` (`read_only` + `approver=true`; MEHO reads this
-     group as Readers and does not read the `approver` claim, so the
-     group gives no approval right). Each carries
+  5. The three MEHO role groups (`roleGroups` in `bootstrap.go`):
+     `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`) and
+     `MEHO-Admins` (`tenant_admin`). Each carries
      `tenant_id` from `--tenant-id` (default the all-zero UUID) and
      `meho_tenant` = `<tenant-id>:<tenant-name>:<Role>` (`--tenant-name`,
      default `main`). Also `MEHO-Platform-Admins` (`platform_admin=true`)
-     and, with `--add-tenant <name>`, the five groups
+     and, with `--add-tenant <name>`, the three groups
      `MEHO-<name>-<Role>` of one more tenant, which carry only
      `meho_tenant` (`extraTenantGroups` in `tenants.go`). The tenant's
      UUID comes from `--add-tenant-id`, else from the `meho_tenant` value
@@ -3115,7 +3119,7 @@ Every step does a "does this exist?" check before mutating:
   Different → `PUT /groups/{id}` with the full attribute map (Keycloak
   replaces the whole map, so other attributes are carried over, and so
   is the group description); equal → skip. `approver` is removed from
-  every group except `MEHO-Approvers`. Old groups such as
+  each of these groups that has it. Old groups such as
   `meho-admins` are never touched.
 - User: `GET /users?exact=true&username=<name>`; missing → POST then
   `PUT /users/{id}/reset-password`; existing → skip the password
@@ -3215,10 +3219,10 @@ the CA cert is available.
 in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (8 mappers, 4 default scopes, 2 clients, 5 groups with
+  the recipe (8 mappers, 4 default scopes, 2 clients, 3 groups with
   their attributes plus `MEHO-Platform-Admins`, 1 user in `MEHO-Admins`
   and `MEHO-Platform-Admins`).
-- `tenants_test.go`: `--add-tenant` makes five groups with only
+- `tenants_test.go`: `--add-tenant` makes three groups with only
   `meho_tenant`, a second run changes nothing, a missing id is made once
   and read back, a one-tenant realm gains `meho_tenant`, and bad tenant
   flags stop before any Keycloak call.
@@ -3227,7 +3231,7 @@ in-memory state maps) through these scenarios, among others:
   exactly once across two runs.
 - Upgrade: a realm with the older fixed-value `tenant-id` /
   `tenant-role` mappers and a `meho-admins` group ends with only User
-  Attribute mappers, the five groups, the admin user also in
+  Attribute mappers, the three groups, the admin user also in
   `MEHO-Admins`, the old group left in place; a second run changes
   nothing.
 - Changed group attributes are set back; other attributes stay;
@@ -3256,10 +3260,8 @@ in-memory state maps) through these scenarios, among others:
 The unit suite proves the orchestrator's interaction shape.
 `backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
 proves the realm semantics against a real Keycloak 26.0 in CI: a
-person in each of the five groups gets the right `tenant_id` /
-`tenant_role` (and only the `MEHO-Approvers` person gets `approver`, a
-claim that MEHO does not read for approval),
-both in the token Keycloak builds for `meho-cli` and through a real
+person in each of the three groups gets the right `tenant_id` /
+`tenant_role` and no `approver`, both in the token Keycloak builds for `meho-cli` and through a real
 `meho-mcp` login checked by the backplane's JWT code; a person in no
 group gets `401 missing_tenant_claim`; and an older realm with
 fixed-value mappers is upgraded, with a second run changing nothing.

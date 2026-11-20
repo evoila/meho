@@ -21,6 +21,7 @@ from meho_backplane.broadcast.agent_events import (
     WORK_REF_MAX_CHARS,
     AgentAnnouncementEvent,
     PlannedOpClass,
+    announcement_text_problem,
 )
 from meho_backplane.broadcast.announcement_claims import (
     AnnouncementClaimError,
@@ -100,6 +101,7 @@ __all__ = [
     "BroadcastEvent",
     "InvalidArchiveCursorError",
     "PlannedOpClass",
+    "announcement_text_problem",
     "broadcast_readiness_probe",
     "build_trusted_announcement",
     "classify_op",

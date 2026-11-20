@@ -37,13 +37,12 @@ carry the same access model the Bearer REST plane adopted in #3243/#3270:
 ``approve_request`` / ``reject_request`` run the shared service gate
 ``_check_reviewer_role``, which admits a principal that is
 ``operator``-or-higher **or** carries the orthogonal ``approver``
-capability (``Operator.approver``, lifted from the JWT ``approver`` claim
-by :func:`~meho_backplane.auth.jwt._operator_from_claims`). So a dedicated
-approver provisioned as ``read_only`` role + ``approver=true`` can clear a
-four-eyes gate through the console just as it can over REST/CLI, while a
-``read_only`` principal *without* the flag is still refused (403). The
-capability is scoped to the approvals decision: it grants no dispatch or
-other ``require_role``-gated console surface (those never read
+capability (``Operator.approver``). MEHO does not set this flag from a
+token claim, and no role gives it today, so no ``read_only`` approver can
+be set up yet. A ``read_only`` principal without the flag is refused
+(403), in the console and over REST/CLI alike. The capability is scoped
+to the approvals decision: it grants no dispatch or other
+``require_role``-gated console surface (those never read
 ``operator.approver``), and the ``sub``-keyed self-approval refusal
 (#1401) is unchanged -- an approver cannot decide a request it parked.
 

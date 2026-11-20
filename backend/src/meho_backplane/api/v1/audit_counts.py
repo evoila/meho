@@ -12,7 +12,8 @@ window it counted.
 
 Same posture as the query routes in :mod:`meho_backplane.api.v1.audit`:
 ``operator`` role minimum, tenant from the JWT (never the body), and the
-request is audited as an aggregate-only audit query.
+request is audited as an aggregate-only audit query. A service login
+counts only the rows of its own calls, as on the query routes.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 
 from meho_backplane.api.v1.audit_models import AuditClassCounts, AuditClassCountsRequest
-from meho_backplane.audit_query import DurationParseError, count_event_classes
+from meho_backplane.audit_query import DurationParseError, count_event_classes, own_rows_sub
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
@@ -48,7 +49,12 @@ async def class_counts(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     async with get_sessionmaker()() as session:
-        result = await count_event_classes(filters, tenant_id=operator.tenant_id, session=session)
+        result = await count_event_classes(
+            filters,
+            tenant_id=operator.tenant_id,
+            session=session,
+            owner_sub=own_rows_sub(operator),
+        )
     total = sum(result.counts.values())
     structlog.contextvars.bind_contextvars(audit_row_count=total)
     return AuditClassCounts(counts=result.counts, total=total, since=result.since)

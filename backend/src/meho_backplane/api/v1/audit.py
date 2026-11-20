@@ -80,8 +80,8 @@ minimum (:class:`~meho_backplane.auth.operator.TenantRole.OPERATOR`):
 :mod:`~meho_backplane.api.v1.retrieve` and
 :mod:`~meho_backplane.api.v1.retrieve_usage`. These match the MCP
 ``query_audit`` tool, which is also ``operator``-gated — including its
-``shape="tree"`` *self-session* replay, locked to the caller's own
-session id.
+``shape="tree"`` *self-session* replay, which holds only the rows of
+the caller's own calls.
 
 The **cross-session replay** route
 (``GET /api/v1/audit/sessions/{session_id}/replay``) takes an
@@ -97,6 +97,12 @@ MCP and than ``docs/cross-repo/audit-replay.md``; tightening to
 ``tenant_admin`` closes that gap. Self-scoped audit access
 (``my-recent``, an operator querying their own principal) stays at
 ``operator`` — only the arbitrary-session forensic path is lifted.
+
+Who reads which rows: a person reads every row of the tenant. A service
+login (an agent, a runner, an add-on, any client-credentials login)
+reads only the rows of its own calls on every route here, whatever role
+it carries (:func:`~meho_backplane.audit_query.own_rows_sub`). A row or a
+session of another login answers like one that does not exist.
 
 Error mapping
 =============
@@ -136,8 +142,10 @@ from meho_backplane.audit_query import (
     DurationParseError,
     InvalidCursorError,
     MyRecentPage,
+    ReplayNode,
     UnsupportedFilterError,
     count_loose_rows_in_forest,
+    own_rows_sub,
     parse_duration,
     query_audit,
     replay_session,
@@ -228,12 +236,19 @@ def _bind_audit_overrides(op_id: str = _AUDIT_QUERY_OP_ID) -> None:
 async def _dispatch(
     filters: AuditQueryFilters,
     *,
-    tenant_id: uuid.UUID,
+    operator: Operator,
+    own_rows_only: bool = True,
 ) -> AuditQueryResult:
     """Acquire a session, call :func:`query_audit`, bind ``audit_row_count``.
 
     Centralises the substrate dispatch so each route handler stays
-    focused on filter construction. Maps the substrate's operator-
+    focused on filter construction. The tenant is the caller's own. A
+    service login reads only the rows of its own calls
+    (:func:`~meho_backplane.audit_query.own_rows_sub`); a person reads
+    every row of the tenant. ``own_rows_only=False`` reads every row of the
+    tenant for any caller and binds no ``audit_row_count``; only
+    :func:`trace` uses it, and it checks the row's owner and binds the
+    count itself. Maps the substrate's operator-
     facing validation errors (:class:`InvalidCursorError`,
     :class:`UnsupportedFilterError`) to 400 — other exceptions
     propagate and the chassis turns them into 500.
@@ -241,7 +256,12 @@ async def _dispatch(
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session:
-            result = await query_audit(filters, tenant_id=tenant_id, session=session)
+            result = await query_audit(
+                filters,
+                tenant_id=operator.tenant_id,
+                session=session,
+                owner_sub=own_rows_sub(operator) if own_rows_only else None,
+            )
     except (InvalidCursorError, UnsupportedFilterError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -249,7 +269,8 @@ async def _dispatch(
     # via ``audit_row_count`` (per ``broadcast/events.py::_maybe_row_count``),
     # giving SSE / Slack subscribers an aggregate signal without
     # revealing the request filter or the matched audit rows.
-    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    if own_rows_only:
+        structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
     return result
 
 
@@ -273,7 +294,7 @@ async def query(
         filters = body.to_filters()
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await _dispatch(filters, tenant_id=operator.tenant_id)
+    return await _dispatch(filters, operator=operator)
 
 
 @router.get("/who-touched/{target}", response_model=AuditQueryResult)
@@ -297,7 +318,7 @@ async def who_touched(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(target=target, since=since_dt, limit=limit)
-    return await _dispatch(filters, tenant_id=operator.tenant_id)
+    return await _dispatch(filters, operator=operator)
 
 
 @router.get("/by-work-ref/{ref:path}", response_model=AuditQueryResult)
@@ -337,7 +358,7 @@ async def by_work_ref(
         except DurationParseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(work_ref=ref, since=since_dt, limit=limit)
-    return await _dispatch(filters, tenant_id=operator.tenant_id)
+    return await _dispatch(filters, operator=operator)
 
 
 @router.get("/my-recent", response_model=MyRecentPage)
@@ -371,7 +392,7 @@ async def my_recent(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(principal_sub=operator.sub, since=since_dt, limit=limit)
-    result = await _dispatch(filters, tenant_id=operator.tenant_id)
+    result = await _dispatch(filters, operator=operator)
     return MyRecentPage(items=result.rows, next_cursor=result.next_cursor)
 
 
@@ -391,7 +412,7 @@ async def show(
     """
     _bind_audit_overrides()
     filters = AuditQueryFilters(audit_id=audit_id, limit=1)
-    result = await _dispatch(filters, tenant_id=operator.tenant_id)
+    result = await _dispatch(filters, operator=operator)
     if not result.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
     return result.rows[0]
@@ -423,6 +444,17 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
     ):
         return None
     return view
+
+
+async def _trace_asked_by(sub: str, audit_id: uuid.UUID, *, tenant_id: uuid.UUID) -> bool:
+    """True when the stored trace of *audit_id* names *sub* as its caller.
+
+    The caller of a trace is the login that asked for the call, also when a
+    person approved it and the audit row names that person.
+    """
+    async with get_sessionmaker()() as session:
+        view = await load_trace(session, audit_id=audit_id, tenant_id=tenant_id)
+    return view is not None and view.operator_sub == sub
 
 
 def _reads_own_traces_only(operator: Operator) -> bool:
@@ -519,6 +551,13 @@ async def trace(
     capture is a best-effort opt-in
     (F1/F7), so "no trace" is a normal observable state, not an error.
 
+    A service login reads only the rows of its own calls, so for a row of
+    another login it gets the same 404. One case differs: a call that ran
+    after a person approved it. Its audit row names the person who
+    approved, but its trace names the login that asked for the call. That
+    login gets the trace (:func:`_trace_asked_by`); the answer holds no
+    field of the approver's audit row.
+
     Tenant isolation is enforced twice: the existence check is tenant-scoped,
     and :func:`~meho_backplane.flight_recorder.load_trace` additionally filters
     the trace header on ``tenant_id`` as defence in depth.
@@ -531,12 +570,30 @@ async def trace(
     # row, exactly as ``show`` does — so a probing operator cannot distinguish
     # "no such dispatch" from "dispatch in another tenant".
     audit = await _dispatch(
-        AuditQueryFilters(audit_id=audit_id, limit=1), tenant_id=operator.tenant_id
+        AuditQueryFilters(audit_id=audit_id, limit=1),
+        operator=operator,
+        own_rows_only=False,
     )
+    # The stored row count is bound only after the owner check, so a row of
+    # another login and a missing row leave the same count (0) in the
+    # caller's own audit row.
+    structlog.contextvars.bind_contextvars(audit_row_count=0)
     if not audit.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
+    owner_sub = own_rows_sub(operator)
+    row = audit.rows[0]
+    if (
+        owner_sub is not None
+        and row.principal_sub != owner_sub
+        and not (
+            row.event_class == AuditEventClass.OPERATION_EXECUTION
+            and await _trace_asked_by(owner_sub, audit_id, tenant_id=operator.tenant_id)
+        )
+    ):
+        raise HTTPException(status_code=404, detail="audit row not found")
+    structlog.contextvars.bind_contextvars(audit_row_count=1)
 
-    event_class = audit.rows[0].event_class
+    event_class = row.event_class
     view = None
     if event_class == AuditEventClass.OPERATION_EXECUTION:
         view = await _load_trace_for(operator, audit_id)
@@ -554,6 +611,7 @@ async def _count_session_rows(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Cheap tenant-scoped count of a session's *anchor* rows.
 
@@ -568,6 +626,8 @@ async def _count_session_rows(
     ``dispatch_child`` whose own ``agent_session_id`` is NULL); those
     are deliberately *not* counted — "session rows" are defined by the
     ``agent_session_id`` anchor, matching the issue's WHERE clause.
+
+    ``owner_sub`` counts only the rows of that login (a service login).
     """
     stmt = (
         sa.select(sa.func.count())
@@ -577,6 +637,8 @@ async def _count_session_rows(
             AuditLog.tenant_id == tenant_id,
         )
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     return await session.scalar(stmt) or 0
 
 
@@ -584,6 +646,7 @@ async def _count_excluded_null_session_rows(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Count the tenant's ``method=MCP`` rows with a NULL ``agent_session_id``.
 
@@ -600,6 +663,8 @@ async def _count_excluded_null_session_rows(
     methods (CLI / REST rows) are not "excluded" from a surface they
     were never part of. Tenant-scoped and independent of any
     ``session_id`` — the un-negotiated rows belong to no session.
+
+    ``owner_sub`` counts only the rows of that login (a service login).
     """
     stmt = (
         sa.select(sa.func.count())
@@ -610,7 +675,52 @@ async def _count_excluded_null_session_rows(
             AuditLog.agent_session_id.is_(None),
         )
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     return await session.scalar(stmt) or 0
+
+
+async def _replay_tree(
+    session_id: uuid.UUID,
+    *,
+    tenant_id: uuid.UUID,
+    owner_sub: str | None,
+    session: AsyncSession,
+) -> tuple[int, list[ReplayNode]]:
+    """Return the anchor row count and the tree of one session.
+
+    With *owner_sub* set (a service login, whatever role it carries), only
+    the login's own rows are counted and walked: the tree, ``row_count``
+    and every other count of the answer hold only its own stored rows. So
+    a session of another login answers ``(0, [])``, the same as a session
+    that does not exist. A session above
+    :data:`_REPLAY_ROW_CAP` anchor rows raises 413 before the tree is built.
+    """
+    row_count = await _count_session_rows(
+        session_id,
+        tenant_id=tenant_id,
+        session=session,
+        owner_sub=owner_sub,
+    )
+    if row_count > _REPLAY_ROW_CAP:
+        # Bind the count so the audit-on-replay broadcast still
+        # reports the (rejected) cardinality, then refuse before
+        # the recursive build runs.
+        structlog.contextvars.bind_contextvars(audit_row_count=row_count)
+        # FastAPI 0.136 renamed the 413 constant to
+        # ``HTTP_413_CONTENT_TOO_LARGE`` (same value, 413) and
+        # deprecated the old ``..._REQUEST_ENTITY_TOO_LARGE`` spelling.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={"detail": "session_too_large", "row_count": row_count},
+        )
+    root = await replay_session(
+        session_id,
+        tenant_id=tenant_id,
+        session=session,
+        owner_sub=owner_sub,
+    )
+    return row_count, root
 
 
 @router.get("/sessions/{session_id}/replay", response_model=AuditReplayResult)
@@ -655,39 +765,25 @@ async def replay(
     empty history — see :func:`_count_excluded_null_session_rows`.
     """
     _bind_audit_overrides(_AUDIT_REPLAY_OP_ID)
+    owner_sub = own_rows_sub(operator)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        row_count = await _count_session_rows(
+        row_count, root = await _replay_tree(
             session_id,
             tenant_id=operator.tenant_id,
-            session=session,
-        )
-        if row_count > _REPLAY_ROW_CAP:
-            # Bind the count so the audit-on-replay broadcast still
-            # reports the (rejected) cardinality, then refuse before
-            # the recursive build runs.
-            structlog.contextvars.bind_contextvars(audit_row_count=row_count)
-            # FastAPI 0.136 renamed the 413 constant to
-            # ``HTTP_413_CONTENT_TOO_LARGE`` (same value, 413) and
-            # deprecated the old ``..._REQUEST_ENTITY_TOO_LARGE`` spelling.
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail={"detail": "session_too_large", "row_count": row_count},
-            )
-
-        root = await replay_session(
-            session_id,
-            tenant_id=operator.tenant_id,
+            owner_sub=owner_sub,
             session=session,
         )
         excluded_null_session_count = await _count_excluded_null_session_rows(
             tenant_id=operator.tenant_id,
             session=session,
+            owner_sub=owner_sub,
         )
         loose_row_count = await count_loose_rows_in_forest(
             root,
             tenant_id=operator.tenant_id,
             session=session,
+            owner_sub=owner_sub,
         )
 
     structlog.contextvars.bind_contextvars(audit_row_count=row_count)

@@ -3327,7 +3327,7 @@ the notes) and none of the others failed.</p>
 <tr>
 <td><code>certificate</code></td>
 <td>MEHO opens a TLS connection to <code>BACKPLANE_URL</code>. The chain is trusted, the name matches, and more than 30 days are left.</td>
-<td>Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix <code>BACKPLANE_URL</code>. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address.</td>
+<td>Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix <code>BACKPLANE_URL</code>. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. On a Linux server (form 2), the line names the command that does both: <code>sudo meho-host certificate --cert &lt;chain.pem&gt; --key &lt;key.pem&gt;</code>. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address.</td>
 </tr>
 <tr>
 <td><code>network</code></td>
@@ -3364,7 +3364,10 @@ a firewall, and run the checks again. The install itself is not stopped.</p>
   until the certificate check is green, so a bad certificate gives one red
   line, not two.</li>
 <li>The certificate check uses the system trust bundle of the MEHO container.
-  Point <code>SSL_CERT_FILE</code> at your own bundle if your CA is private.</li>
+  Point <code>SSL_CERT_FILE</code> at your own bundle if your CA is private. On a
+  Linux server (form 2), <code>meho-host certificate</code> gives your CA to MEHO, and
+  the check trusts it too (see <a href="../form-2-linux-server/#use-a-certificate-from-your-own-ca">Form 2: use a certificate from your own
+  CA</a>).</li>
 <li>The clock check reads the time from a successful discovery answer of
   Keycloak only. An error page from a proxy in front of Keycloak does not
   count, so the line is red while Keycloak is down.</li>

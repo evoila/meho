@@ -3984,6 +3984,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>On a Linux server (install form 2), <code>meho-host certificate</code> also gives the CA of your certificate to MEHO (the ConfigMap <code>meho-console-trust</code>) and restarts MEHO, so the <code>certificate</code> line of the first-start list turns green; the console is away for about a minute. With the install's own CA the line stays red, as before. When the CA cannot be read, the line says the certificate is not trusted and names <code>sudo meho-host certificate</code>.</td>
+<td>If you installed your own certificate with <code>meho-host certificate</code> before this version, run <code>sudo meho-host certificate --cert chain.pem --key key.pem</code> again with the same files after the update, so the <code>certificate</code> line turns green. See https://evoila.github.io/meho/latest/install/form-2-linux-server/#use-a-certificate-from-your-own-ca.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>Only a person can remove a <code>deny</code> grant or a <code>needs-approval</code> grant of an agent. A call that removes such a grant with a service, runner or agent login now gets 403 <code>human_principal_required</code>, and the grant stays. This holds for REST, MCP and the console. Over REST and MCP, any login that has the <code>tenant_admin</code> role can remove an <code>auto-execute</code> grant. On the unified console page, only a person can remove any grant.</td>
 <td>If a script removes <code>deny</code> or <code>needs-approval</code> grants, run it with a person's login. Scripts that only remove <code>auto-execute</code> grants need no change.</td>
 </tr>

@@ -4138,10 +4138,16 @@ says what is wrong, and nothing changes.</p>
    line of <code>meho-host check</code>. With 30 days or less left, the line is a
    <code>[WARN]</code>.</p>
 </li>
+<li>From v0.49.0, the command also gives your CA to MEHO, and MEHO
+   restarts. The console is away for about a minute. After that, the
+   <code>certificate</code> line of the first-start list is green.</li>
 <li>MEHO keeps the key. Delete your copy of <code>key.pem</code> from the server.</li>
 </ol>
-<p>An update keeps your certificate. To replace it, for example before it
-expires, run the command again with the new files.</p>
+<p>An update keeps your certificate, and MEHO keeps trusting your CA. To
+replace the certificate, for example before it expires, run the command
+again with the new files. If you installed your certificate with an
+older version, run the command again after the update to v0.49.0, so the
+<code>certificate</code> line turns green.</p>
 <h3 id="the-unseal-key">The unseal key<a class="headerlink" href="#the-unseal-key" title="Permanent link">&para;</a></h3>
 <p>OpenBao, the password safe, locks itself ("seals") at every restart. By
 default it opens ("unseals") itself again within seconds, with a copy of

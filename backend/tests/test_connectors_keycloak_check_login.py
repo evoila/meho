@@ -111,15 +111,16 @@ _NO_DIRECT_GRANTS = {
 }
 
 
-def _person(sub: str) -> Operator:
+def _person(sub: str, *, platform_admin: bool = False) -> Operator:
     return Operator(
         sub=sub,
         name=f"Person {sub}",
         email=None,
         raw_jwt=f"{sub}.jwt",
         tenant_id=_TENANT_ID,
-        tenant_role=TenantRole.OPERATOR,
+        tenant_role=TenantRole.TENANT_ADMIN if platform_admin else TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
+        platform_admin=platform_admin,
     )
 
 
@@ -422,7 +423,9 @@ async def test_password_and_tokens_leak_nowhere(
     spans: list[Any],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    requester, approver = _person("kc-check-requester"), _person("kc-check-approver")
+    # The login is checked in master, so a platform admin approves.
+    requester = _person("kc-check-requester")
+    approver = _person("kc-check-approver", platform_admin=True)
     caplog.set_level(logging.DEBUG)
     with (
         capture_logs() as logs,

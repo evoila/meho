@@ -143,6 +143,8 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_GROUP_REALM_COMPOSITE_PATH": ("GET",),
     "_GROUP_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_GROUPS_PATH": ("GET",),
+    # Every realm role a user has (the platform admin check of a login).
+    "_USER_REALM_COMPOSITE_PATH": ("GET",),
     "_USER_GROUP_PATH": ("PUT", "DELETE"),
     # Realm delete approval card (#3886): user and group counts.
     "_USERS_COUNT_PATH": ("GET",),
@@ -265,6 +267,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
+        "GET:/admin/realms/{realm}/users/{user-id}/role-mappings/realm/composite",
         "GET:/admin/realms/{realm}/users/{user-id}/sessions",
         "POST:/admin/realms",
         "POST:/admin/realms/{realm}/authentication/executions/{executionId}/config",

@@ -284,7 +284,7 @@ async def _park(op_id: str, params: dict[str, Any]) -> uuid.UUID:
     return uuid.UUID(call["extras"]["approval_request_id"])
 
 
-async def _approve_and_resume(request_id: uuid.UUID, *, platform_admin: bool = False) -> Any:
+async def _approve_and_resume(request_id: uuid.UUID, *, platform_admin: bool = True) -> Any:
     approver = _operator(
         "kc-identity-approver", TenantRole.TENANT_ADMIN, platform_admin=platform_admin
     )

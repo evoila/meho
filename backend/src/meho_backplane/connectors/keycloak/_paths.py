@@ -71,6 +71,7 @@ __all__ = [
     "_USER_BRUTE_FORCE_PATH",
     "_USER_CREDENTIALS_PATH",
     "_USER_CREDENTIAL_PATH",
+    "_USER_REALM_COMPOSITE_PATH",
     "_USER_ROLE_MAPPINGS_CLIENT_PATH",
     "_USER_SESSIONS_PATH",
     "fill_path",
@@ -131,6 +132,8 @@ _GROUP_REALM_COMPOSITE_PATH = (
     "/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/composite"
 )
 _USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
+# Every realm role a user has: direct, from groups and the parts of composites.
+_USER_REALM_COMPOSITE_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings/realm/composite"
 # NB: the user-group membership sub-resource uses the camelCase ``{groupId}``
 # path-parameter name (a Keycloak spec quirk — the groups resource itself uses
 # the hyphenated ``{group-id}``); the placeholder is byte-for-byte the pinned

@@ -144,6 +144,26 @@ def test_a_real_quoted_value_over_a_line_break_is_still_hidden_whole(form: str) 
         assert out.endswith("\nnext line")
 
 
+#: A line break between a connection string field and a password that starts with ``/``.
+_FIELD_BREAKS: Final[list[str]] = ["\n", "\r\n", "\n\n", " \n\t"]
+
+
+@pytest.mark.parametrize("brk", _FIELD_BREAKS)
+def test_a_connection_password_after_a_line_break_is_not_a_working_folder(brk: str) -> None:
+    text = f"Server=db;{brk}{_PWD_IS}/made up phrase\nnext line"
+    for out in _answer_and_trace(text):
+        assert "made up phrase" not in out
+        assert out.startswith(f"Server=db;{brk}{_PWD_IS}")
+        assert out.endswith("\nnext line")
+
+
+@pytest.mark.parametrize("brk", _FIELD_BREAKS)
+def test_a_working_folder_after_a_command_on_the_line_above_stays(brk: str) -> None:
+    text = f"cd /srv;{brk}pwd=/tmp\nnext line"
+    for out in _answer_and_trace(text):
+        assert out == text
+
+
 # -- one long line ----------------------------------------------------------------
 
 

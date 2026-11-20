@@ -616,14 +616,14 @@ def _is_connection_field(text: str, match: re.Match[str], start: int, stop: int)
 def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -> bool:
     """True for ``pwd=/tmp``: a folder path that is not a connection string field.
 
-    A field stands before it (``Server=db;Pwd=/x``) or after it
-    (``Pwd=/x;Database=d``) in a connection string.
+    A field stands before it (``Server=db;Pwd=/x``, also on the line above)
+    or after it (``Pwd=/x;Database=d``) in a connection string.
     """
     if match["label"].lower() != "pwd" or not text.startswith("/", start):
         return False
     if _NEXT_FIELD.match(text, stop) is not None:
         return False
-    before = text[max(0, match.start() - 256) : match.start()].rstrip(" \t")
+    before = text[max(0, match.start() - 256) : match.start()].rstrip()
     if not before.endswith(";"):
         return True
     field = before[:-1].rsplit("\n", 1)[-1].rsplit(";", 1)[-1]

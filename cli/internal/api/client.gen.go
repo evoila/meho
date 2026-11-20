@@ -2200,8 +2200,11 @@ type ApprovalSignInStatusState string
 // level: “off“, “observe“ or “required“ (“auto“ is “observe“
 // only while “sign_in“ shows for sure that the realm does not give the
 // level, and “required“ when it is “ok“ or its read failed).
-// “sign_in_level_warning“ is a short sentence whenever the level is not
-// required in practice or the read failed, else “None“.
+// “web_sign_in“ and “web_sign_in_level_in_force“ are the same for the
+// console's approval client (#6282): “auto“ reads each client's
+// binding, so the two can differ. “sign_in_level_warning“ is a short
+// sentence whenever the level is not required in practice for either
+// client or a read failed, else “None“.
 // “rights_change_admins“ is how many admins of the caller's tenant could
 // approve a change of rights (#6641,
 // :mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
@@ -2217,6 +2220,10 @@ type ApprovalsStatus struct {
 	SignInLevel        *string               `json:"sign_in_level"`
 	SignInLevelInForce *string               `json:"sign_in_level_in_force"`
 	SignInLevelWarning *string               `json:"sign_in_level_warning"`
+
+	// WebSignIn The state of the approval sign-in flow and its binding (#6280).
+	WebSignIn             *ApprovalSignInStatus `json:"web_sign_in,omitempty"`
+	WebSignInLevelInForce *string               `json:"web_sign_in_level_in_force"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -7162,8 +7169,11 @@ type HealthResponse struct {
 	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
 	// only while ``sign_in`` shows for sure that the realm does not give the
 	// level, and ``required`` when it is ``ok`` or its read failed).
-	// ``sign_in_level_warning`` is a short sentence whenever the level is not
-	// required in practice or the read failed, else ``None``.
+	// ``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the
+	// console's approval client (#6282): ``auto`` reads each client's
+	// binding, so the two can differ. ``sign_in_level_warning`` is a short
+	// sentence whenever the level is not required in practice for either
+	// client or a read failed, else ``None``.
 	// ``rights_change_admins`` is how many admins of the caller's tenant could
 	// approve a change of rights (#6641,
 	// :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
@@ -7334,9 +7344,11 @@ type HealthResponse struct {
 
 // ImportedSensor What the import did, or would do, to one Sensor.
 type ImportedSensor struct {
-	Action        ImportedSensorAction `json:"action"`
-	ChangedFields *[]string            `json:"changed_fields,omitempty"`
-	Name          string               `json:"name"`
+	Action            ImportedSensorAction `json:"action"`
+	ChangedFields     *[]string            `json:"changed_fields,omitempty"`
+	IdentitySubAfter  *string              `json:"identity_sub_after"`
+	IdentitySubBefore *string              `json:"identity_sub_before"`
+	Name              string               `json:"name"`
 }
 
 // ImportedSensorAction defines model for ImportedSensor.Action.
@@ -11127,6 +11139,12 @@ type SensorResultRead struct {
 // SensorResultReadState defines model for SensorResultRead.State.
 type SensorResultReadState string
 
+// SensorRunAccepted Answer of the run route: the Sensor and when it is due.
+type SensorRunAccepted struct {
+	NextFireAt time.Time          `json:"next_fire_at"`
+	SensorId   openapi_types.UUID `json:"sensor_id"`
+}
+
 // SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
 //
 // The queryable half of the checks-runner watchdog: an external prober
@@ -14220,6 +14238,12 @@ type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
 // ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
 type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
 
+// RunSensorNowApiV1SensorsSensorIdRunPostParams defines parameters for RunSensorNowApiV1SensorsSensorIdRunPost.
+type RunSensorNowApiV1SensorsSensorIdRunPostParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // ListGrantsApiV1ServicePrincipalsGrantsGetParams defines parameters for ListGrantsApiV1ServicePrincipalsGrantsGet.
 type ListGrantsApiV1ServicePrincipalsGrantsGetParams struct {
 	PrincipalSub   *string `form:"principal_sub,omitempty" json:"principal_sub,omitempty"`
@@ -14650,6 +14674,19 @@ type UiAuditResultsUiAuditResultsGetParams struct {
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
 	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
+}
+
+// UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams defines parameters for UiAuthApprovalCallbackUiAuthApprovalCallbackGet.
+type UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams struct {
+	Code             *string `form:"code,omitempty" json:"code,omitempty"`
+	State            *string `form:"state,omitempty" json:"state,omitempty"`
+	Error            *string `form:"error,omitempty" json:"error,omitempty"`
+	ErrorDescription *string `form:"error_description,omitempty" json:"error_description,omitempty"`
+}
+
+// UiAuthApprovalSignInUiAuthApprovalSignInGetParams defines parameters for UiAuthApprovalSignInUiAuthApprovalSignInGet.
+type UiAuthApprovalSignInUiAuthApprovalSignInGetParams struct {
+	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
 }
 
 // UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
@@ -18119,6 +18156,9 @@ type ClientInterface interface {
 	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
 	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RunSensorNowApiV1SensorsSensorIdRunPost request
+	RunSensorNowApiV1SensorsSensorIdRunPost(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListGrantsApiV1ServicePrincipalsGrantsGet request
 	ListGrantsApiV1ServicePrincipalsGrantsGet(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18552,6 +18592,12 @@ type ClientInterface interface {
 
 	// UiAuditDrawerUiAuditShowAuditIdGet request
 	UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthApprovalCallbackUiAuthApprovalCallbackGet request
+	UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthApprovalSignInUiAuthApprovalSignInGet request
+	UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthCallbackUiAuthCallbackGet request
 	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22218,6 +22264,18 @@ func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Con
 	return c.Client.Do(req)
 }
 
+func (c *Client) RunSensorNowApiV1SensorsSensorIdRunPost(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunSensorNowApiV1SensorsSensorIdRunPostRequest(c.Server, sensorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListGrantsApiV1ServicePrincipalsGrantsGet(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(c.Server, params)
 	if err != nil {
@@ -24140,6 +24198,30 @@ func (c *Client) UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet(ctx conte
 
 func (c *Client) UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditDrawerUiAuditShowAuditIdGetRequest(c.Server, auditId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -39297,6 +39379,77 @@ func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, se
 	return req, nil
 }
 
+// NewRunSensorNowApiV1SensorsSensorIdRunPostRequest generates requests for RunSensorNowApiV1SensorsSensorIdRunPost
+func NewRunSensorNowApiV1SensorsSensorIdRunPostRequest(server string, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/run", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListGrantsApiV1ServicePrincipalsGrantsGetRequest generates requests for ListGrantsApiV1ServicePrincipalsGrantsGet
 func NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(server string, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams) (*http.Request, error) {
 	var err error
@@ -45886,6 +46039,152 @@ func NewUiAuditDrawerUiAuditShowAuditIdGetRequest(server string, auditId openapi
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest generates requests for UiAuthApprovalCallbackUiAuthApprovalCallbackGet
+func NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest(server string, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/approval-callback")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Code != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "code", runtime.ParamLocationQuery, *params.Code); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Error != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error", runtime.ParamLocationQuery, *params.Error); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ErrorDescription != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error_description", runtime.ParamLocationQuery, *params.ErrorDescription); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest generates requests for UiAuthApprovalSignInUiAuthApprovalSignInGet
+func NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest(server string, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/approval-sign-in")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReturnTo != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -55272,6 +55571,9 @@ type ClientWithResponsesInterface interface {
 	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
 	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
 
+	// RunSensorNowApiV1SensorsSensorIdRunPostWithResponse request
+	RunSensorNowApiV1SensorsSensorIdRunPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error)
+
 	// ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse request
 	ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error)
 
@@ -55705,6 +56007,12 @@ type ClientWithResponsesInterface interface {
 
 	// UiAuditDrawerUiAuditShowAuditIdGetWithResponse request
 	UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error)
+
+	// UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse request
+	UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error)
+
+	// UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse request
+	UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error)
 
 	// UiAuthCallbackUiAuthCallbackGetWithResponse request
 	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
@@ -60470,6 +60778,29 @@ func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) StatusCode() in
 	return 0
 }
 
+type RunSensorNowApiV1SensorsSensorIdRunPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *SensorRunAccepted
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunSensorNowApiV1SensorsSensorIdRunPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunSensorNowApiV1SensorsSensorIdRunPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListGrantsApiV1ServicePrincipalsGrantsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -63065,6 +63396,50 @@ func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthApprovalSignInUiAuthApprovalSignInGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthApprovalSignInUiAuthApprovalSignInGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthApprovalSignInUiAuthApprovalSignInGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69138,6 +69513,15 @@ func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWit
 	return ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp)
 }
 
+// RunSensorNowApiV1SensorsSensorIdRunPostWithResponse request returning *RunSensorNowApiV1SensorsSensorIdRunPostResponse
+func (c *ClientWithResponses) RunSensorNowApiV1SensorsSensorIdRunPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error) {
+	rsp, err := c.RunSensorNowApiV1SensorsSensorIdRunPost(ctx, sensorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse(rsp)
+}
+
 // ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse request returning *ListGrantsApiV1ServicePrincipalsGrantsGetResponse
 func (c *ClientWithResponses) ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error) {
 	rsp, err := c.ListGrantsApiV1ServicePrincipalsGrantsGet(ctx, params, reqEditors...)
@@ -70536,6 +70920,24 @@ func (c *ClientWithResponses) UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx
 		return nil, err
 	}
 	return ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp)
+}
+
+// UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse request returning *UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse
+func (c *ClientWithResponses) UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error) {
+	rsp, err := c.UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse(rsp)
+}
+
+// UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse request returning *UiAuthApprovalSignInUiAuthApprovalSignInGetResponse
+func (c *ClientWithResponses) UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error) {
+	rsp, err := c.UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse(rsp)
 }
 
 // UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
@@ -78604,6 +79006,39 @@ func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Resp
 	return response, nil
 }
 
+// ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse parses an HTTP response from a RunSensorNowApiV1SensorsSensorIdRunPostWithResponse call
+func ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse(rsp *http.Response) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunSensorNowApiV1SensorsSensorIdRunPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest SensorRunAccepted
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListGrantsApiV1ServicePrincipalsGrantsGetResponse parses an HTTP response from a ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse call
 func ParseListGrantsApiV1ServicePrincipalsGrantsGetResponse(rsp *http.Response) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -81940,6 +82375,58 @@ func ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp *http.Response) (*UiAud
 	}
 
 	response := &UiAuditDrawerUiAuditShowAuditIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse parses an HTTP response from a UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse call
+func ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse(rsp *http.Response) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse parses an HTTP response from a UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse call
+func ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse(rsp *http.Response) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthApprovalSignInUiAuthApprovalSignInGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

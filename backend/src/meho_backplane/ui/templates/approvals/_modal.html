@@ -630,7 +630,16 @@
         </div>
       {% endif %}
 
-      {% if effect.get("preview_unavailable") %}
+      {% if effect.get("preview_failed") %}
+        {#- The preview build raised at park time. The request keeps the
+            catalog risk level; the effect itself is not known. -#}
+        <div class="alert alert-error mt-2" role="alert" data-preview-failed>
+          <div>
+            <h4 class="font-semibold text-sm">No preview</h4>
+            <p class="text-xs opacity-90">MEHO could not build the preview of this change.</p>
+          </div>
+        </div>
+      {% elif effect.get("preview_unavailable") %}
         {#- #1628: the preview builder ran but faulted, so the blast radius
             could not be resolved. Error-styled -- this is not a small action. -#}
         <div class="alert alert-error mt-2" role="alert">

@@ -62,7 +62,7 @@ from tests.test_policy_routing_classified import (
     embedding,  # noqa: F401 -- fixture
 )
 
-_ALL = ["Operators", "SA-Operators", "Admins", "Approvers"]
+_ALL = ["Operators", "Admins"]
 _STORAGE_TO_ADMINS: dict[str, Any] = {
     "classifications": [],
     "routing": [{"match": {"category": "storage"}, "approvers": ["Admins"]}],
@@ -316,7 +316,7 @@ _SHADOWED = _tenant(
 def test_a_broad_entry_after_its_own_narrower_one_is_a_warning() -> None:
     assert tenant_floor_mistakes(_SHADOWED, _NETWORK_TO_ADMINS) == []
     assert tenant_floor_warnings(_SHADOWED, _NETWORK_TO_ADMINS) == [
-        "`routing[1]` lets MEHO-Operators, MEHO-SA-Operators or MEHO-Approvers approve "
+        "`routing[1]` lets MEHO-Operators approve "
         "changes with category `network`, but the install's routing (`install:routing[0]`) "
         "lets only MEHO-Admins approve them. A tenant can only narrow the install's routing: "
         "name only these groups, or fewer. `routing[0]` comes first and fits each of these "
@@ -368,7 +368,7 @@ async def test_the_import_plan_of_a_tenant_shows_the_warning() -> None:
         b"policy: v1\n"
         b"routing:\n"
         b"  - {match: {category: network}, approvers: [Admins]}\n"
-        b"  - {match: {risk: caution}, approvers: [Operators, SA-Operators, Admins, Approvers]}\n"
+        b"  - {match: {risk: caution}, approvers: [Operators, Admins]}\n"
     )
     async with get_sessionmaker()() as session:
         plan = await build_plan(session, scope="tenant", tenant_id=_TENANT, content=content)

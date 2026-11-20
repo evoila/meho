@@ -24,7 +24,7 @@ For these, MEHO checks when a person approves:
   is a tenant admin. It needs a platform admin when the change can give
   platform admin rights: the connector decides this from what the group or
   role gives (``platform_admin``), not from its name. No self-approval rule
-  covers it, also not the one of the MEHO-SA-Operators group.
+  covers it.
 
 The connector describes each parked request in
 ``proposed_effect["preview"]["grant"]``: ``user_id`` (the login the change

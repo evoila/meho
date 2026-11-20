@@ -115,19 +115,19 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
 def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.service_grants import (
-        credential_read_grant_reason,
+        credential_call_waits,
+        credential_grant_reason,
         delete_grant_reason,
     )
 
     op_id = descriptor.op_id
+    stored_class = getattr(descriptor, "op_class", None)
     patterns = get_settings().service_grant_delete_shaped_patterns
     marks = {
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
-        "credential_read": credential_read_grant_reason(
-            op_id, getattr(descriptor, "op_class", None)
-        )
-        is not None,
+        "credential": credential_grant_reason(op_id, stored_class) is not None,
+        "credential_waits": credential_call_waits(op_id, stored_class),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
     }
@@ -321,12 +321,14 @@ async def shadow_call(
 def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk:
     """The :class:`ApprovalAsk` of *request*, as *operator* would see it."""
     from meho_backplane.db.models import ApprovalRequestStatus
-    from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
+    from meho_backplane.operations.approval_queue import (
+        ApprovalRoleFloorError,
+        approval_risk_level,
+    )
     from meho_backplane.operations.grant_approval import check_grant_approval, is_rights_change
     from meho_backplane.operations.people_behind import behind_subs, people_behind_unknown
 
     effect = request.proposed_effect or {}
-    level = effect.get("safety_level")
     waits_because = effect.get("waits_because")
     grant_refusal: str | None = None
     try:
@@ -336,7 +338,7 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
     return ApprovalAsk(
         requester_sub=request.principal_sub,
         op_id=request.op_id,
-        risk=level if isinstance(level, str) else None,
+        risk=approval_risk_level(request),
         pending=request.status == ApprovalRequestStatus.PENDING.value,
         waits_because=waits_because if isinstance(waits_because, str) else None,
         rights_change=is_rights_change(request),

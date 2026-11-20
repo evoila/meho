@@ -605,13 +605,17 @@ async def _park_run_bound_move(*, requester_sub: str) -> uuid.UUID:
             params=_MOVE_PARAMS,
             params_hash=compute_params_hash(_MOVE_PARAMS),
             run_id=uuid.uuid4(),
+            proposed_effect={"safety_level": "dangerous"},
         )
         await session.commit()
     return request.id
 
 
 def _decide_approved(request_id: uuid.UUID, *, decider_sub: str) -> dict[str, Any]:
-    """Approve *request_id* over HTTP ``/decide`` as a distinct operator."""
+    """Approve *request_id* over HTTP ``/decide`` as a distinct tenant admin.
+
+    ``secret.move`` is ``dangerous``: only an SA-Operator or an admin approves it.
+    """
     key = make_rsa_keypair("kid-decider-2293")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
@@ -619,7 +623,7 @@ def _decide_approved(request_id: uuid.UUID, *, decider_sub: str) -> dict[str, An
             key,
             fresh_sign_in=True,
             sub=decider_sub,
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:

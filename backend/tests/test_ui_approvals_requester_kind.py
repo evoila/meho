@@ -90,9 +90,15 @@ def _panel() -> str:
     return str(response.text)
 
 
+_PERSON = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+
 def test_rest_view_returns_the_requester_kind() -> None:
-    assert _view(_load(_seed(name="incident-triage", kind="agent"))).principal_kind == "agent"
-    assert _view(_load(_seed(name=None, kind=None))).principal_kind is None
+    assert (
+        _view(_load(_seed(name="incident-triage", kind="agent")), operator=_PERSON).principal_kind
+        == "agent"
+    )
+    assert _view(_load(_seed(name=None, kind=None)), operator=_PERSON).principal_kind is None
 
 
 def test_subject_ref_marks_only_machine_kinds() -> None:

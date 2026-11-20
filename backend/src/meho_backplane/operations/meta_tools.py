@@ -134,6 +134,7 @@ from meho_backplane.operations._search_typed_first import (
     search_raw_block,
     typed_only_for_caller,
 )
+from meho_backplane.operations._target_connector_limit import allowed_connectors_var
 from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
@@ -149,6 +150,10 @@ from meho_backplane.operations.op_policy import (
     OpKey,
     effective_policy_map,
     hidden_classification_fields,
+)
+from meho_backplane.operations.switch_params import (
+    visible_llm_instructions,
+    visible_parameter_schema,
 )
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
@@ -231,8 +236,14 @@ class UnknownConnectorError(ValueError):
 
     @classmethod
     async def for_caller(cls, *, tenant_id: uuid.UUID, connector_id: str) -> UnknownConnectorError:
-        """Build the error with the close ids *tenant_id* can see (#4136)."""
+        """Build the error with the close ids *tenant_id* can see (#4136).
+
+        With a bound connector list, only the close ids on the list are named.
+        """
         did_you_mean = await close_connector_ids(tenant_id=tenant_id, connector_id=connector_id)
+        allowed = allowed_connectors_var.get()
+        if allowed is not None:
+            did_you_mean = [cid for cid in did_you_mean if cid in allowed]
         return cls(
             unknown_connector_message(connector_id, did_you_mean),
             connector_id=connector_id,
@@ -2177,12 +2188,18 @@ async def describe_descriptor(
             group_id=descriptor.group_id,
             group_key=group_key,
             tags=list(descriptor.tags or []),
-            parameter_schema=dict(descriptor.parameter_schema or {}),
+            parameter_schema=dict(visible_parameter_schema(descriptor.parameter_schema) or {}),
             response_schema=(
                 dict(descriptor.response_schema) if descriptor.response_schema else None
             ),
             llm_instructions=(
-                dict(descriptor.llm_instructions) if descriptor.llm_instructions else None
+                dict(
+                    visible_llm_instructions(
+                        descriptor.llm_instructions, descriptor.parameter_schema
+                    )
+                )
+                if descriptor.llm_instructions
+                else None
             ),
             safety_level=policy.safety_level,
             requires_approval=policy.requires_approval,

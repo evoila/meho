@@ -299,6 +299,24 @@ Round-trip shape:
 5. **302 to the original `return_to`.** Operator lands on the page
    they were originally bounced from.
 
+**The console approval sign-in (#6282).** When MEHO requires the
+approval level, an approve in the console needs one more sign-in with the
+console's approval client (`UI_KEYCLOAK_APPROVE_CLIENT_ID`, default
+`meho-web-approve`, the secret of `meho-web`, bound to the approval
+sign-in flow). `meho_backplane.ui.auth.approval_sign_in_routes` adds two
+routes to the same router: `GET /ui/auth/approval-sign-in?return_to=…`
+(needs a session; PKCE, `prompt=login`, `max_age=0`,
+`acr_values=meho-approve`; the pending flow keeps the session id, so the
+callback does not need the `SameSite=Strict` session cookie) and
+`GET /ui/auth/approval-callback` (same `state` and binding-cookie checks,
+code exchange with the approval client, JWT check, then the token is
+kept Fernet-encrypted in `web_session.approval_token` only when `azp` is
+the approval client and `sub` is the session's person). The approvals
+modal links there instead of `?fresh_sign_in=1` under `required`
+(`ui/routes/approvals/sign_in.py`). The normal login above does not
+change. Details: [`approvals.md`](approvals.md), "The console approval
+asks for the same level".
+
 Expired-callback-state recovery (G0.29 #2089, Leg 1): the
 authorization round-trip has a short window (the verifier-store TTL,
 ≤10 min). An operator who stepped away mid-login and completed the

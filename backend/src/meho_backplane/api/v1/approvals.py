@@ -93,6 +93,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from meho_backplane.auth.agent_admission import is_agent_caller
 from meho_backplane.auth.approval_sign_in import (
     ApprovalAuth,
     check_fresh_approval_sign_in,
@@ -109,6 +110,7 @@ from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeE
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
@@ -721,13 +723,13 @@ def _execution_outcome(dispatch_result: Any) -> str | None:
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
-def _people_behind_fields(row: ApprovalRequest, viewer: Operator | None) -> dict[str, Any]:
-    """``people_behind`` and ``people_behind_known`` of *row* for the view.
+def _people_behind_fields(row: ApprovalRequest, operator: Operator) -> dict[str, Any]:
+    """``people_behind`` and ``people_behind_known`` of *row* for *operator*.
 
     Only a person reads them: for an agent, service or runner login that
-    calls the API, and without a known caller, both fields stay ``None``.
+    calls the API, both fields stay ``None``.
     """
-    if viewer is None or not is_human_principal(viewer):
+    if not is_human_principal(operator):
         return {}
     if people_behind_line(row.principal_kind, row.people_behind) is None:
         return {}
@@ -738,15 +740,43 @@ def _people_behind_fields(row: ApprovalRequest, viewer: Operator | None) -> dict
     return {"people_behind": people, "people_behind_known": bool(people)}
 
 
+#: The ops whose REST card hides person-only fields from a caller that is not
+#: a person. Every other op's card comes back as stored, for every caller.
+_PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"linux.script.run"})
+
+
+def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
+    """The ``proposed_effect`` of *row* as *operator* may read it.
+
+    Only for the ops in :data:`_PERSON_ONLY_REST_CARD_OPS`: a person reads
+    the full card, as in the console, and an agent, service or runner login
+    reads what the MCP approval tools return (:func:`proposed_effect_for_agent`),
+    so the ``env`` values of ``linux.script.run`` stay out. Every other card
+    is the stored one.
+    """
+    if row.op_id not in _PERSON_ONLY_REST_CARD_OPS or (
+        is_human_principal(operator) and not is_agent_caller(operator)
+    ):
+        return row.proposed_effect
+    shown = proposed_effect_for_agent(
+        row.op_id,
+        row.proposed_effect,
+        params=row.params,
+        connector_id=row.connector_id,
+        tenant=str(row.tenant_id),
+    )
+    return shown if shown is not None else row.proposed_effect
+
+
 def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
     right: ApproveRight | None = None,
     *,
-    viewer: Operator | None = None,
+    operator: Operator,
 ) -> ApprovalRequestView:
-    """Convert an ORM row to a response view.
+    """Convert an ORM row to a response view for *operator*.
 
     *reviewer_context* is the redacted, resolved judging context (#3353),
     supplied only on the single-request path (its resolution runs a few
@@ -754,7 +784,7 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row. *right* (#3329) says
     whether the caller may approve the request; list and show pass it.
-    *viewer* is the caller: the people behind a machine login are shown
+    *operator* is the caller: the people behind a machine login are shown
     only to a person.
     """
     expired_reason = approval_expired_reason(row)
@@ -766,13 +796,13 @@ def _view(
         principal_act=row.principal_act,
         principal_name=row.principal_name,
         principal_kind=row.principal_kind,
-        **_people_behind_fields(row, viewer),
+        **_people_behind_fields(row, operator),
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,
         params_hash=row.params_hash,
         preview_hash=row.preview_hash,
-        proposed_effect=row.proposed_effect,
+        proposed_effect=_proposed_effect_for(operator, row),
         reveal_secret=bool(row.reveal_secret),
         waits_for_requester=is_secret_reveal(row),
         reveal_changes_something=is_write_reveal(row),
@@ -1060,7 +1090,7 @@ async def list_approvals(
             )
             floor = await load_install_floor(session)
         return [
-            _view(r, right=approve_right(operator, r, floor=floor), viewer=operator)
+            _view(r, right=approve_right(operator, r, floor=floor), operator=operator)
             for r in unknown_rows
         ]
     # Validate status value against the closed enum; "all" means no filter.
@@ -1095,7 +1125,9 @@ async def list_approvals(
         rows = list(result.scalars().all())
         floor = await load_install_floor(session)
 
-    return [_view(r, right=approve_right(operator, r, floor=floor), viewer=operator) for r in rows]
+    return [
+        _view(r, right=approve_right(operator, r, floor=floor), operator=operator) for r in rows
+    ]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -1136,7 +1168,7 @@ async def get_approval_request(
         reviewer_context,
         delegation,
         approve_right(operator, row, floor=floor),
-        viewer=operator,
+        operator=operator,
     )
 
 
@@ -1581,7 +1613,7 @@ async def withdraw_approval_request(
         decision="withdrawn",
         audit_id=request._audit_id,  # type: ignore[attr-defined]
     )
-    return _view(request, viewer=operator)
+    return _view(request, operator=operator)
 
 
 @router.post(
@@ -1647,7 +1679,7 @@ async def mark_approval_outcome_checked(
     return _view(
         request,
         right=approve_right(operator, request, floor=await current_install_floor()),
-        viewer=operator,
+        operator=operator,
     )
 
 

@@ -40,6 +40,7 @@ __all__ = [
     "hide_flag_value",
     "hide_in_text",
     "hide_shell_script",
+    "is_secret_shaped_name",
     "reads_shell_script",
 ]
 
@@ -127,7 +128,7 @@ def reads_shell_script(word: str) -> bool:
     return _SHELL_SCRIPT_OPTION.match(word) is not None
 
 
-def _secret_shaped_name(name: str) -> bool:
+def is_secret_shaped_name(name: str) -> bool:
     """True when a variable or flag name on a command line can name a secret."""
     upper = name.upper()
     return is_secret_param_name(name) or any(word in upper for word in _COMMAND_SECRET_WORDS)
@@ -158,7 +159,7 @@ def _secret_assignment(word: str) -> re.Match[str] | None:
     """
     for match in _ASSIGNMENT_NAME.finditer(word):
         name = match["name"]
-        if _secret_shaped_name(name) or name.lstrip("-") in _USER_FLAGS:
+        if is_secret_shaped_name(name) or name.lstrip("-") in _USER_FLAGS:
             return match
     return None
 
@@ -314,7 +315,7 @@ def _hide_word(
     if name in _USER_FLAGS:
         return None, "user"
     p_secret = name == "p" and p_rule != _P_NONE
-    return None, "secret" if p_secret or _secret_shaped_name(name) else None
+    return None, "secret" if p_secret or is_secret_shaped_name(name) else None
 
 
 def _hide_glued_value(word: str, *, p_rule: str, script_mode: bool) -> str | None:

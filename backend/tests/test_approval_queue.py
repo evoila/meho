@@ -272,7 +272,7 @@ async def test_credential_write_parks_only_an_opaque_handle(session: AsyncSessio
     assert request.resume_parent == {"op_id": "composite.rotate"}
     assert request.execution_handle is not None
     assert secret not in repr(request)
-    assert secret not in _view(request).model_dump_json()
+    assert secret not in _view(request, operator=_make_operator()).model_dump_json()
     assert secret not in repr(_row_to_dict(request))
 
     async with get_sessionmaker()() as fresh:
@@ -570,7 +570,7 @@ async def test_create_pending_request_captures_bound_work_ref(
         work_ref_var.reset(token)
 
     assert request.work_ref == "gh:evoila/meho#1659"
-    assert _view(request).work_ref == "gh:evoila/meho#1659"
+    assert _view(request, operator=_make_operator()).work_ref == request.work_ref
     assert _row_to_dict(request)["work_ref"] == "gh:evoila/meho#1659"
 
 
@@ -668,6 +668,7 @@ async def test_approve_request_flips_status(session: AsyncSession) -> None:
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -698,6 +699,7 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -750,6 +752,7 @@ async def test_request_and_its_audit_row_name_the_policy_rule(session: AsyncSess
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     finally:
@@ -855,6 +858,7 @@ async def test_a_decision_row_names_the_bound_kind_of_the_approver(session: Asyn
         target=None,
         params=params,
         params_hash=compute_params_hash(params),
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -891,6 +895,7 @@ async def test_approve_request_records_reason_in_decision_payload(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     without_reason = await create_pending_request(
         session,
@@ -900,6 +905,7 @@ async def test_approve_request_records_reason_in_decision_payload(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -943,6 +949,7 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     to_reject = await create_pending_request(
         session,
@@ -952,6 +959,7 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -999,6 +1007,7 @@ async def test_approve_request_raises_on_hash_mismatch(session: AsyncSession) ->
         target=None,
         params=original_params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1073,6 +1082,7 @@ async def test_approve_request_params_none_skips_hash_check(
         target=None,
         params=original_params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1107,6 +1117,7 @@ async def test_approve_request_audit_id_matches_decision_row(
         target=None,
         params=original_params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1138,6 +1149,7 @@ async def test_approve_request_raises_on_already_decided(session: AsyncSession) 
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1392,6 +1404,7 @@ async def test_read_only_with_approver_can_approve(session: AsyncSession) -> Non
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1537,6 +1550,7 @@ async def test_self_approval_allowed_under_break_glass(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -2322,6 +2336,7 @@ async def test_approve_allows_request_within_deadline(
         params=params,
         params_hash=compute_params_hash(params),
         expires_at=datetime.now(UTC) + timedelta(hours=1),
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -3106,6 +3121,7 @@ async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
             params=params,
             params_hash=compute_params_hash(params),
             run_id=uuid.uuid4(),
+            proposed_effect={"safety_level": "caution"},
         )
         await s.commit()
     return pending.id
@@ -3424,6 +3440,7 @@ async def test_decision_audit_row_backlinks_and_inherits_session(
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
     finally:
         agent_session_id_var.reset(token)
@@ -3868,6 +3885,7 @@ async def _park_for_delegation(session: AsyncSession) -> uuid.UUID:
         target=None,
         params={"name": "test"},
         params_hash=compute_params_hash({"name": "test"}),
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
     return pending.id

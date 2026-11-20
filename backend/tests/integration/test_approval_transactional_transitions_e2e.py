@@ -115,6 +115,7 @@ async def _commit_pending(
             params=call_params,
             params_hash=compute_params_hash(call_params),
             expires_at=expires_at,
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request

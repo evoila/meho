@@ -47,6 +47,9 @@ The rules:
 * **Credential read.** An operation that shows a secret value
   (:mod:`meho_backplane.operations.credential_read`) is at least
   ``caution`` and waits for approval. No override removes this.
+* **Credential write or mint.** An operation that writes or makes a
+  credential (class ``credential_write`` or ``credential_mint``) keeps the
+  approval its code turns on. No override removes it.
 
 * **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
   operation also gets a category, labels and the rule that set them, and
@@ -75,6 +78,7 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations.caller_address import (
@@ -83,6 +87,11 @@ from meho_backplane.operations.caller_address import (
 )
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.grant_approval import is_rights_change_op
+from meho_backplane.operations.switch_params import (
+    checked_parameter_schema,
+    visible_llm_instructions,
+    visible_parameter_schema,
+)
 from meho_backplane.policy.classification import Classification
 from meho_backplane.policy.store import (
     InvalidStoredPolicyError,
@@ -120,6 +129,12 @@ SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "
 #: classification. They are left out while the ``POLICY_CLASSIFICATION``
 #: switch is off, so those answers stay exactly as they were.
 CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
+
+#: The classes of an operation that writes or makes a credential. When the
+#: code turns approval on for such an operation, no override turns it off.
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_write", "credential_mint"}
+)
 
 
 def hidden_classification_fields() -> set[str]:
@@ -398,19 +413,27 @@ def policy_in_force(
 
 
 def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
-    """Raise *policy* for a credential read, a caller-address parameter and a change of rights.
+    """Raise *policy* for a credential call, a caller-address parameter and a change of rights.
 
     A change of rights (an operation registered with
     :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`
     or :func:`~meho_backplane.operations.grant_approval.register_grant_op`)
     always waits for approval, also when an older override turned it off.
+    An operation that writes or makes a credential keeps the approval its
+    code turns on, also when an install or tenant override turns it off.
     """
+    stored_op_class = getattr(row, "op_class", None)
     safety_level, requires_approval = raise_for_credential_read(
         row.op_id,
         safety_level=policy.safety_level,
         requires_approval=policy.requires_approval,
-        stored_op_class=getattr(row, "op_class", None),
+        stored_op_class=stored_op_class,
     )
+    if (
+        row.requires_approval
+        and resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
+    ):
+        requires_approval = True
     safety_level, requires_approval = raise_for_caller_address(
         row.parameter_schema,
         safety_level=safety_level,
@@ -438,6 +461,10 @@ async def apply_effective_policy(
     ``policy_labels`` and ``policy_rule_ref`` (not columns either) get the
     classification, so approver routing can match the category and the
     call contract and the approval request can show it.
+    ``row.parameter_schema`` gets the shown schema and
+    ``row.parameter_check_schema`` (not a column) the schema a call is
+    checked against, and ``row.llm_instructions`` loses the examples and
+    hints that name a hidden parameter (``operations/switch_params.py``).
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
@@ -446,6 +473,9 @@ async def apply_effective_policy(
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
+    row.parameter_check_schema = checked_parameter_schema(row.parameter_schema)
+    row.llm_instructions = visible_llm_instructions(row.llm_instructions, row.parameter_schema)
+    row.parameter_schema = visible_parameter_schema(row.parameter_schema)
     _set_classification(row, policy)
     return row
 

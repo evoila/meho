@@ -104,6 +104,7 @@ async def _commit_run_bound_pending(*, requester_sub: str) -> ApprovalRequest:
             params=params,
             params_hash=compute_params_hash(params),
             run_id=uuid.uuid4(),
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request

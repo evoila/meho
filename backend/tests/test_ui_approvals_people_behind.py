@@ -96,9 +96,9 @@ def _panel() -> str:
 
 def test_rest_view_names_the_people_behind() -> None:
     reader = _operator(tenant_id=_TENANT_A)
-    known = _view(_load(_seed(kind="agent", people=_PEOPLE)), viewer=reader)
-    unknown = _view(_load(_seed(kind="service", people=[])), viewer=reader)
-    person = _view(_load(_seed(kind="user", people=None)), viewer=reader)
+    known = _view(_load(_seed(kind="agent", people=_PEOPLE)), operator=reader)
+    unknown = _view(_load(_seed(kind="service", people=[])), operator=reader)
+    person = _view(_load(_seed(kind="user", people=None)), operator=reader)
 
     assert known.people_behind_known is True
     assert known.people_behind is not None
@@ -118,9 +118,9 @@ def test_rest_view_hides_the_people_behind_from_an_agent_login() -> None:
     )
     row = _load(_seed(kind="agent", people=_PEOPLE))
 
-    for view in (_view(row, viewer=reader), _view(row)):
-        assert view.people_behind is None
-        assert view.people_behind_known is None
+    view = _view(row, operator=reader)
+    assert view.people_behind is None
+    assert view.people_behind_known is None
 
 
 def test_modal_and_card_name_the_people_behind_an_agent() -> None:

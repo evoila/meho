@@ -42,11 +42,12 @@ Rules that never change:
 * An operation that a connector marks for per-call approval
   (:func:`~meho_backplane.op_classes.needs_per_call_approval`) is never
   covered either.
-* An operation that reads a credential (the ``credential_read`` class,
-  :func:`~meho_backplane.operations.service_grants.credential_read_grant_reason`)
+* An operation that reads, writes or makes a credential (the classes
+  ``credential_read``, ``credential_write`` and ``credential_mint``,
+  :func:`~meho_backplane.operations.service_grants.credential_grant_reason`)
   is never covered either: each call waits for a person. A request that
-  lists one is accepted, and the answer names the entry in
-  ``entries_that_wait``
+  lists one is refused. A request made before this rule can still list
+  one: show and approve name such an entry in ``entries_that_wait``
   (:func:`~meho_backplane.operations.run_approval_notes.with_wait_notes`).
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
@@ -90,6 +91,7 @@ from meho_backplane.operations.run_approval_schemas import (
 from meho_backplane.operations.service_grants import (
     always_wait_grant_reason,
     caller_address_grant_reason,
+    credential_refusal,
     delete_grant_reason,
 )
 from meho_backplane.policy.routing import approver_set_for, routing_enabled, routing_refusal
@@ -227,10 +229,16 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
             f"op {entry.op_id!r}: a person approves each call. A run approval never "
             "covers it: leave it out of the list"
         )
+    credential = credential_refusal(entry.op_id)
+    if credential is not None:
+        return credential
     product, version, impl_id = parse_connector_id(entry.connector_id)
     descriptor = await lookup_descriptor(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=entry.op_id
     )
+    credential = credential_refusal(entry.op_id, getattr(descriptor, "op_class", None))
+    if credential is not None:
+        return credential
     reason = (
         caller_address_grant_reason(descriptor)
         or always_wait_grant_reason(descriptor)
@@ -302,7 +310,7 @@ async def _check_approver_group(
     A ``dangerous`` (or ``destructive``) operation of another principal may
     be approved only by the groups of
     ``docs/decisions/approval-groups-and-self-approval.md``: a
-    MEHO-SA-Operator or a tenant admin. The same check
+    tenant admin. The same check
     (:func:`~meho_backplane.operations.approval_queue.may_approve_high_risk`)
     decides here, on the risk level each entry's operation has now in this
     tenant. An entry whose operation MEHO cannot find has no known risk
@@ -504,8 +512,7 @@ class RunApprovalService:
             ):
                 raise RunApprovalValidationError(
                     "an entry names a target kind (target_product), but this tenant does not "
-                    "allow target kinds in run approvals; name each target, or ask a tenant "
-                    "admin to turn on run_approval_target_kinds in the settings file"
+                    "allow target kinds in run approvals; name each target"
                 )
             await _refuse_live_or_record_expired(session, operator, payload.work_ref, now)
             row = RunApproval(

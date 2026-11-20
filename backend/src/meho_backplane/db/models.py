@@ -2052,6 +2052,11 @@ class EndpointDescriptor(Base):
     policy_install_category = cast("str | None", None)
     policy_labels = cast(Mapping[str, str], MappingProxyType({}))
     policy_rule_ref = cast("str | None", None)
+    #: Not a column. On a row that ``apply_effective_policy`` returned, the
+    #: schema a call is checked against: a parameter whose switch is off
+    #: accepts no value there (``operations/switch_params.py``).
+    #: ``parameter_schema`` is then the shown schema, without it.
+    parameter_check_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -3863,6 +3868,9 @@ class WebSession(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Fernet ciphertext of the console approval sign-in's access token
+    # (#6282, migration 0176). NULL = no approval sign-in on this session.
+    approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -4268,7 +4276,7 @@ class AgentDefinition(Base):
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # The person who last changed the definition. NULL until the first
-    # change after migration ``0176`` on a row the migration could not fill.
+    # change after migration ``0178`` on a row the migration could not fill.
     updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -6450,7 +6458,7 @@ class RunApproval(Base):
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # OAuth client id of the login that asked. MEHO finds the add-on pairing
     # by it when a person approves the list (operations/people_behind.py).
-    # NULL on a list from before migration 0176.
+    # NULL on a list from before migration 0178.
     principal_client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_ref: Mapped[str] = mapped_column(Text, nullable=False)
     entries: Mapped[list[dict[str, object]]] = mapped_column(
@@ -7252,11 +7260,11 @@ class ApprovalRequest(Base):
       instead of the un-executable raw key. The resume runs under the
       approving reviewer, who auto-executes every governed sub-op (all
       ``dangerous`` + ``requires_approval=False``), so the composite completes
-      in that single pass; a composite that would open a *second* governed gate
-      is unsupported and fails closed
-      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1), unless that gate is an ``after_main_effect`` step with saved
-      state (#4217). NULL for every non-composite (direct-op) park — those keep
+      in that single pass; a later step that needs its own approval waits
+      again. The optional key ``"steps"`` lists the steps the composite's run
+      already went through, with their results, so a re-entry does not send
+      them again (:mod:`~meho_backplane.operations.composite_steps`). NULL for
+      every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -7288,7 +7296,7 @@ class ApprovalRequest(Base):
       NULL on every other request. Added by migration ``0153``.
 
     * ``approver_roles`` -- JSON nullable. The login group kinds that may
-      approve the request (for example ``["SA-Operators", "Admins"]``),
+      approve the request (for example ``["Operators", "Admins"]``),
       worked out from the policy file's ``routing`` section when the
       request started to wait (:mod:`meho_backplane.policy.routing`). Group
       kinds only, never people. At the click the person must be in one of
@@ -7593,7 +7601,7 @@ class ApprovalRequest(Base):
     # ``[{"sub", "name", "why"}]``, set at park time by
     # :mod:`meho_backplane.operations.people_behind`. NULL for a person's
     # request. An empty list: MEHO knows nobody behind the login. Added by
-    # migration ``0176``.
+    # migration ``0178``.
     people_behind: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON, nullable=True, default=None
     )
@@ -8935,7 +8943,7 @@ class RunbookRun(Base):
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
     # The person who last handed the run to a new assignee. NULL when the
-    # run was never handed over. Added by migration ``0176``.
+    # run was never handed over. Added by migration ``0178``.
     reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -9352,8 +9360,9 @@ class Sensor(Base):
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
-    # when the state changes so #2506's ``for:`` hysteresis can read how
-    # long the current state has held.
+    # when the state changes (or the first result confirms the initial
+    # ``unknown``) so the ``for:`` hysteresis can read how long the
+    # current state has held.
     last_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,

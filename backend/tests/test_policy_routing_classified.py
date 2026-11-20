@@ -48,7 +48,7 @@ _OP = "clsroute.switch.port.set"
 
 _NETWORK_TO_SA: dict[str, Any] = {
     "classifications": [{"match": {"connector": _CONNECTOR}, "category": "network"}],
-    "routing": [{"match": {"category": "network"}, "approvers": ["SA-Operators", "Admins"]}],
+    "routing": [{"match": {"category": "network"}, "approvers": ["Operators", "Admins"]}],
 }
 
 _CALL: dict[str, Any] = {"connector_id": _CONNECTOR, "op_id": _OP, "params": {}}
@@ -146,7 +146,7 @@ async def test_a_waiting_call_stores_the_kinds_of_its_category(embedding: AsyncM
 
     assert call["status"] == "awaiting_approval", call
     row = await _request()
-    assert row.approver_roles == ["SA-Operators", "Admins"]
+    assert row.approver_roles == ["Operators", "Admins"]
     assert row.approver_rule == "install:routing[0]"
 
 
@@ -184,7 +184,7 @@ async def test_a_waiting_step_stores_the_kinds_of_its_category() -> None:
     assert gate is not None
     assert gate.status == "awaiting_approval", gate
     row = await _request()
-    assert row.approver_roles == ["SA-Operators", "Admins"]
+    assert row.approver_roles == ["Operators", "Admins"]
     assert row.approver_rule == "install:routing[0]"
 
 
@@ -192,7 +192,7 @@ async def test_a_waiting_step_stores_the_kinds_of_its_category() -> None:
 # A tenant that moves the operation to another category
 # ---------------------------------------------------------------------------
 
-_ALL = "[Operators, SA-Operators, Admins, Approvers]"
+_ALL = "[Operators, Admins]"
 _INSTALL_FILE = (
     "policy: v1\n"
     "classifications:\n"
@@ -268,7 +268,7 @@ async def _move_by_database_row() -> None:
         "routing": [
             {
                 "match": {"category": "storage"},
-                "approvers": ["Operators", "SA-Operators", "Admins", "Approvers"],
+                "approvers": ["Operators", "Admins"],
             }
         ],
     }
@@ -350,7 +350,7 @@ async def test_the_click_routes_the_install_entries_with_the_install_category(
     async with get_sessionmaker()() as session:
         stored = await session.get(ApprovalRequest, row.id)
         assert stored is not None
-        stored.approver_roles = ["Operators", "SA-Operators", "Admins", "Approvers"]
+        stored.approver_roles = ["Operators", "Admins"]
         await session.commit()
 
     assert await _explained(await _request()) == (("MEHO-Admins",), ("MEHO-Admins",))

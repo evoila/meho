@@ -3,8 +3,8 @@
 
 """Store the people behind a request of an agent, service or runner login.
 
-Revision ID: 0176
-Revises: 0175
+Revision ID: 0178
+Revises: 0177
 Create Date: 2026-11-18
 
 Why
@@ -47,8 +47,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0176"
-down_revision: str | None = "0175"
+revision: str = "0178"
+down_revision: str | None = "0177"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -216,6 +216,14 @@ chart adds from `values-single-node.yaml`
 port 443 reaches the Traefik pod, inside the pod range, before Calico
 checks the rules.
 
+`values-single-node.yaml` also mounts the optional ConfigMap
+`meho-console-trust` into the `meho` pod and sets `CONSOLE_CA_FILE` to its
+file (#6698). The install writes no ConfigMap, so with the install's own
+CA the first-start list trusts only the system trust bundle, and its
+`certificate` line stays red. `meho-host certificate` writes the
+ConfigMap with the customer's CA and restarts the pod
+([linux-server-meho-host.md](linux-server-meho-host.md), `certificate`).
+
 The rule comes from the answers of the install, so the update writes it
 again with the ranges in `install.json`. When no address of this machine
 can be read, the rule is written without the `/32` entries, and a

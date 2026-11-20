@@ -61,7 +61,7 @@ the notes) and none of the others failed.
 | Check | Green when | Red line, and the fix |
 |---|---|---|
 | `dns` | The host of `BACKPLANE_URL` resolves, and the address it points at answers as this MEHO. | "The host name ... does not resolve." Add the name to DNS, or fix `BACKPLANE_URL`. If `BACKPLANE_URL` is empty, set it to the address people use to reach MEHO. "The address it points at does not answer as this MEHO." The name points at another server: point it at the address MEHO is served on, or fix `BACKPLANE_URL`. |
-| `certificate` | MEHO opens a TLS connection to `BACKPLANE_URL`. The chain is trusted, the name matches, and more than 30 days are left. | Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix `BACKPLANE_URL`. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address. |
+| `certificate` | MEHO opens a TLS connection to `BACKPLANE_URL`. The chain is trusted, the name matches, and more than 30 days are left. | Expired: renew the certificate. Name does not match: use a certificate that lists the name, or fix `BACKPLANE_URL`. Not trusted: install the full chain, or add your own CA to the trust bundle of MEHO. On a Linux server (form 2), the line names the command that does both: `sudo meho-host certificate --cert <chain.pem> --key <key.pem>`. Under 30 days left: renew it. Cannot connect: check that MEHO can reach its own address. |
 | `network` | The host of `BACKPLANE_URL` points at a private, shared or local address. | Warning, not red: "points at a public internet address". See [MEHO stays on the management network](#meho-stays-on-the-management-network). |
 | `clock` | The clock of MEHO is within 60 seconds of the time PostgreSQL reports, and of the time Keycloak reports when Keycloak sends one (see the notes). | The clock is more than 60 seconds away from Keycloak or PostgreSQL: set up time sync (NTP) on the server or the cluster nodes. No answer from Keycloak, or an error answer: check that Keycloak is running and that MEHO can reach the address in `KEYCLOAK_DISCOVERY_URL` (or `KEYCLOAK_ISSUER_URL` when that is not set). The time of PostgreSQL cannot be read: check that MEHO can reach it. |
 | `reachability` | Every system in the settings answers the same call that `meho targets probe` uses. With no systems added, the line is green. | "These systems did not answer: esx-2, esx-5." Check that each one is switched on, that MEHO can reach its address, and that its login in MEHO is right. |
@@ -86,7 +86,10 @@ a firewall, and run the checks again. The install itself is not stopped.
   until the certificate check is green, so a bad certificate gives one red
   line, not two.
 - The certificate check uses the system trust bundle of the MEHO container.
-  Point `SSL_CERT_FILE` at your own bundle if your CA is private.
+  Point `SSL_CERT_FILE` at your own bundle if your CA is private. On a
+  Linux server (form 2), `meho-host certificate` gives your CA to MEHO, and
+  the check trusts it too (see [Form 2: use a certificate from your own
+  CA](form-2-linux-server.md#use-a-certificate-from-your-own-ca)).
 - The clock check reads the time from a successful discovery answer of
   Keycloak only. An error page from a proxy in front of Keycloak does not
   count, so the line is red while Keycloak is down.

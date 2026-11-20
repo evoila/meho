@@ -118,6 +118,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "checks_investigator_agent",
         "checks_notify_suppression_window_minutes",
         "composite_max_depth",
+        "console_ca_file",
         "corpus_allowed_hosts",
         "corpus_answer_timeout_seconds",
         "corpus_audience",

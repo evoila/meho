@@ -29,6 +29,8 @@
   block is valid HTML5 and the browser applies the styles to every
   descendant element identically.
 -#}
+
+{% from "_components.html" import badge, button %}
 {% extends "base.html" %}
 
 {% block page_title %}Memory: {{ entry.slug }} &middot; MEHO Operator Console{% endblock %}
@@ -58,7 +60,7 @@
         <div>
           <h1 class="text-xl font-semibold font-mono break-all">{{ entry.slug }}</h1>
           <div class="text-xs opacity-70">
-            <span class="badge badge-outline badge-sm mr-2">{{ entry.scope }}</span>
+            {{ badge(entry.scope, variant="outline", class="mr-2") }}
             {% if entry.user_sub %}
               <span>owner: {{ entry.user_sub }}</span>
             {% endif %}
@@ -121,7 +123,7 @@
         <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
           {% for tag in entry.tags %}
             <li>
-              <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+              {{ badge(tag, variant="quiet") }}
             </li>
           {% endfor %}
         </ul>
@@ -154,7 +156,7 @@
         </p>
         <div class="modal-action">
           <form method="dialog">
-            <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+            {{ button("Cancel", variant="quiet", type="submit") }}
           </form>
           <button
             type="button"

@@ -17,6 +17,8 @@
   (``request_id``, when present), and the legacy ``audit_id`` link that
   rows written before #3747 carry.
 -#}
+
+{% from "_components.html" import badge %}
 <section
   id="conventions-history-panel"
   class="space-y-3"
@@ -53,7 +55,7 @@
               {% if row.change_kind %}
                 <span class="badge badge-xs" data-history-change-kind="{{ row.change_kind }}">{{ row.change_kind }}</span>
               {% elif row.is_create %}
-                <span class="badge badge-success badge-xs">created</span>
+                {{ badge("created", variant="success", size="xs") }}
               {% endif %}
             </div>
 

@@ -29,6 +29,8 @@
     recent_ops_updated_at -- ISO-8601 time the rows were read (UTC)
     recent_ops_forbidden  -- true when the session is below ``operator``
 -#}
+
+{% from "_components.html" import badge %}
 {% if recent_ops_forbidden %}
 <article
   id="recent-ops-card"
@@ -66,7 +68,7 @@
         {% for op in recent_ops %}
           <li class="flex items-center gap-2 py-1.5">
             <time class="text-xs opacity-70 w-44 shrink-0" datetime="{{ op.occurred_at }}">{{ op.occurred_at[:19] | replace("T", " ") }}</time>
-            <span class="badge badge-outline badge-xs">{{ op.method }}</span>
+            {{ badge(op.method, variant="outline", size="xs") }}
             <span class="font-mono text-xs truncate">{{ op.op_id or op.path }}</span>
             <span class="text-xs opacity-50 ml-auto">{{ op.status_code }}</span>
           </li>

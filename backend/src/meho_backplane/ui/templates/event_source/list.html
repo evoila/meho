@@ -1,3 +1,4 @@
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Event Sources &middot; MEHO Operator Console{% endblock %}
@@ -46,11 +47,11 @@
                 </td>
                 <td class="text-right whitespace-nowrap">
                   {% if is_tenant_admin %}
-                    <a href="/ui/event-sources/{{ item.slug | urlencode }}/edit" class="btn btn-ghost btn-xs">Edit</a>
+                    {{ button("Edit", variant="quiet", size="xs", href="/ui/event-sources/{{ item.slug | urlencode }}/edit") }}
                     <form method="post" action="/ui/event-sources/{{ item.slug | urlencode }}/delete"
                           class="inline" onsubmit="return confirm('Delete event source {{ item.slug }}?');">
                       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                      <button type="submit" class="btn btn-ghost btn-xs text-error">Delete</button>
+                      {{ button("Delete", variant="quiet", size="xs", class="text-error", type="submit") }}
                     </form>
                   {% else %}
                     <span class="opacity-50 text-xs">read-only</span>

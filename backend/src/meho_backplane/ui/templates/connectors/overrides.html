@@ -19,6 +19,8 @@
     * ``classification`` -- bool: the POLICY_CLASSIFICATION switch. The
                   "Category" column shows only while it is on.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Operation overrides &middot; MEHO Operator Console{% endblock %}
@@ -76,7 +78,7 @@
                 {% elif row.requires_approval %}
                   required
                 {% elif show == "reduced" %}
-                  <span class="badge badge-warning badge-sm">turned off</span>
+                  {{ badge("turned off", variant="warning") }}
                 {% else %}
                   not required
                 {% endif %}

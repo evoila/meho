@@ -35,6 +35,8 @@
   via ``hx-headers``; the route sets the matching ``meho_csrf`` cookie on
   the same response, so the double-submit pair always lines up (#1693).
 -#}
+
+{% from "_components.html" import badge, button %}
 <div id="broadcast-overrides-pane" class="space-y-4">
   {% if not is_tenant_admin %}
     {# ---------- Gated empty state (non-admin operator) ---------- #}
@@ -176,7 +178,7 @@
             >
               Cancel
             </button>
-            <button type="submit" class="btn btn-sm btn-primary">Create rule</button>
+            {{ button("Create rule", variant="primary", type="submit") }}
           </div>
         </form>
       </div>
@@ -212,9 +214,9 @@
                 </td>
                 <td>
                   {% if rule.detail == "aggregate" %}
-                    <span class="badge badge-sm badge-warning">aggregate</span>
+                    {{ badge("aggregate", variant="warning") }}
                   {% else %}
-                    <span class="badge badge-sm badge-ghost">full</span>
+                    {{ badge("full", variant="quiet") }}
                   {% endif %}
                 </td>
                 <td class="font-mono text-xs break-all">{{ rule.created_by_sub }}</td>
@@ -255,7 +257,7 @@
             </p>
             <div class="modal-action">
               <form method="dialog">
-                <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+                {{ button("Cancel", variant="quiet", type="submit") }}
               </form>
               <button
                 type="button"

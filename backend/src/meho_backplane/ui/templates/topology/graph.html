@@ -63,6 +63,8 @@
   HTML parse -- the chassis CSP posture (zero inline JS) remains
   unchanged.
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
@@ -139,9 +141,7 @@
           {% endif %}
         </span>
       {% endif %}
-      <a class="btn btn-xs btn-ghost ml-auto" href="/ui/topology?view=graph">
-        Clear overlay
-      </a>
+      {{ button("Clear overlay", variant="quiet", size="xs", class="ml-auto", href="/ui/topology?view=graph") }}
     </div>
   {% endif %}
 
@@ -192,7 +192,7 @@
           controls (whose columns are taller by one label row);
           ``justify-self-end`` right-aligns it and ``w-1/2`` gives it the
           requested half-column width. -#}
-      <button type="submit" class="btn btn-sm btn-primary w-1/2 self-end justify-self-end">Apply</button>
+      {{ button("Apply", variant="primary", class="w-1/2 self-end justify-self-end", type="submit") }}
     </div>
   </form>
 

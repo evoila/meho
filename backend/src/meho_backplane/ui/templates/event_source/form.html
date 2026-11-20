@@ -1,3 +1,4 @@
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {#- Per-field validation errors (#384). `errors` maps a form field name to
@@ -124,7 +125,7 @@
       <button type="submit" class="btn btn-sm btn-primary" data-action="submit">
         {{ "Create" if mode == "create" else "Save" }}
       </button>
-      <a href="/ui/event-sources" class="btn btn-sm btn-ghost">Cancel</a>
+      {{ button("Cancel", variant="quiet", href="/ui/event-sources") }}
     </div>
   </form>
 </section>

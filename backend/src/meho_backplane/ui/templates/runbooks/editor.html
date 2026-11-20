@@ -42,6 +42,8 @@
                          in_flight_run_count} surfaced after a fork-on-edit
     csrf_token        -- str
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ page_title }} &middot; MEHO Operator Console{% endblock %}
@@ -206,8 +208,8 @@
 
     {# Actions #}
     <div class="flex items-center justify-end gap-3 mt-4">
-      <a href="/ui/runbooks" class="btn btn-ghost btn-sm">Cancel</a>
-      <button type="submit" class="btn btn-primary btn-sm">{{ submit_label }}</button>
+      {{ button("Cancel", variant="quiet", href="/ui/runbooks") }}
+      {{ button(submit_label, variant="primary", type="submit") }}
     </div>
   </form>
 </section>

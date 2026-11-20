@@ -22,6 +22,7 @@
   password / MFA.
 -#}
 {% extends "base.html" %}
+{% from "_components.html" import button %}
 {% from "_icons.html" import icon %}
 {% from "_tenant_label.html" import tenant_label %}
 {# The expiry-relative renderer lives with the session fragment so the
@@ -191,7 +192,7 @@
       </p>
       <div class="modal-action">
         <form method="dialog">
-          <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+          {{ button("Cancel", variant="quiet", type="submit") }}
         </form>
         <button
           type="button"

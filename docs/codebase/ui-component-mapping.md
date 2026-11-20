@@ -41,10 +41,26 @@ page.
 `size="sm"` is the component's default, so it is omitted above rather than
 passed.
 
-**An icon-only button becomes `icon=` with a `label`**, not `btn-square`. The
-component emits `btn-square` itself when `icon` is set and the label is
-empty, and the label becomes the accessible name. Dropping the label here is
-how a button ends up announced as "button".
+**Do not convert an icon-only button yet — `icon=` is broken in meho-ui
+0.6.0.** This page said the opposite until it was checked by rendering the
+macro rather than reading its signature. What it actually emits:
+
+```jinja
+{{ button("", variant="quiet", icon="trash") }}
+<button type="button" class="btn btn-ghost btn-sm btn-square" aria-label=""></button>
+```
+
+Two faults in one line. The icon is never drawn: only the
+`unavailable_reason` branch mentions a `caller()`, so the `<a>` and
+`<button>` branches set `btn-square` and emit nothing inside. And the
+`aria-label` is guarded by `{% if icon and not label %}`, so it is rendered
+only when the label is empty — which is exactly when it has nothing to say.
+A converted icon button is therefore an empty square announced as "button",
+which is the regression the old wording claimed to prevent.
+
+This blocks **25 icon-only buttons**. It needs a fix in the component set
+(P2.1's own rule: open an issue against `meho-ui`, do not reach for raw
+markup), not a workaround here.
 
 ## Badges
 
@@ -122,6 +138,142 @@ against the component set** rather than reaching for raw markup. Four
 elements is small enough that converting them to the nearest surviving
 variant is likely right, but it is still a visible change and belongs in a
 batch's screenshot review.
+
+## Two rules the first batch settled
+
+Neither needed a decision from the UI lead: both are facts about the macros,
+established by rendering them rather than by reading them.
+
+### Layout classes ride along in `class=`
+
+`badge()` and `button()` both take a `class=""` passthrough, appended after
+the variant and size classes. So a layout or typography class on the old
+markup is not a reason to leave an element raw:
+
+```jinja
+<span class="badge badge-outline badge-xs font-mono">{{ x }}</span>
+{{ badge(x, variant="outline", size="xs", class="font-mono") }}
+```
+
+This covers `font-mono`, `shrink-0`, `ml-1` and `gap-1` — 20 of the 128
+elements converted so far, so it is the common case, not the exception.
+
+### A sizeless original is `size="md"`, never the default
+
+The macro's own default is `size="sm"`, which **emits `badge-sm`**. Old markup
+carrying no size class at all is DaisyUI's default size, which the macro emits
+only for `size="md"`:
+
+| Old classes | Call | Emits |
+|---|---|---|
+| `badge badge-warning badge-sm` | `badge(…, variant="warning")` | `badge badge-warning badge-sm` |
+| `badge badge-warning` | `badge(…, variant="warning", size="md")` | `badge badge-warning` |
+
+Passing nothing for a sizeless original silently shrinks it. This is the same
+shape of trap as the bare-`btn` case above, one axis over.
+
+## One behaviour the macro changes: an empty label
+
+`badge("")` renders **nothing**. The old markup rendered an empty pill:
+
+```jinja
+<span class="badge badge-ghost badge-xs"></span>   {# old: an empty pill #}
+{{ badge("", variant="quiet", size="xs") }}        {# new: no output #}
+```
+
+This applies to every converted element, not to any one batch. It is an
+improvement — an empty pill is a rendering artefact, not a label — and no
+converted site can currently reach it, but it is a real difference and a
+batch that converts a badge over a nullable value should check that site.
+
+## How a batch is verified
+
+Per element, not per eyeball. For every element the converter would change,
+the macro is rendered with the planned arguments and compared **node-wise**
+against the original markup — tag, attributes (classes sorted), text — so
+attribute order and whitespace cannot hide a difference. Then each changed
+template is rendered whole, before and after, through the app's real Jinja
+environment and compared the same way.
+
+So far: **128 badges and 32 buttons across 62 templates**, every one
+identical. That is 128 of 340 badges and 32 of 406 buttons.
+
+It earns its keep. On the buttons it caught two converter faults that read
+fine in a diff: a bare `data-classify-request` dropped from two submit
+buttons, and a `&larr;` label escaped into the visible text `&larr; Back to
+runs`. Neither is visible in a side-by-side of the Jinja source.
+
+The stand-in context such a sweep uses must be chosen with care. A generic
+"everything is truthy" object makes both arms of an `{% if %}` render, which
+is what you want, but it also leaves nested lookups undefined — and an
+undefined label is empty, which the macro drops (above). That shows up as a
+whole-template difference which is an artefact of the harness, not of the
+conversion. Four files tripped it; all four were identical once rendered with
+a realistic row. Re-render before believing a difference.
+
+## Not every family converts mechanically
+
+P2.6 was scoped as "convert the templates". Measured per family, only one of
+the four is a mechanical substitution. This is the finding that should shape
+the remaining batches.
+
+| Family | In tree | Mechanically convertible | What stops the rest |
+|---|---|---|---|
+| `badge` | 340 | **128 done**, 94 more | 69 need one of the three decisions above |
+| `btn` | 406 | **32 done** | 374 carry attributes the macro does not name |
+| `alert` | 175 | ~7 | 133 of 140 wrap nested markup |
+| `modal` | 73 | — | same shape as `alert` |
+
+### Buttons: the attributes are the problem, not the variants
+
+367 of 406 buttons carry `hx-*`. Add `data-*`, `aria-*`, `onclick` and
+Alpine's `x-on:` / `@click` and only **32 of 406** are expressible with the
+macro's named parameters (`type`, `href`, `target`, `download`, `disabled`).
+The rest have to pass everything else through `extra={…}`, and a hundred of
+them carry four or more such attributes.
+
+Count bare attributes when measuring this. A regex of the shape
+`(\w+)\s*=` sees only valued ones, which silently hides
+`data-classify-request`, `disabled` and `open` — it put this figure at 53
+until the node-wise check caught two buttons whose bare attribute the
+conversion would have dropped.
+
+That conversion does not read better than the markup it replaces:
+
+```jinja
+<button type="button" class="btn btn-sm btn-ghost" data-action="enable"
+        hx-post="/ui/agents/{{ agent.name | urlencode }}/toggle"
+        hx-vals='{"enabled": "true"}' hx-target="body" hx-swap="none">Enable</button>
+
+{{ button("Enable", variant="quiet", extra={
+     "data-action": "enable",
+     "hx-post": "/ui/agents/" ~ (agent.name | urlencode) ~ "/toggle",
+     "hx-vals": '{"enabled": "true"}',
+     "hx-target": "body",
+     "hx-swap": "none"}) }}
+```
+
+It is longer, it moves HTML attributes into a dict literal, and it turns an
+interpolated URL into a `~` concatenation. The variant naming is still worth
+having; whether it is worth that per call site is a decision for the UI lead,
+not for the person doing the conversion. **Convert the 53, leave the 353.**
+
+### Alerts and modals: the macro imposes a structure
+
+`alert(message, …)` takes an escaped **string** and wraps it:
+
+```html
+<div class="alert alert-warning" role="status"><div><p>{{ message }}</p></div></div>
+```
+
+133 of 140 alerts in the tree hold nested markup — an icon, a `<ul>`, a
+button, a `<strong>`. Passing that as `message` needs `|safe` at every call
+site, which trades a template that cannot inject markup for one that can, and
+it still adds a `<div><p>` wrapper the current markup does not have. `dialog`
+takes `body` the same way, so the 73 modals have the same shape.
+
+Neither is a conversion. Both are a redesign of the component or of the call
+sites, and they belong in their own ticket rather than inside a batch.
 
 ## Dead v4 classes — remove on sight
 

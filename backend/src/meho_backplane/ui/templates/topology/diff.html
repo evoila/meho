@@ -17,6 +17,8 @@
   URL captures the window for copy/paste); an Alpine ``x-data`` toggle keeps
   the optional ``kind`` filter collapsed until wanted.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Topology &middot; Diff &middot; MEHO Operator Console{% endblock %}
@@ -109,14 +111,14 @@
         {% for entry in entries %}
           <li class="flex flex-wrap items-center gap-2 border-base-300 border-b pb-1" data-test="diff-entry">
             {% if entry.change_kind == "created" %}
-              <span class="badge badge-success badge-xs">created</span>
+              {{ badge("created", variant="success", size="xs") }}
             {% elif entry.change_kind == "removed" %}
-              <span class="badge badge-error badge-xs">removed</span>
+              {{ badge("removed", variant="error", size="xs") }}
             {% else %}
-              <span class="badge badge-warning badge-xs">{{ entry.change_kind }}</span>
+              {{ badge(entry.change_kind, variant="warning", size="xs") }}
             {% endif %}
-            <span class="badge badge-ghost badge-xs">{{ entry.source }}</span>
-            <span class="badge badge-outline badge-xs">{{ entry.kind }}</span>
+            {{ badge(entry.source, variant="quiet", size="xs") }}
+            {{ badge(entry.kind, variant="outline", size="xs") }}
             {% if entry.name %}
               <span class="font-mono">{{ entry.name }}</span>
             {% endif %}

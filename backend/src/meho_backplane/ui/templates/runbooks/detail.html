@@ -29,6 +29,8 @@
     * ``page_title`` — overrides the ``<title>`` suffix.
     * ``content`` — overrides the base.html main pane.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ template.slug }} &middot; Runbooks{% endblock %}
@@ -132,7 +134,7 @@
             <li class="card bg-base-100 border-base-300 border shadow-sm">
               <div class="card-body space-y-3 py-4">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="badge badge-neutral">{{ loop.index }}</span>
+                  {{ badge(loop.index, variant="neutral", size="md") }}
                   <h3 class="card-title font-mono text-base">{{ step.id }}</h3>
                   {% if step.type == "operation_call" %}
                     <span class="badge badge-info badge-outline" aria-label="Step kind: operation call">
@@ -171,13 +173,13 @@
                   <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
                   {% if verify.type == "confirm" %}
                     <p class="text-sm">
-                      <span class="badge badge-sm badge-outline mr-1">confirm</span>
+                      {{ badge("confirm", variant="outline", class="mr-1") }}
                       {{ verify.prompt }}
                     </p>
                   {% else %}
                     <div class="space-y-1 text-sm">
                       <p>
-                        <span class="badge badge-sm badge-outline mr-1">operation_call</span>
+                        {{ badge("operation_call", variant="outline", class="mr-1") }}
                         <code class="font-mono">{{ verify.op_id }}</code>
                       </p>
                       {% if verify.params %}

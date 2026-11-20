@@ -13,6 +13,8 @@
   (``superseded`` / ``conflicts`` edge ids) so a "successful" import that
   rewrites the auto-edge landscape is visible before it lands.
 -#}
+
+{% from "_components.html" import badge %}
 <div data-test="bulk-preview" data-dry-run="true">
   <div role="status" class="alert alert-info text-sm">
     <span>
@@ -43,21 +45,21 @@
             <td class="font-mono">{{ row.index }}</td>
             <td>
               {% if row.action == "create" %}
-                <span class="badge badge-success badge-sm">create</span>
+                {{ badge("create", variant="success") }}
               {% elif row.action == "update" %}
-                <span class="badge badge-info badge-sm">update</span>
+                {{ badge("update", variant="info") }}
               {% else %}
-                <span class="badge badge-warning badge-sm">conflict</span>
+                {{ badge("conflict", variant="warning") }}
               {% endif %}
             </td>
             <td>
               <span class="font-mono">{{ row.from_name }}</span>
-              <span class="badge badge-ghost badge-xs">{{ row.from_kind }}</span>
+              {{ badge(row.from_kind, variant="quiet", size="xs") }}
             </td>
-            <td><span class="badge badge-outline badge-xs">{{ row.kind }}</span></td>
+            <td>{{ badge(row.kind, variant="outline", size="xs") }}</td>
             <td>
               <span class="font-mono">{{ row.to_name }}</span>
-              <span class="badge badge-ghost badge-xs">{{ row.to_kind }}</span>
+              {{ badge(row.to_kind, variant="quiet", size="xs") }}
             </td>
             <td class="text-xs opacity-70">
               {% if row.superseded %}

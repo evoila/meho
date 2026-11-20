@@ -29,6 +29,7 @@
   Context: ``connector_id``, ``user_uuid``, ``target``, ``current_roles``,
   ``error``, ``csrf_token``.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <dialog id="keycloak-user-modal" class="modal modal-open" aria-label="Assign Keycloak realm roles" data-keycloak-modal="role-assign">
   <div class="modal-box max-w-lg">
@@ -75,7 +76,7 @@
         {% if current_roles %}
           <div class="mt-1 flex flex-wrap gap-1">
             {% for role in current_roles %}
-              <span class="badge badge-ghost badge-sm font-mono">{{ role }}</span>
+              {{ badge(role, variant="quiet", class="font-mono") }}
             {% endfor %}
           </div>
         {% else %}

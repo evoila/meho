@@ -39,6 +39,7 @@
     chain         -- dict | None: {work_ref, step, total} when the parked
                      request is step k of N in its change ticket (#3596)
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 
 {% if error_message %}
@@ -143,7 +144,7 @@
   {%- set handle = envelope.get("handle") -%}
   <div class="space-y-3" data-run-status="ok">
     <div class="flex items-center gap-2">
-      <span class="badge badge-success badge-sm">executed</span>
+      {{ badge("executed", variant="success") }}
       {% if envelope.get("duration_ms") is not none %}
         <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
       {% endif %}

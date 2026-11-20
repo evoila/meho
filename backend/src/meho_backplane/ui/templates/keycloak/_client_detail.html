@@ -26,6 +26,7 @@
   Context keys: ``client_uuid``, ``target``, ``client``, ``error``,
   ``is_tenant_admin`` (see ``keycloak/routes.py``).
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 
 <div
@@ -58,14 +59,14 @@
       <div class="flex flex-wrap items-center gap-2">
         <span class="font-mono text-sm font-semibold">{{ client.get("clientId") | default("—", true) }}</span>
         {% if client.get("enabled") %}
-          <span class="badge badge-success badge-sm">enabled</span>
+          {{ badge("enabled", variant="success") }}
         {% else %}
-          <span class="badge badge-ghost badge-sm">disabled</span>
+          {{ badge("disabled", variant="quiet") }}
         {% endif %}
         {% if client.get("publicClient") %}
-          <span class="badge badge-ghost badge-sm">public</span>
+          {{ badge("public", variant="quiet") }}
         {% else %}
-          <span class="badge badge-outline badge-sm">confidential</span>
+          {{ badge("confidential", variant="outline") }}
         {% endif %}
       </div>
 
@@ -139,7 +140,7 @@
                 <span class="text-xs opacity-50">Default</span>
                 <div class="mt-0.5 flex flex-wrap gap-1">
                   {% for scope in default_scopes %}
-                    <span class="badge badge-outline badge-xs font-mono">{{ scope }}</span>
+                    {{ badge(scope, variant="outline", size="xs", class="font-mono") }}
                   {% endfor %}
                 </div>
               </div>
@@ -149,7 +150,7 @@
                 <span class="text-xs opacity-50">Optional</span>
                 <div class="mt-0.5 flex flex-wrap gap-1">
                   {% for scope in optional_scopes %}
-                    <span class="badge badge-ghost badge-xs font-mono">{{ scope }}</span>
+                    {{ badge(scope, variant="quiet", size="xs", class="font-mono") }}
                   {% endfor %}
                 </div>
               </div>

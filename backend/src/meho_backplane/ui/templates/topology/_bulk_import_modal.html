@@ -33,6 +33,8 @@
   evidence_url?}`` rows, where ``from`` / ``to`` are a bare name string or a
   ``{name, kind}`` mapping.
 -#}
+
+{% from "_components.html" import badge %}
 <div
   id="topology-bulk-modal"
   class="card bg-base-100 border-base-300 border shadow-md"
@@ -81,7 +83,7 @@
           {% for err in row_errors %}
             <li data-test="bulk-row-error" data-row-index="{{ err.index }}">
               <span class="font-mono">row {{ err.index }}</span>
-              <span class="badge badge-outline badge-xs">{{ err.error }}</span>
+              {{ badge(err.error, variant="outline", size="xs") }}
               <span>{{ err.message }}</span>
               {% if err.kinds %}
                 <span class="opacity-70">

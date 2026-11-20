@@ -310,10 +310,16 @@ in place.
    `/var/lib/meho/console-ca.crt`. Its last line is the `console-certificate`
    line of `meho-host check`. With 30 days or less left, the line is a
    `[WARN]`.
-4. MEHO keeps the key. Delete your copy of `key.pem` from the server.
+4. From v0.49.0, the command also gives your CA to MEHO, and MEHO
+   restarts. The console is away for about a minute. After that, the
+   `certificate` line of the first-start list is green.
+5. MEHO keeps the key. Delete your copy of `key.pem` from the server.
 
-An update keeps your certificate. To replace it, for example before it
-expires, run the command again with the new files.
+An update keeps your certificate, and MEHO keeps trusting your CA. To
+replace the certificate, for example before it expires, run the command
+again with the new files. If you installed your certificate with an
+older version, run the command again after the update to v0.49.0, so the
+`certificate` line turns green.
 
 ### The unseal key
 

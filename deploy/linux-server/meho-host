@@ -20,7 +20,8 @@
 #                     CIS profile that the install made; the MEHO firewall
 #                     stays on
 #   certificate       put the customer's certificate and key into the TLS
-#                     Secret of the console, after it checks them (#4738)
+#                     Secret of the console, after it checks them, and
+#                     let MEHO trust the customer's CA (#4738, #6698)
 #   keyholder on|off  switch OpenBao between "a keyholder unseals it" and
 #                     "it unseals itself" (#4738)
 #   unseal            unseal OpenBao by hand in keyholder mode (#4738)
@@ -159,6 +160,14 @@ readonly CERT_ROW_RE="^([^[:space:]]+)[[:space:]]+.*[[:space:]](${CERT_EXPIRES_R
 # clients trust). It never reads tls.key.
 readonly CONSOLE_TLS_SECRET=meho-core-tls
 readonly CONSOLE_CERT_MIN_DAYS=30
+# The ConfigMap with the CA of the customer's certificate, and the
+# Deployment of the meho pod. values-single-node.yaml mounts the ConfigMap
+# into that pod and points CONSOLE_CA_FILE at it, so the first-start list
+# trusts the CA when it connects to the console address (#6698). Only
+# certificate writes the ConfigMap: with the install's own CA, the
+# certificate line of the list stays red.
+readonly CONSOLE_TRUST_CONFIGMAP=meho-console-trust
+readonly MEHO_DEPLOYMENT=meho
 # One kubectl call prints both keys, decoded, with the marker line between
 # them: each call may wait 10 seconds, and meho doctor gives the whole check
 # 60 seconds (#4740).
@@ -326,8 +335,11 @@ Commands:
                     the certificate names the host name of this install
                     and is valid now, and that the chain ends at your CA.
                     When a check fails, nothing changes. It writes your
-                    CA to /var/lib/meho/console-ca.crt, and at the end it
-                    prints the certificate line of check.
+                    CA to /var/lib/meho/console-ca.crt, and gives it to
+                    MEHO, so the certificate line of the first-start list
+                    turns green. MEHO restarts for this: the console is
+                    away for about a minute. At the end it prints the
+                    certificate line of check.
   keyholder on      OpenBao, the password safe of MEHO, stays sealed after
                     every restart, and MEHO waits, until a keyholder runs
                     unseal. It asks for the unseal key, to show that the
@@ -1627,6 +1639,32 @@ write_console_ca() {
     warn "$MEHO_CONSOLE_CA_FILE could not be written, so it may still hold the old CA. Give your own CA file to the browsers and laptops that use MEHO."
 }
 
+# trust_console_ca <CA certificate>: the CA of the new certificate goes to
+# the ConfigMap CONSOLE_TRUST_CONFIGMAP (key ca.crt), and the meho pod
+# restarts, so its first-start list trusts the CA (#6698). The restart is
+# needed: Kubernetes promises a running pod a changed ConfigMap only
+# "eventually", and nothing for one made after the pod started. The CA
+# goes into binaryData in base64, so the JSON needs no escaping. kubectl
+# apply makes the ConfigMap or replaces its data. Helm does not own it, so
+# an update keeps it. kubectl's messages are not shown, as for the Secret.
+# The Secret holds the new certificate already, so a failure here only
+# warns.
+trust_console_ca() {
+    local ca
+    ca=$(printf '%s\n' "$1" | base64 -w 0)
+    if ! printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s"},"binaryData":{"ca.crt":"%s"}}\n' \
+        "$CONSOLE_TRUST_CONFIGMAP" "$ca" |
+        rke2_kubectl -n "$MEHO_NAMESPACE" apply -f - >/dev/null 2>&1; then
+        warn "the ConfigMap $CONSOLE_TRUST_CONFIGMAP could not be written, so the first-start list of MEHO does not trust your CA yet. Run the command again."
+        return 0
+    fi
+    if ! rke2_kubectl -n "$MEHO_NAMESPACE" rollout restart "deployment/$MEHO_DEPLOYMENT" >/dev/null 2>&1; then
+        warn "MEHO could not be restarted, so its first-start list trusts your CA only after its next restart. Run the command again."
+        return 0
+    fi
+    ok "MEHO restarts and then trusts your CA in its first-start list. The console is away for about a minute."
+}
+
 # check_new_certificate <host> <file> <certificates>: stop with one [FAIL]
 # line unless the chain is complete and the server certificate passes the
 # rule of the console certificate (certificate_state), with the last
@@ -1707,6 +1745,7 @@ command_certificate() {
             "check the node and pods lines: sudo meho-host check. Then $SUPPORT_HINT"
     ok "installed the certificate for $host in the Secret $CONSOLE_TLS_SECRET: the console, the API and the login show it within a minute"
     write_console_ca "$(pem_block "$chain" last)"
+    trust_console_ca "$(pem_block "$chain" last)"
     note "browsers and the meho CLI trust it when the computer trusts your CA."
     # The certificate line of check, not the first-start list: the list
     # fetches the certificate through the console address, and Traefik

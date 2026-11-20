@@ -187,8 +187,8 @@ class UpdateFlowTests(UpdateTestCase):
         self.assert_succeeds(result)
         headers = [line for line in result.stdout.splitlines() if line.startswith("== ")]
         last_step = (
-            "== Update step 5: install the meho command and meho-host, write the install record"
-            " and read the first-start list"
+            "== Update step 5: install the meho command and meho-host, and write the install"
+            " record"
         )
         self.assertEqual(
             [

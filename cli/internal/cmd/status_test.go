@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -610,13 +611,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// firstStartServer serves GET /first-start and records whether any
-// Authorization header came in.
+// firstStartServer serves GET /api/v1/first-start, records the
+// Authorization header of each call and stores a login for its URL.
 func firstStartServer(t *testing.T, body []byte, status int) (string, *[]string) {
 	t.Helper()
+	xdg := withTempXDG(t)
 	var auths []string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/first-start", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/first-start", func(w http.ResponseWriter, r *http.Request) {
 		auths = append(auths, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -624,11 +626,15 @@ func firstStartServer(t *testing.T, body []byte, status int) (string, *[]string)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{
+		BackplaneURL: srv.URL,
+		AccessToken:  jwtMarker,
+		Expiry:       time.Now().Add(time.Hour),
+	})
 	return srv.URL, &auths
 }
 
 func TestStatus_FirstStart_AllGreen(t *testing.T) {
-	withTempXDG(t)
 	url, auths := firstStartServer(t, mustJSON(map[string]any{
 		"ok": true,
 		"checks": []map[string]any{
@@ -651,13 +657,47 @@ func TestStatus_FirstStart_AllGreen(t *testing.T) {
 			t.Errorf("missing %q in stdout:\n%s", want, out)
 		}
 	}
-	if len(*auths) != 1 || (*auths)[0] != "" {
-		t.Errorf("first-start must be called once without a token, got %v", *auths)
+	if len(*auths) != 1 || (*auths)[0] != "Bearer "+jwtMarker {
+		t.Errorf("first-start must be called once with the stored login, got %v", *auths)
+	}
+	if strings.Contains(out+stderr.String(), jwtMarker) {
+		t.Errorf("the token must not be printed")
+	}
+}
+
+func TestStatus_FirstStart_WithoutLoginNamesTheLogin(t *testing.T) {
+	withTempXDG(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+	}))
+	t.Cleanup(srv.Close)
+
+	_, stderr, err := runStatus(t, "--first-start", "--backplane", srv.URL)
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitAuthExpired {
+		t.Fatalf("want exit %d, got %v", output.ExitAuthExpired, err)
+	}
+	for _, want := range []string{"meho login " + srv.URL, srv.URL + "/ui/first-start"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("missing %q in stderr:\n%s", want, stderr.String())
+		}
+	}
+	if calls != 0 {
+		t.Errorf("without a login the command must not call the backplane, got %d calls", calls)
+	}
+}
+
+func TestStatus_FirstStart_RoleTooLowExitsFive(t *testing.T) {
+	url, _ := firstStartServer(t, []byte(`{"detail":"first_start_needs_admin"}`), http.StatusForbidden)
+	_, _, err := runStatus(t, "--first-start", "--backplane", url)
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitInsufficientRole {
+		t.Fatalf("want exit %d, got %v", output.ExitInsufficientRole, err)
 	}
 }
 
 func TestStatus_FirstStart_RedLineExitsSix(t *testing.T) {
-	withTempXDG(t)
 	url, _ := firstStartServer(t, mustJSON(map[string]any{
 		"ok": false,
 		"checks": []map[string]any{
@@ -676,7 +716,6 @@ func TestStatus_FirstStart_RedLineExitsSix(t *testing.T) {
 }
 
 func TestStatus_FirstStart_JSONIsTheSameList(t *testing.T) {
-	withTempXDG(t)
 	url, _ := firstStartServer(t, mustJSON(map[string]any{
 		"ok":     true,
 		"checks": []map[string]any{{"name": "dns", "status": "ok", "message": "fine"}},
@@ -686,17 +725,16 @@ func TestStatus_FirstStart_JSONIsTheSameList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var got firstStartList
+	var got api.FirstStartResponse
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}
-	if !got.OK || len(got.Checks) != 1 || got.Checks[0].Name != "dns" {
+	if !got.Ok || len(got.Checks) != 1 || got.Checks[0].Name != "dns" {
 		t.Errorf("unexpected list: %+v", got)
 	}
 }
 
 func TestStatus_FirstStart_OldBackplaneAndBadBody(t *testing.T) {
-	withTempXDG(t)
 	for name, tc := range map[string]struct {
 		body   []byte
 		status int
@@ -714,13 +752,19 @@ func TestStatus_FirstStart_OldBackplaneAndBadBody(t *testing.T) {
 }
 
 func TestStatus_FirstStart_UnreachableAndWatchConflict(t *testing.T) {
-	withTempXDG(t)
-	_, _, err := runStatus(t, "--first-start", "--backplane", "http://127.0.0.1:1")
+	xdg := withTempXDG(t)
+	const deadURL = "http://127.0.0.1:1"
+	seedCreds(t, xdg, deadURL, auth.StoredToken{
+		BackplaneURL: deadURL,
+		AccessToken:  jwtMarker,
+		Expiry:       time.Now().Add(time.Hour),
+	})
+	_, _, err := runStatus(t, "--first-start", "--backplane", deadURL)
 	var coder output.ExitCoder
 	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnreachable {
 		t.Errorf("want exit %d, got %v", output.ExitUnreachable, err)
 	}
-	_, _, err = runStatus(t, "--first-start", "--watch", "--backplane", "http://127.0.0.1:1")
+	_, _, err = runStatus(t, "--first-start", "--watch", "--backplane", deadURL)
 	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUsage {
 		t.Errorf("want exit %d, got %v", output.ExitUsage, err)
 	}

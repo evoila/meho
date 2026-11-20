@@ -36,6 +36,8 @@ Two people take part. They can be the same person.
 | **The cluster admin** | Admin of the whole OpenShift cluster | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one project only | Steps 2 to 8 |
 
+**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+
 **Tools on your laptop:**
 
 - `oc`, the OpenShift command line, to log in. The web console has it

@@ -23,6 +23,7 @@ This chapter does not need it.
 | **A DNS name** | A hostname for MEHO, for example `meho.example.com`, that points to your ingress controller. |
 | **Cluster capacity** | With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See `values.yaml` to change each part. |
 | **A browser** | The web console is built with Tailwind CSS 4, which is made for Chrome 111, Safari 16.4 and Firefox 128 or newer. Use a browser at least that new. |
+| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
 
 Everything else ships inside the Helm release: the activity-feed store
 (Valkey), the database migrations and the operations catalog.

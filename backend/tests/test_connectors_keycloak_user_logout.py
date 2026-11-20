@@ -254,7 +254,9 @@ async def test_logout_unknown_id_is_not_found(kc: KeycloakConnector) -> None:
 async def test_logout_waits_for_approval_then_runs(kc: KeycloakConnector) -> None:
     """The call waits; a second person approves; only then the POST runs once."""
     requester = _operator("kc-logout-requester")
-    approver = _operator("kc-logout-approver")
+    approver = _operator("kc-logout-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
+    )
     args = {
         "connector_id": _CONNECTOR_ID,
         "op_id": _OP_ID,

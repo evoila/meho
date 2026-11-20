@@ -111,6 +111,7 @@ References
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Annotated, Final, Literal, get_args
 from uuid import UUID, uuid4
@@ -131,6 +132,7 @@ __all__ = [
     "AdmissionSource",
     "AgentAnnouncementEvent",
     "PlannedOpClass",
+    "announcement_text_problem",
 ]
 
 
@@ -214,6 +216,39 @@ PlannedOpClass = Literal[
 #: JSON-Schema enum on the announce tool and the model type stay a
 #: single source of truth.
 PLANNED_OP_CLASS_VALUES: Final[tuple[str, ...]] = get_args(PlannedOpClass)
+
+
+def _has_control_character(text: str) -> bool:
+    """Whether *text* holds a C0 or C1 control character, or DEL."""
+    return any(unicodedata.category(ch) == "Cc" for ch in text)
+
+
+def announcement_text_problem(
+    *,
+    activity: str,
+    target: str | None,
+    targets: list[str],
+    scope: str | None,
+) -> str | None:
+    """Name the first announcement text field that holds a control character.
+
+    The text of an announcement goes to every operator of the tenant and
+    is shown on terminals. So ``activity``, ``target``, each entry of
+    ``targets`` and ``scope`` must not hold a C0 or C1 control character
+    or DEL (this includes a line break and a tab). Both the REST route and
+    the MCP tool call this check. Returns a plain reason, or ``None`` when
+    the text is fine.
+    """
+    fields: list[tuple[str, str | None]] = [
+        ("activity", activity),
+        ("target", target),
+        *((f"targets[{index}]", value) for index, value in enumerate(targets)),
+        ("scope", scope),
+    ]
+    for name, value in fields:
+        if value is not None and _has_control_character(value):
+            return f"{name}: must not contain control characters"
+    return None
 
 
 class AgentAnnouncementEvent(BaseModel):

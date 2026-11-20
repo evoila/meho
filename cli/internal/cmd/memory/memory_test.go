@@ -1048,6 +1048,57 @@ func TestRunRecallByKeyPrintsBody(t *testing.T) {
 	}
 }
 
+// runRecallByKeyWithBody serves one memory entry with the given body and
+// returns what `meho recall user/note` prints on stdout.
+func runRecallByKeyWithBody(t *testing.T, body string, jsonOut bool) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory/user/note",
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "note", body))
+		},
+	)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runRecall(cmd, recallOptions{
+		ScopeSlugArg: "user/note", JSONOut: jsonOut, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runRecall: %v; stderr=%s", err, stderr.String())
+	}
+	return stdout.String()
+}
+
+// TestRunRecallByKeyEscapesControlCharacters — `meho recall <scope>/<slug>`
+// prints a body with control characters as visible escapes and keeps its
+// line breaks.
+func TestRunRecallByKeyEscapesControlCharacters(t *testing.T) {
+	body := "note\x1b]0;new title\x07\r\nline two\x1b[2K\r\x07\n\tindented\u202e\n"
+	got := runRecallByKeyWithBody(t, body, false)
+	want := "note\\x1b]0;new title\\x07\nline two\\x1b[2K\\x0d\\x07\n\\x09indented\\u202e\n"
+	if got != want {
+		t.Errorf("unexpected render: got %q; want %q", got, want)
+	}
+}
+
+// TestRunRecallByKeyJSONKeepsBody — with --json the body reaches the
+// caller exactly as stored.
+func TestRunRecallByKeyJSONKeepsBody(t *testing.T) {
+	body := "note\x1b[2K\r\n\tindented\n"
+	out := runRecallByKeyWithBody(t, body, true)
+	var got api.MemoryEntry
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("stdout not JSON: %v; %q", err, out)
+	}
+	if got.Body != body {
+		t.Errorf("body changed: got %q; want %q", got.Body, body)
+	}
+}
+
 func TestRunRecallByKey404SurfacesUnexpected(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory/user/no-such",

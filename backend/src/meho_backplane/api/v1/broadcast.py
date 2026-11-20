@@ -38,6 +38,7 @@ from meho_backplane.broadcast import (
     AnnouncementFilter,
     AnnounceRateLimitError,
     InvalidArchiveCursorError,
+    announcement_text_problem,
     build_trusted_announcement,
     encode_watch_checkpoint,
     enforce_announce_rate_limit,
@@ -186,6 +187,17 @@ async def announce_broadcast(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="invalid_planned_op_class",
+        )
+    text_problem = announcement_text_problem(
+        activity=payload.activity,
+        target=payload.target,
+        targets=payload.targets,
+        scope=payload.scope,
+    )
+    if text_problem is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=text_problem,
         )
     _bind_audit(op_id="meho_broadcast_announce", op_class="write")
     # Trusted admission (#3736): only a checked agent identity publishes.

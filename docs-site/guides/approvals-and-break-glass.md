@@ -308,6 +308,32 @@ group has more rules:
   gives, not its name: the attribute `platform_admin=true` on the group or
   a parent group, a place under `/MEHO-Platform-Admins/`, or the realm role
   in `JWT_PLATFORM_ADMIN_ROLE_NAME`. A group MEHO cannot read counts too.
+- In MEHO's own login realm, in `master` and in the target's admin realm,
+  a platform admin approves every Keycloak write, and every `secret.move`
+  that reads from or writes to one of these realms. A Keycloak admin in
+  `master` can change every realm. The target's admin realm holds the
+  login MEHO uses for that target. So the same rule holds there.
+  The one exception is a write that sets only keys from a short list that
+  cannot touch sign-in or rights: the display name of the realm
+  (`keycloak.realm.update`), the name and description of a client
+  (`keycloak.client.update`), and the first and last name of a user
+  (`keycloak.user.update`). Such a write needs a tenant admin, unless it
+  is for a login with platform admin rights. When a param names the realm,
+  MEHO reads that realm from Keycloak and judges the name Keycloak answers
+  with. When MEHO cannot read which realm a write changes, it counts as the
+  login realm. The name of a new realm (`keycloak.realm.create`) may hold
+  only plain ASCII characters: letters `a` to `z` and `A` to `Z`, digits,
+  the space and the other ASCII signs except `/`, `\`, `?`, `#` and `%`.
+  No letters with accents. When the name of one of these protected realms
+  has a letter with an accent, every `secret.move` with a Keycloak source
+  or sink on that target needs a platform admin. The approval card
+  says why, in the row "Platform admin must approve". A tenant admin, also
+  an admin who may change other rights alone, cannot approve these. No
+  standing grant and no run approval clears such a write: each call waits
+  for a person. A person never approves a `secret.move` that sets the
+  password of their own login.
+- A Keycloak write approved before this rule does not run: MEHO refuses it
+  when the run starts, in every realm. Send the request again.
 
 The approval is for the login and the group as they were when the request
 was made. If a user name or a group name points at another account or group

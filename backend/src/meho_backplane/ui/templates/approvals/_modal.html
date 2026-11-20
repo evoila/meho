@@ -405,6 +405,14 @@
           <dd class="text-right font-semibold">Another admin must approve</dd>
         </div>
       {% endif %}
+      {#- A change in MEHO's own login realm that can give platform admin
+          rights: only a platform admin approves it, and the card says why. -#}
+      {% if request.get("platform_admin_reason") %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-platform-admin>
+          <dt class="shrink-0 text-base-content/55">Platform admin must approve</dt>
+          <dd class="text-right [overflow-wrap:anywhere]">{{ request.get("platform_admin_reason") }}</dd>
+        </div>
+      {% endif %}
       {#- Approver routing: the login groups the request went to. Shown only
           when routing stored them; otherwise today's rule applies. -#}
       {% if request.who_can_approve %}

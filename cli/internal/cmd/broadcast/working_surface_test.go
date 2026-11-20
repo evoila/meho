@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/evoila/meho/cli/internal/api"
 )
@@ -147,6 +148,43 @@ func TestRenderBroadcastSSEEmitsWireData(t *testing.T) {
 		t.Fatalf("renderBroadcastSSE: %v", err)
 	}
 	if got := stdout.String(); got != "{\"kind\":\"announcement\"}\n" {
+		t.Errorf("output: %q", got)
+	}
+}
+
+func TestRenderBroadcastSSEEscapesControlCharacters(t *testing.T) {
+	event, err := json.Marshal(map[string]any{
+		"kind":     "agent_announcement",
+		"activity": "rotating tokens\x1b[2K\rall good\x07",
+		"target":   "\x1b]0;new title\x07cluster-x",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cmd, stdout, _ := newRunCmd(t)
+	if err := renderBroadcastSSE(strings.NewReader("event: broadcast\ndata: "+string(event)+"\n\n"), cmd.OutOrStdout(), false, nil); err != nil {
+		t.Fatalf("renderBroadcastSSE: %v", err)
+	}
+	got := stdout.String()
+	for _, r := range strings.TrimSuffix(got, "\n") {
+		if unicode.Is(unicode.Cc, r) {
+			t.Fatalf("raw control character %U in output: %q", r, got)
+		}
+	}
+	for _, want := range []string{`rotating tokens\x1b[2K\x0dall good\x07`, `\x1b]0;new title\x07cluster-x`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q missing %q", got, want)
+		}
+	}
+}
+
+func TestRenderBroadcastSSEJSONKeepsWireData(t *testing.T) {
+	raw := `{"activity":"a\u001b[2Kb"}`
+	cmd, stdout, _ := newRunCmd(t)
+	if err := renderBroadcastSSE(strings.NewReader("data: "+raw+"\n\n"), cmd.OutOrStdout(), true, nil); err != nil {
+		t.Fatalf("renderBroadcastSSE: %v", err)
+	}
+	if got := stdout.String(); got != raw+"\n" {
 		t.Errorf("output: %q", got)
 	}
 }

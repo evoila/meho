@@ -580,9 +580,17 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     pair is read as XML text first, so a name in CDATA or with a character
     reference (`&#x50;`) is the same name. In a JSON text each
     string is read on its own, and as text: its escapes (`\"`, `\u003c`)
-    are read before its XML, and only the hidden value changes in the
-    JSON, so it still parses. A start tag and a closing tag in two
-    different strings are no element. These steps
+    are read before its XML. The XML step itself changes only the hidden
+    value and keeps the other escapes of the string. When the YAML step
+    also reads the JSON text, it writes the changed string back, and a
+    `\u` escape can then become the plain character; the JSON still
+    parses and means the same. A start tag and a closing tag in two
+    different strings are no element. In a YAML text each value (with
+    its key on the same entry) and each comment is read on its own in the
+    same way, so a start tag and a closing tag in two different YAML
+    values or comment lines are no element, and the keys and values
+    between them stay. A text that reads as neither YAML nor JSON is read
+    as XML whole, so an element over more lines is still hidden. These steps
     write the marker without quotes. A step that is too deep to read hides
     the whole text. An element with no closing tag is not touched, and
     text without a secret-named field comes back unchanged. The YAML read

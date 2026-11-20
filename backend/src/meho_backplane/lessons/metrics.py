@@ -6,7 +6,9 @@
 They answer one question: do stored lessons help? Each number comes with
 its count and its base, and reads ``None`` when the base is 0.
 
-Let a *session* be one ``agent_session_id``. An operation *failed* when
+Let a *session* be one ``agent_session_id`` of an agent run or an MCP
+session. A row whose id is the CLI login session (payload key
+``session_from_client``) belongs to no session here. An operation *failed* when
 its ``DISPATCH`` audit row has a status of 400 or more, other than 429
 (a rate limit is not a mistake). An operation *succeeded* when the status
 is 200.
@@ -61,6 +63,7 @@ from meho_backplane.lessons.retrievals import (
     fetch_retrievals,
     find_uses,
 )
+from meho_backplane.operations._audit import agent_session_rows
 
 __all__ = [
     "REPEAT_LOOKBACK_DAYS",
@@ -236,6 +239,7 @@ def _dispatch_rows(
         AuditLog.occurred_at >= since,
         AuditLog.occurred_at <= until,
         AuditLog.agent_session_id.is_not(None),
+        agent_session_rows(),
     )
     if tenant_id is not None:
         stmt = stmt.where(AuditLog.tenant_id == tenant_id)
@@ -330,6 +334,7 @@ async def _target_first_success_by_session(
             AuditLog.status_code == SUCCESS_STATUS,
             AuditLog.target_id.in_(targets),
             AuditLog.agent_session_id.is_not(None),
+            agent_session_rows(),
             AuditLog.occurred_at <= until,
         )
         .group_by(AuditLog.tenant_id, AuditLog.target_id, AuditLog.agent_session_id)

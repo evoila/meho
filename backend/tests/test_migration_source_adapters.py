@@ -54,7 +54,7 @@ from meho_backplane.connectors.inventory.source_register import (
     SOURCE_ADAPTERS,
     _llm_instructions,
 )
-from meho_backplane.connectors.proxmox import op_classes as _proxmox_rules  # noqa: F401
+from meho_backplane.connectors.proxmox import op_classes as proxmox_op_classes
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.op_classes import call_always_waits
@@ -542,6 +542,7 @@ async def test_proxmox_inventory_reads_run_with_no_person(store: ResultHandleSto
     """Every read of the inventory is a plain read: none waits for a person."""
     guest_file = {"path": "nodes/pve1/qemu/100/agent/file-read"}
     assert call_always_waits("proxmox.api.get", guest_file), "the Proxmox check is loaded"
+    assert "get-osinfo" in proxmox_op_classes.PLAIN_AGENT_READS
     children = _proxmox_children()
     await _run(proxmox_migration_inventory, children, "pve-a", store)
 

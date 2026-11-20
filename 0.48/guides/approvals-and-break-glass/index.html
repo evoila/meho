@@ -2248,6 +2248,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Who may approve">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-request-of-an-agent-counts-as-a-request-of-the-people-behind-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A request of an agent counts as a request of the people behind it
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3375,6 +3392,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Who may approve">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-request-of-an-agent-counts-as-a-request-of-the-people-behind-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A request of an agent counts as a request of the people behind it
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3776,6 +3810,35 @@ the text says instead that you may approve it yourself with a click in
 the web interface. Another
 person's <code>dangerous</code> or <code>destructive</code> change, approved by someone who is
 neither, gets <code>403 approval_group_required</code>.</p>
+<h3 id="a-request-of-an-agent-counts-as-a-request-of-the-people-behind-it">A request of an agent counts as a request of the people behind it<a class="headerlink" href="#a-request-of-an-agent-counts-as-a-request-of-the-people-behind-it" title="Permanent link">&para;</a></h3>
+<p>An agent, an add-on (a service login) or a satellite runner does not ask
+on its own. People set it up. So MEHO treats its request as a request of
+the people behind it:</p>
+<ul>
+<li>who registered or owns the agent, add-on or runner;</li>
+<li>who gave one of its grants that are in force;</li>
+<li>who wrote or last changed its agent definition;</li>
+<li>who made one of its schedules, or an event source when a schedule waits
+  for events;</li>
+<li>who started or handed over the runbook run it works on.</li>
+</ul>
+<p>Only people count. An agent, add-on or runner login that set up, changed
+or handed over something is never one of the people behind another login.</p>
+<p>Such a person may approve the request only where they may approve their
+own change (the table above). A change of rights always needs another
+admin, also when an admin is behind the agent. Everyone else approves it
+as another person's change.</p>
+<p>When MEHO knows nobody behind the login (for example a login made only in
+Keycloak, or one that only other machine logins set up), only an Admin may
+approve its requests.</p>
+<p>The request shows these people: the request card and window in the web
+interface ("Set up by ... Grant by ..."), <code>meho approvals show</code>
+("Behind it:"), and the REST answer (<code>people_behind</code>) when a person asks.
+For an agent, add-on or runner login, the REST answer leaves the two
+fields out. When MEHO knows
+nobody, they say "Set up by: not known".</p>
+<p>Use an agent to run changes on a schedule. An agent is never a way to
+approve your own change.</p>
 <p>To take back your <em>own</em> pending request, withdraw it:
 <code>meho approvals withdraw &lt;id&gt; [--reason TEXT]</code> (or
 <code>POST /api/v1/approvals/{id}/withdraw</code>). The request then shows
@@ -4184,6 +4247,15 @@ and you are not in <code>MEHO-Admins</code>. Ask a person in
 one of the groups the text names to approve it on the Approvals page of
 the web interface. If you are the only operator, see
 <a href="#when-you-are-the-only-operator">When you are the only operator</a>.</p>
+<p><strong><code>approve</code> refuses with "You set up, changed or started the agent,
+add-on or runner that asked for it".</strong> You are one of the people behind
+the login that asked (see
+<a href="#a-request-of-an-agent-counts-as-a-request-of-the-people-behind-it">A request of an agent counts as a request of the people behind it</a>),
+so the change counts as your own change. Ask another person the text
+names to approve it.</p>
+<p><strong><code>approve</code> refuses with "MEHO does not know who set up the login".</strong> An
+agent, add-on or runner asked, and MEHO knows nobody behind it. Ask an
+Admin to approve it.</p>
 <p><strong><code>approve</code> returns <code>approval_group_required</code>.</strong> The change is another
 person's <code>dangerous</code> or <code>destructive</code> change, and you are not a
 MEHO-Admin. Ask one to approve it.</p>

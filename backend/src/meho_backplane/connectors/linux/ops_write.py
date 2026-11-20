@@ -28,8 +28,8 @@ Tier table:
   stdout / stderr / exit. Its ``arguments`` / ``env`` may carry secrets, so it
   is pinned ``credential_write`` and previews only at park time via its
   bespoke builder: the approver reads the script body and its SHA-256
-  (:mod:`~meho_backplane.connectors.linux.script_preview`), never the argument
-  values or env values. A credential
+  (:mod:`~meho_backplane.connectors.linux.script_preview`) and each ``env``
+  name with its value, never the argument values. A credential
   the script needs is instead passed by reference via ``secret_env``
   (``ENV_NAME -> "<vault-path>#<field>"``), resolved from Vault server-side at
   execution time (the same ``_resolve_secret`` seam the sudo password uses) and
@@ -66,7 +66,7 @@ import asyncio
 import base64
 import shlex
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
@@ -91,10 +91,12 @@ from meho_backplane.connectors.linux.ops_host import (
 )
 from meho_backplane.connectors.linux.script_preview import (
     SCRIPT_MAX_BYTES,
+    has_secret_shape,
     script_matches_expected,
     script_preview_fields,
     script_too_large_message,
 )
+from meho_backplane.redaction.command_line import is_secret_shaped_name
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -102,6 +104,7 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "ENV_NOTE",
     "FIREWALL_BACKENDS",
     "LINUX_WRITE_ROOTS",
     "SERVICE_ACTIONS",
@@ -229,9 +232,15 @@ _ENV_NAME_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]*(?![\s\S])"
 #: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.
 _MAX_SECRET_ENV: int = 32
 
+#: The line the ``linux.script.run`` approval card shows next to the ``env``
+#: values.
+ENV_NOTE: Final[str] = "The approver sees every env value. Put secrets in secret_env, not in env."
+
 #: env-var names that ``env`` and ``secret_env`` must NOT bind. The approver
-#: sees the script and the env NAMES, not the env values, so a value must not
-#: change which code runs. Two groups:
+#: never sees a ``secret_env`` value (it is read from Vault only at run time),
+#: so such a value must not change which code runs. ``env`` values are on the
+#: approval card, and ``env`` keeps the same list as a second guard. Three
+#: groups:
 #:
 #: * the ``script.run`` wrapper's own shell variables
 #:   (:func:`build_script_run_wrapper` sets ``tmp`` and, when arguments are
@@ -648,7 +657,14 @@ def _validate_env(raw: Any) -> dict[str, str]:
     env: dict[str, str] = {}
     for name, value in raw.items():
         env[_check_env_name(name, "env")] = str(value)
+        if "\x00" in env[name]:
+            raise LinuxWriteSafetyError(_nul_byte_message(f"env var {name!r}"))
     return env
+
+
+def _nul_byte_message(what: str) -> str:
+    """The refusal for a value with a NUL byte; *what* names the value, never shows it."""
+    return f"The value of {what} holds a NUL byte. A value passed to a script cannot hold one."
 
 
 def _bounded_timeout(raw: Any) -> int:
@@ -789,7 +805,10 @@ async def _resolve_secret_env(
             raise LinuxWriteError(
                 f"secret_env[{name!r}] vault path {path!r} has no field {field!r}"
             )
-        resolved[name] = strip_credential_value(secret_data[field])
+        value = strip_credential_value(secret_data[field])
+        if "\x00" in value:
+            raise LinuxWriteSafetyError(_nul_byte_message(f"secret_env[{name!r}] in Vault"))
+        resolved[name] = value
     return resolved
 
 
@@ -823,8 +842,14 @@ def build_script_run_wrapper(
         'chmod 0700 "$tmp"',
     ]
     for name, value in env.items():
+        # Command substitution drops the line breaks at the end of the value.
+        # ``$'\n'`` adds the same number back. No pattern is matched, so the
+        # host's locale cannot change the bytes: the script gets the value
+        # byte for byte as the approval card shows it.
         q_val = shlex.quote(_b64(value))
-        lines.append(f'export {name}="$(printf %s {q_val} | base64 -d)"')
+        breaks = "\\n" * (len(value) - len(value.rstrip("\n")))
+        tail = f"$'{breaks}'" if breaks else ""
+        lines.append(f'export {name}="$(printf %s {q_val} | base64 -d)"{tail}')
     if working_directory is not None:
         q_wd = shlex.quote(working_directory)
         lines.append(f'cd {q_wd} || {{ echo "===MEHO_RUN_ERR:chdir===" >&2; exit 4; }}')
@@ -1139,7 +1164,7 @@ async def _linux_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 
 
 async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview builder for ``linux.script.run`` -- the script, never the values.
+    """Preview builder for ``linux.script.run`` -- the script and the ``env`` values.
 
     ``linux.script.run`` classifies ``credential_write`` (its ``arguments`` /
     ``env`` may carry secrets). ``preview_operation`` returns
@@ -1150,9 +1175,13 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     shows it with its SHA-256 and the optional check against a reviewed copy
     (:func:`~meho_backplane.connectors.linux.script_preview.script_preview_fields`).
     Next to it: the target, the interpreter, the argument byte size, the
-    env-var NAMES, the ``secret_env`` reference mapping (non-secret
-    ``ENV -> path#field`` Vault pointers), the working directory, the sudo
-    intent, and the timeout -- never the argument values or the env values.
+    env-var names, each ``env`` name with its value (``env``, sorted by name,
+    each value as the handler exports it) and the line :data:`ENV_NOTE`, the
+    ``secret_env`` reference mapping (non-secret ``ENV -> path#field`` Vault
+    pointers), the working directory, the sudo intent, and the timeout --
+    never the argument values. An ``env`` value can change which code the
+    script runs (``TAR_OPTIONS``, ``GIT_SSH_COMMAND``), so the approver reads
+    every one; the params hash binds them to the approved run.
     Declines (``None``) on malformed params.
     """
     script = ctx.params.get("script")
@@ -1171,6 +1200,13 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     env = ctx.params.get("env")
     if isinstance(env, dict) and env:
         preview["env_var_names"] = sorted(str(name) for name in env)
+    if isinstance(env, dict) and env and not ctx.agent_preview:
+        # The values are for the person only: the agent's own
+        # preview_operation answer keeps the names, as before.
+        preview["env"] = {
+            str(name): str(value) for name, value in sorted(env.items(), key=lambda kv: str(kv[0]))
+        }
+        preview["env_note"] = ENV_NOTE
     secret_env = ctx.params.get("secret_env")
     if isinstance(secret_env, dict) and secret_env:
         # The references are non-secret Vault pointers (``path#field``) -- the
@@ -1186,6 +1222,63 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     if isinstance(timeout, int) and not isinstance(timeout, bool):
         preview["timeout_seconds"] = timeout
     return preview
+
+
+#: The ``linux.script.run`` card keys only a person reads. Every read of a
+#: stored request by an agent or a token gets the ``env`` names only.
+_PERSON_ONLY_SCRIPT_RUN_KEYS: Final[frozenset[str]] = frozenset({"env", "env_note"})
+
+_SEND_IN_SECRET_ENV: Final[str] = (
+    "Send it in secret_env, as a Vault path and field, not in env: "
+    "the approver sees every env value."
+)
+
+
+def _refuse_nul_byte(params: dict[str, Any]) -> str | None:
+    """Refuse an ``env`` value or a ``secret_env`` reference with a NUL byte.
+
+    A value passed to a script cannot hold a NUL byte: bash would cut it.
+    A ``secret_env`` value is read from Vault only when the approved run
+    starts, so :func:`_resolve_secret_env` checks it then.
+    """
+    for key in ("env", "secret_env"):
+        mapping = params.get(key)
+        if not isinstance(mapping, dict):
+            continue
+        for name, value in mapping.items():
+            if isinstance(value, str) and "\x00" in value:
+                return _nul_byte_message(f"{key} var {str(name)!r}")
+    return None
+
+
+async def _refuse_before_wait(ctx: PreviewContext) -> str | None:
+    """The check of ``linux.script.run`` before the call waits for approval."""
+    return _refuse_nul_byte(ctx.params) or await _refuse_secret_in_env(ctx)
+
+
+async def _refuse_secret_in_env(ctx: PreviewContext) -> str | None:
+    """Refuse a ``linux.script.run`` call with a secret in ``env``, before it waits.
+
+    The approval card shows every ``env`` value, so a secret must not be
+    there. Refused are a name with a secret word (the command-line rule:
+    ``PASSWORD``, ``TOKEN``, ``SECRET``, ``KEY``, ...) and a value with a
+    secret shape (the rules of the script text: a password in a URL, a
+    JWT, a bearer token, a private key block, a token with a known vendor
+    prefix). The answer names the env name, never the value.
+    """
+    env = ctx.params.get("env")
+    if not isinstance(env, dict):
+        return None
+    for name, value in env.items():
+        if is_secret_shaped_name(str(name)):
+            return f"env var {str(name)!r} has a secret word in its name. {_SEND_IN_SECRET_ENV}"
+        if await asyncio.to_thread(has_secret_shape, str(value)):
+            return f"The value of env var {str(name)!r} looks like a secret. {_SEND_IN_SECRET_ENV}"
+    return None
+
+
+def _person_only_keys_shown_to_agents() -> bool:
+    return False
 
 
 def _check_script_size(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -1233,12 +1326,20 @@ def register_linux_write_previews() -> None:
     non-secret dangerous ops (``sysctl.write`` / ``firewall.load``) register no
     bespoke builder -- they preview via the generic params-echo default.
     """
-    from meho_backplane.operations._preview import register_preview_builder
+    from meho_backplane.operations._park_check import register_park_check
+    from meho_backplane.operations._preview import (
+        register_person_only_preview_keys,
+        register_preview_builder,
+    )
     from meho_backplane.operations._validate import register_params_check
 
     register_preview_builder("linux.file.write", _linux_file_write_preview)
     register_preview_builder("linux.script.run", _linux_script_run_preview)
     register_params_check("linux.script.run", _check_script_size)
+    register_park_check("linux.script.run", _refuse_before_wait)
+    register_person_only_preview_keys(
+        "linux.script.run", _person_only_keys_shown_to_agents, _PERSON_ONLY_SCRIPT_RUN_KEYS
+    )
 
 
 # ===========================================================================
@@ -1469,9 +1570,8 @@ _SCRIPT_RUN_OP = LinuxOp(
             },
             "env": {
                 "type": "object",
-                # Checked by the dispatcher before the call waits for approval:
-                # the approver sees the names, not the values, so a name that
-                # changes how the script starts is refused at once.
+                # Checked by the dispatcher before the call waits for approval,
+                # so a name that changes how the script starts is refused at once.
                 "propertyNames": _ENV_PROPERTY_NAMES_SCHEMA,
                 "additionalProperties": {"type": "string"},
                 "description": (

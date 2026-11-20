@@ -48,6 +48,14 @@ Two layers, one source of truth:
   records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
   paired add-on that asked (#3027); the audit log records every step; the
   agent waiter, the bell badge and the console read the stored row.
+- **Who reads the `env` values of `linux.script.run`.** The REST list and
+  detail (`GET /api/v1/approvals`, `GET /api/v1/approvals/{id}`) give a
+  person's login the whole stored `proposed_effect` of a `linux.script.run`
+  request. An agent, service or runner login gets it through
+  `proposed_effect_for_agent`, the same as the MCP read tools: with the `env`
+  names, without the `env` values (`_PERSON_ONLY_REST_CARD_OPS` in
+  `api/v1/approvals.py`). The REST answer for every other op is the stored
+  `proposed_effect`, for every caller.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
@@ -805,6 +813,33 @@ boundary (`except McpInvalidParamsError` in both `handle_tools_call` and
 `McpInvalidParamsError`, not just self-approval; explicit pre-gate
 branches that already set `400`/`403`/`404` pass through untouched, and a
 genuine handler fault still records `500`.
+
+## A credential call always waits for a person
+
+A call that reads, writes or makes a credential (the classes
+`credential_read`, `credential_write` and `credential_mint`) always waits
+for a person. No standing grant, no agent grant and no run approval covers
+it. One rule says so: `service_grants.never_covered_reason`, with
+`credential_grant_reason` for these classes. Grant create, run approval
+create and agent grant create (an exact op id with `auto-execute`) refuse
+such an operation with the reason "A standing grant, an agent grant or a
+run approval never covers 'OP': it reads, writes or makes a credential, so
+a person approves each call. Leave it out." The call of an agent or a
+service login waits also at level `safe`. The approval of a parent
+multi-step run does not cover such a step or child call: it waits for its
+own approval (`_covered_by_approved_run`). This holds also when the person
+who approved an earlier step has the rights to run it, and whatever level
+the step declares (`composite.credential_step_waits_after_approval`). When
+the person approves the step, the multi-step run goes on with this step
+cleared; when the person rejects it, the run ends and the step never runs.
+A child call (`dispatch_child`) that waits is its own request. When a
+person approves it, only the child runs, and the multi-step run does not
+go on. An install or tenant override does not turn
+off the approval that the code turns on for an operation that writes or
+makes a credential. Details:
+[service-principal-grants.md](service-principal-grants.md#credential-calls),
+[run-approvals.md](run-approvals.md),
+[agent-permission-grants.md](agent-permission-grants.md).
 
 ## G11.7-T1 policy hardening (#1401)
 
@@ -3070,7 +3105,7 @@ later, each with its own builder
 | `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace and the whole Job `spec` as it will be created: Job settings (`backoffLimit`, ...), node choice (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), `hostPID` / `hostNetwork` / `hostIPC`, service account, pod and container `securityContext`, image, `command`, `args`, `volumes`, `volumeMounts`, env var names, `envFrom` and `valueFrom` references (Secret or ConfigMap name and key) | every inline `env` value and probe `httpHeaders` value (the name stays); on `command` and `args`, read as one command line: the value of a `NAME=VALUE` or `--name=value` whose name holds a secret word (`PGPASSWORD=...`, `--password=...`, any length), the argument after a secret flag (`--password x`, `-p x`; also across the end of `command`), the password in `user:password` after `-u` / `--user`, the password in a URL, tokens with a known vendor prefix (`ghp_...`). A list item is one argument of the program, so such a value runs to the end of the item, spaces and shell operators included (`PGPASSWORD=x;tail` is hidden whole); only in the item after `-c` (alone or in a short option group such as `-ec` or `-lc`), a shell command string, is the value one shell word, quotes and escapes included, and an unquoted shell operator such as `;` or `&&` ends it, so the commands after it stay visible; secret-shaped text anywhere in the spec (JWTs, bearer tokens); the value of a field with a secret-shaped name (a `secret` volume, `imagePullSecrets`). A secret on a command line with no known shape is shown. |
-| `linux.script.run` | every call | target, interpreter, the script text (page 1 of the pages, 64 KiB each, with the page count) with its size and SHA-256, the reviewed copy (`script_ref`) and whether the script matches `expected_sha256`, argument byte size, env var names, the `secret_env` references (`path#field`), working directory, `use_sudo`, timeout ([`connectors-linux.md`](connectors-linux.md)) | the argument values and env values; in the script text, values that look like secrets, with the command-line rules of `k8s.job.create` and two changes: `-p` hides its value only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are; and a password glued to `-u` (`curl -uuser:password`) is hidden too (then the SHA-256 is left out too) |
+| `linux.script.run` | every call | target, interpreter, the script text (page 1 of the pages, 64 KiB each, with the page count) with its size and SHA-256, the reviewed copy (`script_ref`) and whether the script matches `expected_sha256`, argument byte size, each `env` name with its value and a line that secrets belong in `secret_env` (both for a person only: reads by an agent or a token get the `env` names), the `secret_env` references (`path#field`), working directory, `use_sudo`, timeout ([`connectors-linux.md`](connectors-linux.md)) | the argument values and the `secret_env` values; in the script text, values that look like secrets, with the command-line rules of `k8s.job.create` and two changes: `-p` hides its value only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are; and a password glued to `-u` (`curl -uuser:password`) is hidden too (then the SHA-256 is left out too) |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
@@ -4918,11 +4953,16 @@ the run, so its remaining internal steps go ahead under that approval
 while the dispatcher runs it with `_approved=True` (it binds
 `approved_run_var`) or while `composite_resume_scope_var` is set (the
 re-entry of an approved step). Then a step whose gate says
-`NEEDS_APPROVAL` goes ahead, unless the step is `destructive` or marked
-`requires_approval`. A `DENY` stays a deny. The same holds for a child
-operation the composite runs through `dispatch_child`: the child's own
-`dispatch()` reads `approved_run_var` right after its policy gate and goes
-ahead on `NEEDS_APPROVAL` under the same two exceptions. This holds whoever runs the
+`NEEDS_APPROVAL` goes ahead, unless the step is `destructive`, marked
+`requires_approval`, or reads, writes or makes a credential
+(`service_grants.credential_call_waits`). A `DENY` stays a deny. The same
+holds for a child operation the composite runs through `dispatch_child`:
+the child's own `dispatch()` reads `approved_run_var` right after its
+policy gate and goes ahead on `NEEDS_APPROVAL` under the same three
+exceptions. A credential step or child waits for its own approval, also
+when the rights of the person who approved the run would let it run: the
+step's gate and the child's `dispatch()` turn an `AUTO_EXECUTE` into a wait
+(`credential_step_waits_after_approval`). This holds whoever runs the
 resume and however the approval was given: a web click, or the command
 line with a fresh sign-in (#3979). It matters since #3980: a reviewer's
 token, and a `dangerous` step in the web interface, would otherwise wait
@@ -4935,7 +4975,8 @@ finish in one resume is not `destructive` and not `requires_approval`**.
 A later step that is `destructive` or marked `requires_approval` waits for
 its own approval, also during a resume. The steps the run already did are
 stored with that new request, so its resume sends none of them again. See
-the next section.
+the next section. A child call that waits is its own request: its approval
+runs only the child, and the multi-step run does not go on.
 
 #### How a multi-step run goes on after an approval
 

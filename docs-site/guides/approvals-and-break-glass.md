@@ -310,16 +310,21 @@ group has more rules:
   in `JWT_PLATFORM_ADMIN_ROLE_NAME`. A group MEHO cannot read counts too.
 - In MEHO's own login realm, in `master` and in the target's admin realm,
   a platform admin approves every Keycloak write, and every `secret.move`
-  that reads from or writes to one of these realms. An admin in `master`
-  or in the admin realm can change every realm, so the same rule holds
-  there.
+  that reads from or writes to one of these realms. A Keycloak admin in
+  `master` can change every realm. The target's admin realm holds the
+  login MEHO uses for that target. So the same rule holds there.
   The one exception is a write that sets only keys from a short list that
   cannot touch sign-in or rights: the display name of the realm
   (`keycloak.realm.update`), the name and description of a client
   (`keycloak.client.update`), and the first and last name of a user
   (`keycloak.user.update`). Such a write needs a tenant admin, unless it
-  is for a login with platform admin rights. When MEHO cannot read which
-  realm a write changes, it counts as the login realm. The approval card
+  is for a login with platform admin rights. When a param names the realm,
+  MEHO reads that realm from Keycloak and judges the name Keycloak answers
+  with. When MEHO cannot read which realm a write changes, it counts as the
+  login realm. The name of a new realm (`keycloak.realm.create`) may hold
+  only plain ASCII characters: letters `a` to `z` and `A` to `Z`, digits,
+  the space and the other ASCII signs except `/`, `\`, `?`, `#` and `%`.
+  No letters with accents. The approval card
   says why, in the row "Platform admin must approve". A tenant admin, also
   an admin who may change other rights alone, cannot approve these. No
   standing grant and no run approval clears such a write: each call waits

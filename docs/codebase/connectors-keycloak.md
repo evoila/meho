@@ -567,8 +567,9 @@ sign-in or rights. The list is `HARMLESS_KEYS` in
 `ops_write_login_realm_rule.py`, and it is the only place.
 
 The same rule holds in `master` (Keycloak's admin realm) and in the
-target's `admin_realm`: a Keycloak admin there can change every realm, also
-the one of MEHO's own login. In this part, "the login realm" means all of
+target's `admin_realm`. A Keycloak admin in `master` can change every realm,
+also the one of MEHO's own login. The target's admin realm holds the login
+MEHO uses for that target. In this part, "the login realm" means all of
 these realms (`is_login_realm_name` in `ops_write_grant.py`; letter case
 and spaces at the ends do not count).
 
@@ -607,14 +608,29 @@ write in `RIGHTS_CHANGE_OPS` and `NOT_RIGHTS_CHANGE_OPS`:
 The realm is the `realm` param for `realm.create` (also the `realm` of its
 representation), `realm.delete`, `realm.update` and `user.check_login`,
 else the realm the target manages, by the name Keycloak answers with
-(`is_login_realm`). When MEHO cannot read it, or cannot read which realms
-its own login uses, the realm counts as the login realm.
+(`is_login_realm`). A realm that a param names is judged the same way:
+MEHO reads `GET /admin/realms/{realm}` and compares the name in the answer
+(`named_realm_is_protected` in `ops_write_grant.py`), because a Keycloak
+database can match a realm name without letter case or accents. When MEHO
+cannot read it, or cannot read which realms its own login uses, the realm
+counts as the login realm.
+
+For `realm.create`, a realm that Keycloak does not know yet (HTTP 404) is
+judged by its name as typed. So the params check of `realm.create`
+(`realm_params.py`, `is_plain_realm_name`) allows only plain ASCII
+characters in the new name (`realm` and `representation.realm`): letters
+`a` to `z` and `A` to `Z`, digits, the space and the other ASCII signs that
+`realm_name_problem` allows (all but `/`, `\`, `?`, `#` and `%`). A name
+with a letter with an accent is refused before the call waits.
 
 A `secret.move` whose source or sink is a `keycloak:` ref in the login
 realm always needs a platform admin (`secret_move_grant`). For a side in
 another realm, MEHO reads the target the ref names, to know its
 `admin_realm`; when it cannot read that target, the side counts as one in
-the login realm. A ref is a
+the login realm. MEHO calls no Keycloak for a `secret.move` before its run
+checks the target, so it judges a side's realm by the name as typed: a
+name that is not plain ASCII (`is_plain_realm_name`) counts as one in the
+login realm. A ref is a
 client-secret source or a user-password sink by its address shape, the
 same way as `build_keycloak_secret_endpoint`: a sink in a realm named
 `clients` is still a sink. A user-password sink in the login realm also

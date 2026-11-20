@@ -4,7 +4,8 @@
 """In MEHO's own login realm, a platform admin approves every Keycloak write.
 
 The same holds in ``master`` (Keycloak's admin realm) and in the target's
-``admin_realm``: an admin there can change every realm. In this module and
+``admin_realm``. A Keycloak admin in ``master`` can change every realm. The
+target's admin realm holds the login MEHO uses for that target. In this module and
 on the card, "the login realm" means all of these realms
 (:func:`~.ops_write_grant.is_login_realm_name`).
 
@@ -35,8 +36,10 @@ no ``harmless_keys_only`` fact does not run either, in every realm.
 Which realm a write changes: the ``realm`` param (and for
 ``keycloak.realm.create`` the ``realm`` of the representation) when the
 write has one, else the target's managed realm
-(:func:`~.ops_write_grant.is_login_realm`). When MEHO cannot read it, the
-realm counts as the login realm.
+(:func:`~.ops_write_grant.is_login_realm`). A realm that a param names is
+judged by the name Keycloak answers with for it
+(:func:`~.ops_write_grant.named_realm_is_protected`). When MEHO cannot read
+the realm, it counts as the login realm.
 
 A caller (``preview_operation``, ``meho_approvals_get``,
 ``meho_approvals_list``) reads the new facts only while
@@ -50,7 +53,7 @@ from typing import TYPE_CHECKING, Any, Final
 from meho_backplane.connectors.keycloak.ops_write_grant import (
     GRANT_OPS,
     is_login_realm,
-    is_login_realm_name,
+    named_realm_is_protected,
 )
 from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     PLATFORM_OPS,
@@ -152,7 +155,11 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
                 names.append(_text(representation.get("realm")))
             given = [name for name in names if name is not None]
             if given:
-                return any(is_login_realm_name(name, ctx.target) for name in given)
+                new = op_id == "keycloak.realm.create"
+                for name in given:
+                    if await named_realm_is_protected(ctx, name, new=new):
+                        return True
+                return False
             if op_id == "keycloak.realm.create":
                 return True
         return await is_login_realm(ctx)

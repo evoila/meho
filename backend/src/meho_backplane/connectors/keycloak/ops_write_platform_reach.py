@@ -428,17 +428,18 @@ async def _realm_of(op_id: str, ctx: PreviewContext) -> tuple[bool, str | None]:
     """Whether the write changes a realm of MEHO's own login, and that realm's name.
 
     The realm is the target's managed realm; for ``keycloak.realm.update``
-    the ``realm`` param names it when it is given. The name is ``None`` when
-    it cannot be read; the realm then counts as MEHO's own.
+    the ``realm`` param names it when it is given, and MEHO judges the name
+    Keycloak answers with for it. The name is ``None`` when it cannot be
+    read; the realm then counts as MEHO's own.
     """
     from meho_backplane.connectors.keycloak.ops_write_grant import (
         is_login_realm,
-        is_login_realm_name,
+        named_realm_is_protected,
     )
 
     explicit = _text(ctx.params.get("realm")) if op_id == _REALM_UPDATE else None
     if explicit is not None:
-        return is_login_realm_name(explicit, ctx.target), explicit
+        return await named_realm_is_protected(ctx, explicit), explicit
     try:
         realm: str | None = resolve_realm_config(ctx.target).managed_realm
     except Exception:
@@ -553,16 +554,22 @@ async def _side_target(ctx: PreviewContext, target_name: str) -> KeycloakTargetL
 async def _is_login_realm(ctx: PreviewContext, side: tuple[str, str] | None) -> bool:
     """Whether a side is in a realm of :func:`~.ops_write_grant.is_login_realm_name`.
 
-    ``True`` when MEHO cannot read the side, or the target it names (then
-    MEHO cannot read the target's ``admin_realm``).
+    MEHO calls no Keycloak for a ``secret.move`` before its run checks the
+    target (:mod:`.secret_move_target`), so it judges the realm name as
+    typed. A name that is not plain ASCII
+    (:func:`~.realm_params.is_plain_realm_name`) counts as protected: a
+    Keycloak database can match a letter with an accent with the plain one.
+    ``True`` also when MEHO cannot read the side, or the target it names
+    (then MEHO cannot read the target's ``admin_realm``).
     """
     from meho_backplane.connectors.keycloak.ops_write_grant import is_login_realm_name
+    from meho_backplane.connectors.keycloak.realm_params import is_plain_realm_name
 
     if side is None:
         return True
     target_name, realm = side
     try:
-        if is_login_realm_name(realm):
+        if is_login_realm_name(realm) or not is_plain_realm_name(realm):
             return True
         return is_login_realm_name(realm, await _side_target(ctx, target_name))
     except Exception:

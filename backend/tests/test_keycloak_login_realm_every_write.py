@@ -24,7 +24,9 @@ import copy
 import importlib
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import unquote
 
+import httpx
 import pytest
 
 from meho_backplane.connectors.keycloak import KeycloakConnector
@@ -84,6 +86,26 @@ class _FakeKeycloak:
 
     def __init__(self) -> None:
         self.realm = _REALM
+        #: The name Keycloak answers with for a realm read by another name.
+        self.realm_answers: dict[str, str] = {}
+        #: The realms whose read fails, and the realms Keycloak does not know.
+        self.realm_reads_fail: set[str] = set()
+        self.missing_realms: set[str] = set()
+
+    def read_realm(self, path: str) -> dict[str, Any] | None:
+        """The answer to ``GET /admin/realms/{realm}``; ``None`` for another path."""
+        head, _sep, name = path.rstrip("/").rpartition("/")
+        if not head.endswith("/admin/realms"):
+            return None
+        name = unquote(name)
+        if name in self.realm_reads_fail:
+            raise RuntimeError("Keycloak is not reachable")
+        if name in self.missing_realms:
+            request = httpx.Request("GET", f"https://keycloak.example{path}")
+            raise httpx.HTTPStatusError(
+                "not found", request=request, response=httpx.Response(404, request=request)
+            )
+        return {"realm": self.realm_answers.get(name, name), "enabled": True}
 
     def connector(self) -> KeycloakConnector:
         connector = KeycloakConnector()
@@ -92,8 +114,8 @@ class _FakeKeycloak:
         async def _get_admin_json(
             _t: Any, path: str, *, operator: Any, params: Any = None
         ) -> dict[str, Any]:
-            if path.rstrip("/").endswith(f"/admin/realms/{state.realm}"):
-                return {"realm": state.realm, "enabled": True}
+            if (realm := state.read_realm(path)) is not None:
+                return realm
             if path.endswith("/clients"):
                 return []  # type: ignore[return-value]
             if "/roles/" in path:

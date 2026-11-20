@@ -55,7 +55,7 @@ rules that use these facts are in
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
@@ -81,6 +81,7 @@ from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     login_has_platform_admin,
     platform_fields,
 )
+from meho_backplane.connectors.keycloak.realm_params import is_plain_realm_name
 from meho_backplane.connectors.keycloak.session import DEFAULT_ADMIN_REALM, resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import (
@@ -96,6 +97,7 @@ from meho_backplane.targets.keycloak_realm_warnings import (
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+    from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
 __all__ = [
     "CREDENTIALS_CHANGED",
@@ -103,6 +105,7 @@ __all__ = [
     "MEMBER_CAP",
     "is_login_realm",
     "is_login_realm_name",
+    "named_realm_is_protected",
     "register_grant_ops",
     "with_grant_facts",
 ]
@@ -252,9 +255,10 @@ def is_login_realm_name(realm: str, target: object = None, *, own_only: bool = F
 
     These are the realms of MEHO's own login, ``master`` (Keycloak's admin
     realm), and the ``admin_realm`` of *target* when it names one. A
-    Keycloak admin in ``master`` or in the admin realm can change every
-    realm, also the one of MEHO's own login. With *own_only*, only the
-    realms of MEHO's own login count.
+    Keycloak admin in ``master`` can change every realm, also the one of
+    MEHO's own login. The target's admin realm holds the login MEHO uses
+    for that target. With *own_only*, only the realms of MEHO's own login
+    count.
     """
     names = set(_backplane_login_realms())
     if not own_only:
@@ -294,6 +298,49 @@ async def login_realm_facts(ctx: PreviewContext) -> tuple[bool, bool]:
         )
     except Exception:
         return True, True
+
+
+async def named_realm_is_protected(
+    ctx: PreviewContext,
+    realm: str,
+    *,
+    target: object = None,
+    connector: KeycloakConnector | None = None,
+    new: bool = False,
+) -> bool:
+    """Whether the realm a param names is a protected realm (:func:`is_login_realm_name`).
+
+    MEHO reads the realm from Keycloak (``GET /admin/realms/{realm}``) and
+    judges the name in the answer: a Keycloak database can match a realm
+    name without letter case, accents or a space at the end. *target* is the
+    target the call goes to (default: ``ctx.target``), *connector* the
+    Keycloak connector that reads it (default: the one of *ctx*).
+
+    ``True`` when the read fails or its answer has no name. With *new* (a
+    realm that ``keycloak.realm.create`` makes), a realm that Keycloak does
+    not know (HTTP 404) is judged by the name as typed, and only a plain
+    name (:func:`is_plain_realm_name`) counts as unprotected.
+    """
+    import httpx
+
+    target = ctx.target if target is None else target
+    if is_login_realm_name(realm, target):
+        return True
+    connector = connector if connector is not None else _live_connector(ctx)
+    if connector is None or target is None:
+        return True
+    try:
+        answer = await connector._get_admin_json(
+            cast("KeycloakTargetLike", target),
+            fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+            operator=ctx.operator,
+        )
+    except httpx.HTTPStatusError as exc:
+        return not (new and exc.response.status_code == 404 and is_plain_realm_name(realm))
+    except Exception:
+        return True
+    name = _text(answer.get("realm")) if isinstance(answer, dict) else None
+    return name is None or is_login_realm_name(name, target)
 
 
 async def is_login_realm(ctx: PreviewContext) -> bool:

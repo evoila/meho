@@ -672,6 +672,10 @@ async def _service_grant_verdict(
 
     refused = await grant_cover_refusal(operator, descriptor, target, connector_id, params)
     if refused is not None:
+        if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and credential_grant_reason(
+            descriptor.op_id, getattr(descriptor, "op_class", None)
+        ):
+            refused = f"{refused}; {CREDENTIAL_WAIT_NOTE}"
         return None, f"{gate_reason}; {refused}" if gate_reason else refused
 
     grant_id = await consult_and_record_grant(

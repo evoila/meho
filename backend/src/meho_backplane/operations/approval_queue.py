@@ -126,9 +126,9 @@ from meho_backplane.operations._audit import (
     policy_decision_var,
     policy_rule_columns,
     policy_rule_var,
-    resolve_agent_session_id,
     resolve_audit_session_id,
     run_id_var,
+    session_is_from_client,
     step_id_var,
     work_ref_var,
 )
@@ -1606,16 +1606,6 @@ resume_requester_var: ContextVar[ResumeRequester | None] = ContextVar(
 # code-quality-allow: already over the 100-line limit on main before #1481
 # (105 lines); the principal_act source fix adds a handful of lines, not the
 # bulk — splitting the row-build + audit-write is out of scope for this fix.
-def _session_is_from_client() -> bool:
-    """Return True when the parking call's session is the CLI login session.
-
-    That is the case when no agent run or MCP session is bound and the
-    ``meho`` CLI sent ``Meho-Session-Id``. The flag is stored on the request
-    row, so the re-dispatch puts the id back where it came from.
-    """
-    return resolve_agent_session_id() is None and client_session_id_var.get() is not None
-
-
 async def create_pending_request(
     session: AsyncSession,
     *,
@@ -1860,7 +1850,7 @@ async def create_pending_request(
         expires_at=bounded_expires_at,
         work_ref=work_ref_var.get(),
         agent_session_id=resolve_audit_session_id(),
-        session_from_client=_session_is_from_client(),
+        session_from_client=session_is_from_client(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,

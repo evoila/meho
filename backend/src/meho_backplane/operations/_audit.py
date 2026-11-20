@@ -31,9 +31,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import structlog
+from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.client_identity import apply_client_block
@@ -61,15 +62,18 @@ from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
 
 __all__ = [
+    "SESSION_FROM_CLIENT_KEY",
     "AgentRunAuditMeta",
     "agent_run_audit_meta_var",
     "agent_session_id_var",
+    "agent_session_rows",
     "audit_rejection_safe",
     "audit_safe",
     "client_session_id_var",
     "decode_work_ref_header",
     "descriptor_op_class",
     "parent_audit_id_var",
+    "payload_session_from_client",
     "policy_decision_var",
     "policy_rule_columns",
     "policy_rule_var",
@@ -78,6 +82,7 @@ __all__ = [
     "restore_audit_extras",
     "reveal_secret_var",
     "run_id_var",
+    "session_is_from_client",
     "snapshot_audit_extras",
     "step_id_var",
     "with_audit_receipt",
@@ -292,6 +297,39 @@ def resolve_audit_session_id() -> uuid.UUID | None:
     if session_id is not None:
         return session_id
     return client_session_id_var.get()
+
+
+#: Payload key of an audit row whose ``agent_session_id`` is the CLI login
+#: session (``Meho-Session-Id``), not an agent run or an MCP session. The
+#: value is ``True``; the key is absent on every other row. Readers that
+#: count agent sessions skip such rows (:func:`agent_session_rows`).
+SESSION_FROM_CLIENT_KEY: Final[str] = "session_from_client"
+
+
+def session_is_from_client() -> bool:
+    """Return True when the current session id is the CLI login session.
+
+    That is the case when no agent run or MCP session is bound and the
+    ``meho`` CLI sent ``Meho-Session-Id``.
+    """
+    return resolve_agent_session_id() is None and client_session_id_var.get() is not None
+
+
+def payload_session_from_client(payload: object) -> bool:
+    """Return True when an audit row *payload* says its session id came from the CLI."""
+    return isinstance(payload, dict) and payload.get(SESSION_FROM_CLIENT_KEY) is True
+
+
+def agent_session_rows() -> ColumnElement[bool]:
+    """SQL condition: the row's session id is not a CLI login session.
+
+    True for a row without :data:`SESSION_FROM_CLIENT_KEY`, so rows of
+    agent runs, MCP sessions and rows with no session id all pass.
+    """
+    condition: ColumnElement[bool] = (
+        AuditLog.payload[SESSION_FROM_CLIENT_KEY].as_boolean().is_not(True)
+    )
+    return condition
 
 
 def resolve_agent_session_id() -> uuid.UUID | None:

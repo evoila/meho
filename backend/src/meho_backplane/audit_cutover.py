@@ -93,8 +93,11 @@ from meho_backplane.auth.current_tenant import tenant_role_source_from_context
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
+    SESSION_FROM_CLIENT_KEY,
+    client_session_id_var,
     parent_audit_id_var,
     resolve_audit_session_id,
+    session_is_from_client,
     work_ref_var,
 )
 from meho_backplane.request_usage.collector import current_request_id
@@ -323,6 +326,28 @@ def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any
     _fill_tenant_role_source(kwargs)
     if wrapper_rows_retired():
         _fill_request_lineage(kwargs)
+
+
+@event.listens_for(AuditLog, "init")
+def _mark_client_session(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) -> None:
+    """Mark a row whose ``agent_session_id`` is the CLI login session.
+
+    The row gets ``payload["session_from_client"] = True`` when no agent run
+    or MCP session is bound and its session id is the one the CLI sent in
+    ``Meho-Session-Id``. Registered after :func:`_note_classified_record`,
+    so it also sees a session id that listener filled in. Every writer is
+    covered, so readers that count agent sessions can skip CLI rows.
+    """
+    if not session_is_from_client():
+        return
+    if kwargs.get("agent_session_id") != client_session_id_var.get():
+        return
+    payload = kwargs.get("payload")
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return
+    kwargs["payload"] = {**payload, SESSION_FROM_CLIENT_KEY: True}
 
 
 @event.listens_for(Session, "after_commit")

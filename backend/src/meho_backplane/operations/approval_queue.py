@@ -1825,7 +1825,13 @@ async def create_pending_request(
     handoff_payload: dict[str, Any] | None = None
     stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
-    if classify_op(op_id) == "credential_write":
+    # A credential write, and a call whose param a connector hides (the
+    # manifest of a k8s.apply of a Secret), keep their params and the
+    # parent's params only in the encrypted one-time handoff: the row never
+    # holds them, also not when the request is approved and never runs.
+    if classify_op(op_id) == "credential_write" or (
+        params is not None and hidden_stored_param(op_id, params) is not None
+    ):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:

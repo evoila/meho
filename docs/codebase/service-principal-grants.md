@@ -153,20 +153,45 @@ and no run approval covers it.
   in this list holds for them: each call waits for a person, grant
   create, agent grant create and run approval create refuse them with
   the same reason, and an override does not turn their approval off.
+  `raise_descriptor_for_params` sets `requires_approval` and
+  `credential_call` on the row of each of their calls, so a person's own
+  call waits too, also when the stored row asks for no approval.
+- For a family of op ids a connector gives a match function instead:
+  `declare_credential_capable_match` (`op_classes.py`). Today the
+  Kubernetes connector matches the operations an ingest makes from a
+  Kubernetes API file (`connectors/kubernetes/ingested_paths.py`): every
+  call that reads or writes a Secret, runs a command in a pod (`exec`,
+  `attach`), opens a port forward or a proxy, or makes a ServiceAccount
+  token, and every write (`POST`, `PUT`, `PATCH`) of a pod or an object
+  that runs one, an ephemeral container, a role or a binding, an object
+  of External Secrets, Sealed Secrets or cert-manager, or a certificate
+  signing request.
 - A connector can also tell from the params of one call that it writes a
-  credential: `declare_credential_check` (`op_classes.py`). Today
-  `k8s.apply` uses it: a manifest that holds a `kind: Secret` (any
-  document, any item of a list object such as
-  `kind: List`), or a manifest MEHO cannot read, makes
-  the call a credential call
-  (`connectors/kubernetes/op_classes.py::manifest_holds_credential`). The
+  credential: `declare_credential_check` (`op_classes.py`). Today two
+  operations use it:
+  - `k8s.apply`: a manifest that holds (in any document, or any item of a
+    list object such as `kind: List`) a `Secret`, an object that runs a
+    pod (`Pod`, `Deployment`, `StatefulSet`, `DaemonSet`, `ReplicaSet`,
+    `ReplicationController`, `Job`, `CronJob`, `PodTemplate`), an object
+    that gives rights (`Role`, `ClusterRole`, `RoleBinding`,
+    `ClusterRoleBinding`) or an object that makes or reads a Secret
+    (`ExternalSecret`, `ClusterExternalSecret`, `SecretStore`,
+    `ClusterSecretStore`, `PushSecret`, `SealedSecret`, `Certificate`), or
+    a manifest MEHO cannot read, makes the call a credential call
+    (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`).
+  - `proxmox.api.get`: a path that reads inside a guest, opens a console
+    or returns a stored secret
+    (`connectors/proxmox/op_classes.py::path_reads_guest_or_secret`, see
+    [connectors-proxmox.md](connectors-proxmox.md)).
+
+  The
   dispatcher, the preview and a step of a multi-step operation check the
   params when the call is made (`operations/wait_when_set.py`). They set
   `requires_approval` and `credential_call` on the row of that call, and
   `descriptor_credential_reason` and `descriptor_credential_waits` read
   it. So such a call waits for a person, and no grant and no run approval
-  covers it. Grant create still takes `k8s.apply`: an apply of other
-  kinds keeps the rules of `k8s.apply`.
+  covers it. Grant create still takes `k8s.apply` and `proxmox.api.get`:
+  an apply of other kinds and a plain read keep their rules.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
   (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.

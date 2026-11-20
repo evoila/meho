@@ -71,7 +71,7 @@ unqualified_target_version: this operation works only on target versions >=9.0,<
 
 The text after `unqualified_target_version:` can differ between
 connectors. For an operation from an API file, MEHO first looks for the
-same operation on the connector version that matches the target, and
+same operation on the [connector version](../reference/words.md#connector-version) that matches the target, and
 runs it there when it exists and is turned on.
 
 So pin the connector whose version matches the target. To see the

@@ -272,7 +272,7 @@ store it points at is decided by your deploy's credential backend
 
 The `secret_ref` is the **logical KV-v2 path relative to the `secret`
 mount** — never include the mount or the `/data/` segment. The
-canonical, enforced layout is per-tenant:
+canonical, enforced layout is per-[tenant](../reference/words.md#tenant):
 
 ```
 tenants/<tenant-id>/<target-name>

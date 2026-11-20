@@ -38,6 +38,7 @@ __all__ = [
     "DECLARABLE_OP_CLASSES",
     "declare_credential_capable",
     "declare_credential_check",
+    "declare_hidden_stored_param",
     "declare_no_secret_value",
     "declare_op_classes",
     "declare_per_call_approval",
@@ -46,6 +47,7 @@ __all__ = [
     "declare_wait_when_set",
     "declared_op_class",
     "declared_op_ids",
+    "hidden_stored_param",
     "is_credential_capable",
     "is_root_shell",
     "is_safe_write",
@@ -72,6 +74,7 @@ _NO_SECRET_VALUE: set[str] = set()
 _WAIT_WHEN_SET: dict[str, frozenset[str]] = {}
 _CREDENTIAL_CAPABLE: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
+_HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
 
 
 def declare_op_classes(
@@ -247,6 +250,38 @@ def params_make_credential_call(op_id: str, params: Mapping[str, Any]) -> bool:
         return True
 
 
+def declare_hidden_stored_param(
+    op_id: str, name: str, check: Callable[[Mapping[str, Any]], bool]
+) -> None:
+    """Hide the param *name* of a stored request of *op_id* when *check* flags its params.
+
+    A stored approval request keeps its params only until the run starts or
+    the request ends without a run. Then MEHO replaces the value of *name*
+    with a marker when *check* returns ``True`` for the params, the same way
+    it replaces a secret-named value. For example the manifest of a
+    ``k8s.apply`` that holds a Kubernetes Secret. A new entry for the same
+    op id replaces the old one.
+    """
+    _HIDDEN_STORED_PARAMS[op_id] = (name, check)
+
+
+def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
+    """The param of *params* that :func:`declare_hidden_stored_param` hides, or ``None``.
+
+    ``None`` when *op_id* has no entry, *params* has no such param, or the
+    check returns ``False``. A check that raises hides the param.
+    """
+    entry = _HIDDEN_STORED_PARAMS.get(op_id)
+    if entry is None or entry[0] not in params:
+        return None
+    name, check = entry
+    try:
+        flagged = bool(check(params))
+    except Exception:
+        flagged = True
+    return name if flagged else None
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -262,3 +297,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _WAIT_WHEN_SET.clear()
     _CREDENTIAL_CAPABLE.clear()
     _CREDENTIAL_CHECKS.clear()
+    _HIDDEN_STORED_PARAMS.clear()

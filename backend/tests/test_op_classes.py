@@ -45,6 +45,7 @@ def fresh_registry() -> Iterator[None]:
     saved_wait_when_set = dict(op_classes._WAIT_WHEN_SET)
     saved_credential_capable = set(op_classes._CREDENTIAL_CAPABLE)
     saved_credential_checks = dict(op_classes._CREDENTIAL_CHECKS)
+    saved_hidden_stored_params = dict(op_classes._HIDDEN_STORED_PARAMS)
     op_classes._reset_declared_op_classes_for_testing()
     try:
         yield
@@ -58,6 +59,7 @@ def fresh_registry() -> Iterator[None]:
         op_classes._WAIT_WHEN_SET.update(saved_wait_when_set)
         op_classes._CREDENTIAL_CAPABLE.update(saved_credential_capable)
         op_classes._CREDENTIAL_CHECKS.update(saved_credential_checks)
+        op_classes._HIDDEN_STORED_PARAMS.update(saved_hidden_stored_params)
 
 
 def test_declared_class_wins_over_the_pattern_rules(fresh_registry: None) -> None:

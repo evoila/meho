@@ -15,6 +15,7 @@ import yaml
 from meho_backplane.op_classes import (
     declare_credential_capable,
     declare_credential_check,
+    declare_hidden_stored_param,
     declare_no_secret_value,
     declare_op_classes,
 )
@@ -137,3 +138,7 @@ def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
 # A k8s.apply of a Secret writes a credential. Such a call waits for a
 # person on every call; an apply of other kinds keeps the rules of k8s.apply.
 declare_credential_check("k8s.apply", manifest_holds_credential)
+
+# The manifest of such an apply holds the Secret's values. A stored request
+# keeps it only until the run starts or the request ends without a run.
+declare_hidden_stored_param("k8s.apply", "manifest", manifest_holds_credential)

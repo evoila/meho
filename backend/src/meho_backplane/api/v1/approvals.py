@@ -93,13 +93,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from meho_backplane.auth.agent_admission import is_agent_caller
 from meho_backplane.auth.approval_sign_in import (
     ApprovalAuth,
     check_fresh_approval_sign_in,
     fresh_sign_in_required,
 )
 from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.auth.rbac import (
     require_approvals_access,
     require_fresh_approval_sign_in,
@@ -109,6 +110,7 @@ from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeE
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
@@ -691,13 +693,43 @@ def _execution_outcome(dispatch_result: Any) -> str | None:
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
+#: The ops whose REST card hides person-only fields from a caller that is not
+#: a person. Every other op's card comes back as stored, for every caller.
+_PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"linux.script.run"})
+
+
+def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
+    """The ``proposed_effect`` of *row* as *operator* may read it.
+
+    Only for the ops in :data:`_PERSON_ONLY_REST_CARD_OPS`: a person reads
+    the full card, as in the console, and an agent, service or runner login
+    reads what the MCP approval tools return (:func:`proposed_effect_for_agent`),
+    so the ``env`` values of ``linux.script.run`` stay out. Every other card
+    is the stored one.
+    """
+    if row.op_id not in _PERSON_ONLY_REST_CARD_OPS or (
+        is_human_principal(operator) and not is_agent_caller(operator)
+    ):
+        return row.proposed_effect
+    shown = proposed_effect_for_agent(
+        row.op_id,
+        row.proposed_effect,
+        params=row.params,
+        connector_id=row.connector_id,
+        tenant=str(row.tenant_id),
+    )
+    return shown if shown is not None else row.proposed_effect
+
+
 def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
     right: ApproveRight | None = None,
+    *,
+    operator: Operator,
 ) -> ApprovalRequestView:
-    """Convert an ORM row to a response view.
+    """Convert an ORM row to a response view for *operator*.
 
     *reviewer_context* is the redacted, resolved judging context (#3353),
     supplied only on the single-request path (its resolution runs a few
@@ -720,7 +752,7 @@ def _view(
         target_id=row.target_id,
         params_hash=row.params_hash,
         preview_hash=row.preview_hash,
-        proposed_effect=row.proposed_effect,
+        proposed_effect=_proposed_effect_for(operator, row),
         reveal_secret=bool(row.reveal_secret),
         waits_for_requester=is_secret_reveal(row),
         reveal_changes_something=is_write_reveal(row),
@@ -1007,7 +1039,10 @@ async def list_approvals(
                 order=order,
             )
             floor = await load_install_floor(session)
-        return [_view(r, right=approve_right(operator, r, floor=floor)) for r in unknown_rows]
+        return [
+            _view(r, right=approve_right(operator, r, floor=floor), operator=operator)
+            for r in unknown_rows
+        ]
     # Validate status value against the closed enum; "all" means no filter.
     status_filter: ApprovalRequestStatus | None = None
     if status != "all":
@@ -1040,7 +1075,9 @@ async def list_approvals(
         rows = list(result.scalars().all())
         floor = await load_install_floor(session)
 
-    return [_view(r, right=approve_right(operator, r, floor=floor)) for r in rows]
+    return [
+        _view(r, right=approve_right(operator, r, floor=floor), operator=operator) for r in rows
+    ]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -1076,7 +1113,13 @@ async def get_approval_request(
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
         floor = await load_install_floor(session)
-    return _view(row, reviewer_context, delegation, approve_right(operator, row, floor=floor))
+    return _view(
+        row,
+        reviewer_context,
+        delegation,
+        approve_right(operator, row, floor=floor),
+        operator=operator,
+    )
 
 
 @router.get("/{request_id}/script", response_model=ApprovalScriptPageView)
@@ -1520,7 +1563,7 @@ async def withdraw_approval_request(
         decision="withdrawn",
         audit_id=request._audit_id,  # type: ignore[attr-defined]
     )
-    return _view(request)
+    return _view(request, operator=operator)
 
 
 @router.post(
@@ -1584,7 +1627,9 @@ async def mark_approval_outcome_checked(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="note_required"
         ) from exc
     return _view(
-        request, right=approve_right(operator, request, floor=await current_install_floor())
+        request,
+        right=approve_right(operator, request, floor=await current_install_floor()),
+        operator=operator,
     )
 
 

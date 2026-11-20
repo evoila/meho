@@ -1580,6 +1580,13 @@ class Settings(BaseModel):
         session without the scope does not list it, and a call answers
         with the same message as for the other admin tools. This saves
         its text in every session that has no use for the tool.
+    agent_topology_off_with_connector_list:
+        Off by default. When on, a hosted agent whose definition has a
+        ``connectors`` list does not get ``query_topology`` (disabled
+        reason ``outside_connector_list``): the topology links objects of
+        every connector. When off, such an agent gets ``query_topology``
+        when its definition asks for it. Env
+        ``AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST``.
     team_knowledge_recall:
         Off by default. When on, MEHO shows what the team knows without a
         search (:mod:`meho_backplane.recall`): ``preview_operation`` and
@@ -2582,6 +2589,9 @@ class Settings(BaseModel):
     operation_contract_guidance: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_require_session_id: bool = False
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    agent_topology_off_with_connector_list: bool = Field(
+        default=False, json_schema_extra=AGENT_FACING
+    )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3784,6 +3794,9 @@ def get_settings() -> Settings:
         ),
         mcp_topology_off_default_list=parse_bool_env(
             os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
+        ),
+        agent_topology_off_with_connector_list=parse_bool_env(
+            os.environ.get("AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST"),
         ),
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),

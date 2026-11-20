@@ -191,7 +191,10 @@ async def resolve_k8s_target(operator: Operator, name: str) -> tuple[Any, Any]:
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.resolver import resolve_connector_or_label
     from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+    from meho_backplane.operations._handler_resolve import (
+        forget_target_if_changed,
+        get_or_create_connector_instance,
+    )
     from meho_backplane.targets.resolver import (
         AmbiguousTargetError,
         TargetNotFoundError,
@@ -222,7 +225,9 @@ async def resolve_k8s_target(operator: Operator, name: str) -> tuple[Any, Any]:
             f"store.k8s_secret.target {name!r} is a {getattr(target, 'product', None)!r} "
             "target, not a Kubernetes target. No token was made."
         )
-    return target, get_or_create_connector_instance(cls)
+    connector = get_or_create_connector_instance(cls)
+    await forget_target_if_changed(target)
+    return target, connector
 
 
 async def _check_k8s_destination(operator: Operator, store: Mapping[str, Any]) -> _K8sDestination:

@@ -56,6 +56,7 @@ async def resolve_user(
     params: dict[str, Any],
     *,
     op_id: str,
+    check_login_user: bool = True,
 ) -> tuple[str, str | None, str]:
     """Return ``(user_uuid, stored_username, managed_realm)``.
 
@@ -63,9 +64,12 @@ async def resolve_user(
     from the approval card, and a ``username`` that is not the stored one is
     refused. Raises :exc:`ValueError` when neither ``id`` nor ``username`` is
     given or they name different users, and :exc:`KeycloakUserNotFoundError`
-    when the user does not exist.
+    when the user does not exist. A card builder that only reads passes
+    ``check_login_user=False``.
     """
-    user = await read_user_for_write(connector, operator, target, params, op_id=op_id)
+    user = await read_user_for_write(
+        connector, operator, target, params, op_id=op_id, check_login_user=check_login_user
+    )
     return user.uuid, user.username, resolve_realm_config(target).managed_realm
 
 

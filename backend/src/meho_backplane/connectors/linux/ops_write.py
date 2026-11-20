@@ -190,6 +190,12 @@ FIREWALL_BACKENDS: tuple[str, ...] = ("nft", "iptables")
 #: The default interpreter for ``linux.script.run`` when none is declared.
 _DEFAULT_INTERPRETER: str = "/bin/bash"
 
+#: The remote command of ``linux.script.run`` without sudo. The command MEHO
+#: sends over SSH is this fixed text and holds no value. The wrapper goes on
+#: stdin: it holds the script, every ``env`` and ``secret_env`` value, and
+#: the ``arguments``, which the interpreter gets as its own arguments.
+_SCRIPT_RUN_REMOTE_CMD: str = "bash -s"
+
 #: Suffix of the sibling backup ``linux.file.write`` writes before replacing an
 #: existing file, so the park-time preview can echo a deterministic path and
 #: the rollback-on-validate-failure restores from a known location.
@@ -932,8 +938,17 @@ async def linux_script_run(
             timeout=float(timeout),
         )
     else:
-        cmd = f"bash -c {shlex.quote(wrapper)}"
-        proc = await connector._run_command(target, cmd, operator=operator, timeout=float(timeout))
+        # The command sent over SSH is fixed and holds no value. The wrapper
+        # goes on stdin, the same as the sudo path: the script, the ``env``
+        # and ``secret_env`` values, and the ``arguments``, which the
+        # interpreter gets as its own arguments.
+        proc = await connector._run_command(
+            target,
+            _SCRIPT_RUN_REMOTE_CMD,
+            operator=operator,
+            timeout=float(timeout),
+            stdin=wrapper,
+        )
 
     stdout_lines = _stdout(proc).splitlines()
     return {

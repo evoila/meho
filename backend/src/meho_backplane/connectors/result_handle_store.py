@@ -84,6 +84,14 @@ profile, a built-in profile, or any session while the
 (:func:`result_profile_scope`), so these sessions read the same results
 as before, also records written before the field existed.
 
+Hosted agent connector list: a record also keeps the connector list of
+the hosted agent whose call made it (``connector_scope``, from
+:data:`result_connector_scope_var`), or ``None`` outside such a run. The
+read checks it against the reader's list
+(:func:`~meho_backplane.operations._target_connector_limit.stored_result_within_limit`,
+with :func:`record_connector_scope`), so an agent with a list reads only
+results made under a list inside its own.
+
 Bounded size
 ============
 
@@ -131,7 +139,9 @@ __all__ = [
     "SpilledWindow",
     "dispose_result_handle_store",
     "get_result_handle_store",
+    "record_connector_scope",
     "reset_result_handle_store_for_testing",
+    "result_connector_scope_var",
     "result_profile_scope",
     "result_profile_var",
 ]
@@ -140,6 +150,12 @@ __all__ = [
 #: ``None``. The MCP ``tools/call`` handler sets it; every record written
 #: while it is set keeps it, so only a read under the same profile finds it.
 result_profile_var: ContextVar[str | None] = ContextVar("result_profile", default=None)
+
+#: The sorted connector list of the hosted agent whose call is running, or
+#: ``None``. Every record written while it is set keeps it.
+result_connector_scope_var: ContextVar[list[str] | None] = ContextVar(
+    "result_connector_scope", default=None
+)
 
 
 def result_profile_scope(profile: str | None) -> str | None:
@@ -333,6 +349,21 @@ class _StoredPayload(msgspec.Struct):
     record_kind: str = _ROWS_RECORD
     document: Any = None
     mcp_profile: str | None = None
+    connector_scope: list[str] | None = None
+
+
+class _ConnectorScopeOnly(msgspec.Struct):
+    """The one field :func:`record_connector_scope` reads."""
+
+    connector_scope: list[str] | None = None
+
+
+def record_connector_scope(raw: bytes) -> list[str] | None:
+    """The connector list a raw record keeps, or ``None`` (also when it does not decode)."""
+    try:
+        return msgspec.json.decode(raw, type=_ConnectorScopeOnly).connector_scope
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        return None
 
 
 def _without_document(
@@ -547,6 +578,7 @@ class ResultHandleStore:
                 metadata=metadata,
                 document=document,
                 mcp_profile=result_profile_var.get(),
+                connector_scope=result_connector_scope_var.get(),
             )
             baseline, selected = _select_record(
                 baseline,
@@ -632,6 +664,7 @@ class ResultHandleStore:
             record_kind=_DOCUMENT_RECORD,
             document=document,
             mcp_profile=result_profile_var.get(),
+            connector_scope=result_connector_scope_var.get(),
         )
         try:
             encoded = msgspec.json.encode(record)

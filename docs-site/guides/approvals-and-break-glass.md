@@ -251,8 +251,11 @@ manages, not only in MEHO's own login realm:
 
 - **An admin makes it alone in the web console.** An admin is a tenant
   admin (`MEHO-Admins`) or a platform admin (`MEHO-Platform-Admins`).
-  When an admin starts the change with a click in the web console, it
-  runs at once. No request waits. The audit row of the call says that
+  When an admin starts the change with a click in the web console after
+  a fresh sign-in, it runs at once. No request waits. MEHO asks for the
+  same sign-in as for an approval in the web console. Without it, and
+  when MEHO cannot show on the approval card who the change gives rights
+  to, the call waits for an approval. The audit row of the call says that
   it was a change of rights that an admin ran at once in the web
   console (`rights_change_run: admin_in_web_console`).
 - **Every other call waits.** A call with a token waits: the command

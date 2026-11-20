@@ -111,6 +111,7 @@ __all__ = [
     "register_grant_op",
     "register_rights_change_check",
     "register_rights_change_op",
+    "who_may_make_refusal",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -353,26 +354,49 @@ def _check_who_the_change_is_for(
         )
 
 
+_PLATFORM_ADMIN_CHANGE: Final[str] = (
+    "it changes who has rights in MEHO's own login realm "
+    "(a group or role that gives platform admin rights, or one MEHO could not read)"
+)
+_LOGIN_REALM_CHANGE: Final[str] = "it changes who has rights in MEHO's own login realm"
+
+
+def _login_realm_need(operator: Operator, facts: GrantFacts) -> tuple[str, str] | None:
+    """``(what the change does, the role it needs)`` when *operator* lacks that role, else ``None``.
+
+    In the login realm: a tenant admin; a platform admin when it gives platform admin.
+    """
+    if facts.platform_admin:
+        return None if operator.platform_admin else (_PLATFORM_ADMIN_CHANGE, "a platform admin")
+    if operator.tenant_role != TenantRole.TENANT_ADMIN:
+        return _LOGIN_REALM_CHANGE, "a tenant admin"
+    return None
+
+
 def _check_login_realm_approver(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
     """In the login realm: a tenant admin; a platform admin when it gives platform admin."""
-    if facts.platform_admin:
-        if not operator.platform_admin:
-            raise _refusal(
-                request,
-                operator,
-                "it changes who has rights in MEHO's own login realm "
-                "(a group or role that gives platform admin rights, or one MEHO could not read). "
-                "Only a platform admin may approve it",
-            )
-    elif operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise _refusal(
-            request,
-            operator,
-            "it changes who has rights in MEHO's own login realm. "
-            "Only a tenant admin may approve it",
-        )
+    need = _login_realm_need(operator, facts)
+    if need is not None:
+        change, role = need
+        raise _refusal(request, operator, f"{change}. Only {role} may approve it")
+
+
+def who_may_make_refusal(operator: Operator, request: ApprovalRequest) -> str | None:
+    """Why *operator* may not make the change of rights *request* at once, or ``None``.
+
+    The same rule of who may as :func:`check_grant_approval`, for a change
+    that runs at once in the web console and so has no request to approve.
+    """
+    facts = grant_facts(request)
+    if facts is None or not facts.login_realm:
+        return None
+    need = _login_realm_need(operator, facts)
+    if need is None:
+        return None
+    change, role = need
+    return f"You cannot make this change: {change}. Only {role} may make this change."
 
 
 def _refusal(request: ApprovalRequest, operator: Operator, denial: str) -> Exception:

@@ -458,6 +458,10 @@ class Operator(BaseModel):
     #: and MCP never do. Off means the call came with a token: it follows the
     #: agent rule, so only ``safe`` operations run at once.
     web_session: bool = False
+    #: The id of the web interface session of this call, set next to
+    #: :attr:`web_session` and only there. ``None`` for every other call.
+    #: The console's approval sign-in is kept on that session.
+    web_session_id: UUID | None = None
     #: The MCP tool profile the client named with ``?profile=`` (#4172),
     #: or ``None`` for the full tool list. Only the MCP route sets it, from
     #: the URL; see :mod:`meho_backplane.mcp.profiles`. A built-in profile

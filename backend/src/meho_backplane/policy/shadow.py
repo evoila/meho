@@ -262,15 +262,17 @@ async def evaluate_call(
             )
         )
     if admin_console_rights_change(asker, asked):
-        from meho_backplane.operations.rights_change_console import console_refusal
+        from meho_backplane.operations.rights_change_console import console_check
 
-        found["rights_change_refusal"] = await console_refusal(
+        check = await console_check(
             operator,
             connector_id=connector_id,
             descriptor=descriptor,
             target=target,
             params=params,
         )
+        found["rights_change_refusal"] = check.refusal
+        found["rights_change_waits"] = check.waits
     return evaluate(asker, asked, Lookups(**found))
 
 

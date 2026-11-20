@@ -29,6 +29,7 @@ per-test SQLite + ``alembic upgrade head``.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -95,6 +96,7 @@ _OTHER_FILE = "policy: v1\nclassifications:\n  - {match: {op: polapi.*}, always_
 @pytest.fixture
 def switch(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "observe")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -170,6 +172,8 @@ def _admin(
         platform_admin=platform_admin,
         raw_jwt="header.payload.signature",
         web_session=web,
+        acr="1",
+        auth_time=int(time.time()),
     )
 
 

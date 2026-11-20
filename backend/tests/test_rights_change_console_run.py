@@ -27,9 +27,11 @@ Fixture values are made up.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
@@ -38,6 +40,8 @@ from sqlalchemy import select
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_write_grant import GRANT_OPS
+from meho_backplane.connectors.keycloak.rights_changes import RIGHTS_CHANGE_OPS
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -70,6 +74,11 @@ _USER_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000c7")
 _LOGIN_REALMS = "meho_backplane.connectors.keycloak.ops_write_grant._backplane_login_realms"
 _PARAMS: dict[str, Any] = {"group_id": _GROUP_UUID, "user_id": _USER_UUID}
+_APPROVAL_OPERATOR = "meho_backplane.ui.routes.approvals.sign_in.approval_operator"
+
+
+#: Two days: older than every sign-in limit of a console approve.
+_OLD_SIGN_IN_AGE = 2 * 24 * 3600
 
 
 def _person(
@@ -78,6 +87,7 @@ def _person(
     web: bool = True,
     platform_admin: bool = False,
     kind: PrincipalKind = PrincipalKind.USER,
+    sign_in_age: int = 5,
 ) -> Operator:
     return Operator(
         sub="console-rights-admin",
@@ -87,6 +97,8 @@ def _person(
         principal_kind=kind,
         platform_admin=platform_admin,
         web_session=web,
+        acr="1",
+        auth_time=int(time.time()) - sign_in_age,
     )
 
 
@@ -126,6 +138,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "observe")
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
     get_settings.cache_clear()
     reset_dispatcher_caches()
@@ -276,7 +289,8 @@ async def test_a_tenant_admin_cannot_add_a_member_to_the_platform_admin_group(
         result = await _add(_person())
 
     assert result["status"] == "denied", result
-    assert "Only a platform admin may approve it" in result["error"]
+    assert "Only a platform admin may make this change." in result["error"]
+    assert "approve" not in result["error"]
     assert not put.called
     assert await _requests() == []
     assert await _run_rows() == []
@@ -292,6 +306,128 @@ async def test_a_group_that_cannot_be_read_counts_as_the_strict_case(
 
     assert result["status"] == "denied", result
     assert "platform admin" in result["error"]
+    assert not put.called
+
+
+# -- the console session needs the sign-in of a console approve -----------------
+
+
+@pytest.mark.asyncio
+async def test_a_console_session_with_an_old_sign_in_waits(keycloak: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(_person(sign_in_age=_OLD_SIGN_IN_AGE))
+
+    assert result["status"] == "awaiting_approval", result
+    assert not put.called
+    (request,) = await _requests()
+    assert request.rights_change is True
+    assert await _run_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_a_console_session_with_a_fresh_sign_in_runs_at_once(
+    keycloak: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(_person(sign_in_age=5))
+
+    assert result["status"] == "ok", result
+    assert put.called
+    assert await _requests() == []
+
+
+def _approval_sign_in(*, acr: str) -> Operator:
+    """The person's console approval sign-in, as the session row gives it back."""
+    return Operator(
+        sub="console-rights-admin",
+        raw_jwt="<console-rights-approval-jwt>",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        azp="meho-web-approve",
+        acr=acr,
+        auth_time=int(time.time()) - 5,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval", "status"),
+    [
+        (None, "awaiting_approval"),
+        (_approval_sign_in(acr="1"), "awaiting_approval"),
+        (_approval_sign_in(acr="meho-approve"), "ok"),
+    ],
+    ids=["no-approval-sign-in", "approval-sign-in-without-the-level", "approval-sign-in"],
+)
+async def test_the_approval_sign_in_level_is_asked_where_it_is_required(
+    keycloak: KeycloakConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    approval: Operator | None,
+    status: str,
+) -> None:
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "required")
+    get_settings.cache_clear()
+    operator = _person().model_copy(update={"web_session_id": uuid.uuid4()})
+    with (
+        patch(_APPROVAL_OPERATOR, new_callable=AsyncMock, return_value=approval),
+        respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock,
+    ):
+        put = _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(operator)
+
+    assert result["status"] == status, result
+    assert put.called is (status == "ok")
+
+
+# -- no card, no run ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", sorted(set(RIGHTS_CHANGE_OPS) - set(GRANT_OPS)))
+async def test_a_keycloak_write_that_is_not_a_change_of_one_login_or_group_waits(
+    keycloak: KeycloakConnector, op_id: str
+) -> None:
+    descriptor = await lookup_descriptor(
+        tenant_id=_TENANT_ID,
+        product="keycloak",
+        version="26.x",
+        impl_id="keycloak-admin",
+        op_id=op_id,
+    )
+    assert descriptor is not None
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, group=_PLAIN_GROUP)
+        verdict, _reason = await policy_gate(
+            operator=_person(),
+            descriptor=descriptor,
+            target=target,
+            connector_id=_CONNECTOR_ID,
+            params={"realm": _REALM},
+        )
+
+    assert verdict.value == "needs-approval"
+
+
+@pytest.mark.asyncio
+async def test_a_change_whose_card_does_not_build_waits(
+    keycloak: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "meho_backplane.operations.approval_object_check.live_card",
+        AsyncMock(return_value=None),
+    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(_person(platform_admin=True))
+
+    assert result["status"] == "awaiting_approval", result
     assert not put.called
 
 
@@ -389,9 +525,10 @@ def _asked(*marks: str, risk: str = "dangerous") -> Asked:
         (
             _asker(),
             _asked("rights_change"),
-            Lookups(rights_change_refusal="Only a platform admin may approve it"),
+            Lookups(rights_change_refusal="Only a platform admin may make this change."),
             Verdict.DENY,
         ),
+        (_asker(), _asked("rights_change"), Lookups(rights_change_waits=True), Verdict.WAIT),
         (_asker(via="token"), _asked("rights_change"), Lookups(), Verdict.WAIT),
         (_asker(roles={"operator"}), _asked("rights_change"), Lookups(), Verdict.WAIT),
         (
@@ -409,6 +546,7 @@ def _asked(*marks: str, risk: str = "dangerous") -> Asked:
     ids=[
         "admin-web",
         "admin-web-refused",
+        "admin-web-waits",
         "admin-token",
         "operator-web",
         "platform-admin-web",
@@ -476,7 +614,7 @@ async def test_a_change_of_rights_whose_params_carry_a_credential_waits(
 
 
 @pytest.mark.asyncio
-async def test_a_client_update_without_a_credential_runs_at_once_in_the_console(
+async def test_a_client_update_without_a_credential_is_not_a_credential_write(
     keycloak: KeycloakConnector,
 ) -> None:
     descriptor = await lookup_descriptor(

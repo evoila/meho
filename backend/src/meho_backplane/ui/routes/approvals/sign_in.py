@@ -34,7 +34,13 @@ from meho_backplane.ui.auth.approval_sign_in_routes import approval_sign_in_loca
 from meho_backplane.ui.auth.approval_token_store import approval_operator
 from meho_backplane.ui.auth.routes import login_location
 
-__all__ = ["approve_sign_in_state", "sign_in_url", "web_approval_auth", "web_sign_in_level"]
+__all__ = [
+    "approve_sign_in_state",
+    "has_web_approval_sign_in",
+    "sign_in_url",
+    "web_approval_auth",
+    "web_sign_in_level",
+]
 
 
 async def web_sign_in_level() -> SignInLevel:
@@ -63,6 +69,24 @@ async def web_approval_auth(operator: Operator, session_id: uuid.UUID) -> Approv
         get_settings(),
         level_in_force=level.in_force,
         level_check_failed=level.check_failed,
+    )
+
+
+async def has_web_approval_sign_in(operator: Operator) -> bool:
+    """Whether *operator*'s console session has the sign-in a console approve needs.
+
+    The same rule as :func:`web_approval_auth`, without the ``401``.
+    ``False`` for a call that did not come from a console session.
+    """
+    if not operator.web_session:
+        return False
+    session_id = operator.web_session_id
+    level = await web_sign_in_level()
+    return web_approval_sign_in_ready(
+        operator,
+        await approval_operator(session_id) if session_id is not None else None,
+        get_settings(),
+        level_in_force=level.in_force,
     )
 
 

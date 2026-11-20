@@ -1419,14 +1419,29 @@ when all of this holds:
   also the admin's own token, an agent, a service login, a hosted agent
   run (the stricter of the caller and the agent) and an Operator wait.
 
-Before it runs, `console_refusal` runs the operation's check before a wait
-(`park_check_refusal`) and builds the approval card against the live
-system (`live_card`). Then it runs `check_grant_approval` on that card, the
-same check of who may make the change as on approve. A refusal is a `deny`
-with the same text. The dispatcher marks the audit row of such a run with
-`rights_change_run: admin_in_web_console` (an `audit_*` context key). The
-policy evaluator has the same rule (`admin_console_rights_change`, mark
-`rights_change`, lookup `rights_change_refusal`).
+Before it runs, `console_check` runs the operation's check before a wait
+(`park_check_refusal`); a refusal there is a `deny`. Then the call waits,
+as every other change of rights does, when:
+
+- the console session lacks the sign-in a console approve needs
+  (`has_web_approval_sign_in` in `ui/routes/approvals/sign_in.py`, the
+  same rule as `web_approval_auth`: a fresh sign-in, and the approval
+  sign-in level where `APPROVAL_SIGN_IN_LEVEL` asks for it). The session
+  id is `Operator.web_session_id`;
+- the approval card, built against the live system (`live_card`), does
+  not build, or does not say who the change gives rights to: a
+  `register_grant_op` operation needs the `grant` block with the login
+  and group it names. Only an operation registered with
+  `register_no_login_realm_op` (`policy.apply`, `policy.classify`) needs
+  no such block.
+
+Then `who_may_make_refusal` runs the check of who may make the change on
+that card, the same rule as `check_grant_approval` on approve. A refusal
+is a `deny` that says who may make the change. The dispatcher marks the
+audit row of such a run with `rights_change_run: admin_in_web_console`
+(an `audit_*` context key). The policy evaluator has the same rule
+(`admin_console_rights_change`, mark `rights_change`, lookups
+`rights_change_refusal` and `rights_change_waits`).
 
 `policy.apply` and `policy.classify` check again in the handler: a run
 without an approval, or a run by the person who asked (also a re-run of a

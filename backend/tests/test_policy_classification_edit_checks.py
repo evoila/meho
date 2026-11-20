@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -88,6 +89,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
     monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "observe")
     monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
     get_settings.cache_clear()
     clear_jwks_cache()
@@ -149,6 +151,8 @@ def _admin(
         principal_kind=kind,
         raw_jwt="header.payload.signature",
         web_session=web,
+        acr="1",
+        auth_time=int(time.time()),
     )
 
 

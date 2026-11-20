@@ -11,8 +11,7 @@ or :func:`~meho_backplane.operations.grant_approval.register_grant_op`
 an admin (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`)
 makes it with a click in the web console
 (:attr:`~meho_backplane.auth.operator.Operator.web_session`). Then it runs
-at once (:func:`runs_at_once_in_console`), after the checks of who may make
-it (:func:`console_refusal`).
+at once (:func:`runs_at_once_in_console`), after :func:`console_check`.
 
 The call still waits when:
 
@@ -32,12 +31,14 @@ The call still waits when:
 * it comes with a token (the command line, REST, MCP), also the admin's
   own token, or from an agent or a hosted agent run.
 
-:func:`console_refusal` runs the same checks of who may make the change
-as the approve (:func:`~meho_backplane.operations.grant_approval.check_grant_approval`),
-on the approval card built against the live system: in MEHO's own login
-realm the admin must be a tenant admin, and a platform admin when the
-change can give platform admin rights. A refused call does not run and
-gives the same text as the approve.
+:func:`console_check` makes the call wait when the console session lacks
+the sign-in a console approve needs, or when the approval card, built
+against the live system, does not build or does not say who the change
+gives rights to. Then it runs the checks of who may make the change
+(:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`,
+the same rule as the approve): in MEHO's own login realm the admin must
+be a tenant admin, and a platform admin when the change can give platform
+admin rights. A refused call does not run.
 
 The audit row of such a run carries ``rights_change_run`` with the value
 :data:`CONSOLE_RUN_AUDIT_VALUE`: a change of rights that an admin ran at
@@ -48,22 +49,29 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from meho_backplane.auth.operator import Operator, is_human_principal
-from meho_backplane.operations.grant_approval import check_grant_approval, is_rights_change_op
+from meho_backplane.operations.grant_approval import (
+    grant_facts,
+    is_rights_change_op,
+    who_may_make_refusal,
+)
 
 if TYPE_CHECKING:
-    from meho_backplane.db.models import EndpointDescriptor
+    from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 
 __all__ = [
     "CONSOLE_RUN_AUDIT_VALUE",
     "CONSOLE_RUN_REASON",
-    "console_refusal",
+    "ConsoleCheck",
+    "console_check",
     "params_write_credential",
     "register_credential_params_check",
+    "register_no_login_realm_op",
     "runs_at_once_in_console",
 ]
 
@@ -103,7 +111,7 @@ def runs_at_once_in_console(
 ) -> bool:
     """True when *operator*'s call of *descriptor* is an admin's change of rights in the console.
 
-    Reads no I/O. The caller still runs :func:`console_refusal` before the
+    Reads no I/O. The caller still runs :func:`console_check` before the
     call runs.
     """
     from meho_backplane.operations.service_grants import credential_call_waits
@@ -120,27 +128,91 @@ def runs_at_once_in_console(
     )
 
 
-async def console_refusal(
+@dataclass(frozen=True)
+class ConsoleCheck:
+    """The answer of :func:`console_check`: run at once, wait, or refuse.
+
+    ``refusal`` is the text of a refused call. ``waits`` is ``True`` when
+    the call waits for approval, as every other change of rights does. A
+    call with neither runs at once.
+    """
+
+    waits: bool = False
+    refusal: str | None = None
+
+
+#: Operations that are a change of rights but never write a login realm,
+#: so a console call of them needs no card facts of who it gives rights to.
+_NO_LOGIN_REALM_OPS: set[str] = set()
+
+
+def register_no_login_realm_op(op_id: str) -> None:
+    """Record that *op_id* never writes a login realm (:func:`console_check`)."""
+    _NO_LOGIN_REALM_OPS.add(op_id)
+
+
+async def _has_console_sign_in(operator: Operator) -> bool:
+    # Imported late: the console's sign-in store is part of the web interface.
+    from meho_backplane.ui.routes.approvals.sign_in import has_web_approval_sign_in
+
+    return await has_web_approval_sign_in(operator)
+
+
+def _card_built(card: dict[str, Any] | None) -> bool:
+    return (
+        isinstance(card, dict)
+        and isinstance(card.get("preview"), dict)
+        and not card.get("preview_unavailable")
+    )
+
+
+def _card_names_who(request: ApprovalRequest) -> bool:
+    """True when the card holds the facts of who the change gives rights to."""
+    if request.op_id in _NO_LOGIN_REALM_OPS:
+        return True
+    facts = grant_facts(request)
+    if facts is None:
+        return False
+    preview = (request.proposed_effect or {}).get("preview")
+    return (
+        isinstance(preview, dict)
+        and isinstance(preview.get("grant"), dict)
+        and not (facts.for_login and facts.user_id is None)
+        and not (facts.for_group and facts.group_id is None)
+    )
+
+
+async def console_check(
     operator: Operator,
     *,
     connector_id: str | None,
     descriptor: EndpointDescriptor,
     target: Any,
     params: dict[str, Any] | None,
-) -> str | None:
-    """Why *operator* may not make this change of rights, or ``None`` when they may.
+) -> ConsoleCheck:
+    """Whether *operator*'s change of rights in the console runs at once, waits, or is refused.
 
-    Runs the op's own check before a wait for approval
-    (:func:`~meho_backplane.operations._park_check.park_check_refusal`), as
-    a call that waits would. Then builds the approval card against the live
-    system and runs the approve's checks of who may make the change on it.
-    A card that does not build counts as the strict case (MEHO's own login
-    realm, platform admin rights), as on the approve.
+    In this order:
+
+    * the op's own check before a wait for approval
+      (:func:`~meho_backplane.operations._park_check.park_check_refusal`)
+      refuses the call, as it would refuse a call that waits;
+    * the call waits when the console session lacks the sign-in a console
+      approve needs (a fresh sign-in, and the approval sign-in level where
+      ``APPROVAL_SIGN_IN_LEVEL`` asks for it);
+    * the call waits when its approval card does not build against the
+      live system, or the card does not say who the change gives rights
+      to. Only an operation registered with
+      :func:`register_no_login_realm_op` needs no such facts;
+    * the call is refused when the admin may not make the change
+      (:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`):
+      in MEHO's own login realm the admin must be a tenant admin, and a
+      platform admin when the change can give platform admin rights, or
+      when MEHO could not read whether it can.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._park_check import park_check_refusal
     from meho_backplane.operations.approval_object_check import live_card
-    from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
 
     op_id = descriptor.op_id
     call_params = params or {}
@@ -155,15 +227,15 @@ async def console_refusal(
     )
     if refused is not None:
         reason = (refused.extras or {}).get("reason")
-        return reason if isinstance(reason, str) else (refused.error or "refused")
+        text = reason if isinstance(reason, str) else (refused.error or "refused")
+        return ConsoleCheck(refusal=text)
+    if not await _has_console_sign_in(operator):
+        _log.info("rights_change_console_waits_for_sign_in", op_id=op_id, operator_sub=operator.sub)
+        return ConsoleCheck(waits=True)
     card = None
     if connector_id is not None:
         card = await live_card(
-            operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=target,
-            params=call_params,
+            operator, connector_id=connector_id, op_id=op_id, target=target, params=call_params
         )
     request = ApprovalRequest(
         id=uuid.uuid4(),
@@ -175,9 +247,10 @@ async def console_refusal(
         proposed_effect=card or {},
         rights_change=True,
     )
-    try:
-        check_grant_approval(operator, request)
-    except ApprovalRoleFloorError as exc:
+    if not _card_built(card) or not _card_names_who(request):
+        _log.info("rights_change_console_waits_for_card", op_id=op_id, operator_sub=operator.sub)
+        return ConsoleCheck(waits=True)
+    refusal = who_may_make_refusal(operator, request)
+    if refusal is not None:
         _log.info("rights_change_console_refused", op_id=op_id, operator_sub=operator.sub)
-        return exc.reason_text
-    return None
+    return ConsoleCheck(refusal=refusal)

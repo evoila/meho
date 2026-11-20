@@ -168,8 +168,9 @@ class Lookups:
     is the refusal text of a service login's read scope. ``sandbox`` and
     ``agent_grant_required`` are the settings at the time of the call.
     ``rights_change_refusal`` is the refusal text of the checks of who may
-    make a change of rights, for an admin's call in the web console
-    (:func:`~meho_backplane.operations.rights_change_console.console_refusal`).
+    make a change of rights, for an admin's call in the web console, and
+    ``rights_change_waits`` is ``True`` when that call waits all the same
+    (:func:`~meho_backplane.operations.rights_change_console.console_check`).
     """
 
     agent_grant: tuple[Verdict, str] | None = None
@@ -180,6 +181,7 @@ class Lookups:
     sandbox: bool = False
     agent_grant_required: str = "off"
     rights_change_refusal: str | None = None
+    rights_change_waits: bool = False
 
 
 @dataclass(frozen=True)
@@ -406,6 +408,8 @@ def _rights_change_step(steps: _Steps, found: Lookups) -> None:
             Verdict.DENY,
             _default("rights_change.console_refused", found.rights_change_refusal),
         )
+        return
+    if found.rights_change_waits:
         return
     steps.set(
         Verdict.RUN,

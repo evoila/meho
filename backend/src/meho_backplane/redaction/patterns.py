@@ -53,15 +53,16 @@ import re
 from typing import Final, Protocol
 
 from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
-from meho_backplane.redaction.command_secret import COMMAND_SECRET, CommandSecretFinder
+from meho_backplane.redaction.command_hand_off import hand_off
+from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
-    "COMMAND_SECRET_BEFORE_API_KEY",
     "MASK_CHARS",
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
     "SecretFinder",
+    "command_secret_hand_off",
     "get_pattern",
     "secret_spans",
 ]
@@ -194,11 +195,6 @@ MASK_CHARS: Final[str] = "*\u2022\u25cf\u00b7"
 # that is mask characters to its end is skipped: ``****abc123`` goes on
 # after the masks and is redacted whole.
 _NOT_A_MASK: Final[str] = r"(?![" + MASK_CHARS + "]+(?!" + _VALUE_CHARS + "))"
-# The command_line_secret rule runs right before this one and hides only a
-# value: ``Pwd=[REDACTED:command_line_secret];Database=d`` keeps its label
-# and its next fields. Its mark is never read as the start of a value, also
-# when a ``;`` follows it, so this rule does not hide those fields as well.
-_NOT_A_COMMAND_LINE_MARK: Final[str] = r"(?!\[REDACTED:command_line_secret\])"
 _API_KEY = re.compile(
     r"(?<![A-Za-z0-9])(?:"
     r"api[_-]?key"
@@ -214,7 +210,6 @@ _API_KEY = re.compile(
     r")"
     r"\s*[=:]\s*['\"]?"
     + _NOT_A_PLACEHOLDER
-    + _NOT_A_COMMAND_LINE_MARK
     + _NOT_A_MASK
     + _VALUE_CHARS
     + "{8,"
@@ -348,7 +343,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "url_secret": URL_SECRET,
-    # Every value it reads. The engine swaps in COMMAND_SECRET_BEFORE_API_KEY
+    # Every value it reads. The engine uses command_secret_hand_off() instead
     # when the api_key rule runs right after it in the policy.
     "command_line_secret": COMMAND_SECRET,
     "uuid": _UUID,
@@ -357,11 +352,17 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "fqdn": _FQDN,
 }
 
-#: The ``command_line_secret`` finder for a policy where the ``api_key`` rule
-#: runs right after it with a ``redact`` or ``hash`` action: a value that rule
-#: hides whole is left to it, so that part of the answer stays as it was
-#: without this rule.
-COMMAND_SECRET_BEFORE_API_KEY: Final[SecretFinder] = CommandSecretFinder(next_rule=_API_KEY)
+
+def command_secret_hand_off() -> tuple[SecretFinder, SecretFinder]:
+    """The ``command_line_secret`` and ``api_key`` finders for one run of the engine.
+
+    For a policy where the ``api_key`` rule runs right after the command
+    line rule (:mod:`.command_hand_off`): a value the ``api_key`` rule
+    hides whole is left to it, so that part of the answer stays as it was
+    without the command line rule.
+    """
+    return hand_off(_API_KEY)
+
 
 #: Stable, sorted tuple of pattern names; what the Pydantic policy
 #: schema validates rule.pattern against. Sorted for deterministic

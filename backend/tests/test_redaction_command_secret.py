@@ -29,7 +29,7 @@ from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.redaction.command_secret import COMMAND_SECRET
-from meho_backplane.redaction.engine import _pattern_for, redact
+from meho_backplane.redaction.engine import _patterns_for, redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.redaction.patterns import secret_spans
@@ -667,8 +667,8 @@ def _hidden_characters(text: str, policy: RedactionPolicy) -> set[int]:
     answer it builds is checked against the engine's answer.
     """
     current, origin, hidden = text, list(range(len(text))), set()
-    for index, rule in enumerate(policy.rules):
-        spans = secret_spans(_pattern_for(rule, policy.rules[index + 1 : index + 2]), current)
+    for rule, pattern in zip(policy.rules, _patterns_for(policy.rules), strict=True):
+        spans = secret_spans(pattern, current)
         parts: list[str] = []
         places: list[int] = []
         pos = 0
@@ -736,6 +736,100 @@ def test_the_rule_only_hides_more() -> None:
     assert shown_now == {}
 
 
+_CMD_MARK: Final = "[REDACTED:" + "command_line_secret]"
+
+
+def _in_json(line: str, levels: int) -> str:
+    """*line* as a JSON log line, inside *levels* JSON documents."""
+    text = line
+    for level in range(levels):
+        text = json.dumps({"log": text, "ok": level})
+    return text
+
+
+def _as_json(secret: str, levels: int) -> str:
+    """*secret* as it stands in the text of :func:`_in_json`."""
+    for _level in range(levels):
+        secret = json.dumps(secret)[1:-1]
+    return secret
+
+
+#: A database login, then a repository reference on the next line.
+_CLIENT_THEN_REFERENCE: Final = (
+    f"sqlplus {_login('scott', PW)}@db\nuses: {_login('actions', 'checkout')}@main"
+)
+#: (line, its secret values). Each value is hidden whole, and nothing else
+#: changes against main: the api_key rule decides on the text after this
+#: rule's marks, a mark that was in the text before is read as on main, a
+#: value hidden already stays, a ``;`` after a shell command is no
+#: connection text, a database login after a client may name a service that
+#: starts with a digit, and a ``password=`` word in double quotes is one
+#: shell word.
+_SECRETS_OF: Final[list[tuple[str, tuple[str, ...]]]] = [
+    (
+        f'token={_login("app", chr(34) + "made up" + chr(34))}@svc;{_PASSWORD_IS}"{PW}"',
+        ('"made up"', f'"{PW}"'),
+    ),
+    (f"token={_CMD_MARK};{PW}", (PW,)),
+    (f"token={_CMD_MARK},{PW}", (PW,)),
+    (f"token={_CMD_MARK}-{PW}", (PW,)),
+    (f"x-api-key: {_CMD_MARK}{PW}", (PW,)),
+    ("AWS_SECRET_ACCESS_KEY=***REDACTED*** app", ()),
+    ("run --password [REDACTED] x", ()),
+    ("run --password '****' x", ()),
+    ("run --token \u2022\u2022\u2022\u2022 x", ()),
+    ("curl -u admin:***REDACTED*** https://example.invalid", ()),
+    ("<password>[REDACTED]</password>", ()),
+    (f"cd /tmp; {_PASSWORD_IS.lower()}{PW} --user admin", (PW,)),
+    (f"cd /tmp; {_PASSWORD_IS.lower()}ab12 --user admin next", ("ab12",)),
+    (f"sqlplus {_login('scott', PW)}@1db", (PW,)),
+    (f'run {_PASSWORD_IS.lower()}"made\\"up {PW}" next', (f'"made\\"up {PW}"',)),
+]
+#: (line, its secret values, JSON levels): the line as a JSON log line, also
+#: inside more JSON documents. Every level of the answer that parses on main
+#: still parses.
+_SECRETS_IN_JSON: Final[list[tuple[str, tuple[str, ...], int]]] = [
+    *((line, secrets, 1) for line, secrets in _SECRETS_OF),
+    *(
+        (line, (secret,), levels)
+        for line, secret in (
+            (f"Server=db;{_PWD_IS}made up {PW}", f"made up {PW}"),
+            (f"run --password {PW}", PW),
+        )
+        for levels in (2, 3)
+    ),
+    *((_CLIENT_THEN_REFERENCE, (PW,), levels) for levels in (1, 2, 3)),
+]
+
+
+def _places(text: str, parts: tuple[str, ...]) -> set[int]:
+    places: set[int] = set()
+    for part in parts:
+        for found in re.finditer(re.escape(part), text):
+            places.update(range(*found.span()))
+    return places
+
+
+def _changes_besides(text: str, secrets: tuple[str, ...], policy: RedactionPolicy) -> list[str]:
+    """Each difference to main that is not one of *secrets* replaced by the mark."""
+    on_main = _hidden_characters(text, _without_command_rule(policy))
+    now = _hidden_characters(text, policy)
+    values = _places(text, secrets)
+    wrong = [f"shown now: {text[place]!r} at {place}" for place in sorted(on_main - now)]
+    wrong += [f"hidden now: {text[place]!r} at {place}" for place in sorted(now - on_main - values)]
+    wrong += [f"not hidden: {text[place]!r} at {place}" for place in sorted(values - now)]
+    return wrong
+
+
+def _parses(text: str, levels: int) -> bool:
+    for _level in range(levels):
+        try:
+            text = json.loads(text)["log"]
+        except (ValueError, KeyError, TypeError):
+            return False
+    return True
+
+
 def test_every_change_to_an_answer_is_a_secret_value_replaced_by_the_mark() -> None:
     """Over the texts of main's own tests and of the form tests, in the answer and the trace."""
     wrong: dict[str, list[str]] = {}
@@ -743,6 +837,16 @@ def test_every_change_to_an_answer_is_a_secret_value_replaced_by_the_mark() -> N
         for policy in (get_default_policy(), _content_policy()):
             if found := _not_a_secret_value_change(text, policy):
                 wrong[text] = found
+    cases = [(line, secrets, 0) for line, secrets in _SECRETS_OF] + _SECRETS_IN_JSON
+    for line, secrets, levels in cases:
+        text = _in_json(line, levels)
+        values = tuple(_as_json(secret, levels) for secret in secrets)
+        for policy in (get_default_policy(), _content_policy()):
+            if found := _changes_besides(text, values, policy):
+                wrong[text] = found
+            on_main = redact(text, _without_command_rule(policy)).redacted
+            if _parses(on_main, levels) and not _parses(redact(text, policy).redacted, levels):
+                wrong[text] = ["the answer does not parse"]
     assert wrong == {}
 
 
@@ -801,6 +905,13 @@ _COMMAND_RULE_ONLY: Final = RedactionPolicy(
 def test_the_rule_on_its_own_hides_every_value(line: str, expected: str) -> None:
     """Without the api_key rule after it, no value is left to that rule."""
     assert redact(line, _COMMAND_RULE_ONLY).redacted == expected
+
+
+def test_the_lines_of_a_list_are_handed_off_as_one_text() -> None:
+    """A value over two lines gets a mark on each line; the api_key rule reads around them."""
+    rows = ['run --password "made', f'up" {_PASSWORD_IS.lower()}{_CMD_MARK};{PW}']
+    out = redact(rows, get_default_policy()).redacted
+    assert out == [f"run --password {_MARK}", f"{_MARK} [REDACTED:api_key]"]
 
 
 def test_a_rule_between_this_rule_and_api_key_ends_the_handoff() -> None:

@@ -19,19 +19,23 @@ option name and the words around it stay readable:
   with quoted, joined and escaped password parts (``user/"x y"@service``).
   A service name that looks like a branch, a version or a commit id
   (``@main``, ``@v4``) is a repository reference, unless a database client
-  (``sqlplus``, ``rman``, ``expdp``, ...) stands before it in the same command;
+  (``sqlplus``, ``rman``, ``expdp``, ...) stands before it in the same command.
+  A service name that starts with a digit counts only after such a client;
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string. A value in
   quotes or in braces (``Pwd={x;y}``) is read to its closing mark, also
   across line breaks; a value that is never closed ends at its line. A
   value without them runs to the ``;`` that ends it, so it may hold spaces
   and quotes (``Pwd=made'up;``). With no ``;`` after it, it runs to the
   end of its line, so a last field may hold spaces. Text counts as a
-  connection string when a ``;`` stands before the label, or a ``;`` ends
-  the value and a next field (``;Database=``) follows or no option
-  (``-x``) or ``key=`` word stands in the value. A label behind ``-`` is
-  a command option. Only the value is hidden: the label and the next
-  fields stay as the other rules leave them.
-  Elsewhere ``password=`` takes one shell word, as an option does;
+  connection string when a ``;`` ends the value and a next field
+  (``;Database=``) follows. It also counts when no option (``-x``) or
+  ``key=`` word stands in the value, and a field with ``=`` and a ``;``
+  stand before the label, or a ``;`` ends the value. A shell command
+  before a ``;`` (``cd /x; password=y``) is no field. A label behind
+  ``-`` is a command option. Only the value is hidden: the label and the
+  next fields stay as the other rules leave them.
+  Elsewhere ``password=`` takes one shell word, as an option does, also
+  when its value is in double quotes (``password="a\\"b"`` is one value);
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``, ``APP_KEY=x``);
 * the text inside an XML element named like a secret
@@ -56,17 +60,18 @@ A double-quoted string with a backslash in it (a JSON string, or a quoted
 command) is also read as its text: ``\\"`` is a quote and ``\\\\`` is one
 backslash there. So ``{"msg":"run --password \\"made up\\""}`` hides
 ``\\"made up\\"`` whole. A string inside such a string is read the same
-way, up to three levels deep.
+way, up to three levels deep. A form that starts inside such a string
+is read from the text of the string only, so its value ends where the
+string ends, and a line break written as ``\\n`` ends a command there.
+
+A value that an earlier step hid already stays: a ``[REDACTED...]`` mark,
+an older mark (``***REDACTED***``, ``<redacted>``) or only the characters a
+tool prints in place of a typed password (``****``).
 
 The named pattern (:mod:`.patterns`) reports every value it reads. When the
-``api_key`` rule runs right after this one in a policy and replaces its
-match in full (``redact`` or ``hash``, not ``mask``), the engine uses
-:data:`.patterns.COMMAND_SECRET_BEFORE_API_KEY` instead: a value that this rule
-reads and that rule hides whole is left to it, so the answer stays as it
-was. A value that the ``api_key`` rule hides only in part is hidden whole,
-together with that part. So this rule changes an answer only where it
-hides more of a secret value, and a policy without the ``api_key`` rule
-still hides every value.
+``api_key`` rule runs right after this one in a policy, the two rules work
+as a pair (:mod:`.command_hand_off`), so a value that rule hides whole
+stays as it was without this rule.
 
 Names that look like a secret but are not one stay: paging tokens
 (``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), a short list
@@ -86,9 +91,18 @@ import bisect
 import re
 from typing import Final
 
-__all__ = ["COMMAND_SECRET", "CommandSecretFinder"]
+__all__ = ["COMMAND_SECRET", "CommandSecretFinder", "merge_spans"]
 
 _PLACEHOLDER: Final = re.compile(r"""\[REDACTED:[^\[\]\s'"]+\]""")
+#: A value that an earlier step hid already: a ``[REDACTED:...]`` mark, an
+#: older mark (``[REDACTED]``, ``***REDACTED***``, ``<redacted>``) or a run of
+#: the characters a tool prints in place of a typed password (the
+#: ``MASK_CHARS`` of :mod:`.patterns`), also in quotes. It is no secret.
+_ALREADY_HIDDEN: Final = re.compile(
+    r"""(['"]?)(?:\[REDACTED(?::[^\[\]\s'"]+)?\]|\*{3}REDACTED\*{3}|<redacted>"""
+    r"""|[*\u2022\u25cf\u00b7]+)\1""",
+    re.IGNORECASE,
+)
 
 #: A run of bare value characters (no white space, quote, backslash or operator).
 _BARE: Final = re.compile(r"""[^\s'"\\;|&<>()]+""")
@@ -173,8 +187,8 @@ def _value_end(text: str, start: int, size: int | None = None) -> int:
 
 
 def _is_hidden(value: str) -> bool:
-    """False for an empty value or a ``[REDACTED:...]`` placeholder."""
-    return bool(value) and _PLACEHOLDER.fullmatch(value) is None
+    """True when *value* is a secret to hide: not empty and not hidden already."""
+    return bool(value) and _ALREADY_HIDDEN.fullmatch(value) is None
 
 
 def _value_span(text: str, start: int, size: int | None = None) -> tuple[int, int] | None:
@@ -473,7 +487,7 @@ _LOGIN_USER: Final = re.compile(r"(?<![\w/.:@$#-])[A-Za-z][\w$#-]{0,127}/")
 _LOGIN_PASSWORD_MAX: Final = 256
 #: A run of bare login password characters: no ``/``, ``@``, white space, quote or ``\``.
 _LOGIN_BARE: Final = re.compile(r"""[^\s/@'"\\]+""")
-_SERVICE: Final = re.compile(r"//[^\s'\"]{1,256}|[A-Za-z][\w.-]{0,127}")
+_SERVICE: Final = re.compile(r"//[^\s'\"]{1,256}|[A-Za-z0-9][\w.-]{0,127}")
 #: What stands after ``@`` in text that is not a login: image digests
 #: (``app@sha256:...``), versions and branches (``actions/checkout@v4``,
 #: ``@main``), and commit ids.
@@ -543,9 +557,11 @@ def _login_spans(text: str) -> list[tuple[int, int]]:
         if service is None:
             continue
         name = service.group(0)
+        # A service name that starts with a digit, or that looks like a
+        # branch or a version, is a login only after a database client.
         if (
             not name.startswith("//")
-            and _NOT_A_SERVICE.fullmatch(name.split(":")[0])
+            and (name[0].isdigit() or _NOT_A_SERVICE.fullmatch(name.split(":")[0]))
             and not _after_database_client(text, match.start())
         ):
             continue
@@ -650,23 +666,37 @@ def _quoted_connection_value(text: str, start: int, marks: _ClosingMarks) -> tup
     return start, len(text) if line_end < 0 else line_end
 
 
-def _is_connection_field(text: str, match: re.Match[str], start: int, stop: int) -> bool:
+def _field_before(text: str, match: re.Match[str]) -> bool:
+    """True when a connection string field and a ``;`` stand before the label.
+
+    The field may end the line above (``Server=db;`` then ``Pwd=x``). A
+    shell command with no ``=`` before a ``;`` (``cd /x; password=y``) is no
+    field.
+    """
+    before = text[max(0, match.start() - 256) : match.start()].rstrip()
+    if not before.endswith(";"):
+        return False
+    field = before[:-1].rsplit("\n", 1)[-1].rsplit(";", 1)[-1]
+    return "=" in field
+
+
+def _is_connection_field(
+    text: str, match: re.Match[str], start: int, stop: int, *, quoted: bool = False
+) -> bool:
     """True when the label at *match* is a field of a connection string.
 
-    A label behind ``-`` is a command option. Otherwise a ``;`` before the
-    label, a ``;`` and a next field after the value (``;Database=``), or a
-    ``;`` that ends a value with no command word in it, marks a connection
-    string.
+    A label behind ``-`` is a command option. A ``;`` and a next field
+    after the value (``;Database=``) mark a connection string. So does a
+    field and a ``;`` before the label, or a ``;`` after the value, when no
+    command word stands in the value (a *quoted* value has none).
     """
     if text[match.start() - 1 : match.start()] == "-":
         return False
-    if text[max(0, match.start() - 40) : match.start()].rstrip().endswith(";"):
+    if _NEXT_FIELD.match(text, stop) is not None:
         return True
-    if not text.startswith(";", stop):
+    if not quoted and _COMMAND_WORD.search(text, start, stop) is not None:
         return False
-    return (
-        _NEXT_FIELD.match(text, stop) is not None or _COMMAND_WORD.search(text, start, stop) is None
-    )
+    return _field_before(text, match) or text.startswith(";", stop)
 
 
 def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -> bool:
@@ -677,13 +707,7 @@ def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -
     """
     if match["label"].lower() != "pwd" or not text.startswith("/", start):
         return False
-    if _NEXT_FIELD.match(text, stop) is not None:
-        return False
-    before = text[max(0, match.start() - 256) : match.start()].rstrip()
-    if not before.endswith(";"):
-        return True
-    field = before[:-1].rsplit("\n", 1)[-1].rsplit(";", 1)[-1]
-    return "=" not in field
+    return _NEXT_FIELD.match(text, stop) is None and not _field_before(text, match)
 
 
 def _connection_span(
@@ -698,7 +722,16 @@ def _connection_span(
         # A value that the closing quote of a JSON string or a quoted command
         # cuts off ends there, so the string still closes.
         begin, end = _quoted_connection_value(text, start, marks)
-        return [(begin, min(end, limit))]
+        end = min(end, limit)
+        if (
+            text[start] == '"'
+            and match["label"].lower() == "password"
+            and not _is_connection_field(text, match, start, end, quoted=True)
+        ):
+            # A command word in double quotes: ``\"`` inside it is a quote.
+            word = _value_span(text, start, close)
+            return [] if word is None else [word]
+        return [(begin, end)]
     window = min(limit, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
     stop_at = window if stop is None else stop.start()
@@ -824,7 +857,7 @@ def _trimmed(text: str, start: int, end: int) -> tuple[int, int] | None:
     """The span *start*..*end* without white space at its ends, or ``None`` when empty."""
     part = text[start:end]
     core = part.strip()
-    if not core or _PLACEHOLDER.fullmatch(core):
+    if not _is_hidden(core):
         return None
     lead = len(part) - len(part.lstrip())
     return start + lead, start + lead + len(core)
@@ -882,7 +915,7 @@ def _xml_spans(text: str) -> list[tuple[int, int]]:
 # -- the finder -------------------------------------------------------------------
 
 
-def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Sort the spans and join those that touch or overlap."""
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
@@ -971,8 +1004,24 @@ def _decoded(text: str, start: int, end: int) -> tuple[str, list[int]]:
     return "".join(parts), starts
 
 
+def _outside(spans: list[tuple[int, int]], strings: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The *spans* that do not start inside one of the sorted *strings*."""
+    starts = [start for start, _end in strings]
+    kept = []
+    for span in spans:
+        at = bisect.bisect_right(starts, span[0]) - 1
+        if at < 0 or span[0] >= strings[at][1]:
+            kept.append(span)
+    return kept
+
+
 def _value_spans(text: str, depth: int = 0) -> list[tuple[int, int]]:
-    """The secret values of every form, also those inside an escaped string."""
+    """The secret values of every form, also those inside an escaped string.
+
+    A form that starts inside an escaped string is read from the text of
+    that string only, so its value ends where the string ends (a JSON log
+    line inside a JSON string keeps its other fields).
+    """
     spans = [
         *_long_option_spans(text),
         *_tool_spans(text),
@@ -981,60 +1030,20 @@ def _value_spans(text: str, depth: int = 0) -> list[tuple[int, int]]:
         *_environment_spans(text),
         *_xml_spans(text),
     ]
-    if depth < _MAX_STRING_DEPTH:
-        for start, end in _escaped_strings(text):
+    if depth < _MAX_STRING_DEPTH and (strings := _escaped_strings(text)):
+        spans = _outside(spans, strings)
+        for start, end in strings:
             inner, starts = _decoded(text, start, end)
             spans.extend((starts[a], starts[b]) for a, b in _value_spans(inner, depth + 1))
-    return _merge(spans)
-
-
-def _left_to_next_rule(
-    text: str, spans: list[tuple[int, int]], next_rule: re.Pattern[str]
-) -> list[tuple[int, int]]:
-    """*spans*, without those that *next_rule* hides whole, joined with those it hides in part.
-
-    *next_rule* runs on the same text right after this rule. A value it
-    hides whole is left to it, so that part of the answer stays as it was.
-    A value it hides only in part is joined with what it hides there, so
-    nothing that it hides is shown.
-    """
-    covers = [match.span() for match in next_rule.finditer(text)]
-    if not covers:
-        return spans
-    ends = [end for _start, end in covers]
-    kept: list[tuple[int, int]] = []
-    for start, end in spans:
-        first = bisect.bisect_right(ends, start)
-        last = first
-        while last < len(covers) and covers[last][0] < end:
-            last += 1
-        overlapping = covers[first:last]
-        if len(overlapping) == 1 and overlapping[0][0] <= start and end <= overlapping[0][1]:
-            continue
-        if overlapping:
-            start = min(start, overlapping[0][0])
-            end = max(end, overlapping[-1][1])
-        kept.append((start, end))
-    return _merge(kept)
+    return merge_spans(spans)
 
 
 class CommandSecretFinder:
-    """Report the secret value of each command line form listed in the module docstring.
-
-    With *next_rule* (the ``api_key`` pattern, which runs right after this
-    rule), a value that rule hides whole is left to it, and a value it
-    hides in part is joined with that part.
-    """
-
-    def __init__(self, next_rule: re.Pattern[str] | None = None) -> None:
-        self._next_rule = next_rule
+    """Report the secret value of each command line form listed in the module docstring."""
 
     def secret_spans(self, text: str) -> list[tuple[int, int]]:
         """Return ``(start, end)`` of every secret value, left to right, never overlapping."""
-        spans = _value_spans(text)
-        if self._next_rule is None or not spans:
-            return spans
-        return _left_to_next_rule(text, spans, self._next_rule)
+        return _value_spans(text)
 
 
 #: The finder on its own: it reports every value it reads.

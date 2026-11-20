@@ -863,6 +863,11 @@ def test_sweep_accepts_a_name_only_when_the_hide_mark_follows(name: str, sep: st
     assert _sweep_matches(f"mysql -h db {name}{sep}made-up-value ok")
     assert _sweep_matches(f"mysql -h db {name}{sep} [REDACTED:command_line_secret] ok")
     assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED] ok")
+    assert not _sweep_matches(f'log "{name}{sep}[REDACTED:command_line_secret]"')
+    # A half-written mark, or a value after a complete mark, fails it.
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line_secret]made-up ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line_secret];made-up ok")
 
 
 # ---------------------------------------------------------------------------

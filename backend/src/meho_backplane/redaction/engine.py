@@ -70,8 +70,8 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.redaction.patterns import (
-    COMMAND_SECRET_BEFORE_API_KEY,
     SecretFinder,
+    command_secret_hand_off,
     get_pattern,
     secret_spans,
 )
@@ -186,8 +186,7 @@ def redact(
     # flattens to ``list`` -- so the JSON-shape guarantee the
     # JSONFlux reducer relies on is preserved in both modes.
     mutate = policy.mode != "shadow"
-    for index, rule in enumerate(applicable_rules):
-        pattern = _pattern_for(rule, applicable_rules[index + 1 : index + 2])
+    for rule, pattern in zip(applicable_rules, _patterns_for(applicable_rules), strict=True):
         current = _walk_and_apply(current, rule, manifest, path="", mutate=mutate, pattern=pattern)
 
     return RedactionResult(redacted=current, manifest=tuple(manifest))
@@ -198,25 +197,31 @@ def redact(
 # ---------------------------------------------------------------------------
 
 
-def _pattern_for(
-    rule: RedactionRule, following: tuple[RedactionRule, ...]
-) -> re.Pattern[str] | SecretFinder:
-    """The named pattern of *rule*, given the rule that runs right after it.
+def _patterns_for(
+    rules: Sequence[RedactionRule],
+) -> list[re.Pattern[str] | SecretFinder]:
+    """The named pattern of each rule, for one run of the engine.
 
-    ``command_line_secret`` leaves a value that the ``api_key`` rule hides
-    whole to that rule, but only when that rule runs right after it and
-    replaces what it matches in full (``redact`` or ``hash``). A ``mask``
-    action keeps the last characters of its match, so with it, and
-    without the ``api_key`` rule, the finder hides every value it reads.
+    ``command_line_secret`` (action ``redact``) and the ``api_key`` rule
+    right after it work as a pair when that rule replaces what it matches
+    in full (``redact`` or ``hash``): a value that the ``api_key`` rule
+    hides whole is left to it, and it reads only the text between the
+    marks the command line rule wrote (:mod:`.command_hand_off`). A
+    ``mask`` action keeps the last characters of its match, so with it,
+    and without the ``api_key`` rule, the command line rule hides every
+    value it reads.
     """
-    if (
-        rule.pattern == "command_line_secret"
-        and following
-        and following[0].pattern == "api_key"
-        and following[0].action != "mask"
-    ):
-        return COMMAND_SECRET_BEFORE_API_KEY
-    return get_pattern(rule.pattern)
+    patterns = [get_pattern(rule.pattern) for rule in rules]
+    for index in range(len(rules) - 1):
+        rule, following = rules[index], rules[index + 1]
+        if (
+            rule.pattern == "command_line_secret"
+            and rule.action == "redact"
+            and following.pattern == "api_key"
+            and following.action != "mask"
+        ):
+            patterns[index], patterns[index + 1] = command_secret_hand_off()
+    return patterns
 
 
 def _walk_and_apply(
@@ -291,7 +296,7 @@ def _apply_to_str(
 ) -> str:
     """Match *rule* against *leaf*; emit manifest + return new string.
 
-    The named-pattern lookup (:func:`_pattern_for`) raises
+    The named-pattern lookup (:func:`_patterns_for`) raises
     :class:`KeyError` on an unknown name, but the policy schema rejects unknown names at parse time
     so that branch is unreachable in production. Defensively, an
     unknown name here would crash policy load before any traffic, not

@@ -365,12 +365,9 @@ async def test_k8s_job_create_hides_the_whole_argument_after_a_secret_flag() -> 
     [
         (
             f'tool --password "{_SHORT}\\" phrase" run',
-            "tool --password [REDACTED:command_line_secret] run",
+            "tool --password ***REDACTED*** run",
         ),
-        (
-            f"tool --password {_SHORT}\\ phrase run",
-            "tool --password [REDACTED:command_line_secret] run",
-        ),
+        (f"tool --password {_SHORT}\\ phrase run", "tool --password ***REDACTED*** run"),
         (
             f"tool -p '{_SHORT}' --user admin:{_SHORT}\\ phrase run",  # gitleaks:allow
             "tool -p ***REDACTED*** --user admin:***REDACTED*** run",
@@ -396,12 +393,11 @@ async def test_k8s_job_create_hides_the_whole_argument_after_a_secret_flag() -> 
         ),
         (
             f'sh -c "pg_dump --password {_SHORT} app" && echo done',
-            'sh -c "pg_dump --password [REDACTED:command_line_secret] app" && echo done',
+            'sh -c "pg_dump --password ***REDACTED*** app" && echo done',
         ),
         (
             f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
-            "sh -c 'curl --user=admin:[REDACTED:command_line_secret]"  # gitleaks:allow
-            " x.invalid' && echo done",
+            "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done",  # gitleaks:allow
         ),
     ],
 )
@@ -467,7 +463,7 @@ async def test_k8s_job_create_hides_a_direct_argument_to_its_end() -> None:
     assert container["args"] == [
         "PGPASSWORD=***REDACTED***",
         'env "PGPASSWORD=***REDACTED***"',
-        "tool --password [REDACTED:command_line_secret]",
+        "tool --password ***REDACTED***",
         "tool -p ***REDACTED***",
         "--dry-run",
     ]

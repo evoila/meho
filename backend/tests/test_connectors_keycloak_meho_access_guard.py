@@ -168,6 +168,9 @@ class _Realm:
         }
         self.members: dict[str, list[str]] = {_PLATFORM_GROUP: [], _TEAM_GROUP: []}
         self.groups_fail = False
+        #: Rows sent after the real ones, to send rows in an odd shape.
+        self.extra_members: dict[str, list[Any]] = {}
+        self.extra_user_groups: list[Any] = []
         self.roles: dict[str, list[dict[str, Any]]] = {}
         base = f"/admin/realms/{realm}"
         mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
@@ -229,12 +232,14 @@ class _Realm:
 
     def _members(self, request: httpx.Request) -> httpx.Response:
         group_id = request.url.path.split("/")[-2]
-        rows = [self.users[uid] for uid in self.members.get(group_id, [])]
+        rows: list[Any] = [self.users[uid] for uid in self.members.get(group_id, [])]
+        rows += self.extra_members.get(group_id, [])
         return self._fail() or httpx.Response(200, json=rows)
 
     def _user_groups(self, request: httpx.Request) -> httpx.Response:
         user_id = request.url.path.split("/")[-2]
-        rows = [self.groups[g] for g, ids in self.members.items() if user_id in ids]
+        rows: list[Any] = [self.groups[g] for g, ids in self.members.items() if user_id in ids]
+        rows += self.extra_user_groups
         return self._fail() or httpx.Response(200, json=rows)
 
 
@@ -465,6 +470,38 @@ async def test_a_second_platform_admin_who_leaves_while_the_request_waits_is_cou
     assert written == []
 
 
+@pytest.mark.parametrize(("op_id", "extra"), _LAST_ADMIN, ids=_LAST_ADMIN_IDS)
+async def test_a_member_whose_own_attribute_is_false_is_not_counted(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    extra: dict[str, Any],
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        # In the platform admin group, but the user's own value wins in the login.
+        member = {**_user(_SECOND_ADMIN_UUID, "member-without-rights")}
+        member["attributes"] = {"platform_admin": ["false"]}
+        api.add(member, _PLATFORM_GROUP)
+        call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
+        result = await _run(op_id, _params(op_id, _ADMIN_UUID, extra))
+        written = _writes(mock)
+    _refused_before_approval(call, "the last active platform admin")
+    _refused_on_run(result, "last_platform_admin")
+    assert written == []
+
+
+async def test_a_member_whose_own_attribute_is_true_is_counted(
+    kc: KeycloakConnector,  # noqa: F811
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        member = {**_user(_SECOND_ADMIN_UUID, "second-platform-admin")}
+        member["attributes"] = {"platform_admin": ["true"]}
+        api.add(member, _PLATFORM_GROUP)
+        call = await _call("keycloak.user.disable", {"id": _ADMIN_UUID})
+    assert call["status"] == "awaiting_approval", call
+
+
 async def test_leaving_a_group_that_gives_no_platform_admin_rights_is_not_refused(
     kc: KeycloakConnector,  # noqa: F811
 ) -> None:
@@ -654,6 +691,53 @@ async def test_a_failed_keycloak_read_is_refused(
         api = _realm(mock)
         api.add(_user(_SECOND_ADMIN_UUID, "second-platform-admin"), _PLATFORM_GROUP)
         api.groups_fail = True
+        call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
+        result = await _run(op_id, _params(op_id, _ADMIN_UUID, extra))
+        written = _writes(mock)
+    _refused_before_approval(call, "MEHO could not read Keycloak to check")
+    _refused_on_run(result, "meho_access_not_checked")
+    assert written == []
+
+
+def _odd_member_row(api: _Realm) -> None:
+    api.extra_members[_PLATFORM_GROUP] = ["not-an-object"]
+
+
+def _member_row_without_id(api: _Realm) -> None:
+    api.extra_members[_PLATFORM_GROUP] = [{"username": "no-id"}]
+
+
+def _member_with_only_an_id(api: _Realm) -> None:
+    only_id = "77777777-7777-7777-7777-777777777777"
+    api.users[only_id] = {"id": only_id}
+    api.members[_PLATFORM_GROUP].insert(0, only_id)
+
+
+def _user_group_row_without_id(api: _Realm) -> None:
+    api.extra_user_groups = [{"name": "no-id"}]
+
+
+_ODD_ROWS = [
+    _odd_member_row,
+    _member_row_without_id,
+    _member_with_only_an_id,
+    _user_group_row_without_id,
+]
+
+
+@pytest.mark.parametrize("odd", _ODD_ROWS, ids=[f.__name__.strip("_") for f in _ODD_ROWS])
+@pytest.mark.parametrize(("op_id", "extra"), _LAST_ADMIN, ids=_LAST_ADMIN_IDS)
+async def test_a_row_in_an_odd_shape_is_refused(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    extra: dict[str, Any],
+    odd: Any,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        # Without the odd row, the second platform admin lets the write wait.
+        api.add(_user(_SECOND_ADMIN_UUID, "second-platform-admin"), _PLATFORM_GROUP)
+        odd(api)
         call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
         result = await _run(op_id, _params(op_id, _ADMIN_UUID, extra))
         written = _writes(mock)

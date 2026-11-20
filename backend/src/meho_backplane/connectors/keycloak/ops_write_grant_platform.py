@@ -53,6 +53,7 @@ __all__ = [
     "group_gives_platform_admin",
     "group_marks_platform_admin",
     "user_flag_marks_platform_admin",
+    "user_flag_withholds_platform_admin",
 ]
 
 
@@ -127,6 +128,31 @@ def group_marks_platform_admin(rep: dict[str, Any]) -> bool:
 def user_flag_marks_platform_admin(rep: dict[str, Any]) -> bool:
     """True when the user's own attributes set the platform admin flag to ``true``."""
     return _flag_is_true(rep, _attribute_names())
+
+
+def user_flag_withholds_platform_admin(rep: dict[str, Any]) -> bool:
+    """True when the user's own attributes set the platform admin flag to a value that is not true.
+
+    MEHO's login reads the flag with a user attribute mapper. A value on the
+    user wins over the value of the user's groups, so such a user has no
+    platform admin rights from a group. Attributes that are not an object
+    raise :exc:`ValueError`.
+    """
+    attributes = rep.get("attributes")
+    if attributes is None:
+        return False
+    if not isinstance(attributes, dict):
+        raise ValueError("the user's attributes are not an object")
+    names = _attribute_names()
+    for key, value in attributes.items():
+        if not _names_flag(key, names):
+            continue
+        values = value if isinstance(value, list) else [value]
+        if not values or not all(
+            isinstance(v, str) and v.strip().casefold() == "true" for v in values
+        ):
+            return True
+    return False
 
 
 async def _read_group(

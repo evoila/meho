@@ -39,8 +39,14 @@ Who counts as a platform admin (the same rules as MEHO's login):
 * with ``JWT_PLATFORM_ADMIN_ROLE_NAME`` set, the user has that realm role.
 
 "Active" means the user is enabled and is not a client's service-account
-user. When MEHO counts the other platform admins, it counts the enabled
-people in the groups that give platform admin rights.
+user. When MEHO counts the other platform admins, it reads each member of
+the groups that give platform admin rights. It counts a member only when
+that member is an enabled person and their own ``platform_admin`` attribute
+is not set to another value than ``true``: the login takes the user's own
+value over the value of the group.
+
+A row that Keycloak sends in an odd shape (not an object, no id, no user
+name, no ``enabled`` value) also counts as doubt: MEHO refuses.
 
 Each refusal is a :exc:`MehoAccessRefusedError`. Its message names no user,
 so the same text is the reason before approval and the error of the run.
@@ -225,10 +231,19 @@ def _is_own_account(user: dict[str, Any], operator: Operator) -> bool:
 
 
 def _is_person(user: dict[str, Any]) -> bool:
-    username = _text(user.get("username")) or ""
-    return user.get("enabled") is not False and not username.casefold().startswith(
-        SERVICE_ACCOUNT_PREFIX
-    )
+    """Whether *user* is an enabled person; raises when Keycloak sent an incomplete user."""
+    username = _text(user.get("username"))
+    enabled = user.get("enabled")
+    if username is None or not isinstance(enabled, bool):
+        raise _CannotCountError("a user without a user name or an enabled value")
+    return enabled and not username.casefold().startswith(SERVICE_ACCOUNT_PREFIX)
+
+
+def _row_id(row: dict[str, Any]) -> str:
+    row_id = _text(row.get("id"))
+    if row_id is None:
+        raise _CannotCountError("a row without an id")
+    return row_id
 
 
 async def _read_list(
@@ -248,7 +263,9 @@ async def _read_list(
             params={**params, "first": str(len(rows)), "max": str(_PAGE_SIZE)},
             strict=True,
         )
-        rows.extend(row for row in page if isinstance(row, dict))
+        if not all(isinstance(row, dict) for row in page):
+            raise _CannotCountError(f"GET {path} sent a row that is not an object")
+        rows.extend(page)
         if len(page) < _PAGE_SIZE:
             return rows
     raise _CannotCountError(f"GET {path} has too many pages")
@@ -274,9 +291,7 @@ async def _platform_groups(
             seen += 1
             if seen > _MAX_GROUPS:
                 raise _CannotCountError("the realm has too many groups")
-            group_id = _text(group.get("id"))
-            if group_id is None:
-                raise _CannotCountError("a group has no id")
+            group_id = _row_id(group)
             gives = parent_gives or group_marks_platform_admin(group)
             if gives:
                 found.add(group_id)
@@ -294,14 +309,35 @@ async def _other_platform_admins(
     groups: set[str],
     user_id: str,
 ) -> bool:
-    """Whether an active person other than *user_id* is in one of *groups*."""
+    """Whether a platform admin other than *user_id* is in one of *groups*.
+
+    Reads each member again, so the count uses the member's own attributes.
+    """
+    # Imported late: this module imports the user lookup, which imports this module.
+    from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
+        user_flag_withholds_platform_admin,
+    )
+
+    checked = {user_id.casefold()}
     for group_id in sorted(groups):
         path = fill_path(_GROUP_MEMBERS_PATH, {"realm": realm, "group-id": group_id})
-        for member in await _read_list(
-            connector, operator, target, path, briefRepresentation="true"
-        ):
-            member_id = (_text(member.get("id")) or "").casefold()
-            if member_id and member_id != user_id.casefold() and _is_person(member):
+        rows = await _read_list(connector, operator, target, path, briefRepresentation="true")
+        # Every row must have an id, also the rows after the first platform admin found.
+        for member_id in [_row_id(row) for row in rows]:
+            if member_id.casefold() in checked:
+                continue
+            checked.add(member_id.casefold())
+            user_path = fill_path(_USER_PATH, {"realm": realm, "user-id": member_id})
+            other = await get_or_none(connector, target, user_path, operator)
+            if other is None:
+                continue
+            if not _is_person(other):
+                continue
+            try:
+                withheld = user_flag_withholds_platform_admin(other)
+            except ValueError as exc:
+                raise _CannotCountError(str(exc)) from exc
+            if not withheld:
                 return True
     return False
 
@@ -357,9 +393,9 @@ async def _loses_last_platform_admin(
         user_flag_marks_platform_admin,
     )
 
-    user_id = _text(user.get("id"))
-    if user_id is None:
-        raise _CannotCountError("the user has no id")
+    user_id = _row_id(user)
+    if not _is_person(user):
+        return False
     removed: str | None = None
     if op_id == _MEMBER_REMOVE_OP:
         removed = await _removed_group_id(connector, operator, target, params)
@@ -376,11 +412,10 @@ async def _loses_last_platform_admin(
     groups = await _platform_groups(connector, operator, target, realm)
     user_groups_path = fill_path(_USER_GROUPS_PATH, {"realm": realm, "user-id": user_id})
     user_groups = {
-        gid
+        _row_id(row)
         for row in await _read_list(
             connector, operator, target, user_groups_path, briefRepresentation="true"
         )
-        if (gid := _text(row.get("id"))) is not None
     }
     flag = user_flag_marks_platform_admin(user)
     has_role = bool(roles) and await _has_realm_role(
@@ -440,8 +475,6 @@ async def refuse_meho_access_loss(
     if action is None and op_id != _MEMBER_REMOVE_OP:
         return
     words = action or "removing it from this group"
-    if not _is_person(user):
-        return
     try:
         async with asyncio.timeout(_COUNT_TIMEOUT_S):
             last = await _loses_last_platform_admin(

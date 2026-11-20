@@ -1195,10 +1195,14 @@ cases:
   group that gives the rights (the group `MEHO-Platform-Admins` or a group
   under it, or a group whose own or parent's `platform_admin` attribute is
   `true`; `ops_write_grant_platform.py`). MEHO counts the others when the
-  check runs: the enabled members of those groups who are not a client's
-  service-account user. A person with only the user attribute is not
-  counted as another admin.
-- **On doubt MEHO refuses.** A failed or odd Keycloak read, too many
+  check runs. It reads each member of those groups again and counts the
+  enabled members who are not a client's service-account user. A member
+  whose own `platform_admin` attribute has a value other than `true` is not
+  counted: the login takes the user's own value over the group's value. A
+  person with only the user attribute is not counted as another admin.
+- **On doubt MEHO refuses.** A failed or odd Keycloak read (also a row
+  that is not an object, a group or member without an id, or a user
+  without a user name or an `enabled` value), too many
   groups or pages, a group MEHO cannot read, or settings MEHO cannot read
   refuse the write (`meho_access_not_checked`). Only a user MEHO cannot
   read before approval is let through to wait: the card says MEHO could

@@ -687,12 +687,18 @@ _SPACES: Final = re.compile(r"[ \t]+")
 _FIELD_END: Final = re.compile(r";(?:[ \t]*[A-Za-z][\w .-]{0,63}=|[\s'\"]|\Z)")
 
 
+def _blanks_end(text: str, pos: int, window: int) -> int:
+    """Index after the spaces or tabs at *pos* (``Database=d ;Token=x``), at most *window*."""
+    blanks = _BLANKS.match(text, pos, max(pos, window))
+    return pos if blanks is None else blanks.end()
+
+
 def _next_field_spans(
     text: str, pos: int, window: int, marks: _ClosingMarks
 ) -> list[tuple[int, int]]:
     """The values of the next fields after *pos* whose names are not on the plain list."""
     spans: list[tuple[int, int]] = []
-    while (field := _NEXT_FIELD.match(text, pos, window)) is not None:
+    while (field := _NEXT_FIELD.match(text, _blanks_end(text, pos, window), window)) is not None:
         start = field.end()
         while start < window and text[start] in " \t":
             start += 1
@@ -705,7 +711,7 @@ def _next_field_spans(
         name = _SPACES.sub(" ", field.group(0)[1:-1].strip()).lower()
         if name not in _PLAIN_FIELDS and _is_hidden(text[span[0] : span[1]]):
             # The name goes with the value when a ``;`` follows, as for the password.
-            named = _FIELD_END.match(text, span[1]) is not None
+            named = _FIELD_END.match(text, _blanks_end(text, span[1], window)) is not None
             spans.append((field.start() + 1, span[1]) if named else span)
         pos = max(span[1], field.end())
     return spans
@@ -729,7 +735,9 @@ def _with_label(
     finds nothing, so the closing quote stays. The next fields stay readable
     only when they hold no secret: every other next field value is hidden.
     """
-    if match["label"].lower() not in _API_KEY_LABELS or not _FIELD_END.match(text, span[1]):
+    if match["label"].lower() not in _API_KEY_LABELS or not _FIELD_END.match(
+        text, _blanks_end(text, span[1], window)
+    ):
         return [span]
     return [(match.start(), span[1]), *_next_field_spans(text, span[1], window, marks)]
 

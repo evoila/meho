@@ -569,6 +569,17 @@ _AFTER_A_PASSWORD: Final[list[tuple[str, str]]] = (
             f"Server=db;{_MARK};User ID=app;Encrypt=true; Token = {_MARK}",
         ),
     ]
+    # Spaces or tabs before the ``;`` do not stop the scan of the next fields.
+    + [
+        (
+            f"{label}{value}{blank};{field}{blank};Token=demo12",
+            f"{_MARK}{blank};{field}{blank};Token={_MARK}",
+        )
+        for label in (_PWD_IS, _PASSWORD_IS)
+        for value in ("example-password", f"'{PW}'", '"example-password"', "{example-password}")
+        for field in ("Database=d", "Database='d'", 'Database="d"', "Database={d}")
+        for blank in (" ", "\t", "  ")
+    ]
 )
 
 

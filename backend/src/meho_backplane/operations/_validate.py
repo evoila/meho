@@ -907,7 +907,7 @@ async def _non_agent_verdict(
     gate_reason = _non_agent_park_reason(
         operator, descriptor, is_service=is_service, decide_only=decide_only
     )
-    if gate_reason is not None and runs_at_once_in_console(operator, descriptor):
+    if gate_reason is not None and runs_at_once_in_console(operator, descriptor, params=params):
         return await _console_rights_verdict(operator, descriptor, target, connector_id, params)
 
     if gate_reason is None and is_service:

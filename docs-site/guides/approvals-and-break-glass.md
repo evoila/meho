@@ -272,7 +272,8 @@ manages, not only in MEHO's own login realm:
 Some changes of rights always wait, also for an admin in the web console:
 a change that reads, writes or makes a credential (for example a new
 password, a new user, or the realm settings with the mail password), a
-`destructive` change, a change with the "always wait" mark (from an
+change whose values carry a credential (for example a client update
+with a new client secret), a `destructive` change, a change with the "always wait" mark (from an
 override or a classification rule), and a `secret.move` with a
 `keycloak:` side.
 

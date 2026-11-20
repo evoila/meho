@@ -113,9 +113,10 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
     )
 
 
-def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
+def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.grant_approval import is_rights_change_op
+    from meho_backplane.operations.rights_change_console import params_write_credential
     from meho_backplane.operations.service_grants import (
         credential_call_waits,
         credential_grant_reason,
@@ -129,7 +130,9 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
         "credential": credential_grant_reason(op_id, stored_class) is not None,
-        "credential_waits": credential_call_waits(op_id, stored_class),
+        "credential_waits": (
+            credential_call_waits(op_id, stored_class) or params_write_credential(op_id, params)
+        ),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
         "rights_change": is_rights_change_op(op_id),
@@ -137,8 +140,14 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     return frozenset(name for name, on in marks.items() if on)
 
 
-def asked_of(descriptor: EndpointDescriptor, *, connector_id: str | None, target: Any) -> Asked:
-    """The :class:`Asked` of one call of *descriptor*.
+def asked_of(
+    descriptor: EndpointDescriptor,
+    *,
+    connector_id: str | None,
+    target: Any,
+    params: dict[str, Any] | None = None,
+) -> Asked:
+    """The :class:`Asked` of one call of *descriptor* with *params*.
 
     Category and labels stay empty: no customer rule reads them in part 1.
     """
@@ -153,7 +162,7 @@ def asked_of(descriptor: EndpointDescriptor, *, connector_id: str | None, target
         always_wait=bool(descriptor.requires_approval),
         mutating=_is_mutating(descriptor),
         caller_address=has_caller_address(descriptor.parameter_schema),
-        op_class=_op_class(descriptor),
+        op_class=_op_class(descriptor, params),
         target=str(target_id) if target_id is not None else None,
     )
 
@@ -229,7 +238,7 @@ async def evaluate_call(
 
     actor_sub = resolve_actor_sub()
     asker = asker_of(operator, acting_agent=actor_sub)
-    asked = asked_of(descriptor, connector_id=connector_id, target=target)
+    asked = asked_of(descriptor, connector_id=connector_id, target=target, params=params)
     found: dict[str, Any] = {
         "sandbox": sandbox_mode_active(),
         "agent_grant_required": get_settings().agent_grant_required,

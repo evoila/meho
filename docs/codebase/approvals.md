@@ -1407,6 +1407,10 @@ when all of this holds:
 - it is not `destructive`, it has no "always wait" mark
   (`policy_always_wait`, from an override or a classification rule), and
   it does not read, write or make a credential (`credential_call_waits`).
+  Its params carry no credential either (`params_write_credential`, with
+  the check a connector registers with `register_credential_params_check`;
+  the Keycloak writes register `carries_credential`, which looks for keys
+  such as a client's `secret`, a user's `credentials` or a `password`).
   Those always wait. A change of
   rights only by its params (`register_rights_change_check`, for example a
   `secret.move` with a `keycloak:` side) always waits too;

@@ -34,19 +34,31 @@ one group (``GRANT_OPS`` in :mod:`.ops_write_grant`) are also registered
 there with
 :func:`~meho_backplane.operations.grant_approval.register_grant_op`, which
 also checks who the change is for.
+
+A representation can carry a credential: a client's ``secret``, a user's
+``credentials``, an identity provider's ``clientSecret``, an SMTP
+``password`` or a directory's ``bindCredential``.
+:func:`register_rights_change_ops` also registers :func:`carries_credential`
+for every write of :data:`RIGHTS_CHANGE_OPS`
+(:func:`~meho_backplane.operations.rights_change_console.register_credential_params_check`),
+so a call whose params hold such a key always waits for a person, also
+for an admin in the web console.
 """
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
 from meho_backplane.operations.grant_approval import register_rights_change_op
+from meho_backplane.operations.rights_change_console import register_credential_params_check
 
 __all__ = [
+    "CREDENTIAL_KEYS",
     "CURRENT_STATE_ON_CARD",
     "NEW_OBJECT_OPS",
     "NOT_RIGHTS_CHANGE_OPS",
     "RIGHTS_CHANGE_OPS",
+    "carries_credential",
     "register_rights_change_ops",
 ]
 
@@ -161,10 +173,32 @@ NEW_OBJECT_OPS: Final[dict[str, str]] = {
 }
 
 
+#: Keys of a Keycloak representation whose value is a credential, in lower case.
+CREDENTIAL_KEYS: Final[frozenset[str]] = frozenset(
+    {"secret", "credentials", "clientsecret", "password", "bindcredential"}
+)
+
+
+def carries_credential(value: Any) -> bool:
+    """True when *value* holds a key of :data:`CREDENTIAL_KEYS` at any depth."""
+    if isinstance(value, dict):
+        return any(
+            (isinstance(key, str) and key.lower() in CREDENTIAL_KEYS) or carries_credential(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(carries_credential(item) for item in value)
+    return False
+
+
 def register_rights_change_ops() -> None:
-    """Register every write of :data:`RIGHTS_CHANGE_OPS` as a change of rights."""
+    """Register every write of :data:`RIGHTS_CHANGE_OPS` as a change of rights.
+
+    Also registers :func:`carries_credential` as the check of its params.
+    """
     for op_id in RIGHTS_CHANGE_OPS:
         register_rights_change_op(op_id)
+        register_credential_params_check(op_id, carries_credential)
 
 
 register_rights_change_ops()

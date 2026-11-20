@@ -17,7 +17,8 @@ a respx-mocked Keycloak Admin REST API:
   admin.
 
 The gate keeps the wait for a change of rights that reads, writes or makes
-a credential, for a ``destructive`` one, for one with the "always wait"
+a credential, for one whose params carry a credential (a client secret, a
+user's credentials, a password), for a ``destructive`` one, for one with the "always wait"
 mark, and for a ``secret.move`` with a
 Keycloak side. The policy evaluator gives the same answers.
 
@@ -56,6 +57,7 @@ from meho_backplane.operations.rights_change_console import (
     runs_at_once_in_console,
 )
 from meho_backplane.policy.evaluate import Asked, Asker, Lookups, Verdict, evaluate
+from meho_backplane.policy.shadow import asked_of
 from meho_backplane.targets.resolver import resolve_target
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
@@ -318,7 +320,7 @@ async def test_a_change_of_rights_that_writes_a_credential_waits(
     )
 
     assert verdict.value == "needs-approval"
-    assert runs_at_once_in_console(_person(), descriptor) is False
+    assert runs_at_once_in_console(_person(), descriptor, params={}) is False
 
 
 @pytest.mark.asyncio
@@ -340,7 +342,7 @@ async def test_an_always_wait_change_of_rights_waits_for_an_admin_in_the_console
     )
 
     assert verdict.value == "needs-approval"
-    assert runs_at_once_in_console(_person(), descriptor) is False
+    assert runs_at_once_in_console(_person(), descriptor, params={}) is False
 
 
 def test_a_destructive_or_always_wait_change_of_rights_and_a_secret_move_wait() -> None:
@@ -350,11 +352,11 @@ def test_a_destructive_or_always_wait_change_of_rights_and_a_secret_move_wait() 
     marked = EndpointDescriptor(op_id=_ADD, safety_level="dangerous", parameter_schema={})
     marked.policy_always_wait = True
 
-    assert runs_at_once_in_console(_person(), destructive) is False
-    assert runs_at_once_in_console(_person(), marked) is False
-    assert runs_at_once_in_console(_person(), move) is False
-    assert runs_at_once_in_console(_person(), plain) is True
-    assert runs_at_once_in_console(_person(web=False), plain) is False
+    assert runs_at_once_in_console(_person(), destructive, params=_PARAMS) is False
+    assert runs_at_once_in_console(_person(), marked, params=_PARAMS) is False
+    assert runs_at_once_in_console(_person(), move, params=_PARAMS) is False
+    assert runs_at_once_in_console(_person(), plain, params=_PARAMS) is True
+    assert runs_at_once_in_console(_person(web=False), plain, params=_PARAMS) is False
 
 
 # -- the policy evaluator gives the same answers ---------------------------------
@@ -422,3 +424,73 @@ def test_the_evaluator_gives_the_same_answer(
     asker: Asker, asked: Asked, found: Lookups, verdict: Verdict
 ) -> None:
     assert evaluate(asker, asked, found).verdict is verdict
+
+
+_CLIENT_SECRET = {"representation": {"clientId": "console-client", "secret": "<made-up>"}}
+_REALM_WITH_SECRETS = {
+    "representation": {
+        "realm": "console-new",
+        "clients": [{"clientId": "console-client", "secret": "<made-up>"}],
+    }
+}
+_USER_WITH_CREDENTIALS = {"representation": {"credentials": [{"type": "password"}]}}
+_IDP_SECRET = {"representation": {"identityProviders": [{"config": {"clientSecret": "<made-up>"}}]}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("keycloak.client.update", _CLIENT_SECRET),
+        ("keycloak.client.create", _CLIENT_SECRET),
+        ("keycloak.realm.create", _REALM_WITH_SECRETS),
+        ("keycloak.realm.create", _IDP_SECRET),
+        ("keycloak.user.update", _USER_WITH_CREDENTIALS),
+    ],
+    ids=["client-update", "client-create", "realm-client", "realm-idp", "user"],
+)
+async def test_a_change_of_rights_whose_params_carry_a_credential_waits(
+    keycloak: KeycloakConnector, op_id: str, params: dict[str, Any]
+) -> None:
+    descriptor = await lookup_descriptor(
+        tenant_id=_TENANT_ID,
+        product="keycloak",
+        version="26.x",
+        impl_id="keycloak-admin",
+        op_id=op_id,
+    )
+    assert descriptor is not None
+
+    verdict, _reason = await policy_gate(
+        operator=_person(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR_ID,
+        params=params,
+    )
+
+    assert verdict.value == "needs-approval"
+    assert runs_at_once_in_console(_person(), descriptor, params=params) is False
+    asked = asked_of(descriptor, connector_id=_CONNECTOR_ID, target=None, params=params)
+    assert "credential_waits" in asked.op_class
+    assert evaluate(_asker(), asked, Lookups()).verdict is Verdict.WAIT
+
+
+@pytest.mark.asyncio
+async def test_a_client_update_without_a_credential_runs_at_once_in_the_console(
+    keycloak: KeycloakConnector,
+) -> None:
+    descriptor = await lookup_descriptor(
+        tenant_id=_TENANT_ID,
+        product="keycloak",
+        version="26.x",
+        impl_id="keycloak-admin",
+        op_id="keycloak.client.update",
+    )
+    assert descriptor is not None
+    params = {"client_id": "console-client", "representation": {"redirectUris": []}}
+
+    assert runs_at_once_in_console(_person(), descriptor, params=params) is True
+    asked = asked_of(descriptor, connector_id=_CONNECTOR_ID, target=None, params=params)
+    assert "credential_waits" not in asked.op_class
+    assert evaluate(_asker(), asked, Lookups()).verdict is Verdict.RUN

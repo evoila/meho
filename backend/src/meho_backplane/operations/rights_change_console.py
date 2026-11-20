@@ -22,6 +22,10 @@ The call still waits when:
 * it reads, writes or makes a credential
   (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
   such a call always waits for a person;
+* its params carry a credential, such as a client secret or a password
+  (:func:`params_write_credential`, with a check that the connector
+  registers with :func:`register_credential_params_check`): such a call
+  always waits for a person;
 * it is a change of rights only because of its params (a ``secret.move``
   with a Keycloak side, registered with
   :func:`~meho_backplane.operations.grant_approval.register_rights_change_check`);
@@ -43,6 +47,7 @@ once in the web console.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -57,6 +62,8 @@ __all__ = [
     "CONSOLE_RUN_AUDIT_VALUE",
     "CONSOLE_RUN_REASON",
     "console_refusal",
+    "params_write_credential",
+    "register_credential_params_check",
     "runs_at_once_in_console",
 ]
 
@@ -71,7 +78,29 @@ CONSOLE_RUN_REASON: Final[str] = (
 CONSOLE_RUN_AUDIT_VALUE: Final[str] = "admin_in_web_console"
 
 
-def runs_at_once_in_console(operator: Operator, descriptor: EndpointDescriptor) -> bool:
+#: op_id -> a check of the call's params: True when they carry a credential.
+#: The check reads the params only (no I/O).
+_CREDENTIAL_PARAMS_CHECKS: dict[str, Callable[[dict[str, Any]], bool]] = {}
+
+
+def register_credential_params_check(op_id: str, check: Callable[[dict[str, Any]], bool]) -> None:
+    """Record that a call of *op_id* writes a credential when *check* passes on its params.
+
+    Such a call always waits for a person, also for an admin in the web
+    console (:func:`runs_at_once_in_console`).
+    """
+    _CREDENTIAL_PARAMS_CHECKS[op_id] = check
+
+
+def params_write_credential(op_id: str, params: dict[str, Any] | None) -> bool:
+    """True when the params of a call of *op_id* carry a credential. Reads no I/O."""
+    check = _CREDENTIAL_PARAMS_CHECKS.get(op_id)
+    return check is not None and isinstance(params, dict) and check(params)
+
+
+def runs_at_once_in_console(
+    operator: Operator, descriptor: EndpointDescriptor, *, params: dict[str, Any] | None
+) -> bool:
     """True when *operator*'s call of *descriptor* is an admin's change of rights in the console.
 
     Reads no I/O. The caller still runs :func:`console_refusal` before the
@@ -84,6 +113,7 @@ def runs_at_once_in_console(operator: Operator, descriptor: EndpointDescriptor) 
         and descriptor.safety_level != "destructive"
         and not getattr(descriptor, "policy_always_wait", False)
         and not credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None))
+        and not params_write_credential(descriptor.op_id, params)
         and operator.web_session
         and is_human_principal(operator)
         and operator.may_approve_rights_change()

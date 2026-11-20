@@ -605,6 +605,25 @@ def test_text_with_a_lone_surrogate_is_read_as_xml() -> None:
     assert hide_secret_text(_SURROGATE_PLAIN_XML) == _SURROGATE_PLAIN_XML
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"\ufeffa: <password>{_FAKE_ELEMENT}</password>\nc: d\n",
+        f"\ufeffa: |\n  <password>{_FAKE_ELEMENT}</password>\nc: d\n",
+        f"\ufeffhost: db\npassword: {_FAKE_BLOCK}\nc: d\n",
+    ],
+    ids=["element-in-plain-value", "element-in-block-value", "secret-named-key"],
+)
+def test_yaml_with_a_byte_order_mark_changes_only_the_secret_value(text: str) -> None:
+    shown = hide_secret_text(text)
+    assert _shown_fakes(shown) == []
+    assert shown.startswith("\ufeff")
+    lines = yaml.safe_load(shown.lstrip("\ufeff"))
+    assert lines["c"] == "d"
+    assert set(lines) == set(yaml.safe_load(text.lstrip("\ufeff")))
+    assert _MARKER in json.dumps(lines)
+
+
 def test_too_deep_step_hides_the_whole_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from meho_backplane.redaction import secret_text
 

@@ -555,7 +555,18 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     values: a JSON or YAML file in a string, such as a ConfigMap entry or
     the last-applied note of kubectl (`redaction/secret_text.py`: the
     quoted-pair text step, then a YAML read that replaces each secret value
-    in place; a YAML file inside a JSON note is read too). The YAML read
+    in place; a YAML file inside a JSON note is read too). Two more steps
+    (`redaction/secret_markup.py`) hide what the YAML read does not see:
+    a comment line such as `# dbPassword: ...` in a YAML text, every
+    `key: value` line of a text that does not read as YAML (with the
+    indented lines of a block value under a secret name), and XML text:
+    the text of a secret-named element (`<password>...</password>`, child
+    elements and CDATA included), a secret-named attribute
+    (`dbPassword="..."`), and the `value` attribute of an element whose
+    `name` or `key` attribute is a secret name
+    (`<add key="DbPassword" value="..."/>`). These steps write the marker
+    without quotes. An element with no closing tag is not touched, and
+    text without a secret-named field comes back unchanged. The YAML read
     uses the same rules as the key-name walk: a bare `community` in an SNMP
     place, and the `value` of a secret-named pair also when it is a list
     or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one

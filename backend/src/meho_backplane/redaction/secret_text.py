@@ -9,7 +9,7 @@ the Helm values of a custom resource. A secret-named field inside such a
 text has no key of its own in the answer, so the key-name walk of the
 default view does not see it. This module hides it in the text.
 
-:func:`hide_secret_text` runs two steps over one string:
+:func:`hide_secret_text` runs four steps over one string:
 
 1. :func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields_in_text`:
    quoted pairs, as in JSON (``"password": "..."``), Python text and escaped
@@ -31,9 +31,17 @@ default view does not see it. This module hides it in the text.
    A string value inside the YAML is read again as text, so a YAML file
    inside a JSON note is covered too; such a value is written
    back as a JSON string. A text that YAML reads as one plain value is not
-   read again. Text that is not YAML keeps what step 1 made of it.
+   read again. Text that is not YAML goes to the line step.
    A text deeper than the levels the pass reads, or too deep to parse, is
    hidden whole when it may hold a secret name.
+3. A line step (:func:`~meho_backplane.redaction.secret_markup.hide_secret_lines`):
+   in a text that reads as YAML, a comment line such as
+   ``# dbPassword: ...``; in a text that does not, every ``key: value``
+   line.
+4. An XML step (:func:`~meho_backplane.redaction.secret_markup.hide_secret_xml`):
+   the text of a secret-named element, a secret-named attribute, and the
+   ``value`` attribute of an element whose ``name`` or ``key`` is a secret
+   name. Each step runs on every text the YAML step reads again, too.
 
 The name rule is the shared
 :func:`~meho_backplane.broadcast.events.is_secret_param_name`. Like the
@@ -61,6 +69,7 @@ from meho_backplane.redaction.secret_fields import (
     _is_placeholder,
     scrub_secret_fields_in_text,
 )
+from meho_backplane.redaction.secret_markup import hide_secret_lines, hide_secret_xml
 
 __all__ = ["hide_secret_text", "hide_secret_text_leaves"]
 
@@ -345,20 +354,23 @@ def _hide_yaml(text: str, depth: int) -> str:
             if document is not None and not _is_plain_text(document):
                 finder.walk(document)
         if not finder.spans:
-            return text
+            return hide_secret_lines(text, comments_only=True)
         spans = finder.spans
         if "&" in text:
             spans = spans + _orphan_alias_spans(text, finder.removed)
     except yaml.YAMLError:
-        return text
+        return hide_secret_lines(text, comments_only=False)
     except RecursionError:
         # Too deep to read: hide the whole text rather than show it unread.
         return SECRET_FIELD_MARKER
-    return _apply(text, spans)
+    return hide_secret_lines(_apply(text, spans), comments_only=True)
 
 
 def _hide_text(text: str, depth: int) -> str:
-    return _hide_yaml(scrub_secret_fields_in_text(text), depth)
+    hidden = _hide_yaml(scrub_secret_fields_in_text(text), depth)
+    if "<" in hidden and _MAY_HOLD_SECRET_NAME.search(hidden):
+        return hide_secret_xml(hidden)
+    return hidden
 
 
 def hide_secret_text(text: str) -> str:

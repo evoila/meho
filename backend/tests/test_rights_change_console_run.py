@@ -740,7 +740,7 @@ async def test_a_platform_admin_s_protocol_mapper_in_the_login_realm_waits(
 async def test_a_tenant_admin_s_protocol_mapper_outside_the_login_realm_waits(
     keycloak: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_LOGIN_REALMS, lambda: set())
+    monkeypatch.setattr(_LOGIN_REALMS, set)
 
     dumped, post = await _create_mapper(_person())
 

@@ -28,14 +28,16 @@ from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 from meho_backplane.connectors.linux import LinuxSshConnector
-from meho_backplane.redaction.command_secret import _PLAIN_FIELDS, COMMAND_SECRET
+from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
+from meho_backplane.redaction.patterns import get_pattern, secret_spans
 from meho_backplane.redaction.policy import RedactionPolicy
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
+from tests.test_redaction_command_secret_logs import _JSON_FORMS, _json_string
 
 PW: Final = "made-up-pw-4711"
 #: Built from pieces, so secret scanners do not flag the lines that use them.
@@ -53,10 +55,10 @@ def _login(user: str, password: str) -> str:
 #: (line, text that must be gone, text that must stay)
 _HIDDEN: Final[list[tuple[str, str, str]]] = [
     (f"run --password {PW} --user a", PW, "--password"),
-    (f"run --passwd={PW} next", PW, "--passwd="),
+    (f"run --passwd={PW} next", PW, "run --"),
     (f"run --pass {PW} --pwd {PW}", PW, "--pwd"),
     (f"run --token {PW} --secret {PW}", PW, "--secret"),
-    (f"run --api-key {PW} --client-secret={PW}", PW, "--client-secret="),
+    (f"run --api-key {PW} --client-secret={PW}", PW, "--api-key "),
     (f"run --db-password {PW} tail", PW, "tail"),
     (f"sshpass -p {PW} ssh -p 22 host", PW, "ssh -p 22 host"),
     (f"sshpass -p{PW} ssh host", PW, "ssh host"),
@@ -79,10 +81,10 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     (f"Server=db;{_PWD_IS}{PW};Database=d", PW, "Server=db;"),
     (f"Server=db;{_PW_IS}{PW}", PW, "Server=db;"),
     (f'Server=db;{_PASSWORD_IS}"{PW};x";Database=d', PW, "Server=db;"),
-    (f"DB_PASSWORD={PW} run", PW, "DB_PASSWORD="),
-    (f"APP_PASS={PW} APP_PWD={PW} APP_SECRET={PW}", PW, "APP_SECRET="),
+    (f"DB_PASSWORD={PW} run", PW, " run"),
+    (f"APP_PASS={PW} APP_PWD={PW} APP_SECRET={PW}", PW, "APP_PASS="),
     (f"API_TOKEN={PW} SIGNING_KEY={PW}", PW, "SIGNING_KEY="),
-    (f"AWS_SECRET_ACCESS_KEY={PW} SECRET_KEY={PW}", PW, "SECRET_KEY="),
+    (f"AWS_SECRET_ACCESS_KEY={PW} SECRET_KEY={PW}", PW, "AWS_SECRET_ACCESS_KEY="),
     # Every ``_KEY`` name is hidden, except a short list of names that hold no secret.
     *[
         (f"{name}_KEY={PW} run", PW, f"{name}_KEY=")
@@ -132,7 +134,8 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     ),
     # A connection string value with spaces, or in braces with a ``;`` in it.
     (f"User ID=u;{_PASSWORD_IS}{PW} long phrase;Database=d", "long phrase", "User ID=u;"),
-    (f"Server=db;{_PWD_IS}{PW} long phrase", "long phrase", "Server=db;"),
+    # With no ``;`` after it, the value ends at white space.
+    (f"Server=db;{_PWD_IS}{PW} long phrase", PW, "long phrase"),
     (f"Server=db;{_PWD_IS}{{made-up;tail}};Database=d", "tail", "Server=db;"),
     (f"{_PW_IS}{PW} -suffix;Database=d", "-suffix", "Database=d"),
     # A quoted tool name: its options follow the closing quote.
@@ -229,6 +232,44 @@ def test_the_value_is_hidden_on_every_line_of_a_log() -> None:
     assert out.endswith("\nend")
 
 
+#: Service names that look like a branch, a version or a commit id.
+_BRANCH_LIKE: Final = ["main", "master", "latest", "head", "stable", "v19prod", "v4", "sha256"]
+_BRANCH_LIKE_WITH_HEX: Final = [*_BRANCH_LIKE, "deadbeef1", "abc1234"]
+
+
+@pytest.mark.parametrize(
+    "client",
+    ["sqlplus", "rman target", "expdp", "impdp", "sqlldr", "dgmgrl", "/opt/bin/sqlplus -s"],
+)
+@pytest.mark.parametrize(
+    "service", [*_BRANCH_LIKE_WITH_HEX, *(f"{name}:1521/svc" for name in _BRANCH_LIKE_WITH_HEX)]
+)
+def test_a_database_login_after_a_client_is_hidden_whatever_the_service_name(
+    client: str, service: str
+) -> None:
+    line = f"{client} {_login('scott', PW)}@{service} as sysdba"
+    trace, _fired = scrub_content(line)
+    for out in (redact(line, get_default_policy()).redacted, trace):
+        assert out == f"{client} scott/{_MARK}@{service} as sysdba"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        *(f"uses: org/action@{name}" for name in _BRANCH_LIKE_WITH_HEX),
+        *(f"pip install git+https://h/org/repo@{name}" for name in _BRANCH_LIKE),
+        "registry.example.com/team/app@sha256:0123456789abcdef",
+        # A client in another command or on another line does not count.
+        "sqlplus -v; uses: org/action@main",
+        "sqlplus -v\nuses: org/action@v4",
+        "echo sqlplus | tee org/action@main",
+    ],
+)
+def test_a_repository_reference_without_a_database_client_stays(line: str) -> None:
+    assert COMMAND_SECRET.secret_spans(line) == []
+    assert redact(line, get_default_policy()).redacted == line
+
+
 def test_a_value_that_is_a_placeholder_is_left_alone() -> None:
     assert COMMAND_SECRET.secret_spans("--token=[REDACTED:api_key] x") == []
 
@@ -269,34 +310,39 @@ def test_spans_never_overlap_and_are_left_to_right() -> None:
 
 
 _MARK: Final = "[REDACTED:command_line_secret]"
+#: The mark of the api_key rule. Where that rule hides a value whole, the
+#: answer is the one of main.
+_KEY_MARK: Final = "[REDACTED:api_key]"
 
 #: (line, the whole filter output): only the value goes, every other word stays.
 _WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
     (
         f"run --{_PASSWORD_IS.lower()}{PW} --user alice --verbose",
-        f"run --{_PASSWORD_IS.lower()}{_MARK} --user alice --verbose",
+        f"run --{_KEY_MARK} --user alice --verbose",
     ),
-    (f"run -{_PASSWORD_IS}{PW} --user alice", f"run -{_PASSWORD_IS}{_MARK} --user alice"),
+    (f"run --{_PASSWORD_IS.lower()}'made up' --user alice", f"run --password={_MARK} --user alice"),
+    (f"run -{_PASSWORD_IS}{PW} --user alice", f"run -{_KEY_MARK} --user alice"),
     (
         f"login {_PASSWORD_IS.lower()}{PW} user=alice; echo ok",
-        f"login {_PASSWORD_IS.lower()}{_MARK} user=alice; echo ok",
+        f"login {_KEY_MARK} user=alice; echo ok",
     ),
-    (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_PASSWORD_IS}{_MARK}"),
+    (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_KEY_MARK} long phrase"),
+    (f"Server=db;{_PASSWORD_IS}made up long phrase;", f"Server=db;{_PASSWORD_IS}{_MARK};"),
     (f"{_PW_IS}{PW} long phrase;", f"{_PW_IS}{_MARK};"),
     # A ``pw=`` value with an option-like word, followed by a next field.
     (f"{_PW_IS}{PW} -suffix;Database=d", f"{_PW_IS}{_MARK};Database=d"),
     # A command option keeps the words after its value, also before a ``;``.
     (
         f"run --{_PASSWORD_IS.lower()}{PW} --user alice; mode=fast",
-        f"run --{_PASSWORD_IS.lower()}{_MARK} --user alice; mode=fast",
+        f"run --{_KEY_MARK} --user alice; mode=fast",
     ),
     (
         f"run -{_PASSWORD_IS}{PW} --user alice; mode=fast",
-        f"run -{_PASSWORD_IS}{_MARK} --user alice; mode=fast",
+        f"run -{_KEY_MARK} --user alice; mode=fast",
     ),
     (
         f"login {_PASSWORD_IS.lower()}{PW} --verbose; echo ok",
-        f"login {_PASSWORD_IS.lower()}{_MARK} --verbose; echo ok",
+        f"login {_KEY_MARK} --verbose; echo ok",
     ),
     # Quoted, joined and escaped login password parts are hidden whole.
     (
@@ -322,7 +368,7 @@ _WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
         f"sh -c 'run --password {_MARK}'; echo 'status ok'",
     ),
     (
-        f'sh -c "DB_PASSWORD={PW}"; echo "status ok"',
+        'sh -c "DB_PASSWORD=\'made up\'"; echo "status ok"',
         f'sh -c "DB_PASSWORD={_MARK}"; echo "status ok"',
     ),
     (
@@ -364,10 +410,9 @@ def test_only_the_value_is_replaced(line: str, expected: str) -> None:
 @pytest.mark.parametrize(
     ("label", "hidden", "expected"),
     [
-        # ``Pwd=`` and ``Password=`` go with the value, so the api_key rule
-        # does not hide ``;Database=d`` too.
-        (_PWD_IS, f"{_PWD_IS}made'up", f"Server=db;{_MARK};Database=d"),
-        (_PASSWORD_IS, f"{_PASSWORD_IS}made'up", f"Server=db;{_MARK};Database=d"),
+        # Only the value is hidden: the label and ``;Database=d`` stay.
+        (_PWD_IS, "made'up", f"Server=db;{_PWD_IS}{_MARK};Database=d"),
+        (_PASSWORD_IS, "made'up", f"Server=db;{_PASSWORD_IS}{_MARK};Database=d"),
         (_PW_IS, "made'up", f"Server=db;{_PW_IS}{_MARK};Database=d"),
     ],
 )
@@ -397,12 +442,13 @@ def test_no_part_of_a_braced_connection_value_is_left() -> None:
     ],
 )
 def test_a_connection_string_value_runs_to_its_semicolon(line: str) -> None:
-    # A ``;`` right after the value: the label goes with it.
+    # A ``;`` right after the value: the value runs to it, the label stays.
     spans = COMMAND_SECRET.secret_spans(line)
     assert len(spans) == 1
-    assert line[spans[0][0] : spans[0][1]].endswith("made up long phrase")
+    assert line[spans[0][0] : spans[0][1]] == "made up long phrase"
     out = redact(line, get_default_policy()).redacted
     assert "phrase" not in out
+    assert f"={_MARK}" in out
     if "Database=d" in line:
         assert out.endswith(";Database=d")
 
@@ -549,52 +595,30 @@ def _texts_of_other_tests() -> list[str]:
     return [text for _name, text, _hit in _PATTERN_TEST_ROWS] + _OTHER_RULE_TEXTS
 
 
-#: The next fields of a connection string after a hidden password whose
-#: names hold no secret (``[REDACTED:command_line_secret];Database=d``).
-#: Without this rule the api_key rule hid them with the password. Any other
-#: next field must stay hidden.
-_PLAIN_NAMES: Final = "|".join(
-    re.escape(name).replace(r"\ ", "[ \t]+")
-    for name in sorted(_PLAIN_FIELDS, key=len, reverse=True)
-)
-_NEXT_FIELDS: Final = re.compile(
-    re.escape(_MARK) + r"(?:;[ \t]*(?i:" + _PLAIN_NAMES + r")[ \t]*=[^;\s'\"]*)+"
-)
-
-#: (text, what each policy shows): a field after a hidden connection password.
-#: A field that may hold a secret is hidden too; a plain field stays.
-_AFTER_A_PASSWORD: Final[list[tuple[str, str]]] = (
-    [
-        (f"{label}example-password;Token=demo12", f"{_MARK};Token={_MARK}")
-        for label in (_PWD_IS, _PASSWORD_IS)
-    ]
-    + [
-        (f"{label}example-password;{name}=ab;Database=d", f"{_MARK};{_MARK};Database=d")
-        for label in (_PWD_IS, _PASSWORD_IS)
-        for name in ("Token", "Secret", "AccountKey", "Api Key", "Pwd")
-    ]
-    + [
-        (
-            f"Server=db;{_PWD_IS}'{PW}';User ID=app;Encrypt=true; Token = t1",
-            f"Server=db;{_MARK};User ID=app;Encrypt=true; Token = {_MARK}",
-        ),
-    ]
-    # Spaces or tabs before the ``;`` do not stop the scan of the next fields.
-    + [
-        (
-            f"{label}{value}{blank};{field}{blank};Token=demo12",
-            f"{_MARK}{blank};{field}{blank};Token={_MARK}",
-        )
-        for label in (_PWD_IS, _PASSWORD_IS)
-        for value in ("example-password", f"'{PW}'", '"example-password"', "{example-password}")
-        for field in ("Database=d", "Database='d'", 'Database="d"', "Database={d}")
-        for blank in (" ", "\t", "  ")
-    ]
-)
+#: (text, what each policy shows): fields after a connection string password.
+#: Where the api_key rule hides the password whole, the answer is the one of
+#: main. Where it does not, only the value is hidden: the label and the
+#: fields after it stay.
+_AFTER_A_PASSWORD: Final[list[tuple[str, str]]] = [
+    (f"{label}example-password;Token=demo12", "[REDACTED:api_key]")
+    for label in (_PWD_IS, _PASSWORD_IS)
+] + [
+    (
+        f"Server=db;{_PWD_IS}'made up';ApplicationIntent=ReadOnly",
+        f"Server=db;{_PWD_IS}{_MARK};ApplicationIntent=ReadOnly",
+    ),
+    (
+        f"Server=db;{_PWD_IS}'{PW}';User ID=app;Encrypt=true; Token = t1",
+        "Server=db;[REDACTED:api_key];User ID=app;Encrypt=true; Token = t1",
+    ),
+    (f"{_PW_IS}{PW};Database=d", f"{_PW_IS}{_MARK};Database=d"),
+    (f"{_PASSWORD_IS} {PW};Token=demo12 words", "[REDACTED:api_key] words"),
+    (f"Server=db;{_PWD_IS}{PW} long phrase", "Server=db;[REDACTED:api_key] long phrase"),
+]
 
 
 @pytest.mark.parametrize(("line", "expected"), _AFTER_A_PASSWORD)
-def test_a_field_after_a_connection_password_is_hidden_unless_it_is_plain(
+def test_a_field_after_a_connection_password_is_shown_or_hidden_as_on_main(
     line: str, expected: str
 ) -> None:
     trace, _fired = scrub_content(line)
@@ -607,7 +631,7 @@ def _shown(text: str) -> str:
 
 
 _FIELD_SECRET: Final = "tk-41"
-#: Where the reader of the next fields stops before the connection string ends.
+#: Connection strings with odd parts after the password.
 _STOPS: Final[list[str]] = [
     ";Database=d;;",  # a double semicolon
     ";Database=d;1x=v;",  # a name that does not start with a letter
@@ -618,46 +642,87 @@ _STOPS: Final[list[str]] = [
     ";Database=" + "d" * 1100 + ";",  # a field more than 1,024 characters further on
 ]
 _STOPPED: Final[list[str]] = [
-    f"{label}example-password{stop}{name}={_FIELD_SECRET}"
+    f"{label}{value}{stop}{name}={_FIELD_SECRET}"
     for label in (_PWD_IS, _PASSWORD_IS)
+    for value in ("example-password", "'made up'")
     for stop in _STOPS
     for name in ("AccountKey", "SharedAccessKey", "Token")
 ]
 
 
+def _content_policy() -> RedactionPolicy:
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    return _CONTENT_POLICY
+
+
+def _hidden_characters(text: str, policy: RedactionPolicy) -> set[int]:
+    """The places of *text* that the answer under *policy* hides, rule by rule.
+
+    It runs the rules the way the engine does on one text, and keeps for
+    each character of the answer the place in *text* it came from. The
+    answer it builds is checked against the engine's answer.
+    """
+    current, origin, hidden = text, list(range(len(text))), set()
+    for rule in policy.rules:
+        spans = secret_spans(get_pattern(rule.pattern), current)
+        parts: list[str] = []
+        places: list[int] = []
+        pos = 0
+        for start, end in spans:
+            mark = f"[REDACTED:{rule.pattern}]"
+            parts += [current[pos:start], mark]
+            places += origin[pos:start] + [-1] * len(mark)
+            hidden.update(place for place in origin[start:end] if place >= 0)
+            pos = end
+        current = "".join([*parts, current[pos:]])
+        origin = places + origin[pos:]
+    assert current == redact(text, policy).redacted
+    return hidden
+
+
+def _not_a_secret_value_change(text: str, policy: RedactionPolicy) -> list[str]:
+    """Each difference to the answer of main that is not a secret value replaced by the mark.
+
+    The answer now shows nothing that main hides. It hides a part that
+    main shows only inside a value this rule reads as a secret.
+    """
+    on_main = _hidden_characters(text, _without_command_rule(policy))
+    now = _hidden_characters(text, policy)
+    values = {place for a, b in COMMAND_SECRET.secret_spans(text) for place in range(a, b)}
+    wrong = [f"shown now: {text[place]!r} at {place}" for place in sorted(on_main - now)]
+    wrong += [f"hidden now: {text[place]!r} at {place}" for place in sorted(now - on_main - values)]
+    return wrong
+
+
 @pytest.mark.parametrize(
     "text", [*_STOPPED, *(json.dumps({"msg": line, "ok": 1}) for line in _STOPPED)]
 )
-def test_the_rest_after_a_stop_of_the_field_reader_stays_hidden(text: str) -> None:
-    """After a stop, the answer and the trace show no word that main hides."""
-    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
-
-    for policy in (get_default_policy(), _CONTENT_POLICY):
-        on_main = redact(text, _without_command_rule(policy)).redacted
-        now = redact(text, policy).redacted
-        assert _FIELD_SECRET not in on_main
-        assert _FIELD_SECRET not in now
-        shown = _shown(_NEXT_FIELDS.sub(_MARK, now))
-        before = _shown(on_main)
-        more = {w for w in _WORD.findall(shown) if w not in before and not _LABEL.fullmatch(w)}
-        assert more == set()
+def test_odd_parts_after_a_connection_password_are_shown_or_hidden_as_on_main(
+    text: str,
+) -> None:
+    for policy in (get_default_policy(), _content_policy()):
+        if _FIELD_SECRET not in redact(text, _without_command_rule(policy)).redacted:
+            assert _FIELD_SECRET not in redact(text, policy).redacted
+        assert _not_a_secret_value_change(text, policy) == []
 
 
-def test_the_rule_only_hides_more() -> None:
-    """No word that the policy without this rule hides is shown with it.
-
-    The one exception: the next fields of a connection string after its
-    password whose names are on the plain list.
-    """
-    before_policy = _without_command_rule()
+def _all_test_texts() -> list[str]:
     texts = _texts_of_other_tests() + [line for line, _gone, _kept in _HIDDEN]
     texts += [line for line, _expected in _WHOLE_OUTPUT]
     texts += [line for line, _kept in _AFTER_APOSTROPHE]
     texts += [line for line, _expected in _AFTER_A_PASSWORD]
+    texts += _STOPPED + _KEPT + _JSON_FORMS
+    return texts + [_json_string(form) for form in _JSON_FORMS]
+
+
+def test_the_rule_only_hides_more() -> None:
+    """No word that the policy without this rule hides is shown with it."""
+    before_policy = _without_command_rule()
     shown_now: dict[str, set[str]] = {}
-    for text in texts:
+    for text in _all_test_texts():
         before = _shown(redact(text, before_policy).redacted)
-        now = _shown(_NEXT_FIELDS.sub(_MARK, redact(text, get_default_policy()).redacted))
+        now = _shown(redact(text, get_default_policy()).redacted)
         # A word shown now must be shown without the rule too (also as a part
         # of a longer word there: ``-p`` of ``-pvalue``), or be a label.
         more = {
@@ -666,6 +731,16 @@ def test_the_rule_only_hides_more() -> None:
         if more:
             shown_now[text] = more
     assert shown_now == {}
+
+
+def test_every_change_to_an_answer_is_a_secret_value_replaced_by_the_mark() -> None:
+    """Over the texts of main's own tests and of the form tests, in the answer and the trace."""
+    wrong: dict[str, list[str]] = {}
+    for text in _all_test_texts():
+        for policy in (get_default_policy(), _content_policy()):
+            if found := _not_a_secret_value_change(text, policy):
+                wrong[text] = found
+    assert wrong == {}
 
 
 #: Ordinary command lines with no secret in them.

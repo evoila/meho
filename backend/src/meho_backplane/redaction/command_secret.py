@@ -16,22 +16,20 @@ option name and the words around it stay readable:
   ``ldapsearch`` / ``ldapmodify`` with ``-w x``, ``curl -u user:x``,
   ``smbclient -U user%x``;
 * a database login ``user/password@service`` (also ``@//host:port/service``),
-  with quoted, joined and escaped password parts (``user/"x y"@service``);
+  with quoted, joined and escaped password parts (``user/"x y"@service``).
+  A service name that looks like a branch, a version or a commit id
+  (``@main``, ``@v4``) is a repository reference, unless a database client
+  (``sqlplus``, ``rman``, ``expdp``, ...) stands before it in the same command;
 * ``Password=``, ``Pwd=`` and ``pw=`` in a connection string. A value in
   quotes or in braces (``Pwd={x;y}``) is read to its closing mark, also
   across line breaks; a value that is never closed ends at its line. A
-  value without them runs to the ``;`` (or the end of the line), so it may
-  hold spaces and quotes (``Pwd=made'up;``). Text counts as a connection string
-  when a ``;`` stands before the label, or a ``;`` ends the value and a
-  next field (``;Database=``) follows or no option (``-x``) or ``key=``
-  word stands in the value. A label behind ``-`` is a command option.
-  When a ``;`` ends the value, ``Password=`` and ``Pwd=`` are hidden with
-  it, so the ``api_key`` rule does not hide the next fields or the closing
-  quote of a JSON string too. A next field stays only when its name holds
-  no secret (``;Database=``); the value of every other one is hidden too.
-  Where the reading of the next fields stops (``;;``, a part that is not a
-  field, a value that is never closed), the rest up to white space or a
-  quote is hidden too.
+  value without them runs to the ``;`` that ends it, so it may hold spaces
+  and quotes (``Pwd=made'up;``). With no ``;`` after it, it ends at white
+  space. Text counts as a connection string when a ``;`` stands before
+  the label, or a ``;`` ends the value and a next field (``;Database=``)
+  follows or no option (``-x``) or ``key=`` word stands in the value. A
+  label behind ``-`` is a command option. Only the value is hidden: the
+  label and the next fields stay as the other rules leave them.
   Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``, ``APP_KEY=x``);
@@ -52,6 +50,19 @@ runs to the end of the line. A form that stands in a quoted command
 (``{"msg":"mysql -px","ok":1}``) ends at the closing quote of that
 string. A quoted tool name (``"mysql" -px``) is not a quoted command: its
 options follow the closing quote.
+
+A double-quoted string with a backslash in it (a JSON string, or a quoted
+command) is also read as its text: ``\\"`` is a quote and ``\\\\`` is one
+backslash there. So ``{"msg":"run --password \\"made up\\""}`` hides
+``\\"made up\\"`` whole. A string inside such a string is read the same
+way, up to three levels deep.
+
+The finder that the named pattern uses (:mod:`.patterns`) knows the
+``api_key`` rule, which runs right after this one. A value that this rule
+reads and that rule hides whole is left to it, so the answer stays as it
+was. A value that the ``api_key`` rule hides only in part is hidden whole,
+together with that part. So this rule changes an answer only where it
+hides more of a secret value.
 
 Names that look like a secret but are not one stay: paging tokens
 (``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), a short list
@@ -497,6 +508,23 @@ def _login_password_end(text: str, start: int, size: int) -> int | None:
     return None
 
 
+#: A database client: a login after it in the same command is a login, also
+#: when its service name looks like a branch or a version (``@main``, ``@v19prod``).
+_DATABASE_CLIENT: Final = re.compile(
+    r"(?<![\w.-])(?:sqlplus|rman|expdp|impdp|exp|imp|sqlldr|dgmgrl)(?![\w.-])"
+)
+#: How far before a login a database client is looked for.
+_CLIENT_WINDOW: Final = 512
+_COMMAND_BREAK: Final = re.compile(r"[\n;|&]")
+
+
+def _after_database_client(text: str, at: int) -> bool:
+    """True when a database client stands before *at* in the same command."""
+    begin = max(0, at - _CLIENT_WINDOW)
+    breaks = [m.end() for m in _COMMAND_BREAK.finditer(text, begin, at)]
+    return _DATABASE_CLIENT.search(text, breaks[-1] if breaks else begin, at) is not None
+
+
 def _login_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     quotes = _OuterQuotes(text)
@@ -511,7 +539,11 @@ def _login_spans(text: str) -> list[tuple[int, int]]:
         if service is None:
             continue
         name = service.group(0)
-        if not name.startswith("//") and _NOT_A_SERVICE.fullmatch(name.split(":")[0]):
+        if (
+            not name.startswith("//")
+            and _NOT_A_SERVICE.fullmatch(name.split(":")[0])
+            and not _after_database_client(text, match.start())
+        ):
             continue
         if _is_hidden(text[match.end() : at]):
             spans.append((match.end(), at))
@@ -650,149 +682,8 @@ def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -
     return "=" not in field
 
 
-#: The connection string labels that the ``api_key`` rule reads too.
-_API_KEY_LABELS: Final = frozenset({"password", "pwd"})
-#: Connection string fields that hold no secret. After a hidden password, the
-#: value of every other next field is hidden too (``;Token=x``).
-_PLAIN_FIELDS: Final = frozenset(
-    {
-        "server",
-        "data source",
-        "host",
-        "hostname",
-        "address",
-        "addr",
-        "network address",
-        "port",
-        "database",
-        "initial catalog",
-        "dbname",
-        "uid",
-        "user",
-        "user id",
-        "userid",
-        "username",
-        "user name",
-        "driver",
-        "dsn",
-        "provider",
-        "encrypt",
-        "trustservercertificate",
-        "trust server certificate",
-        "timeout",
-        "connect timeout",
-        "connection timeout",
-        "command timeout",
-        "application name",
-        "integrated security",
-        "trusted_connection",
-        "multipleactiveresultsets",
-        "pooling",
-        "min pool size",
-        "max pool size",
-        "sslmode",
-        "ssl mode",
-        "schema",
-        "charset",
-        "character set",
-        "persist security info",
-        "authentication",
-    }
-)
-_SPACES: Final = re.compile(r"[ \t]+")
-_FIELD_END: Final = re.compile(r";(?:[ \t]*[A-Za-z][\w .-]{0,63}=|[\s'\"]|\Z)")
-
-
-def _blanks_end(text: str, pos: int, window: int) -> int:
-    """Index after the spaces or tabs at *pos* (``Database=d ;Token=x``), at most *window*."""
-    blanks = _BLANKS.match(text, pos, max(pos, window))
-    return pos if blanks is None else blanks.end()
-
-
-_REST_END: Final = re.compile(r"""[\s'"]""")
-
-
-def _rest_span(text: str, pos: int, limit: int) -> tuple[int, int] | None:
-    """The part at *pos* that the next field reader did not read, or ``None``.
-
-    It runs to white space, a quote or *limit* (the closing quote of a JSON
-    string), as far as the ``api_key`` rule hides a value. A lone ``;`` is
-    not hidden.
-    """
-    found = _REST_END.search(text, pos, limit)
-    end = limit if found is None else found.start()
-    rest = text[pos:end]
-    if not rest.strip(";") or not _is_hidden(rest):
-        return None
-    return pos, end
-
-
-def _next_field_spans(
-    text: str, pos: int, window: int, limit: int, marks: _ClosingMarks
-) -> list[tuple[int, int]]:
-    """The values of the next fields after *pos* whose names are not on the plain list.
-
-    Where the reading stops before the connection string ends (``;;``, a
-    part that is not a field, or the end of *window*), the rest up to white
-    space or a quote is hidden too. A value that is not closed before *limit*
-    is hidden with its field name to the end of its line or *limit*.
-    """
-    spans: list[tuple[int, int]] = []
-    while True:
-        at = _blanks_end(text, pos, window)
-        field = _NEXT_FIELD.match(text, at, window)
-        if field is None:
-            break
-        start = field.end()
-        while start < window and text[start] in " \t":
-            start += 1
-        if start < window and text[start] in _CLOSING:
-            end = _closed_value_end(text, start, marks)
-            if end is None or end > limit:
-                # A value that is not closed before *limit*: the field and the
-                # rest of its line, up to *limit*.
-                line_end = _quoted_connection_value(text, start, marks)[1]
-                spans.append((field.start() + 1, min(line_end, limit)))
-                return spans
-            span = (start, end)
-        else:
-            stop = _VALUE_STOP.search(text, start, window)
-            stop_at = window if stop is None else stop.start()
-            span = (start, start + len(text[start:stop_at].rstrip()))
-        name = _SPACES.sub(" ", field.group(0)[1:-1].strip()).lower()
-        if name not in _PLAIN_FIELDS and _is_hidden(text[span[0] : span[1]]):
-            # The name goes with the value when a ``;`` follows, as for the password.
-            named = _FIELD_END.match(text, _blanks_end(text, span[1], window)) is not None
-            spans.append((field.start() + 1, span[1]) if named else span)
-        pos = max(span[1], field.end())
-    rest = _rest_span(text, at, limit)
-    return spans if rest is None else [*spans, rest]
-
-
-def _with_label(
-    text: str,
-    match: re.Match[str],
-    span: tuple[int, int],
-    window: int,
-    limit: int,
-    marks: _ClosingMarks,
-) -> list[tuple[int, int]]:
-    """*span*, with the label in front of it when a ``;`` ends the value.
-
-    The ``;`` ends it when a next field, white space, a quote or the end of
-    the text follows (``;Database=``, ``;"`` at the end of a JSON string).
-
-    The ``api_key`` rule reads ``Pwd=<placeholder>;Database=d`` as one long
-    value and hides the next fields with it, also the closing quote of a
-    JSON string. Without its label (``[REDACTED:...];Database=d``) the rule
-    finds nothing, so the closing quote stays. The next fields stay readable
-    only when they hold no secret: every other next field value is hidden.
-    """
-    if match["label"].lower() not in _API_KEY_LABELS or not _FIELD_END.match(
-        text, _blanks_end(text, span[1], window)
-    ):
-        return [span]
-    return [(match.start(), span[1]), *_next_field_spans(text, span[1], window, limit, marks)]
+#: White space ends an unquoted connection string value that no ``;`` ends.
+_WHITE: Final = re.compile(r"\s")
 
 
 def _connection_span(
@@ -804,9 +695,10 @@ def _connection_span(
     close = quotes.end(match.start())
     limit = len(text) if close is None else close
     if text[start] in _CLOSING:
-        span = _quoted_connection_value(text, start, marks)
-        end_of_fields = max(span[1], min(limit, span[1] + _VALUE_MAX))
-        return _with_label(text, match, span, end_of_fields, max(span[1], limit), marks)
+        # A value that the closing quote of a JSON string or a quoted command
+        # cuts off ends there, so the string still closes.
+        begin, end = _quoted_connection_value(text, start, marks)
+        return [(begin, min(end, limit))]
     window = min(limit, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
     stop_at = window if stop is None else stop.start()
@@ -820,15 +712,17 @@ def _connection_span(
             return []
         word = _value_span(text, start, close)
         return [] if word is None else [word]
+    if not text.startswith(";", stop_at):
+        # No ``;`` ends the value: the words after its first white space stay.
+        white = _WHITE.search(text, start, stop_at)
+        if white is not None:
+            stop_at = white.start()
     # A value hidden by an earlier rule is not part of this one.
     earlier = _PLACEHOLDER.search(text, start, stop_at)
     if earlier is not None:
         stop_at = earlier.start()
     end = start + len(text[start:stop_at].rstrip())
-    if not _is_hidden(text[start:end]):
-        return []
-    end_of_fields = min(limit, end + _VALUE_MAX)
-    return _with_label(text, match, (start, end), end_of_fields, limit, marks)
+    return [(start, end)] if _is_hidden(text[start:end]) else []
 
 
 def _connection_spans(text: str) -> list[tuple[int, int]]:
@@ -1004,21 +898,145 @@ def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+#: How many levels of strings inside strings are read (a JSON log line in a
+#: JSON string in a JSON document).
+_MAX_STRING_DEPTH: Final = 3
+_STRING_MARK: Final = re.compile(r'["\\\n]')
+_ESCAPE: Final = re.compile(r"\\(?:u[0-9A-Fa-f]{4}|.)", re.DOTALL)
+_ESCAPED_CHARS: Final = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
+
+def _escaped_strings(text: str) -> list[tuple[int, int]]:
+    """The inside of each double-quoted string on one line that holds a backslash.
+
+    Read once from left to right: outside a string a ``"`` opens one,
+    inside it a backslash takes the next character and a ``"`` closes it.
+    A line break ends a string that is never closed.
+    """
+    found: list[tuple[int, int]] = []
+    opening = -1
+    escaped = False
+    pos = 0
+    while (mark := _STRING_MARK.search(text, pos)) is not None:
+        at, char = mark.start(), mark.group(0)
+        pos = at + 1
+        if char == "\n":
+            opening = -1
+        elif char == "\\":
+            if opening >= 0:
+                escaped = True
+                pos = at + 2
+        elif opening < 0:
+            opening, escaped = at, False
+        else:
+            if escaped:
+                found.append((opening + 1, at))
+            opening = -1
+    return found
+
+
+def _decoded(text: str, start: int, end: int) -> tuple[str, list[int]]:
+    """The text of the string inside *start*..*end*, and where each character came from.
+
+    ``starts[i]`` is the index in *text* where character ``i`` of the
+    result starts; one more entry holds *end*. An escape that JSON does
+    not know (``\\ ``) stays as it is.
+    """
+    parts: list[str] = []
+    starts: list[int] = []
+    pos = start
+    for escape in _ESCAPE.finditer(text, start, end):
+        parts.append(text[pos : escape.start()])
+        starts.extend(range(pos, escape.start()))
+        sequence = escape.group(0)
+        char = chr(int(sequence[2:], 16)) if sequence[1] == "u" else _ESCAPED_CHARS.get(sequence[1])
+        if char is None:
+            parts.append(sequence)
+            starts.extend(range(escape.start(), escape.end()))
+        else:
+            parts.append(char)
+            starts.append(escape.start())
+        pos = escape.end()
+    parts.append(text[pos:end])
+    starts.extend(range(pos, end))
+    starts.append(end)
+    return "".join(parts), starts
+
+
+def _value_spans(text: str, depth: int = 0) -> list[tuple[int, int]]:
+    """The secret values of every form, also those inside an escaped string."""
+    spans = [
+        *_long_option_spans(text),
+        *_tool_spans(text),
+        *_login_spans(text),
+        *_connection_spans(text),
+        *_environment_spans(text),
+        *_xml_spans(text),
+    ]
+    if depth < _MAX_STRING_DEPTH:
+        for start, end in _escaped_strings(text):
+            inner, starts = _decoded(text, start, end)
+            spans.extend((starts[a], starts[b]) for a, b in _value_spans(inner, depth + 1))
+    return _merge(spans)
+
+
+def _left_to_next_rule(
+    text: str, spans: list[tuple[int, int]], next_rule: re.Pattern[str]
+) -> list[tuple[int, int]]:
+    """*spans*, without those that *next_rule* hides whole, joined with those it hides in part.
+
+    *next_rule* runs on the same text right after this rule. A value it
+    hides whole is left to it, so that part of the answer stays as it was.
+    A value it hides only in part is joined with what it hides there, so
+    nothing that it hides is shown.
+    """
+    covers = [match.span() for match in next_rule.finditer(text)]
+    if not covers:
+        return spans
+    ends = [end for _start, end in covers]
+    kept: list[tuple[int, int]] = []
+    for start, end in spans:
+        first = bisect.bisect_right(ends, start)
+        last = first
+        while last < len(covers) and covers[last][0] < end:
+            last += 1
+        overlapping = covers[first:last]
+        if len(overlapping) == 1 and overlapping[0][0] <= start and end <= overlapping[0][1]:
+            continue
+        if overlapping:
+            start = min(start, overlapping[0][0])
+            end = max(end, overlapping[-1][1])
+        kept.append((start, end))
+    return _merge(kept)
+
+
 class CommandSecretFinder:
-    """Report the secret value of each command line form listed in the module docstring."""
+    """Report the secret value of each command line form listed in the module docstring.
+
+    With *next_rule* (the ``api_key`` pattern, which runs right after this
+    rule), a value that rule hides whole is left to it, and a value it
+    hides in part is joined with that part.
+    """
+
+    def __init__(self, next_rule: re.Pattern[str] | None = None) -> None:
+        self._next_rule = next_rule
 
     def secret_spans(self, text: str) -> list[tuple[int, int]]:
         """Return ``(start, end)`` of every secret value, left to right, never overlapping."""
-        return _merge(
-            [
-                *_long_option_spans(text),
-                *_tool_spans(text),
-                *_login_spans(text),
-                *_connection_spans(text),
-                *_environment_spans(text),
-                *_xml_spans(text),
-            ]
-        )
+        spans = _value_spans(text)
+        if self._next_rule is None or not spans:
+            return spans
+        return _left_to_next_rule(text, spans, self._next_rule)
 
 
+#: The finder without the ``api_key`` rule: it reports every value it reads.
 COMMAND_SECRET: Final[CommandSecretFinder] = CommandSecretFinder()

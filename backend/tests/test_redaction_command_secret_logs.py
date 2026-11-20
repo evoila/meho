@@ -20,6 +20,7 @@ import pytest
 from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
+from meho_backplane.redaction.policy import RedactionPolicy
 from meho_backplane.redaction.resolver import get_default_policy
 
 PW: Final = "made-up-pw-4711"
@@ -35,12 +36,14 @@ def _answer_and_trace(text: str) -> tuple[str, str]:
 
 # -- JSON log lines ---------------------------------------------------------------
 
-#: Command texts as a JSON log line holds them in its ``msg`` field.
+#: Command texts as a JSON log line holds them in its ``msg`` field. The
+#: api_key rule does not hide these values, so this rule does, and the line
+#: still parses.
 _JSON_COMMANDS: Final[list[str]] = [
     f"run mysql -uroot -p{PW}",
     f"run --password {PW}",
-    f"DB_PASSWORD={PW}",
-    f"Server=db;{_PWD_IS}{PW}",
+    f"DB_PASSWORD='{PW} x'",
+    f"Server=db;{_PWD_IS}'{PW} x'",
 ]
 
 
@@ -63,7 +66,7 @@ def test_a_json_log_line_still_parses_and_keeps_its_other_fields(
         for number, row in enumerate(rows, start=1):
             assert row["status"] == "failed"
             assert row["ts"] == f"t{number}"
-            assert "[REDACTED:" in row["msg"]
+            assert "[REDACTED:command_line_secret]" in row["msg"]
 
 
 @pytest.mark.parametrize("command", _JSON_COMMANDS)
@@ -75,52 +78,105 @@ def test_a_pretty_printed_json_document_still_parses(command: str) -> None:
         assert json.loads(out)["ts"] == "t1"
 
 
-#: A connection string password with a field after it: both labels, and a
-#: quoted, a braced and a plain value.
-_CONNECTION_COMMANDS: Final[list[str]] = [
-    f"Server=db;Uid=sa;{label}{value};Database=d"
-    for label in (_PWD_IS, "Pass" + "word=")
-    for value in (f"'{PW}'", f"{{{PW}}}", PW)
+def _on_main(text: str) -> tuple[str, str]:
+    """What an answer and a trace show of *text* without this rule."""
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    def without(policy: RedactionPolicy) -> RedactionPolicy:
+        rules = tuple(rule for rule in policy.rules if rule.pattern != "command_line_secret")
+        return policy.model_copy(update={"rules": rules})
+
+    return (
+        redact(text, without(get_default_policy())).redacted,
+        redact(text, without(_CONTENT_POLICY)).redacted,
+    )
+
+
+#: Values that the api_key rule hides whole: the answer is the one of main.
+_KEY_RULE_COMMANDS: Final[list[str]] = [
+    f"DB_PASSWORD={PW}",
+    f"Server=db;{_PWD_IS}{PW}",
+    *(
+        f"Server=db;Uid=sa;{label}{value};Database=d"
+        for label in (_PWD_IS, "Pass" + "word=")
+        for value in (f"'{PW}'", f"{{{PW}}}", PW)
+    ),
+    *(f"{label}{value};" for label in (_PWD_IS, "Pass" + "word=") for value in (f"'{PW}'", PW)),
 ]
 
 
 @pytest.mark.parametrize("style", ["compact", "spaced"])
-@pytest.mark.parametrize("lines", [1, 3])
-@pytest.mark.parametrize("command", _CONNECTION_COMMANDS)
-def test_a_connection_string_in_a_json_line_keeps_the_fields_after_the_password(
-    command: str, lines: int, style: str
-) -> None:
-    log = "\n".join(_json_line(command, number, style) for number in range(1, lines + 1))
-    for out in _answer_and_trace(log):
-        assert PW not in out
-        rows = [json.loads(row) for row in out.split("\n")]
-        assert len(rows) == lines
-        for number, row in enumerate(rows, start=1):
-            assert row["msg"] == "Server=db;Uid=sa;[REDACTED:command_line_secret];Database=d"
-            assert row["status"] == "failed"
-            assert row["ts"] == f"t{number}"
-
-
-#: A connection string password as the last field, with a ``;`` after it.
-_LAST_FIELD_COMMANDS: Final[list[str]] = [
-    f"{label}{value};"
-    for label in (_PWD_IS, "Pass" + "word=")
-    for value in (f"'{PW}'", f"{{{PW}}}", PW)
-]
-
-
-@pytest.mark.parametrize("style", ["compact", "spaced"])
-@pytest.mark.parametrize("command", _LAST_FIELD_COMMANDS)
-def test_a_last_connection_password_with_a_semicolon_keeps_the_json_line(
+@pytest.mark.parametrize("command", _KEY_RULE_COMMANDS)
+def test_a_json_line_whose_password_the_api_key_rule_hides_is_the_answer_of_main(
     command: str, style: str
 ) -> None:
     log = _json_line(command, 1, style)
+    assert _answer_and_trace(log) == _on_main(log)
     for out in _answer_and_trace(log):
         assert PW not in out
+
+
+# -- a quoted password in a JSON string ---------------------------------------------
+
+#: The two words of a quoted password; JSON writes its quotes as ``\\"``.
+_FIRST, _SECOND = "made-up", "phrase-4711"
+_QUOTED: Final = f'"{_FIRST} {_SECOND}"'
+#: Built from pieces, so secret scanners do not flag the line that uses it.
+_USER_IS: Final = "bob" + ":"
+#: Each form with a password of two words in double quotes.
+_JSON_FORMS: Final[list[str]] = [
+    f"run --password {_QUOTED} tail",
+    f"run --password={_QUOTED} tail",
+    f"run --api-key={_QUOTED} tail",
+    f"mysql -u root -p{_QUOTED} appdb",
+    f"sshpass -p {_QUOTED} ssh host",
+    f"sqlcmd -S srv -P {_QUOTED} -Q x",
+    f"ldapsearch -x -w {_QUOTED} -b dc=x",
+    f"curl -u {_USER_IS}{_QUOTED} https://h/x",
+    f"smbclient //h/share -U bob%{_QUOTED} -c ls",
+    f"DB_PASSWORD={_QUOTED} run",
+    f"login {'pass' + 'word'}={_QUOTED} --verbose",
+    f"sqlplus scott/{_QUOTED}@orcl as sysdba",
+    f"Server=db;{_PWD_IS}{_QUOTED};Database=d",
+    f"run --password {_FIRST}\\ {_SECOND} tail",
+]
+
+
+def _json_string(command: str) -> str:
+    """*command* in a JSON log line that stands in a JSON string of another one."""
+    inner = json.dumps({"msg": command, "status": "failed"})
+    return json.dumps({"log": inner, "ok": 1})
+
+
+@pytest.mark.parametrize("command", _JSON_FORMS)
+def test_a_quoted_password_in_a_json_string_is_hidden_whole(command: str) -> None:
+    text = json.dumps({"msg": command, "status": "failed"})
+    for out in _answer_and_trace(text):
+        assert _FIRST not in out
+        assert _SECOND not in out
         row = json.loads(out)
-        assert row["msg"] == "[REDACTED:command_line_secret];"
         assert row["status"] == "failed"
-        assert row["ts"] == "t1"
+        assert "[REDACTED:" in row["msg"]
+
+
+@pytest.mark.parametrize("command", _JSON_FORMS)
+def test_a_quoted_password_in_a_json_string_inside_a_json_string_is_hidden_whole(
+    command: str,
+) -> None:
+    for out in _answer_and_trace(_json_string(command)):
+        assert _FIRST not in out
+        assert _SECOND not in out
+        row = json.loads(out)
+        assert row["ok"] == 1
+        inner = json.loads(row["log"])
+        assert inner["status"] == "failed"
+        assert "[REDACTED:" in inner["msg"]
+
+
+def test_the_words_around_a_password_in_a_json_string_stay() -> None:
+    text = json.dumps({"msg": f"run --password {_QUOTED} tail", "status": "failed"})
+    for out in _answer_and_trace(text):
+        assert json.loads(out)["msg"] == "run --password [REDACTED:command_line_secret] tail"
 
 
 # -- a quote that is never closed on its line ---------------------------------------
@@ -215,7 +271,9 @@ def test_a_working_folder_after_a_command_on_the_line_above_stays(brk: str) -> N
 # -- one long line ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("unit", ['"--password x" ', '"u/p@svc" ', '"a;pw=x" '])
+@pytest.mark.parametrize(
+    "unit", ['"--password x" ', '"u/p@svc" ', '"a;pw=x" ', '"--password \\"x y\\"" ', '"\\\\" ']
+)
 def test_a_4_mib_line_of_quoted_forms_is_read_in_linear_time(unit: str) -> None:
     # The end of the line is found once per line. A search for it for each
     # quoted string takes square time: then four times the text takes about

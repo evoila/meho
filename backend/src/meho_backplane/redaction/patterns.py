@@ -53,7 +53,7 @@ import re
 from typing import Final, Protocol
 
 from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
-from meho_backplane.redaction.command_secret import COMMAND_SECRET
+from meho_backplane.redaction.command_secret import CommandSecretFinder
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
@@ -193,6 +193,11 @@ MASK_CHARS: Final[str] = "*\u2022\u25cf\u00b7"
 # that is mask characters to its end is skipped: ``****abc123`` goes on
 # after the masks and is redacted whole.
 _NOT_A_MASK: Final[str] = r"(?![" + MASK_CHARS + "]+(?!" + _VALUE_CHARS + "))"
+# The command_line_secret rule runs right before this one and hides only a
+# value: ``Pwd=[REDACTED:command_line_secret];Database=d`` keeps its label
+# and its next fields. Its mark is never read as the start of a value, also
+# when a ``;`` follows it, so this rule does not hide those fields as well.
+_NOT_A_COMMAND_LINE_MARK: Final[str] = r"(?!\[REDACTED:command_line_secret\])"
 _API_KEY = re.compile(
     r"(?<![A-Za-z0-9])(?:"
     r"api[_-]?key"
@@ -208,6 +213,7 @@ _API_KEY = re.compile(
     r")"
     r"\s*[=:]\s*['\"]?"
     + _NOT_A_PLACEHOLDER
+    + _NOT_A_COMMAND_LINE_MARK
     + _NOT_A_MASK
     + _VALUE_CHARS
     + "{8,"
@@ -341,7 +347,9 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "url_secret": URL_SECRET,
-    "command_line_secret": COMMAND_SECRET,
+    # It knows the api_key rule that runs right after it, so it changes an
+    # answer only where it hides more of a secret value.
+    "command_line_secret": CommandSecretFinder(next_rule=_API_KEY),
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,

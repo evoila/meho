@@ -558,14 +558,17 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     in place; a YAML file inside a JSON note is read too). Two more steps
     (`redaction/secret_markup.py`) hide what the YAML read does not see:
     a comment line such as `# dbPassword: ...` in a YAML text, every
-    `key: value` line of a text that does not read as YAML (with the
-    indented lines of a block value under a secret name), and XML text:
-    the text of a secret-named element (`<password>...</password>`, child
-    elements and CDATA included), a secret-named attribute
-    (`dbPassword="..."`), and the `value` attribute of an element whose
-    `name` or `key` attribute is a secret name
-    (`<add key="DbPassword" value="..."/>`). These steps write the marker
-    without quotes. An element with no closing tag is not touched, and
+    `key: value` line of a text that does not read as YAML (the key bare
+    or in quotes; the lines below a secret-named key that are indented
+    deeper are hidden with the value; a note after the value such as
+    `# rotate monthly` stays), and XML text: the text of a secret-named
+    element (`<password>...</password>`, child elements and CDATA
+    included; a closing tag closes the nearest open element with its
+    name, tags inside CDATA are text, and the text of an XML comment is
+    read on its own), a secret-named attribute (`dbPassword="..."`), and
+    the `value` attribute of an element whose `name` or `key` attribute
+    is a secret name (`<add key="DbPassword" value="..."/>`). These steps
+    write the marker without quotes. An element with no closing tag is not touched, and
     text without a secret-named field comes back unchanged. The YAML read
     uses the same rules as the key-name walk: a bare `community` in an SNMP
     place, and the `value` of a secret-named pair also when it is a list

@@ -118,7 +118,10 @@ def _shown_fakes(blob: str) -> list[str]:
     ("text", "expected"),
     [
         (_COMMENT_YAML, f"db:\n  host: db\n  # dbPassword: {_MARKER}\n  port: 5432\n"),
-        (f"#dbSecret: {_FAKE_COMMENT} # old\nhost: db\n", f"#dbSecret: {_MARKER}\nhost: db\n"),
+        (
+            f"#dbSecret: {_FAKE_COMMENT} # old\nhost: db\n",
+            f"#dbSecret: {_MARKER} # old\nhost: db\n",
+        ),
         (f"## - apiToken: '{_FAKE_COMMENT}'\n", f"## - apiToken: {_MARKER}\n"),
     ],
     ids=["indented", "inline-note", "list-item-quoted"],
@@ -155,6 +158,80 @@ def test_broken_yaml_hides_secret_named_lines_and_their_blocks() -> None:
     ids=["nested-map-crlf", "tab-indent", "list-item", "comment"],
 )
 def test_broken_yaml_forms_are_hidden(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f'bad: [\n"dbPassword": {_FAKE_BROKEN}\n',
+            f'bad: [\n"dbPassword": {_MARKER}\n',
+        ),
+        (
+            f"bad: [\n'dbPassword': {_FAKE_BROKEN}\n",
+            f"bad: [\n'dbPassword': {_MARKER}\n",
+        ),
+        (
+            f'bad: [\n  - "apiToken" : {_FAKE_BROKEN}\nport: 1\n',
+            f'bad: [\n  - "apiToken" : {_MARKER}\nport: 1\n',
+        ),
+    ],
+    ids=["double-quoted-key", "single-quoted-key", "quoted-key-list-item"],
+)
+def test_broken_yaml_hides_values_under_quoted_keys(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"bad: [\ndbSecret: # current\n    {_FAKE_BLOCK}\nport: 1\n",
+            f"bad: [\ndbSecret: {_MARKER} # current\nport: 1\n",
+        ),
+        (
+            f"bad: [\ndbPassword: first\n  {_FAKE_BLOCK}\n  {_FAKE_BROKEN}\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER}\nport: 1\n",
+        ),
+        (
+            f'bad: [\n  dbPassword: "first\n    {_FAKE_BLOCK}"\n  port: 1\n',
+            f"bad: [\n  dbPassword: {_MARKER}\n  port: 1\n",
+        ),
+        (
+            f"bad: [\n- dbPassword: first\n    {_FAKE_BLOCK}\n  host: db\n- port: 1\n",
+            f"bad: [\n- dbPassword: {_MARKER}\n  host: db\n- port: 1\n",
+        ),
+    ],
+    ids=["value-after-a-note", "plain-on-more-lines", "quoted-on-more-lines", "list-item"],
+)
+def test_broken_yaml_hides_every_line_of_a_secret_value(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"bad: [\ndbPassword: {_FAKE_BROKEN} # rotate monthly\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER} # rotate monthly\nport: 1\n",
+        ),
+        (
+            f"bad: [\ndbPassword: '{_FAKE_BROKEN}'  # rotate monthly\r\n",
+            f"bad: [\ndbPassword: {_MARKER}  # rotate monthly\r\n",
+        ),
+        (
+            f"bad: [\ndbSecret: |  # the current key\n  {_FAKE_BLOCK}\nport: 1\n",
+            f"bad: [\ndbSecret: {_MARKER}  # the current key\nport: 1\n",
+        ),
+        (
+            f"# dbPassword: {_FAKE_COMMENT} # rotate monthly\nport: 1\n",
+            f"# dbPassword: {_MARKER} # rotate monthly\nport: 1\n",
+        ),
+    ],
+    ids=["plain-value", "quoted-value-crlf", "block-value", "yaml-comment"],
+)
+def test_note_after_a_hidden_value_stays(text: str, expected: str) -> None:
     assert hide_secret_text(text) == expected
 
 
@@ -209,6 +286,42 @@ def test_xml_hides_secret_named_values(text: str, expected: str) -> None:
     assert hide_secret_text(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"<dbPassword><dbPassword>first</dbPassword>{_FAKE_ELEMENT}</dbPassword>",
+            f"<dbPassword>{_MARKER}</dbPassword>",
+        ),
+        (
+            f"<c><password><![CDATA[a</password>{_FAKE_ELEMENT}]]></password></c>",
+            f"<c><password>{_MARKER}</password></c>",
+        ),
+        (
+            f"<c><password><!-- </password> -->{_FAKE_ELEMENT}</password></c>",
+            f"<c><password>{_MARKER}</password></c>",
+        ),
+        (
+            f"<c><password>{_FAKE_ELEMENT}<br></password><host>db</host></c>",
+            f"<c><password>{_MARKER}</password><host>db</host></c>",
+        ),
+        (
+            f'<c><!-- <db password="{_FAKE_ATTR}"/> <token>{_FAKE_ELEMENT}</token> --></c>',
+            f'<c><!-- <db password="{_MARKER}"/> <token>{_MARKER}</token> --></c>',
+        ),
+    ],
+    ids=[
+        "same-name-child",
+        "closing-tag-in-cdata",
+        "closing-tag-in-comment",
+        "unclosed-child",
+        "inside-a-comment",
+    ],
+)
+def test_xml_secret_element_ends_at_its_own_closing_tag(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
 def test_xml_keeps_empty_flag_and_unclosed_secret_elements() -> None:
     text = (
         "<c><password/><token></token><apiKey>true</apiKey>"
@@ -231,9 +344,11 @@ def test_xml_inside_a_json_text_is_hidden_and_the_text_stays_json() -> None:
         "#!/bin/sh\n# usage: run.sh <name>\necho done\n",
         "db:\n  hosts: [db-1\n  port: 5432\n  user: app\n",
         "\tkey: value\nnote: plain words\n",
-        '<?xml version="1.0"?>\n<config xmlns="https://example.test/ns">\n'
-        '  <host name="db">db-1</host>\n  <add key="LogLevel" value="info"/>\n'
-        "  <!-- port: 5432 -->\n</config>\n",
+        (
+            '<?xml version="1.0"?>\n<config xmlns="https://example.test/ns">\n'
+            '  <host name="db">db-1</host>\n  <add key="LogLevel" value="info"/>\n'
+            "  <!-- port: 5432 -->\n</config>\n"
+        ),
         "<p>Read the <a href='https://example.test/'>guide</a> &amp; go on.</p>",
     ],
     ids=["yaml-comment", "script-comment", "broken-yaml", "broken-yaml-tab", "xml", "html"],

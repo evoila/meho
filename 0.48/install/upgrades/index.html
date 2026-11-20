@@ -3824,7 +3824,7 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.47.0</strong></td>
-<td>With <code>MCP_CLIENT_PER_TOOL_KIND</code> on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role <code>manage-users</code>. Migration <code>0172</code> adds one index on <code>audit_log</code> (person and time); it changes no row, and on a large audit log it takes a while.</td>
+<td>With <code>MCP_CLIENT_PER_TOOL_KIND</code> on, the account page of the web console shows "Your tools": each tool kind, its last use and a "Sign out this tool" button. The button ends the signed-in person's logins of that one tool in Keycloak. For this, MEHO's Keycloak admin client needs the realm-management role <code>manage-users</code>. Migration <code>0172</code> adds one index on <code>audit_log</code> (person and time); it changes no row. While the index is built, calls that write an audit row wait: about 3 seconds for 3.3 million rows in a test, longer on a larger audit log.</td>
 <td><strong>Built-in Keycloak:</strong> nothing to do; <code>meho-admin</code> already has <code>manage-users</code>. <strong>Your own Keycloak:</strong> give MEHO's Keycloak admin client <code>manage-users</code> before you turn the switch on. Without the role, the button shows an error that names it. See <a href="../keycloak-realm/#the-mcp-clients-of-the-ai-tools">The MCP clients of the AI tools</a>.</td>
 </tr>
 <tr>
@@ -4111,6 +4111,11 @@ Rows of the next release are in this table at once.</p>
 <td><strong>v0.49.0</strong></td>
 <td>A tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> now always gets the tenant folder check: every Vault path that a caller or a target names for it must be in the tenant's folder. With an empty <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> that folder is <code>secret/tenants/&lt;tenant id&gt;/</code>; with a non-empty setting the folder of that setting applies. With either setting, MEHO now also checks a person's read of a target's secret when a call runs on a target of such a tenant. A tenant without an entry is unchanged.</td>
 <td>For each tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code>: run <code>meho tenants use &lt;tenant&gt;</code>, then <code>meho targets list --json</code>, and look at the field <code>secret_ref</code> of each target. Move each secret whose <code>secret_ref</code> is outside the tenant's folder into the folder, and set the new <code>secret_ref</code> on the target. A call on a target that is not moved yet fails with <code>connector_error: VaultTenantScopeError</code> and the text <code>vault.kv request outside tenant namespace: requested '&lt;path&gt;' is not within tenant prefix '&lt;folder&gt;'</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
+<td>Migration <code>0179</code> adds one more index on <code>audit_log</code> (person, login client and time). With it, "Your tools" on the account page shows the exact last use of each tool, also for a person with many audit rows. It changes no row. While the index is built, calls that write an audit row wait: about 7 seconds for 3.3 million rows in a test, longer on a larger audit log.</td>
+<td><strong>Nothing to do.</strong> The migration runs by itself. With a large audit log, upgrade at a quiet time.</td>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>

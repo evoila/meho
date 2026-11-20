@@ -1,5 +1,5 @@
 ## Note
-An agent that reads the trace of a Kubernetes call gets a copy in which every env value, the secret values on container command lines and scripts, managedFields and secret values in annotations are hidden; env names and references stay. A person reads the full stored trace.
+An agent that reads the trace of a Kubernetes call gets a copy. In it, env values are hidden by the same secret rules as in the direct answer of an operation, and the secret values on container command lines and scripts and in annotations are hidden (the last-applied annotation is cleaned like the object). Plain env values, env names and references, and managedFields stay. A person and a service login read the stored trace as it is.
 
 ## Action
 None.

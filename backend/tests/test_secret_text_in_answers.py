@@ -57,6 +57,7 @@ _FAKE_LIST = "FAKE" + "-made-up-list-5527"
 _FAKE_MAP = "FAKE" + "-made-up-map-6636"
 _FAKE_SHARED = "FAKE" + "-made-up-shared-7745"
 _FAKE_INNER = "FAKE" + "-made-up-inner-8854"
+_FAKE_DEEP = "FAKE" + "-made-up-deep-9963"
 _MARKER = "[REDACTED:param_name]"
 _FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 _LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
@@ -90,6 +91,7 @@ _FAKES = (
     _FAKE_MAP,
     _FAKE_SHARED,
     _FAKE_INNER,
+    _FAKE_DEEP,
 )
 
 
@@ -571,3 +573,77 @@ def test_cr_excerpt_that_is_cut_stays_hidden_on_a_reveal() -> None:
     assert row["spec_truncated"] is True
     assert _FAKE not in row["spec_excerpt"]
     assert _FAKE_YAML not in row["spec_excerpt"]
+
+
+# ---------------------------------------------------------------------------
+# A text nested deeper than the levels the pass reads
+# ---------------------------------------------------------------------------
+
+
+def _nested_text(levels: int) -> str:
+    """A YAML text with a secret field, put *levels* times into a JSON string."""
+    text = f"db:\n  port: 5432\n  dbPassword: {_FAKE_DEEP}\n"
+    for _ in range(levels):
+        text = json.dumps({"inner": text})
+    return text
+
+
+async def _deep_config_map(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    return configmap_info(
+        V1ConfigMap(
+            data={"deep.json": _nested_text(6)},
+            metadata=V1ObjectMeta(name="app", namespace="team-a"),
+        )
+    )
+
+
+def _deep_custom_resource() -> dict[str, Any]:
+    return {
+        "apiVersion": "db.example.test/v1",
+        "kind": "Database",
+        "metadata": {"name": "app", "namespace": "team-a"},
+        "spec": {"engine": "postgres", "bootstrap": _nested_text(4)},
+    }
+
+
+async def _deep_custom_resource_info(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    return custom_resource_row(_deep_custom_resource(), ["spec.bootstrap"])
+
+
+@pytest.mark.parametrize("levels", [3, 4, 6])
+def test_text_deeper_than_the_pass_reads_is_hidden_whole(levels: int) -> None:
+    shown = hide_secret_text(_nested_text(levels))
+    assert _FAKE_DEEP not in shown
+    assert _MARKER in shown
+
+
+async def test_configmap_text_six_levels_deep_is_hidden_in_the_view_and_the_audit_copy(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(_deep_config_map, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.AGENT), reveal=False)
+
+    assert result.status == "ok", result.error
+    assert _FAKE_DEEP not in result.model_dump_json()
+    row = await _audit_row()
+    assert _FAKE_DEEP not in json.dumps(row.raw_payload)
+
+
+@pytest.mark.parametrize("reveal", [False, True])
+async def test_cr_spec_text_four_levels_deep_is_hidden_in_the_view_and_the_audit_copy(
+    reveal: bool, stub_embedding_service: AsyncMock
+) -> None:
+    await _register(_deep_custom_resource_info, stub_embedding_service, op_id="k8s.cr.info")
+
+    result = await _read(_operator(PrincipalKind.USER), reveal=reveal, op_id="k8s.cr.info")
+
+    assert result.status == "ok", result.error
+    if not reveal:
+        assert _FAKE_DEEP not in result.model_dump_json()
+    row = await _audit_row("k8s.cr.info")
+    assert _FAKE_DEEP not in json.dumps(row.raw_payload)

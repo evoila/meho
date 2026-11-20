@@ -31,6 +31,8 @@ default view does not see it. This module hides it in the text.
    A string value inside the YAML is read again as text, so a YAML file
    inside a JSON note is covered too; such a value is written
    back as a JSON string. Text that is not YAML keeps what step 1 made of it.
+   A text deeper than the levels the pass reads, or too deep to parse, is
+   hidden whole when it may hold a secret name.
 
 The name rule is the shared
 :func:`~meho_backplane.broadcast.events.is_secret_param_name`. Like the
@@ -78,7 +80,8 @@ _MAY_HOLD_SECRET_NAME: Final[re.Pattern[str]] = re.compile(
 #: Values under a secret name that are no secret.
 _KEPT_TAGS: Final[frozenset[str]] = frozenset({"tag:yaml.org,2002:bool", "tag:yaml.org,2002:null"})
 
-#: How deep a text inside a text is read again.
+#: How deep a text inside a text is read again. A deeper text that may
+#: hold a secret name is hidden whole.
 _MAX_TEXT_DEPTH: Final[int] = 3
 
 _QUOTED_MARKER: Final[str] = f'"{SECRET_FIELD_MARKER}"'
@@ -178,7 +181,12 @@ class _Finder:
         elif isinstance(node, yaml.SequenceNode):
             for item in node.value:
                 self.walk(item, in_snmp=in_snmp)
-        elif isinstance(node, yaml.ScalarNode) and node.tag == "tag:yaml.org,2002:str":
+        elif (
+            isinstance(node, yaml.ScalarNode)
+            and node.tag == "tag:yaml.org,2002:str"
+            # A text that reads as just this string holds nothing new.
+            and node.value.strip() != self.text.strip()
+        ):
             inner = _hide_text(node.value, self.depth + 1)
             if inner != node.value:
                 self._replace(node, json.dumps(inner, ensure_ascii=False))
@@ -312,8 +320,11 @@ def _apply(text: str, spans: list[tuple[int, int, str]]) -> str:
 
 
 def _hide_yaml(text: str, depth: int) -> str:
-    if depth > _MAX_TEXT_DEPTH or ":" not in text or not _MAY_HOLD_SECRET_NAME.search(text):
+    if ":" not in text or not _MAY_HOLD_SECRET_NAME.search(text):
         return text
+    if depth > _MAX_TEXT_DEPTH:
+        # Deeper than the pass reads: hide the whole text rather than show it unread.
+        return SECRET_FIELD_MARKER
     finder = _Finder(text, depth)
     try:
         # Keep every document alive while walking: the walk marks nodes by

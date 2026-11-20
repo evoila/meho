@@ -564,7 +564,9 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     that a merge key uses (`<<: *name`, or each alias of a merge list
     `<<: [*name]`) becomes an empty map `{}` when it names a hidden value
     or a value inside one. A map an alias names in an SNMP place is
-    checked with the SNMP rule there. The dispatcher builds this view in a
+    checked with the SNMP rule there. A text nested deeper than the
+    levels the pass reads, or too deep to parse, is hidden whole when it
+    may hold a secret name. The dispatcher builds this view in a
     worker thread, like the redaction pass of a script, so a large text
     value does not hold up other requests. The audit copy
     then holds a fingerprint of the whole text. The

@@ -514,6 +514,20 @@ def test_xml_tags_in_two_json_strings_keep_the_json_between() -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        'start: "<password>"\nhost: db\nport: 5432\nend: "</password>"\n',
+        "start: <password>\nhost: db\nport: 5432\nend: </password>\n",
+        "start: |\n  <password>\nhost: db\nend: |\n  </password>\n",
+        "# <password>\nhost: db\nport: 5432\n# </password>\n",
+    ],
+    ids=["quoted-values", "plain-values", "block-values", "comment-lines"],
+)
+def test_xml_tags_in_two_yaml_values_keep_the_yaml_between(text: str) -> None:
+    assert hide_secret_text(text) == text
+
+
+@pytest.mark.parametrize(
     "name",
     [
         "<![CDATA[dbPassword]]>",

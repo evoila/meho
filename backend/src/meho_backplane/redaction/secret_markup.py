@@ -31,7 +31,10 @@ hides them in the text:
   name. The name of such a pair is read as XML text first: CDATA and
   character references count. In a JSON text, each string is read on its
   own, as text: its escapes are read before its XML, and only the hidden
-  value changes in the JSON. A closing tag closes the
+  value changes in the JSON. In a YAML text, each value (with its key on
+  the same entry) and each comment is read on its own, so a start tag and
+  a closing tag in two different values are no element. A text that reads
+  as neither is read as XML whole. A closing tag closes the
   nearest open element with its name, so a child with the same name does
   not end its parent. Tags inside CDATA are text. The text of an XML
   comment is read on its own, in one pass: comments do not nest.
@@ -52,8 +55,11 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
+
+import yaml
 
 from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER, _is_placeholder
 
@@ -104,6 +110,13 @@ _JSON_ESCAPES: Final[dict[str, str]] = {
     "r": "\r",
     "t": "\t",
 }
+
+#: The parser of the YAML step, the fast one when it is built in.
+_LOADER: Final[Any] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+#: A YAML comment: ``#`` at the start of a line or after white space, to the
+#: end of the line.
+_YAML_COMMENT: Final[re.Pattern[str]] = re.compile(r"(?:^|(?<=[ \t]))#[^\r\n]*+", re.MULTILINE)
 
 #: The indicator of a YAML block value, such as ``|``, ``>-`` or ``|2+``.
 _BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][0-9+\-]{0,2}")
@@ -597,15 +610,98 @@ def _hide_xml_in_json_strings(text: str) -> str:
     return "".join(parts)
 
 
+def _yaml_nodes(text: str) -> Iterator[tuple[int, int, bool, bool]]:
+    """Each node of *text* read as YAML: (start, end, it is a scalar, it is a mapping key).
+
+    Raises :class:`yaml.YAMLError` when *text* is no YAML.
+    """
+    shift = 1 if text.startswith("\ufeff") else 0
+    #: For each open collection: (it is a mapping, its next node is a key).
+    levels: list[list[bool]] = []
+    for event in yaml.parse(text[shift:], Loader=_LOADER):
+        if isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+            levels.pop()
+            continue
+        if not isinstance(event, yaml.NodeEvent):
+            continue
+        is_key = False
+        if levels and levels[-1][0]:
+            is_key = levels[-1][1]
+            levels[-1][1] = not is_key
+        if isinstance(event, yaml.MappingStartEvent):
+            levels.append([True, True])
+        elif isinstance(event, yaml.SequenceStartEvent):
+            levels.append([False, False])
+        start, end = shift + event.start_mark.index, shift + event.end_mark.index
+        yield start, end, isinstance(event, yaml.ScalarEvent), is_key
+
+
+def _yaml_value_spans(text: str) -> list[tuple[int, int]] | None:
+    """The span of each value of *text* read as YAML; None when it is no YAML.
+
+    A scalar key and its scalar value are one span, so ``key: <tag>...``
+    on one entry is read as one text. Every other scalar is a span of its
+    own.
+    """
+    spans: list[tuple[int, int]] = []
+    key: tuple[int, int] | None = None
+    try:
+        for start, end, is_scalar, is_key in _yaml_nodes(text):
+            if key is not None and is_scalar:
+                start, end = key[0], max(key[1], end)
+            elif key is not None:
+                spans.append(key)
+            key = None
+            if is_scalar and is_key:
+                key = (start, end)
+            elif is_scalar and end > start:
+                spans.append((start, end))
+    except yaml.YAMLError:
+        return None
+    if key is not None:
+        spans.append(key)
+    return spans
+
+
+def _hide_xml_in_yaml_values(text: str, values: list[tuple[int, int]]) -> str:
+    """*text* (a YAML text) with the XML step run on each value and each comment on its own."""
+    pieces: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end in [*values, (len(text), len(text))]:
+        if start > cursor:
+            pieces.extend(comment.span() for comment in _YAML_COMMENT.finditer(text, cursor, start))
+        pieces.append((start, end))
+        cursor = max(cursor, end)
+    spans: list[tuple[int, int]] = []
+    for start, end in pieces:
+        if text.find("<", start, end) != -1:
+            spans.extend(_element_spans(text[start:end], start))
+    parts: list[str] = []
+    cursor = 0
+    for start, end in _merged_spans(spans):
+        parts.append(text[cursor:start])
+        parts.append(SECRET_FIELD_MARKER)
+        cursor = end
+    if not parts:
+        return text
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def hide_secret_xml(text: str) -> str:
     """Return *text* with secret-named values in its XML tags hidden.
 
     In a JSON text each string is read on its own, with its escapes read
     first, so a start tag and a closing tag in two different strings are
-    no element, and the JSON between them stays.
+    no element, and the JSON between them stays. In a YAML text each value
+    and each comment is read on its own in the same way. Any other text is
+    read as XML whole.
     """
     if "<" not in text and not _JSON_ESCAPED_LT.search(text):
         return text
     if _is_json_collection(text):
         return _hide_xml_in_json_strings(text)
-    return _hide_xml(text)
+    values = _yaml_value_spans(text)
+    if values is None:
+        return _hide_xml(text)
+    return _hide_xml_in_yaml_values(text, values)

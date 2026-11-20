@@ -106,6 +106,7 @@ from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
+    HIDDEN_PARAM_MARKER,
     classify_op,
     holds_hidden_param_values,
     scrub_secret_named_values,
@@ -117,6 +118,7 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
+from meho_backplane.op_classes import hidden_stored_param
 from meho_backplane.operations._audit import (
     agent_session_id_var,
     parent_audit_id_var,
@@ -2390,19 +2392,29 @@ async def withdraw_request(
     return request
 
 
-def params_with_secret_fields_hidden(params: dict[str, Any] | None) -> dict[str, Any] | None:
+def params_with_secret_fields_hidden(
+    params: dict[str, Any] | None, *, op_id: str
+) -> dict[str, Any] | None:
     """The stored params with each secret-named value replaced, or ``None``.
 
     ``None`` when *params* is ``None`` or holds no secret-named value
     (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
     a row without such a field is never rewritten. A number under such a
-    name (a PIN, a password sent as a number) is hidden too. The other
-    fields keep their value, as in the audit row's raw copy.
+    name (a PIN, a password sent as a number) is hidden too. The param that
+    *op_id* declared with
+    :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
+    replaced too, when its check flags the params (the manifest of a
+    ``k8s.apply`` that holds a Secret). The other fields keep their value,
+    as in the audit row's raw copy.
     """
     if params is None:
         return None
     hidden, found = scrub_secret_named_values(params, hide_numbers=True)
+    name = hidden_stored_param(op_id, params)
+    if name is not None:
+        hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
+        found = True
     if not found:
         return None
     return cast(dict[str, Any], hidden)
@@ -2420,7 +2432,7 @@ async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None
     run claim is won (:func:`claim_resume`).
     """
     await discard_handoff(session, request.id, request.tenant_id)
-    hidden = params_with_secret_fields_hidden(request.params)
+    hidden = params_with_secret_fields_hidden(request.params, op_id=request.op_id)
     if hidden is not None:
         request.params = hidden
 
@@ -2494,12 +2506,12 @@ async def claim_resume(
             .where(ApprovalRequest.resumed_at.is_(None))
             .where(ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value)
             .values(resumed_at=stamp)
-            .returning(ApprovalRequest.params)
+            .returning(ApprovalRequest.params, ApprovalRequest.op_id)
             .execution_options(synchronize_session=False)
         )
         row = claimed.first()
         won = row is not None
-        hidden = params_with_secret_fields_hidden(row[0]) if row is not None else None
+        hidden = params_with_secret_fields_hidden(row[0], op_id=row[1]) if row is not None else None
         if hidden is not None:
             await session.execute(
                 update(ApprovalRequest)

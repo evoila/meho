@@ -30,6 +30,7 @@ tie-break ladder. Only the v2 triple (+ wildcard) advertises this class — the
 argocd / bind9 / pfsense decision.
 """
 
+from meho_backplane.connectors.proxmox import op_classes  # noqa: F401 -- declares the marks
 from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
 from meho_backplane.connectors.proxmox.ops import (
     PROXMOX_READ_OPS,

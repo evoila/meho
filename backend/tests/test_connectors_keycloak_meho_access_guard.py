@@ -670,8 +670,9 @@ async def test_the_account_of_the_person_who_runs_the_approved_request_is_refuse
         api.add(_user(approver_uuid, "the-approver"), _TEAM_GROUP)
         call = await _call(op_id, _params(op_id, approver_uuid, extra))
         assert call["status"] == "awaiting_approval", call
-        approver = _operator(approver_uuid)
-        if op_id == "keycloak.user.credential.delete":
+        # In the login realm a platform admin approves every Keycloak write.
+        approver = _operator(approver_uuid).model_copy(update={"platform_admin": True})
+        if op_id in {"keycloak.user.credential.delete", "keycloak.user.reset_password"}:
             # MEHO already refuses this approval: the change is for the approver's own login.
             with pytest.raises(ApprovalRoleFloorError, match="your own login"):
                 await _approve_and_run(call, approver)
@@ -757,8 +758,12 @@ async def test_a_standing_grant_on_disable_still_runs_for_another_user(
         api = _realm(mock)
         api.add(_user(other, "event-guest"), _TEAM_GROUP)
         call = await _call("keycloak.user.disable", {"id": other}, _bot())
+        # In the login realm a platform admin approves every Keycloak write,
+        # also one with a standing grant; the access check lets it through.
+        assert call["status"] == "awaiting_approval", call
+        result = await _approve_and_run(call)
         written = _writes(mock)
-    assert call["status"] == "ok", call
+    assert result.status == "ok", result
     assert written == [f"PUT /admin/realms/{_LOGIN_REALM}/users/{other}"]
 
 

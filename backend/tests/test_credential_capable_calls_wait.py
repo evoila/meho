@@ -205,10 +205,10 @@ def test_a_manifest_with_a_secret_or_that_meho_cannot_read_counts(manifest: Any)
         _CONFIG_MAP,
         _CONFIG_MAP + "\n---\n" + _CONFIG_MAP.replace("web-settings", "other"),
         "apiVersion: v1\nkind: List\nitems:\n  - apiVersion: v1\n    kind: ConfigMap\n"
-        "    metadata: {name: a}\n",
+        + "    metadata: {name: a}\n",
         "apiVersion: example.com/v1\nkind: Playlist\nmetadata: {name: a}\nitems: [one, two]\n",
         "apiVersion: example.com/v1\nkind: Basket\nmetadata: {name: a}\n"
-        "items:\n  - {kind: Secret, name: not-a-k8s-object}\n",
+        + "items:\n  - {kind: Secret, name: not-a-k8s-object}\n",
     ],
     ids=[
         "config-map",

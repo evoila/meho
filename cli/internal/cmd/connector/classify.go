@@ -305,7 +305,8 @@ func classificationFlagsSet(cmd *cobra.Command, otherFlags ...string) (bool, err
 	for _, name := range otherFlags {
 		if cmd.Flags().Changed(name) {
 			return true, fmt.Errorf(
-				"--category and --label wait for another tenant admin; use them without --%s", name)
+				"--category and --label wait until a tenant admin approves them in the web console; use them without --%s",
+				name)
 		}
 	}
 	return true, nil

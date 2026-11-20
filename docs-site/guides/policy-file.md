@@ -298,8 +298,10 @@ bindings:
   the stored ones, and the shipped bindings count again.
 - A binding can name any group of the login setup, also a group of
   another tenant. Who is in that group is then decided by whoever manages
-  it. Bind only groups that your tenant manages. Two admins of the tenant
-  decide the bindings: one imports the file, a second one approves it.
+  it. Bind only groups that your tenant manages. An admin of the tenant
+  decides the bindings: an import with a token waits until an admin
+  approves it in the web console, and an admin's import in the web console
+  runs at once.
 
 !!! note "Off by default"
 

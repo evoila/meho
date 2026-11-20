@@ -42,13 +42,18 @@ admin rights. A refused call does not run.
 
 The audit row of such a run carries ``rights_change_run`` with the value
 :data:`CONSOLE_RUN_AUDIT_VALUE`: a change of rights that an admin ran at
-once in the web console.
+once in the web console. It also carries ``approval_auth``, the sign-in
+proof of the run, in the form of the decision row of a console approve
+(:meth:`~meho_backplane.auth.approval_sign_in.ApprovalAuth.audit_payload`):
+among others the sign-in level (``acr``) and the sign-in time
+(``auth_time``).
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -62,6 +67,7 @@ from meho_backplane.operations.grant_approval import (
 )
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.approval_sign_in import ApprovalAuth
     from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 
 __all__ = [
@@ -69,10 +75,12 @@ __all__ = [
     "CONSOLE_RUN_REASON",
     "ConsoleCheck",
     "console_check",
+    "keep_console_run_sign_in",
     "params_write_credential",
     "register_credential_params_check",
     "register_no_login_realm_op",
     "runs_at_once_in_console",
+    "take_console_run_sign_in",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -134,11 +142,30 @@ class ConsoleCheck:
 
     ``refusal`` is the text of a refused call. ``waits`` is ``True`` when
     the call waits for approval, as every other change of rights does. A
-    call with neither runs at once.
+    call with neither runs at once; ``sign_in`` is then its sign-in proof.
     """
 
     waits: bool = False
     refusal: str | None = None
+    sign_in: ApprovalAuth | None = None
+
+
+#: The sign-in proof of the console run that the policy gate let run now.
+_run_sign_in: ContextVar[ApprovalAuth | None] = ContextVar(
+    "rights_change_console_run_sign_in", default=None
+)
+
+
+def keep_console_run_sign_in(sign_in: ApprovalAuth | None) -> None:
+    """Keep *sign_in* as the proof of the console run the policy gate lets run now."""
+    _run_sign_in.set(sign_in)
+
+
+def take_console_run_sign_in() -> ApprovalAuth | None:
+    """The proof :func:`keep_console_run_sign_in` kept, then drop it."""
+    sign_in = _run_sign_in.get()
+    _run_sign_in.set(None)
+    return sign_in
 
 
 #: Operations that are a change of rights but never write a login realm,
@@ -151,11 +178,11 @@ def register_no_login_realm_op(op_id: str) -> None:
     _NO_LOGIN_REALM_OPS.add(op_id)
 
 
-async def _has_console_sign_in(operator: Operator) -> bool:
+async def _console_sign_in(operator: Operator) -> ApprovalAuth | None:
     # Imported late: the console's sign-in store is part of the web interface.
-    from meho_backplane.ui.routes.approvals.sign_in import has_web_approval_sign_in
+    from meho_backplane.ui.routes.approvals.sign_in import console_run_auth
 
-    return await has_web_approval_sign_in(operator)
+    return await console_run_auth(operator)
 
 
 def _card_built(card: dict[str, Any] | None) -> bool:
@@ -198,8 +225,9 @@ async def console_check(
       (:func:`~meho_backplane.operations._park_check.park_check_refusal`)
       refuses the call, as it would refuse a call that waits;
     * the call waits when the console session lacks the sign-in a console
-      approve needs (a fresh sign-in, and the approval sign-in level where
-      ``APPROVAL_SIGN_IN_LEVEL`` asks for it);
+      approve of a change of rights needs (a sign-in no older than the
+      approval window ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, and the approval
+      sign-in level where ``APPROVAL_SIGN_IN_LEVEL`` asks for it);
     * the call waits when its approval card does not build against the
       live system, or the card does not say who the change gives rights
       to. Only an operation registered with
@@ -229,7 +257,8 @@ async def console_check(
         reason = (refused.extras or {}).get("reason")
         text = reason if isinstance(reason, str) else (refused.error or "refused")
         return ConsoleCheck(refusal=text)
-    if not await _has_console_sign_in(operator):
+    sign_in = await _console_sign_in(operator)
+    if sign_in is None:
         _log.info("rights_change_console_waits_for_sign_in", op_id=op_id, operator_sub=operator.sub)
         return ConsoleCheck(waits=True)
     card = None
@@ -253,4 +282,5 @@ async def console_check(
     refusal = who_may_make_refusal(operator, request)
     if refusal is not None:
         _log.info("rights_change_console_refused", op_id=op_id, operator_sub=operator.sub)
-    return ConsoleCheck(refusal=refusal)
+        return ConsoleCheck(refusal=refusal)
+    return ConsoleCheck(sign_in=sign_in)

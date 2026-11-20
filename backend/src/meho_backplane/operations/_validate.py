@@ -50,6 +50,7 @@ from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_REASON,
     console_check,
+    keep_console_run_sign_in,
     runs_at_once_in_console,
 )
 from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
@@ -992,6 +993,7 @@ async def _console_rights_verdict(
         return PermissionVerdict.DENY, check.refusal
     if check.waits:
         return None
+    keep_console_run_sign_in(check.sign_in)
     _log.info(
         "policy_gate_rights_change_console_run",
         operator_sub=operator.sub,

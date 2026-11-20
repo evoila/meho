@@ -522,6 +522,7 @@ from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_AUDIT_VALUE,
     CONSOLE_RUN_REASON,
+    take_console_run_sign_in,
 )
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
@@ -4451,6 +4452,7 @@ async def _dispatch_now(
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
             policy_rule_var.set(take_rule())
+            console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
@@ -4511,7 +4513,12 @@ async def _dispatch_now(
             policy_decision_var.set(verdict.value)
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
                 structlog.contextvars.bind_contextvars(
-                    audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE
+                    audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE,
+                    audit_approval_auth=(
+                        console_run_sign_in.audit_payload(operator.sub)
+                        if console_run_sign_in is not None
+                        else None
+                    ),
                 )
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)

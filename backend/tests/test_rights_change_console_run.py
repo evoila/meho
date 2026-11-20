@@ -338,6 +338,50 @@ async def test_a_console_session_with_a_fresh_sign_in_runs_at_once(
     assert await _requests() == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_window", "per_action", "status"),
+    [(120, 600, "awaiting_approval"), (600, 120, "ok")],
+    ids=["approval-window-shorter", "approval-window-longer"],
+)
+async def test_a_direct_run_uses_the_sign_in_limit_of_the_approve(
+    keycloak: KeycloakConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    approval_window: int,
+    per_action: int,
+    status: str,
+) -> None:
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", str(approval_window))
+    monkeypatch.setenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", str(per_action))
+    get_settings.cache_clear()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(_person(sign_in_age=300))
+
+    assert result["status"] == status, result
+    assert put.called is (status == "ok")
+
+
+@pytest.mark.asyncio
+async def test_the_audit_row_of_a_direct_run_records_the_sign_in(
+    keycloak: KeycloakConnector,
+) -> None:
+    operator = _person(sign_in_age=5)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(operator)
+
+    assert result["status"] == "ok", result
+    (row,) = await _run_rows()
+    proof = row["approval_auth"]
+    assert proof["channel"] == "web"
+    assert proof["acr"] == operator.acr == "1"
+    assert proof["auth_time"] == operator.auth_time
+    assert proof["level_in_force"] == "observe"
+
+
 def _approval_sign_in(*, acr: str) -> Operator:
     """The person's console approval sign-in, as the session row gives it back."""
     return Operator(

@@ -8,10 +8,17 @@ whole object: for a pod or a Deployment, the full pod definition. A person
 reads the stored trace as it is. An agent gets a copy made by
 :func:`agent_view`, which hides, at any depth of the span:
 
-* every ``env`` entry's ``value``: the name stays, and the value becomes
-  :data:`ENV_VALUE_MARKER`. An entry that takes its value from a reference
-  (``valueFrom``) has no ``value`` and stays as it is, and so does
-  ``envFrom``. Being at any depth, this covers pods, Deployments,
+* the ``env`` values that the direct answer of an operation hides: each
+  ``env`` list goes through the same secret rules as the default view of
+  an answer
+  (:func:`~meho_backplane.operations._secret_values.hide_secret_values`):
+  :func:`~meho_backplane.broadcast.events.scrub_secret_named_values` with
+  numbers hidden, then
+  :func:`~meho_backplane.redaction.secret_text.hide_secret_text_leaves`.
+  So the value of an entry with a secret-shaped name (``DB_PASSWORD``) is
+  hidden, and so is a secret field inside a text value. A plain value
+  (``LOG_LEVEL=debug``), the names, ``valueFrom`` references and
+  ``envFrom`` stay. Being at any depth, this covers pods, Deployments,
   StatefulSets, DaemonSets, ReplicaSets, Jobs, CronJobs, pod templates in
   custom resources, and the items of a list;
 * the secret values on every command line: a ``command`` and ``args`` list
@@ -22,7 +29,6 @@ reads the stored trace as it is. An agent gets a copy made by
   the argument after ``--password`` or ``--token``, the password in a URL
   and tokens with a known vendor prefix are hidden. The script after
   ``sh -c`` is read as a shell script;
-* every ``managedFields`` entry: the key is left out;
 * annotation values: a value that is a JSON object or list (the
   ``kubectl.kubernetes.io/last-applied-configuration`` annotation holds a
   whole earlier object) is cleaned the same way, each text inside it is
@@ -32,7 +38,8 @@ reads the stored trace as it is. An agent gets a copy made by
   :func:`~meho_backplane.redaction.command_line.hide_in_text`, which hides
   the password in a URL and tokens with a known vendor prefix.
 
-Nothing else in the span changes. The capture-time redaction (Secret
+Nothing else in the span changes: ``managedFields`` and plain values stay
+as they are in the stored span. The capture-time redaction (Secret
 values, secret-named fields, credential shapes) has already run over the
 stored span.
 
@@ -45,19 +52,17 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
+from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.connectors.kubernetes.ops_write_preview import _hide_command_line
 from meho_backplane.redaction.command_line import hide_in_text
+from meho_backplane.redaction.secret_text import hide_secret_text_leaves
 
-__all__ = ["ENV_VALUE_MARKER", "LAST_APPLIED_MARKER", "agent_view"]
-
-#: Put in place of every ``env`` value in an agent's copy of a trace.
-ENV_VALUE_MARKER: Final[str] = "[MEHO-REDACTED:env-value]"
+__all__ = ["LAST_APPLIED_MARKER", "agent_view"]
 
 #: Put in place of a last-applied annotation that is not a JSON object or list.
 LAST_APPLIED_MARKER: Final[str] = "[MEHO-REDACTED:last-applied-configuration]"
 
 _LAST_APPLIED: Final[str] = "kubectl.kubernetes.io/last-applied-configuration"
-_MANAGED_FIELDS: Final[str] = "managedFields"
 
 
 def agent_view(node: Any) -> Any:
@@ -70,12 +75,10 @@ def agent_view(node: Any) -> Any:
         command_line = _hide_command_line(node)
         out: dict[str, Any] = {}
         for key, item in node.items():
-            if key == _MANAGED_FIELDS:
-                continue
             if key in command_line:
                 out[key] = command_line[key]
             elif key == "env" and isinstance(item, list):
-                out[key] = [_env_entry(entry) for entry in item]
+                out[key] = _env_list(item)
             elif key == "annotations" and isinstance(item, dict):
                 out[key] = {
                     name: _annotation_value(str(name), value) for name, value in item.items()
@@ -88,11 +91,10 @@ def agent_view(node: Any) -> Any:
     return node
 
 
-def _env_entry(entry: Any) -> Any:
-    """One ``env`` entry with its ``value`` hidden; the name and a reference stay."""
-    if isinstance(entry, dict) and "value" in entry:
-        return {**agent_view(entry), "value": ENV_VALUE_MARKER}
-    return agent_view(entry)
+def _env_list(env: list[Any]) -> Any:
+    """One ``env`` list with the secret rules of the direct answer applied."""
+    shown, _ = scrub_secret_named_values(agent_view(env), hide_numbers=True)
+    return hide_secret_text_leaves(shown)
 
 
 def _annotation_value(name: str, value: Any) -> Any:

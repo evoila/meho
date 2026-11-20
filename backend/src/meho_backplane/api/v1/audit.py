@@ -433,8 +433,8 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
 async def _agent_copy(view: TraceView) -> TraceView | None:
     """The copy of *view* an agent login reads, or ``None`` when it cannot be made.
 
-    A Kubernetes span has its env values, command-line secrets,
-    ``managedFields`` and annotation secrets hidden
+    A Kubernetes span has its secret env values, command-line secrets and
+    annotation secrets hidden
     (:mod:`meho_backplane.flight_recorder.agent_view`). When the copy fails,
     the agent gets no trace.
     """

@@ -6,8 +6,9 @@
 * An agent reads the cleaned copy: through the trace handle on a
   ``call_operation`` answer (``result_query``), through
   ``GET /api/v1/audit/{id}/trace`` and through ``GET /api/v1/audit/traces``.
-  Env values and the password on the command line are hidden there; the env
-  names stay.
+  The value of a secret-named env entry and the password on the command
+  line are hidden there; the env names, plain values and ``managedFields``
+  stay.
 * A person and a service login read the stored trace as it is.
 * When the copy cannot be made, an agent gets no trace.
 """
@@ -17,7 +18,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -32,7 +33,6 @@ import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.kubernetes.trace_agent_view import ENV_VALUE_MARKER
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
@@ -115,10 +115,8 @@ def _pod() -> dict[str, Any]:
                     "command": ["/app/server"],
                     "args": ["--password", _FAKE],
                     "env": [
-                        {
-                            "name": "DATABASE_URL",
-                            "value": f"postgres://app:{_FAKE}@db.example.invalid/app",
-                        }
+                        {"name": "DB_PASSWORD", "value": _FAKE},
+                        {"name": "LOG_LEVEL", "value": "debug"},
                     ],
                 }
             ]
@@ -184,7 +182,14 @@ async def _seed(*, operator_sub: str = _AGENT_SUB, connector_id: str = "k8s-1.x"
     return audit_id
 
 
-def _get(client: TestClient, path: str, *, principal_kind: str | None, sub: str) -> Any:
+def _get(
+    client: TestClient,
+    path: str,
+    *,
+    principal_kind: str | None,
+    sub: str,
+    params: dict[str, str] | None = None,
+) -> Any:
     token = mint_token(
         _KEY,
         sub=sub,
@@ -194,7 +199,7 @@ def _get(client: TestClient, path: str, *, principal_kind: str | None, sub: str)
     )
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(_KEY))
-        return client.get(path, headers={"Authorization": f"Bearer {token}"})
+        return client.get(path, params=params, headers={"Authorization": f"Bearer {token}"})
 
 
 def _container(trace: dict[str, Any]) -> dict[str, Any]:
@@ -203,11 +208,17 @@ def _container(trace: dict[str, Any]) -> dict[str, Any]:
     return container
 
 
+_HIDDEN_ENV_VALUE = "[REDACTED:param_name]"
+
+
 def _assert_cleaned(trace: dict[str, Any]) -> None:
     assert _FAKE not in json.dumps(trace)
-    assert "managedFields" not in json.dumps(trace)
+    assert "managedFields" in json.dumps(trace)
     container = _container(trace)
-    assert container["env"] == [{"name": "DATABASE_URL", "value": ENV_VALUE_MARKER}]
+    assert container["env"] == [
+        {"name": "DB_PASSWORD", "value": _HIDDEN_ENV_VALUE},
+        {"name": "LOG_LEVEL", "value": "debug"},
+    ]
     assert container["args"] == ["--password", HIDDEN]
 
 
@@ -219,7 +230,16 @@ async def test_agent_reads_cleaned_trace_through_the_rest_routes(client: TestCli
     assert single.json()["trace_present"] is True
     _assert_cleaned(single.json()["trace"])
 
-    search = _get(client, "/api/v1/audit/traces", principal_kind="agent", sub=_AGENT_SUB)
+    # A fixed window around the seeded time, so the test passes on any day.
+    since = (_BASE - timedelta(hours=1)).isoformat()
+    until = (_BASE + timedelta(hours=1)).isoformat()
+    search = _get(
+        client,
+        "/api/v1/audit/traces",
+        principal_kind="agent",
+        sub=_AGENT_SUB,
+        params={"since": since, "until": until},
+    )
     assert search.status_code == 200, search.text
     items = search.json()["items"]
     assert len(items) == 1
@@ -238,7 +258,7 @@ async def test_person_and_service_login_read_the_stored_trace(
 
     assert resp.status_code == 200, resp.text
     container = _container(resp.json()["trace"])
-    assert container["env"][0]["value"] == f"postgres://app:{_FAKE}@db.example.invalid/app"
+    assert container["env"][0] == {"name": "DB_PASSWORD", "value": _FAKE}
     assert container["args"] == ["--password", _FAKE]
 
 

@@ -13,9 +13,10 @@ routes give an agent this copy.
 In the copy, each span of a Kubernetes call (connector product ``k8s``)
 goes through
 :func:`~meho_backplane.connectors.kubernetes.trace_agent_view.agent_view`:
-``env`` values, the secret values on command lines and in ``sh -c`` scripts,
-``managedFields`` and secret values in annotations are hidden. The spans
-of every other connector are copied unchanged.
+the ``env`` values that the secret rules of the direct answer hide, the
+secret values on command lines and in ``sh -c`` scripts, and secret values
+in annotations are hidden. Plain values and ``managedFields`` stay. The
+spans of every other connector are copied unchanged.
 
 The walk takes time in line with the size of the trace. When a trace holds
 a Kubernetes span, the walk runs in a worker thread

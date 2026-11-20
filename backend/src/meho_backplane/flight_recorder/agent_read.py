@@ -348,8 +348,8 @@ async def _load_agent_trace_rows(
             .scalars()
             .all()
         )
-    # The agent's copy: a Kubernetes span has its env values, command-line
-    # secrets, managedFields and annotation secrets hidden (agent_view).
+    # The agent's copy: a Kubernetes span has its secret env values,
+    # command-line secrets and annotation secrets hidden (agent_view).
     return await agent_view_rows([_span_row(span) for span in spans])
 
 

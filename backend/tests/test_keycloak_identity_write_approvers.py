@@ -15,8 +15,8 @@ check the approval rules:
   cannot approve another person's request;
 * a tenant admin can; a MEHO-SA-Operator who is not an admin cannot,
   because all five are changes of rights
-  (``connectors/keycloak/rights_changes.py``), which only another admin
-  approves;
+  (``connectors/keycloak/rights_changes.py``), which only an admin
+  approves, in the web console;
 * the single-operator self-approval switch does not let the requester
   approve their own request.
 """
@@ -65,6 +65,7 @@ def _person(
     sa_operator: bool = False,
     approver: bool = False,
 ) -> Operator:
+    """A person in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         raw_jwt="<test-raw-jwt>",
@@ -72,6 +73,7 @@ def _person(
         tenant_role=role,
         approver=approver,
         self_approver=sa_operator,
+        web_session=True,
     )
 
 

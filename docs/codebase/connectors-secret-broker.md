@@ -261,8 +261,10 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   `keycloak.user.reset_password`: it sets a Keycloak user's password or
   reads a client secret. The request carries the rights-change mark
   (`register_rights_change_check("secret.move", has_keycloak_side)` in
-  `move_preview.py`). So the requester never approves it, and another
-  admin (a tenant admin or a platform admin) must. A move between two
+  `move_preview.py`). It always waits, also for an admin in the web
+  console. Only an admin (a tenant admin or a platform admin) approves it,
+  with a click in the web console; the admin may be the requester. A move
+  between two
   Vault places (or to a `linux:` place) is not a change of rights.
 - Before the `linux:` store uses SSH, it drops the SSH logins this server
   keeps for the target when a person changed the target since this server
@@ -413,8 +415,8 @@ meho secret move \
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).
 - The op is `requires_approval=True`, so the move waits for approval
-  before it runs. A `keycloak:` side makes it a change of rights, so
-  another admin must approve it, never the requester. The response
+  before it runs. A `keycloak:` side makes it a change of rights, so an
+  admin approves it with a click in the web console. The response
   is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 
@@ -439,8 +441,8 @@ client id, the tenant id, and the MEHO audience (the audience your MEHO
 checks, `KEYCLOAK_AUDIENCE`). `tenant_role` is the tenant role the seat
 gets. Keep it `operator`. Never use `tenant_admin`.
 
-Step 1 creates a new login with tenant rights. A second admin should approve
-it before it runs.
+Step 1 creates a new login with tenant rights. An admin approves it in the
+web console before it runs.
 
 <!-- recipe:keycloak-client-representation -->
 ```json

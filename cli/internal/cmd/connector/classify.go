@@ -23,7 +23,7 @@ import (
 // classification.
 const classifyNote = "A category decides who may approve, so a change of category,\n" +
 	"labels or \"always wait\" is a change of rights: it waits until\n" +
-	"another tenant admin approves it (`meho approvals list`). It needs\n" +
+	"a tenant admin approves it in the web console. It needs\n" +
 	"the POLICY_CLASSIFICATION setting on the backplane.\n"
 
 // newClassifyCmd returns the `meho connector classify` command.
@@ -297,7 +297,7 @@ func labelText(labels map[string]string) string {
 
 // classificationFlagsSet reports whether --category or --label was given,
 // and refuses them next to any of the other edit flags: a classification
-// change waits for another admin, the other edits are stored at once.
+// change waits for an admin's approval, the other edits are stored at once.
 func classificationFlagsSet(cmd *cobra.Command, otherFlags ...string) (bool, error) {
 	if !cmd.Flags().Changed("category") && !cmd.Flags().Changed("label") {
 		return false, nil

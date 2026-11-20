@@ -38,8 +38,9 @@ protocol or config is no longer the one the card was made from. A card
 without both ids, both names and that content is refused too.
 
 The op is a change of rights: a mapper decides what goes into a login
-token. So the requester never approves it, and the approver is another
-admin (:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`).
+token. So only an admin approves it, in the web console, and an admin's
+own call in the console runs at once
+(:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`).
 A person approves each call: no standing grant and no run approval covers
 it (:func:`~meho_backplane.op_classes.declare_per_call_approval`).
 

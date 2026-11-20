@@ -15,15 +15,13 @@ first people log in.
       may approve their own. Anyone else needs a second person: an
       admin.
     - **Create a user** (Step 4) and **add a person to a group**
-      (Step 5): these are changes of rights. Another admin (a tenant
-      admin or a platform admin) must approve them, never the person who
-      asked. An Operator cannot approve them.
-      See [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+      (Step 5): these are changes of rights. An admin (a tenant admin or
+      a platform admin) approves them with a click in the web console,
+      and may be the person who asked. An Operator cannot approve them.
+      See [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
 
-    For Steps 4 and 5, an admin who is not the person who asked approves
-    each change. No setup below changes that. An install with only one
-    admin adds a second admin first (see
-    [An install with only one admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin)).
+    For Steps 4 and 5, an admin approves each change in the web console.
+    No setup below changes that.
 
     For the group step, pick one of these before you start:
 
@@ -168,9 +166,9 @@ meho keycloak user create --target keycloak-main -f alice.json \
 ```
 
 This step waits for approval too (risk level `dangerous`). Creating a
-user is a change of rights, so another admin (a tenant admin or a
-platform admin) must approve it, never the person who asked. See
-[Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+user is a change of rights, so an admin (a tenant admin or a platform
+admin) approves it with a click in the web console. See
+[Changes of rights](approvals-and-break-glass.md#changes-of-rights).
 
 ## Step 5: Put each person in exactly one group
 
@@ -179,8 +177,8 @@ meho keycloak group member add --target keycloak-main \
   --username alice@acme.example --group-name MEHO-acme-Admins
 ```
 
-Adding a person to a group is a change of rights. Another admin
-approves it, never the person who asked. Check the members:
+Adding a person to a group is a change of rights. An admin approves it
+with a click in the web console. Check the members:
 
 ```bash
 meho keycloak group member list --target keycloak-main --id <group-id>
@@ -382,5 +380,5 @@ meho approvals approve <approval-id>
 | The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. |
 | `approve` answers `self_approval_forbidden` | You asked for the group step and tried to approve it yourself, and you are not a MEHO-Admin. | Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface. |
-| `approve` answers `rights_change_required` ("This is a change of rights. Another admin must approve it.") | Steps 4 and 5 are changes of rights. You asked for the change and tried to approve it yourself, or you are not an admin in this tenant. Nobody approves their own change of rights. | An admin who is not the person who asked approves. |
+| `approve` answers `rights_change_required` ("This is a change of rights. Approve this change of rights in the web console." or "Only an admin may approve it.") | Steps 4 and 5 are changes of rights. You approved on the command line, or you are not an admin in this tenant. | An admin approves it on the Approvals page of the web console. |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

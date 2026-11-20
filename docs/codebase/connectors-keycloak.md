@@ -471,9 +471,9 @@ whom, or what a sign-in asks for:
 - `user.required_actions.update`: taking a required action away (for
   example the one-time code set-up) makes a user's sign-in weaker.
 
-The first five are also changes of rights (next section): another admin
-(a tenant admin or a platform admin) must approve each call, and an
-Operator cannot. The single-operator
+The first five are also changes of rights (next section): an admin (a
+tenant admin or a platform admin) approves each call in the web console,
+and an Operator cannot. The single-operator
 self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them.
 The test `backend/tests/test_keycloak_identity_write_approvers.py` checks
 both rules for the first five. `user.required_actions.update` is
@@ -486,11 +486,17 @@ A Keycloak write that can change what a login token says, who has which
 role, who may sign in, or how strong a sign-in is, is a change of rights.
 For such a write:
 
-- the requester never approves their own request;
-- another admin (a tenant admin or a platform admin) must approve it, so an
-  Operator cannot;
+- an admin's call in the web console runs at once
+  (`operations/rights_change_console.py`), after the checks of who may make
+  it. A write that reads, writes or makes a credential (`realm.update`,
+  `user.create`, `user.reset_password`) still waits;
+- every other call waits: a token call (command line, REST, MCP), also the
+  admin's own token, an agent's call and an Operator's call;
+- only an admin (a tenant admin or a platform admin) approves a waiting
+  call, with a click in the web console; the admin may be the requester.
+  An Operator cannot;
 - a standing grant, an older grant row and a run approval never cover it:
-  each call waits for its own approval. An agent's call waits too;
+  each call that waits needs its own approval;
 - no operation setting turns its approval off. An edit that tries is
   refused (`approval_off_rights_change`), and a floor in
   `operations/op_policy.py` keeps approval on when an older override row
@@ -510,7 +516,7 @@ Keycloak write, with the reason:
 | `protocol_mapper.create` | yes | a mapper decides which claims a token holds |
 | `client_scope.protocol_mapper.update` | yes | changes a protocol mapper of a client scope, which decides which claims a token holds |
 | `user.create` | yes | the new user can carry groups, roles and attributes that mappers read |
-| `user.reset_password` | yes | a new password for a login is a change of rights; another admin approves it |
+| `user.reset_password` | yes | a new password for a login is a change of rights; an admin approves it |
 | `role_mapping.assign` | yes | gives a user realm roles |
 | `role_mapping.client.assign` | yes | gives a user roles of a client |
 | `user.update` | yes | changes a user's user name and email, which tokens carry and which a login or a password reset uses |
@@ -942,9 +948,8 @@ what rights.
 change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can
 change a person's email or user name, and `user.credential.delete` can
 remove their passkey or one-time code, so both change how a person signs
-in. For these three, the person the change is for never approves it. In
-every realm another admin must approve it; a person who may approve their
-own changes cannot approve these alone. In MEHO's own login realm, a role of the `realm-management` client (in any case) also needs a
+in. In every realm an admin approves it in the web console; the admin may
+be the person the change is for. In MEHO's own login realm, a role of the `realm-management` client (in any case) also needs a
 platform admin as approver: it decides who may manage the realm. The same
 holds for `role_mapping.assign` and `client.assign` when a part of the
 named role, on any level, is such a role or a role that MEHO's login maps to
@@ -955,8 +960,8 @@ A request that waited from before MEHO read the parts has no
 request was made before MEHO read what a role gives. Send it again."
 (`bound_ids_missing` in `operations/grant_approval.py`). They are also
 on the rights-change table (`rights_changes.py`, "Writes that are changes
-of rights"), so in every realm another admin must approve each call and
-the requester never approves their own request.
+of rights"), so in every realm only an admin approves each call, in the web
+console.
 
 - `keycloak.role_mapping.client.assign` and `.remove` (dangerous). Pass the
   user (`id`, or the exact `username`), `client_id` (the client's name, for
@@ -1047,12 +1052,12 @@ the existing mapper is changed.
   `keycloak.client_scope.list`.
 - Risk level `dangerous`, approval required, group `protocol_mapper_write`.
 - It is a change of rights: a mapper decides what goes into the login
-  token, so a change can give rights. The call waits for approval, and
-  another admin must approve:
-  - The op is registered with `register_rights_change_op`. The requester
-    never approves their own request, also as a tenant admin and with the
-    self-approval switch on. The approver is another person who is a
-    tenant admin or a platform admin. An Operator cannot approve it.
+  token, so a change can give rights. An admin's call in the web console
+  runs at once; every other call waits for approval:
+  - The op is registered with `register_rights_change_op`. Only a tenant
+    admin or a platform admin approves it, with a click in the web console,
+    and may be the requester. The self-approval switch does not cover it.
+    An Operator cannot approve it.
   - A person approves each call (`declare_per_call_approval`). No standing
     grant and no run approval covers it. An agent grant does not either:
     the op needs approval, so an agent's call always waits.

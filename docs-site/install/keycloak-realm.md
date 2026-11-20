@@ -410,10 +410,9 @@ managed realm), adds the name `meho-approve` (level 2) to the realm's
 sign-in levels, and makes the flow the browser flow of `meho-cli-approve`. It waits
 for approval
 ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
-It is a change of rights: another admin (a tenant admin or a platform
-admin) approves it, never the person who asked. So an install needs two
-admins before it runs this call. Add the second admin in Keycloak itself
-(Step 6, and put them in `MEHO-Admins` or `MEHO-Platform-Admins`).
+It is a change of rights: an admin (a tenant admin or a platform admin)
+approves it with a click in the web console, and may be the person who
+asked (see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
 With the built-in Keycloak, `helm upgrade` adds the flow without this call.
 
 ```bash
@@ -586,11 +585,9 @@ Keycloak reads the chart's realm file only when it makes the realm.
 The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 `keycloak.authflow.ensure_approval_touch` instead. It waits for
-approval. It is a change of rights: another admin (a tenant admin or a
-platform admin) approves it, never the person who asked. So an install
-needs two admins before it runs this call. Add the second admin in
-Keycloak itself (Step 6, and put them in `MEHO-Admins` or
-`MEHO-Platform-Admins`).
+approval. It is a change of rights: an admin (a tenant admin or a
+platform admin) approves it with a click in the web console, and may be
+the person who asked (see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch \
@@ -1382,7 +1379,7 @@ account `meho-admin` may only manage clients and users. So a realm that
 already runs gets these settings once, in one of two ways:
 
 - **Through MEHO**, with `keycloak.realm.update` (it waits until
-  another admin approves). Put the values in a file, for example `realm-login.json`:
+  an admin approves it in the web console). Put the values in a file, for example `realm-login.json`:
 
     ```json
     {
@@ -1408,8 +1405,8 @@ realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.
 
-MEHO adds the step with one operation. It waits until another admin
-approves ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
+MEHO adds the step with one operation. It waits until an admin approves
+it in the web console ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
 because it changes how every person of the realm logs in:
 
 ```bash

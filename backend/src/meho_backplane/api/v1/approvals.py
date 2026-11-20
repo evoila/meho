@@ -503,7 +503,7 @@ class ApprovalRequestView(BaseModel):
     #: ``may_approve`` true, ``own_change`` means a self-approval is
     #: allowed. ``None`` when ``may_approve`` is ``None``.
     may_approve_reason: str | None = None
-    #: This is a change of rights: another admin must approve it.
+    #: This is a change of rights: only an admin approves it, in the web console.
     rights_change: bool = False
 
 

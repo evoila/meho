@@ -393,9 +393,10 @@ async def test_an_admin_only_operation_reaches_only_tenant_admins(
     assert push_service.to(sa_operator) == []
 
 
-async def test_a_rights_change_reaches_only_another_admin(
+async def test_a_rights_change_reaches_only_the_admins(
     push_service: _FakePushService,
 ) -> None:
+    """The admin who asked may approve it in the web console, so they get the message too."""
     requester, other_admin, sa_operator = _browser("me"), _browser("other"), _browser("sa")
     await _subscribe(requester, sub="admin", login="admin")
     await _subscribe(other_admin, sub="admin-2", login="admin")
@@ -403,7 +404,7 @@ async def test_a_rights_change_reaches_only_another_admin(
 
     await _step(_request(requester="admin", rights_change=True))
 
-    assert push_service.to(requester) == []
+    assert [m["title"] for m in push_service.to(requester)] == ["An approval waits"]
     assert [m["title"] for m in push_service.to(other_admin)] == ["An approval waits"]
     assert push_service.to(sa_operator) == []
 

@@ -30,9 +30,8 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
   case.
 * ``members``: for a group attribute change in the login realm, the ids
   of the logins in the group (up to :data:`MEMBER_CAP`). ``None`` when
-  they could not be read, or when there are more than the cap. The
-  approval then refuses: it cannot tell whether the approver is in the
-  group.
+  they could not be read, or when there are more than the cap. The card
+  shows it; an admin may approve a change of a group they are in.
 
 The same builder runs again right before the approved change runs, so
 the approval check can compare the ids with the live system. For

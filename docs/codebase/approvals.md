@@ -1260,7 +1260,7 @@ login client (see the `client` block in [audit_query.md](audit_query.md)):
   "self_declared": true}`. The tool sends this text about itself, and MEHO
   cannot check it.
 
-## Changes of rights: the login is never its own approver
+## Changes of rights: who the change is for
 
 `operations/grant_approval.py` checks the Keycloak writes that change who
 has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign`,
@@ -1288,7 +1288,8 @@ preview of the waiting request:
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
-  not a list (an error object, `null`), or when the group has more.
+  not a list (an error object, `null`), or when the group has more. The
+  card shows it; no approval rule reads it.
 
 A value that could not be read is `None`, never a guess.
 
@@ -1300,18 +1301,15 @@ The group rule (`_check_approver_group`, used by `approve_request` and
 - when the login or the group the change is for is unknown (the lookup
   failed when the request was parked). Nobody can approve such a request;
   the requester sends a new one;
-- when the login the change is for is the approver, in every group and for
-  every risk level. A second login of the same person is another login, so
-  it is another approver in this check;
-- for a group attribute change in the login realm, when the approver is in
-  the group, or when MEHO could not read who is in the group;
+- in the login realm, when the approver is not a tenant admin;
 - in the login realm, when the approver is not a platform admin and the
   change can give platform admin rights (a group or role that gives them;
   see "How MEHO decides that a group change gives platform admin rights"
   in [connectors-keycloak.md](connectors-keycloak.md)).
 
-A request without the `grant` block, or with a group MEHO could not read,
-gets the strict rule. The decision audit row carries `grant_user_id`,
+An admin may approve a change of their own login and a change of a group
+they are in. A request without the `grant` block, or with a group MEHO
+could not read, gets the strict rule. The decision audit row carries `grant_user_id`,
 `grant_group_id` (when the change names a group), `grant_for_approver`,
 `grant_in_login_realm` and, when the request named one, `grant_username`.
 MEHO does not link two logins of one person.
@@ -1330,11 +1328,6 @@ own resume) and in the re-run after a failure (`approval_rerun`).
 **The run is also bound to the facts that decided who may approve.** The
 same check refuses the run:
 
-- for a group attribute change in the login realm, when the approver
-  (`reviewed_by`) is in the group now. A person can join the group after
-  the request was made, so the saved member list is not enough. When the
-  live member list cannot be read, or no approver is recorded, the run is
-  refused too;
 - when the change now needs a stricter approval than the one it got: the
   live card says login realm or platform admin where the saved one said
   no, or cannot say which it is;
@@ -1373,29 +1366,65 @@ realm. Both ops are also registered with `bound_ids_missing`, so this
 refusal says plainly: "This request was made before MEHO read what a role
 gives. Send it again."
 
-## The rights-change mark: another admin must approve
+## The rights-change mark: an admin approves it in the web console
 
 A waiting request can carry one mark: "this is a change of rights"
-(`ApprovalRequest.rights_change`). No login approves its own rights
-change, at any risk level, in any group. An admin, who may
-approve their own other changes, may not approve this one. The break-glass
-switch `APPROVAL_ALLOW_SELF_APPROVAL` does not clear the mark.
+(`ApprovalRequest.rights_change`). Only an admin approves it, and only
+with a click in the web console (`Operator.web_session`). The admin may be
+the person who asked: the decision row then has `self_approved: true` and
+the rule `sa_operator_self_approval`. No other group approves it, at any
+risk level. The break-glass switch `APPROVAL_ALLOW_SELF_APPROVAL` does not
+clear the mark.
 
-**One check.** `Operator.may_approve_rights_change(requester_sub)`
-decides: not the requester, a person in a chosen tenant, and an admin
-(a `tenant_admin` role or a platform admin). It is used by:
+**One check.** `Operator.may_approve_rights_change()` decides who is an
+admin: a person in a chosen tenant with the `tenant_admin` role or
+platform admin rights. It is used by `check_rights_change_approval` in
+`operations/grant_approval.py`, which the group rule
+(`_check_approver_group`) runs first. So the approve and the "may I
+approve?" sign (`approve_right`) give the same answer. The refusal is one
+sentence:
 
-- `check_rights_change_approval` in `operations/grant_approval.py`, which
-  the group rule (`_check_approver_group`) runs first. So the approve and
-  the "may I approve?" sign (`approve_right`) give the same answer. The
-  refusal is one sentence, on every surface: "This is a change of rights.
-  Another admin must approve it." The REST detail is
-  `rights_change_required: <that sentence>`, and `may_approve_reason` is
-  `rights_change`.
-- run approvals (`RunApprovalService.approve`): a list with a rights-change
-  operation is refused for its requester and for anyone who is not an
-  admin (`rights_change_required`). A list knows the operation but not the
-  realm, so every registered group or role operation counts.
+- not an admin: "This is a change of rights. Only an admin may approve it."
+- an admin on the command line or over REST (no web session): "This is a
+  change of rights. Approve this change of rights in the web console."
+  This holds also for another admin's request.
+
+The REST detail is `rights_change_required: <that sentence>`, and
+`may_approve_reason` is `rights_change`.
+
+Run approvals (`RunApprovalService.approve`): a list with a rights-change
+operation is refused for everyone (`rights_change_required`): a run
+approval list never covers a change of rights. A list knows the operation
+but not the realm, so every registered group or role operation counts.
+
+**An admin's own call in the web console runs at once.**
+`operations/rights_change_console.py` decides it in the policy gate
+(`_non_agent_verdict` in `operations/_validate.py`). The call runs at once
+when all of this holds:
+
+- the operation is registered with `register_rights_change_op` or
+  `register_grant_op` (`is_rights_change_op`);
+- it is not `destructive`, and it does not read, write or make a
+  credential (`credential_call_waits`). Those always wait. A change of
+  rights only by its params (`register_rights_change_check`, for example a
+  `secret.move` with a `keycloak:` side) always waits too;
+- the caller is a person with a web session and an admin
+  (`may_approve_rights_change`). A token call (command line, REST, MCP),
+  also the admin's own token, an agent, a service login, a hosted agent
+  run (the stricter of the caller and the agent) and an Operator wait.
+
+Before it runs, `console_refusal` runs the operation's check before a wait
+(`park_check_refusal`) and builds the approval card against the live
+system (`live_card`). Then it runs `check_grant_approval` on that card, the
+same check of who may make the change as on approve. A refusal is a `deny`
+with the same text. The dispatcher marks the audit row of such a run with
+`rights_change_run: admin_in_web_console` (an `audit_*` context key). The
+policy evaluator has the same rule (`admin_console_rights_change`, mark
+`rights_change`, lookup `rights_change_refusal`).
+
+`policy.apply` and `policy.classify` check again in the handler: a run
+without an approval, or a run by the person who asked (also a re-run of a
+failed approved request), writes only for an admin in the web console.
 
 **Who sets the mark.**
 
@@ -1428,7 +1457,7 @@ A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
 
 **Where the person sees it.** `ApprovalRequestView.rights_change` on REST.
-`meho approvals show` prints `Rights change: another admin must approve`,
+`meho approvals show` prints `Rights change: approve this change of rights in the web console`,
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
 
@@ -4693,7 +4722,8 @@ For each request, `web_push/recipients.py` builds a person from each row's
 facts and asks `approve_right_any_status` (`operations/approval_rights.py`)
 whether that person may approve the request. That is the same rule as the
 approve: the group rule for `dangerous` and `destructive` changes, the
-own-change rules, the rule for a change of rights (only another admin), and
+own-change rules, the rule for a change of rights (only an admin, in the web
+console), and
 the role an operation needs from its approver (for example `tenant_admin`
 for `targets.register`). It only leaves out the "still pending" check, so
 the decision message goes to the same people as the first message.

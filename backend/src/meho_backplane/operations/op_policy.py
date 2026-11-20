@@ -782,7 +782,8 @@ def _new_approval_field(
         raise OpPolicyEditError(
             "approval_off_rights_change",
             f"approval cannot be turned off for {row.op_id!r}: it is a change of "
-            "rights, and a change of rights always waits for another admin to approve it.",
+            "rights. A call of it with a token always waits until an admin approves it "
+            "in the web console.",
         )
     if not base:
         return None

@@ -9,7 +9,8 @@ You keep the policy as one file, `policy: v1`. You can:
 
 - **validate** a file and see every mistake,
 - see a **diff**: what an import would change (a dry run),
-- **import** a file. A second admin must approve the import. Only a
+- **import** a file. An admin approves the import with a click in the web
+  console, and may be the person who asked. Only a
   person can ask for an import, never an agent. Only a platform admin can
   ask to import the install's policy,
 - **export** the stored policy as a file,
@@ -50,7 +51,7 @@ file as a tenant's file and reports `taxonomy.default` as a mistake.
 On a fresh install, the diff of an install file with no `taxonomy` block
 shows the six built-in categories as removed, but they still apply. An
 install file with no entries and no `taxonomy` block is not the same as the
-"small team" file, so its import waits for a second admin to approve it.
+"small team" file, so its import waits for an admin to approve it.
 
 On a fresh install, `meho policy export --scope install` writes the same
 policy, without the comments. To start your own policy:
@@ -60,13 +61,13 @@ policy, without the comments. To start your own policy:
    `taxonomy.categories`.
 3. Run `meho policy validate --scope install` to check it, and
    `meho policy diff --scope install` to see what changes.
-4. Import it. A second admin approves the import.
+4. Import it. An admin approves the import in the web console.
 
 An import replaces the whole stored policy of its scope. When your install
 already has a policy, importing `small-team.yaml` removes every entry of
 that policy, also an entry that made an operation stricter. So export the
-install's policy first and add your entries to that file. A second admin
-must approve every import that changes something, and the changes made to
+install's policy first and add your entries to that file. An admin must
+approve every import that changes something, and the changes made to
 single operations (`meho connector edit-op`) stay.
 
 The "small team" file is for the whole install (`--scope install`). A
@@ -358,7 +359,7 @@ refused, and the message names the entry and the operation.
 ```bash
 meho policy validate policy.yaml     # list every mistake
 meho policy diff policy.yaml         # what an import would change
-meho policy import policy.yaml       # ask to import; a second admin approves
+meho policy import policy.yaml       # ask to import; an admin approves in the web console
 meho policy export -o policy.yaml    # the stored policy as a file
 meho policy history                  # the last 20 imported files
 ```
@@ -472,13 +473,15 @@ Not checked: idempotency_key, connector_resolution
 
 1. MEHO checks the file and works out the diff.
 2. If the file changes nothing, MEHO answers "No change." Nothing waits.
-3. Otherwise the import waits for approval. **Nothing changes yet.** You
-   can never approve your own import. Another tenant admin approves it in
-   the web console or on the command line.
+3. Otherwise the import waits for approval. **Nothing changes yet.** A
+   tenant admin approves it with a click in the web console, and may be
+   the person who asked. The command line and REST do not approve an
+   import.
 4. When it is approved, MEHO checks again. If the stored policy changed in
    the meantime, the import does not run: run the diff again and import
-   again. An approved import that failed cannot run again. Import the file
-   again, and a second admin approves the new request.
+   again. An approved import that failed runs again only for an admin in
+   the web console. Or import the file again, and an admin approves the new
+   request.
 5. The import **replaces the whole policy**. An entry that is not in the
    file is removed.
 

@@ -73,7 +73,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, RunApproval, Tenant
 from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
-from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
+from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.run_approval_notes import with_wait_notes
 from meho_backplane.operations.run_approval_schemas import (
@@ -110,6 +110,12 @@ _log = structlog.get_logger(__name__)
 #: Why a run approval never covers an operation marked with
 #: :func:`~meho_backplane.op_classes.declare_root_shell`.
 ROOT_SHELL_REFUSAL = "runs a command as root on the host; a person approves each call"
+
+#: Why a run approval list with a change of rights cannot be approved.
+RIGHTS_CHANGE_IN_LIST = (
+    "This is a change of rights. A run approval list never covers it: "
+    "a person approves each call in the web console."
+)
 
 #: How long a run approval lasts when the request names no ``expires_at``.
 DEFAULT_RUN_APPROVAL_HOURS = 24
@@ -252,13 +258,12 @@ async def _check_approver_group(
     session: AsyncSession,
     operator: Operator,
     entries: Sequence[dict[str, object]],
-    requester_sub: str,
 ) -> None:
     """Apply the approver-group rule of a single request to the whole list.
 
-    An entry that is a change of rights needs another admin
-    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`),
-    the same check as a single request.
+    An entry that is a change of rights is refused: a run approval list
+    never covers one (a person approves each call in the web console), so
+    such a list cannot be approved.
 
     A ``dangerous`` (or ``destructive``) operation of another principal may
     be approved only by the groups of
@@ -283,12 +288,10 @@ async def _check_approver_group(
     routed: list[dict[str, object]] = []
     for index, raw in enumerate(entries):
         entry = RunApprovalEntry.model_validate(raw)
-        if is_rights_change_op(entry.op_id) and not operator.may_approve_rights_change(
-            requester_sub
-        ):
+        if is_rights_change_op(entry.op_id):
             raise RunApprovalGroupError(
                 f"rights_change_required: entries[{index}] ({entry.op_id!r}): "
-                f"{RIGHTS_CHANGE_REFUSAL}"
+                f"{RIGHTS_CHANGE_IN_LIST}"
             )
         product, version, impl_id = parse_connector_id(entry.connector_id)
         descriptor = await lookup_descriptor(
@@ -539,7 +542,7 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
-            await _check_approver_group(session, operator, row.entries, row.principal_sub)
+            await _check_approver_group(session, operator, row.entries)
             row.approved_at = now
             row.approved_by_sub = operator.sub
             await session.commit()

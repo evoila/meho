@@ -396,7 +396,9 @@ async def test_a_user_renamed_to_the_sign_in_user_while_the_request_waits_is_ref
     kc: KeycloakConnector,
 ) -> None:
     """The real path: park, rename, a second person approves, MEHO refuses and writes nothing."""
-    approver = _operator("kc-guard-approver", TenantRole.TENANT_ADMIN)
+    approver = _operator("kc-guard-approver", TenantRole.TENANT_ADMIN).model_copy(
+        update={"web_session": True}
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         api = _Keycloak(mock, _ADMIN_REALM)
         api.add(_user("event-guest", ["VERIFY_EMAIL"]))

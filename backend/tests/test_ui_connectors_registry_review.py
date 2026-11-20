@@ -1272,7 +1272,7 @@ def test_classify_page_needs_tenant_admin(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dry run lists the matched operation and writes nothing; the request waits."""
+    """The dry run writes nothing; a tenant admin's change in the console runs at once."""
     _classification_on(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_connector(tenant_id=_TENANT_A)
@@ -1305,7 +1305,7 @@ def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> 
     assert "data-classify-in-force" in preview.text
     assert count_after_preview == 0
     assert requested.status_code == 200, requested.text
-    assert "data-classify-requested" in requested.text
-    assert _approval_request_count() == 1
+    assert "data-classify-done" in requested.text
+    assert _approval_request_count() == 0
     assert "data-classify-error" in bad.text
     assert "key=value" in bad.text

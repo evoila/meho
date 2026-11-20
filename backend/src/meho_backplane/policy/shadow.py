@@ -46,6 +46,7 @@ from meho_backplane.policy.evaluate import (
     Decision,
     Lookups,
     Verdict,
+    admin_console_rights_change,
     evaluate,
 )
 from meho_backplane.policy.stamp import RuleStamp, forget_rule, keep_rule
@@ -114,6 +115,7 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
 
 def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
+    from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.service_grants import (
         credential_call_waits,
         credential_grant_reason,
@@ -130,6 +132,7 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
         "credential_waits": credential_call_waits(op_id, stored_class),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
+        "rights_change": is_rights_change_op(op_id),
     }
     return frozenset(name for name, on in marks.items() if on)
 
@@ -219,6 +222,7 @@ async def evaluate_call(
     connector_id: str | None,
     preview_hash: str | None = None,
     decide_only: bool = False,
+    params: dict[str, Any] | None = None,
 ) -> Decision:
     """Do the lookups for one call and return the evaluator's decision. Writes nothing."""
     from meho_backplane.sandbox_mode import sandbox_mode_active
@@ -248,6 +252,16 @@ async def evaluate_call(
                 decide_only=decide_only,
             )
         )
+    if admin_console_rights_change(asker, asked):
+        from meho_backplane.operations.rights_change_console import console_refusal
+
+        found["rights_change_refusal"] = await console_refusal(
+            operator,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+        )
     return evaluate(asker, asked, Lookups(**found))
 
 
@@ -272,6 +286,7 @@ async def shadow_call(
     today: tuple[PermissionVerdict, str | None],
     preview_hash: str | None = None,
     decide_only: bool = False,
+    params: dict[str, Any] | None = None,
 ) -> None:
     """Compare the evaluator with today's verdict *today* for one call. Never raises.
 
@@ -290,6 +305,7 @@ async def shadow_call(
             connector_id=connector_id,
             preview_hash=preview_hash,
             decide_only=decide_only,
+            params=params,
         )
         keep_rule(_shadow_stamp(decision))
         today_verdict, today_reason = today

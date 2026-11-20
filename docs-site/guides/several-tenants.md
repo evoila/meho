@@ -24,11 +24,11 @@ one login. At the end:
     dangerous risk level (decision record:
     [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
 
-    - **Putting a person in a group** is a change of rights. Another
-      admin (a tenant admin or a platform admin) must approve it, never
-      the person who asked. An Operator cannot
-      approve it. See
-      [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+    - **Putting a person in a group** is a change of rights. An admin
+      (a tenant admin or a platform admin) does it in the web console,
+      where it runs at once, or approves a waiting request there. An
+      Operator cannot approve it. See
+      [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
     - **Taking a person out of a group** only takes rights away. A
       MEHO-Admin may approve their own; anyone else
       needs a second person (an admin).
@@ -62,10 +62,8 @@ The design is in the
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- An admin who is not the person who asked, to approve each time you
-  put a person in a group. An install with only one admin adds a second
-  admin first (see
-  [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin)).
+- An admin in the web console, each time you put a person in a group (see
+  [Changes of rights](approvals-and-break-glass.md#changes-of-rights)).
 
 ## Step 1: Add the tenant in Keycloak
 
@@ -404,8 +402,8 @@ A platform admin **may**:
   tenant, the role of that group applies instead.
 - approve their own changes in a tenant where they act as `tenant_admin`.
   They count as an admin there, so they may approve their own changes
-  like members of `MEHO-Admins`. This does not
-  cover a change of rights: another admin must approve that.
+  like members of `MEHO-Admins`. A change of rights they approve only
+  with a click in the web console.
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers `403 tenant_select_with_header`: pick that tenant with

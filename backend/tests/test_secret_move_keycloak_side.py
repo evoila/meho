@@ -4,9 +4,11 @@
 """A ``secret.move`` with a ``keycloak:`` side is a change of rights, bound to its Keycloak target.
 
 * A move to a ``keycloak:`` user password, or from a ``keycloak:`` client
-  secret, is a change of rights: the requester never approves it, a
-  reviewer who is not an admin cannot approve it, and another tenant admin
-  can. A move between two Vault places is not a change of rights.
+  secret, is a change of rights: it waits also when an admin asks in the
+  web console, a reviewer who is not an admin cannot approve it, no admin
+  approves it with a token, and an admin approves it in the web console
+  (also the admin who asked). A move between two Vault places is not a
+  change of rights.
 * The card a person reads names, for each ``keycloak:`` side, the Keycloak
   target it points to (id and name), its host and its secret reference.
   The agent's views leave these fields out.
@@ -85,6 +87,7 @@ def _person(
     *,
     role: TenantRole = TenantRole.OPERATOR,
     sa_operator: bool = False,
+    web: bool = True,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -95,10 +98,11 @@ def _person(
         tenant_role=role,
         principal_kind=PrincipalKind.USER,
         self_approver=sa_operator,
+        web_session=web,
     )
 
 
-#: The requester is a tenant admin, so only the rights-change rule stops them.
+#: The requester is a tenant admin in the web console: the move still waits.
 _REQUESTER = _person("kc-requester", role=TenantRole.TENANT_ADMIN)
 #: A reviewer who approves a dangerous change of another person, but is not an admin.
 _PLAIN_REVIEWER = _person("kc-reviewer", sa_operator=True)
@@ -279,14 +283,15 @@ async def test_a_move_with_a_keycloak_side_is_a_change_of_rights(
     row = await _ask(params)
     assert row.rights_change is True
     assert is_rights_change(row)
+    assert row.status == ApprovalRequestStatus.PENDING.value
 
-    with pytest.raises(RightsChangeApprovalError):
-        await _approve(row.id, _REQUESTER)
     with pytest.raises(RightsChangeApprovalError):
         await _approve(row.id, _PLAIN_REVIEWER)
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(row.id, _person("kc-other-admin", role=TenantRole.TENANT_ADMIN, web=False))
     assert await _status(row.id) == ApprovalRequestStatus.PENDING.value
 
-    approved = await _approve(row.id, _OTHER_ADMIN)
+    approved = await _approve(row.id, _REQUESTER)
     assert approved.status == ApprovalRequestStatus.APPROVED.value
     assert keycloak.hosts_called() == set()  # parking and approving call no Keycloak
 

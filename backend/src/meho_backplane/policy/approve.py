@@ -9,9 +9,10 @@
 1. **Floor:** only a person approves. Agents, services and runners never do.
 2. A ``read_only`` person without the approver flag cannot decide.
 3. Only a pending request can be approved.
-4. **Floor:** a change of rights only another admin approves; the person
-   who asked never does. A change of a login's or a group's rights also
-   follows the rules on who the change is for (``grant_refusal``).
+4. **Floor:** only an admin approves a change of rights, and only with a
+   click in the web interface. The admin may be the person who asked. A
+   change of a login's or a group's rights also follows the rules on who
+   the change is for (``grant_refusal``).
 5. An own change: a MEHO-Admin may approve it; a
    person may approve their own ``caution`` change that waited only
    because it came with a token, with a click in the web interface; and
@@ -76,11 +77,17 @@ def _may_self_approve(asker: Asker) -> bool:
     return in_group and asker.tenant_chosen
 
 
-def _may_approve_rights_change(asker: Asker, requester_sub: str) -> bool:
-    if asker.sub.casefold() == requester_sub.casefold():
-        return False
+def _rights_change_refusal(asker: Asker) -> tuple[bool, RuleRef] | None:
     is_admin = asker.tenant_role is TenantRole.TENANT_ADMIN or "platform_admin" in asker.roles
-    return is_admin and asker.tenant_chosen
+    if not (is_admin and asker.tenant_chosen):
+        return _no("rights_change", "only an admin approves a change of rights", source="floor")
+    if asker.via != "web":
+        return _no(
+            "rights_change",
+            "approve this change of rights in the web console",
+            source="floor",
+        )
+    return None
 
 
 def _own_change(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
@@ -95,12 +102,12 @@ def _own_change(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
 
 
 def _group_rule(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
-    if ask.rights_change and not _may_approve_rights_change(asker, ask.requester_sub):
-        return _no(
-            "rights_change", "only another admin approves a change of rights", source="floor"
-        )
+    if ask.rights_change and (refusal := _rights_change_refusal(asker)) is not None:
+        return refusal
     if ask.grant_refusal is not None:
         return _no("grant_change", ask.grant_refusal, source="floor")
+    if ask.rights_change and asker.sub == ask.requester_sub:
+        return _yes("sa_operator_self_approval", "an admin's own change of rights, in the web")
     if asker.sub == ask.requester_sub:
         return _own_change(asker, ask)
     if ask.risk not in _HIGH_RISK:

@@ -518,6 +518,10 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.rights_change_console import (
+    CONSOLE_RUN_AUDIT_VALUE,
+    CONSOLE_RUN_REASON,
+)
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.service_grants import credential_call_waits
@@ -4500,6 +4504,10 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
+                structlog.contextvars.bind_contextvars(
+                    audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE
+                )
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
                 # The row keeps the reason and its code (#5773), so the audit

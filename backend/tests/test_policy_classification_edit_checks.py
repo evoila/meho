@@ -38,8 +38,8 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.policy import classify as classify_module
 from meho_backplane.connectors.policy.classify import (
     CARD_FIRST_MATCHES,
+    CLASSIFY_NEEDS_APPROVAL,
     CLASSIFY_NEEDS_PERSON,
-    CLASSIFY_NEEDS_SECOND_ADMIN,
     POLICY_CLASSIFY_OP_ID,
     POLICY_REGISTRY_CONNECTOR_ID,
     register_policy_classify_operation,
@@ -53,6 +53,7 @@ from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.approval_queue import (
+    RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -137,13 +138,17 @@ async def ops(embedding: AsyncMock) -> None:
     await register_policy_classify_preview_operation(embedding_service=embedding)
 
 
-def _admin(sub: str = "admin-a", *, kind: PrincipalKind = PrincipalKind.USER) -> Operator:
+def _admin(
+    sub: str = "admin-a", *, kind: PrincipalKind = PrincipalKind.USER, web: bool = False
+) -> Operator:
+    """An admin; ``web`` is a click in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         tenant_id=_TENANT,
         tenant_role=TenantRole.TENANT_ADMIN,
         principal_kind=kind,
         raw_jwt="header.payload.signature",
+        web_session=web,
     )
 
 
@@ -430,7 +435,7 @@ async def test_a_second_admin_runs_the_change_and_the_card_records_the_requester
     (request,) = await _requests()
     record = request.proposed_effect["permission_preflight"]["requester"]  # type: ignore[index]
     assert record["sub"] == "admin-a" and record["principal_kind"] == "user"
-    ran = await _approve(request.id, _admin("admin-b"))
+    ran = await _approve(request.id, _admin("admin-b", web=True))
     assert ran.status == "ok", ran
     assert (await _stored() or {})["classifications"] == [
         {"match": {"op": "clschk.vm.*"}, "category": "compute"}
@@ -439,7 +444,36 @@ async def test_a_second_admin_runs_the_change_and_the_card_records_the_requester
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("ops")
-async def test_the_requester_cannot_rerun_a_failed_approved_change(
+async def test_an_admin_change_in_the_console_runs_at_once() -> None:
+    result = await _dispatch(_admin("admin-a", web=True))
+
+    assert result.status == "ok", result
+    assert await _requests() == []
+    assert (await _stored() or {})["classifications"] == [
+        {"match": {"op": "clschk.vm.*"}, "category": "compute"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("ops")
+async def test_the_requester_approves_their_own_change_in_the_console() -> None:
+    result = await _dispatch(_admin("admin-a"))
+    assert result.status == "awaiting_approval", result
+    (request,) = await _requests()
+
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request.id, _admin("admin-a"))
+    ran = await _approve(request.id, _admin("admin-a", web=True))
+
+    assert ran.status == "ok", ran
+    assert (await _stored() or {})["classifications"] == [
+        {"match": {"op": "clschk.vm.*"}, "category": "compute"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("ops")
+async def test_the_requester_with_a_token_cannot_rerun_a_failed_approved_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _dispatch(_admin("admin-a"))
@@ -450,11 +484,11 @@ async def test_the_requester_cannot_rerun_a_failed_approved_change(
 
     with monkeypatch.context() as m:
         m.setattr(classify_module, "set_classification", _fails)
-        first = await _approve(request.id, _admin("admin-b"))
+        first = await _approve(request.id, _admin("admin-b", web=True))
     assert first.status != "ok"
     outcome = await rerun_failed_request(operator=_admin("admin-a"), request_id=request.id)
     assert outcome.result.status != "ok"
-    assert CLASSIFY_NEEDS_SECOND_ADMIN in str(outcome.result.error) + str(outcome.result.extras)
+    assert CLASSIFY_NEEDS_APPROVAL in str(outcome.result.error) + str(outcome.result.extras)
     assert await _stored() is None
 
 
@@ -474,7 +508,7 @@ async def test_the_run_checks_the_recorded_requester_again(record: dict[str, Any
         effect["permission_preflight"] = None if record is None else {"requester": record}
         row.proposed_effect = effect
         await session.commit()
-    result = await _approve(request.id, _admin("admin-b"))
+    result = await _approve(request.id, _admin("admin-b", web=True))
     assert result.status != "ok"
     assert CLASSIFY_NEEDS_PERSON in str(result.error) + str(result.extras)
     assert await _stored() is None

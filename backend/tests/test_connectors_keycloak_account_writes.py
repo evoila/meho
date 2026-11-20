@@ -843,9 +843,9 @@ async def test_no_secret_data_reaches_a_result_a_card_or_an_audit_row(
 ) -> None:
     """A recorded list with secretData and credentialData never comes out."""
     requester = _operator("kc-account-requester")
-    # The change is in MEHO's own login realm, so another admin approves it.
+    # The change is in MEHO's own login realm, so a tenant admin approves it in the console.
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
     )
     remaining = [c for c in _CREDENTIALS if c["type"] != "otp"]
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -939,8 +939,10 @@ async def _park_sign_in_change(op_id: str, requester: Operator) -> uuid.UUID:
 
 
 async def _approve_as(request_id: uuid.UUID, approver: Operator) -> None:
+    """*approver* approves with a click in the web console."""
+    console = approver.model_copy(update={"web_session": True})
     async with get_sessionmaker()() as session:
-        await approve_request(session, request_id, operator=approver, params=None)
+        await approve_request(session, request_id, operator=console, params=None)
         await session.commit()
 
 
@@ -959,25 +961,24 @@ async def test_a_sign_in_change_card_names_the_user_for_the_grant_check(
 
 
 @pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
-async def test_the_user_a_sign_in_change_is_for_cannot_approve_it(
+async def test_an_admin_approves_a_sign_in_change_of_their_own_login(
     kc: KeycloakConnector, op_id: str
 ) -> None:
     request_id = await _park_sign_in_change(op_id, _operator())
     affected = _operator(_USER_UUID).model_copy(update={"tenant_role": TenantRole.TENANT_ADMIN})
 
-    with pytest.raises(ApprovalRoleFloorError) as exc:
-        await _approve_as(request_id, affected)
+    await _approve_as(request_id, affected)
 
-    assert "your own login" in exc.value.reason_text
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None and row.status == "approved"
 
 
 @pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
-async def test_a_self_approver_cannot_approve_their_own_sign_in_change(
+async def test_a_self_approver_who_is_not_an_admin_cannot_approve_their_own_sign_in_change(
     kc: KeycloakConnector, op_id: str
 ) -> None:
-    requester = _operator().model_copy(
-        update={"self_approver": True, "tenant_role": TenantRole.TENANT_ADMIN}
-    )
+    requester = _operator().model_copy(update={"self_approver": True})
     request_id = await _park_sign_in_change(op_id, requester)
 
     with pytest.raises(RightsChangeApprovalError):
@@ -1162,7 +1163,7 @@ async def test_a_credential_delete_does_not_run_when_the_credentials_changed(
 ) -> None:
     """Parked by type; a new credential of that type appears; the approved run is refused."""
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
     )
     new_otp = {**_CREDENTIALS[1], "id": "cred-otp-3", "userLabel": "New phone"}
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -1204,7 +1205,7 @@ async def _approve_and_resume_credential_delete(
 ) -> tuple[Any, respx.Route, respx.Route]:
     """Park a delete by type, approve it, run it; Keycloak answers *credential_reads* in order."""
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
     )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
@@ -1271,7 +1272,7 @@ async def test_an_approved_credential_delete_stops_when_the_list_changes_after_t
 async def test_outside_the_login_realm_a_self_approver_cannot_approve_their_own_change(
     kc: KeycloakConnector, op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A change of rights in every realm: another admin must approve it."""
+    """A change of rights in every realm: only an admin approves it."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/another-login")
     get_settings.cache_clear()
     requester = _operator().model_copy(update={"self_approver": True})

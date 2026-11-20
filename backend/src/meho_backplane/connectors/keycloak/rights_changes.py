@@ -8,10 +8,13 @@ that token. So a Keycloak write that can change what a token says, who
 has which role, who may sign in, or how strong a sign-in is, is a change
 of rights. For each such write:
 
-* the requester never approves their own request;
-* another admin (a tenant admin or a platform admin) must approve it;
+* an admin's call in the web console runs at once, after the checks of
+  who may make it (:mod:`~meho_backplane.operations.rights_change_console`);
+* every other call waits, and only an admin (a tenant admin or a platform
+  admin) approves it, in the web console; the admin may be the one who
+  asked;
 * a standing grant, a stored grant row and a run approval never cover it,
-  so each call waits for its own approval. An agent's call waits too.
+  so each call that waits needs its own approval. An agent's call waits too.
 
 Every Keycloak write is on exactly one of the two tables below, with the
 reason. ``tests/test_keycloak_rights_change_writes.py`` fails when a new
@@ -73,7 +76,7 @@ RIGHTS_CHANGE_OPS: Final[dict[str, str]] = {
         "changes a protocol mapper of a client scope, which decides which claims a token holds"
     ),
     "keycloak.user.reset_password": (
-        "a new password for a login is a change of rights; another admin approves it"
+        "a new password for a login is a change of rights; an admin approves it"
     ),
     "keycloak.user.create": (
         "the new user can carry groups, roles and attributes that mappers put into tokens"

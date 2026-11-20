@@ -69,9 +69,10 @@ A move with a ``keycloak`` side is a change of rights
 Such a move sets a Keycloak user's password or reads a client secret, so
 it counts as a change of rights, like ``keycloak.user.reset_password``
 (:func:`~meho_backplane.operations.grant_approval.register_rights_change_check`
-with :func:`has_keycloak_side`). The requester never approves it, and
-another admin (a tenant admin or a platform admin) must. A move between
-two Vault places is not a change of rights.
+with :func:`has_keycloak_side`). It always waits, also when an admin asks
+in the web console. Only an admin (a tenant admin or a platform admin)
+approves it, in the web console, and the admin may be the one who asked.
+A move between two Vault places is not a change of rights.
 
 What a caller reads about a ``linux`` side is behind the switch
 ``SECRET_MOVE_LINUX_TARGET_CARD`` (``Settings.secret_move_linux_target_card``,

@@ -502,19 +502,20 @@ class Operator(BaseModel):
         in_a_self_approval_group = self.self_approver or self.tenant_role == TenantRole.TENANT_ADMIN
         return in_a_self_approval_group and self.tenant_chosen and is_human_principal(self)
 
-    def may_approve_rights_change(self, requester_sub: str) -> bool:
-        """Return ``True`` when this person may approve a change of rights.
+    def may_approve_rights_change(self) -> bool:
+        """Return ``True`` when this person is an admin who may make a change of rights.
 
-        The one place that decides it, for every kind of rights change
-        and every approval path (the approve, the "may I approve?" sign and
-        run approvals). True only for a person in a chosen current tenant who
-        is an admin there (the ``tenant_admin`` role or a platform admin)
-        and who is not *requester_sub*: the requester never approves their
-        own change of rights. No group, no risk level and no break-glass
-        switch changes that.
+        The one place that decides who is an admin for a change of rights,
+        for every path: the approve, the "may I approve?" sign, and a
+        change of rights that runs at once in the web console
+        (:mod:`~meho_backplane.operations.rights_change_console`). True
+        only for a person in a chosen current tenant who is an admin there
+        (the ``tenant_admin`` role or a platform admin). The admin may be
+        the person who asked. No group, no risk level and no break-glass
+        switch changes that. The approve also needs a click in the web
+        console
+        (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
         """
-        if self.sub.casefold() == requester_sub.casefold():
-            return False
         is_admin = self.tenant_role == TenantRole.TENANT_ADMIN or self.platform_admin
         return is_admin and self.tenant_chosen and is_human_principal(self)
 

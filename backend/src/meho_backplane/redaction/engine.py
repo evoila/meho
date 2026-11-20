@@ -63,12 +63,18 @@ policy is responsible for ordering.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.redaction.patterns import get_pattern, secret_spans
+from meho_backplane.redaction.patterns import (
+    COMMAND_SECRET_BEFORE_API_KEY,
+    SecretFinder,
+    get_pattern,
+    secret_spans,
+)
 from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 
 __all__ = [
@@ -180,8 +186,9 @@ def redact(
     # flattens to ``list`` -- so the JSON-shape guarantee the
     # JSONFlux reducer relies on is preserved in both modes.
     mutate = policy.mode != "shadow"
-    for rule in applicable_rules:
-        current = _walk_and_apply(current, rule, manifest, path="", mutate=mutate)
+    for index, rule in enumerate(applicable_rules):
+        pattern = _pattern_for(rule, applicable_rules[index + 1 : index + 2])
+        current = _walk_and_apply(current, rule, manifest, path="", mutate=mutate, pattern=pattern)
 
     return RedactionResult(redacted=current, manifest=tuple(manifest))
 
@@ -191,6 +198,20 @@ def redact(
 # ---------------------------------------------------------------------------
 
 
+def _pattern_for(
+    rule: RedactionRule, following: tuple[RedactionRule, ...]
+) -> re.Pattern[str] | SecretFinder:
+    """The named pattern of *rule*, given the rule that runs right after it.
+
+    ``command_line_secret`` leaves a value that the ``api_key`` rule hides
+    whole to that rule, but only when that rule runs right after it.
+    Without it, the finder hides every value it reads.
+    """
+    if rule.pattern == "command_line_secret" and following and following[0].pattern == "api_key":
+        return COMMAND_SECRET_BEFORE_API_KEY
+    return get_pattern(rule.pattern)
+
+
 def _walk_and_apply(
     node: object,
     rule: RedactionRule,
@@ -198,6 +219,7 @@ def _walk_and_apply(
     *,
     path: str,
     mutate: bool,
+    pattern: re.Pattern[str] | SecretFinder,
 ) -> object:
     """Recurse through *node*, applying *rule* at every string leaf.
 
@@ -216,7 +238,7 @@ def _walk_and_apply(
     way -- the gate only changes what the returned string is.
     """
     if isinstance(node, str):
-        return _apply_to_str(node, rule, manifest, path=path, mutate=mutate)
+        return _apply_to_str(node, rule, manifest, path=path, mutate=mutate, pattern=pattern)
     if isinstance(node, Mapping):
         return {
             key: _walk_and_apply(
@@ -225,12 +247,15 @@ def _walk_and_apply(
                 manifest,
                 path=_join_path(path, str(key)),
                 mutate=mutate,
+                pattern=pattern,
             )
             for key, value in node.items()
         }
     if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
         if len(node) > 1 and all(isinstance(item, str) for item in node):
-            return _apply_to_rows(list(node), rule, manifest, path=path, mutate=mutate)
+            return _apply_to_rows(
+                list(node), rule, manifest, path=path, mutate=mutate, pattern=pattern
+            )
         return [
             _walk_and_apply(
                 item,
@@ -238,6 +263,7 @@ def _walk_and_apply(
                 manifest,
                 path=_join_path(path, str(index)),
                 mutate=mutate,
+                pattern=pattern,
             )
             for index, item in enumerate(node)
         ]
@@ -254,11 +280,12 @@ def _apply_to_str(
     *,
     path: str,
     mutate: bool,
+    pattern: re.Pattern[str] | SecretFinder,
 ) -> str:
     """Match *rule* against *leaf*; emit manifest + return new string.
 
-    The named-pattern lookup raises :class:`KeyError` on an unknown
-    name, but the policy schema rejects unknown names at parse time
+    The named-pattern lookup (:func:`_pattern_for`) raises
+    :class:`KeyError` on an unknown name, but the policy schema rejects unknown names at parse time
     so that branch is unreachable in production. Defensively, an
     unknown name here would crash policy load before any traffic, not
     a request mid-flight.
@@ -268,7 +295,6 @@ def _apply_to_str(
     is the original *leaf*. The detection signal is identical to
     enforce mode; only the in-payload substitution is suppressed.
     """
-    pattern = get_pattern(rule.pattern)
     spans = secret_spans(pattern, leaf)
     if not spans:
         return leaf
@@ -296,6 +322,7 @@ def _apply_to_rows(
     *,
     path: str,
     mutate: bool,
+    pattern: re.Pattern[str] | SecretFinder,
 ) -> list[str]:
     """Match *rule* against *rows* as one text; rewrite each row's part of a match.
 
@@ -320,7 +347,6 @@ def _apply_to_rows(
     matches, not their product, so a long log tail with many secrets in
     every row is handled in about the time its rows take one by one.
     """
-    pattern = get_pattern(rule.pattern)
     spans = secret_spans(pattern, "\n".join(rows))
     if not spans:
         return rows

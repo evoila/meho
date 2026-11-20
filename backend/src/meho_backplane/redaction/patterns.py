@@ -53,10 +53,11 @@ import re
 from typing import Final, Protocol
 
 from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
-from meho_backplane.redaction.command_secret import CommandSecretFinder
+from meho_backplane.redaction.command_secret import COMMAND_SECRET, CommandSecretFinder
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
+    "COMMAND_SECRET_BEFORE_API_KEY",
     "MASK_CHARS",
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
@@ -347,14 +348,19 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "url_secret": URL_SECRET,
-    # It knows the api_key rule that runs right after it, so it changes an
-    # answer only where it hides more of a secret value.
-    "command_line_secret": CommandSecretFinder(next_rule=_API_KEY),
+    # Every value it reads. The engine swaps in COMMAND_SECRET_BEFORE_API_KEY
+    # when the api_key rule runs right after it in the policy.
+    "command_line_secret": COMMAND_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,
     "fqdn": _FQDN,
 }
+
+#: The ``command_line_secret`` finder for a policy where the ``api_key`` rule
+#: runs right after it: a value that rule hides whole is left to it, so that
+#: part of the answer stays as it was without this rule.
+COMMAND_SECRET_BEFORE_API_KEY: Final[SecretFinder] = CommandSecretFinder(next_rule=_API_KEY)
 
 #: Stable, sorted tuple of pattern names; what the Pydantic policy
 #: schema validates rule.pattern against. Sorted for deterministic

@@ -24,12 +24,13 @@ option name and the words around it stay readable:
   quotes or in braces (``Pwd={x;y}``) is read to its closing mark, also
   across line breaks; a value that is never closed ends at its line. A
   value without them runs to the ``;`` that ends it, so it may hold spaces
-  and quotes (``Pwd=made'up;``). With no ``;`` after it, it ends at white
-  space. Text counts as a connection string when a ``;`` stands before
-  the label, or a ``;`` ends the value and a next field (``;Database=``)
-  follows or no option (``-x``) or ``key=`` word stands in the value. A
-  label behind ``-`` is a command option. Only the value is hidden: the
-  label and the next fields stay as the other rules leave them.
+  and quotes (``Pwd=made'up;``). With no ``;`` after it, it runs to the
+  end of its line, so a last field may hold spaces. Text counts as a
+  connection string when a ``;`` stands before the label, or a ``;`` ends
+  the value and a next field (``;Database=``) follows or no option
+  (``-x``) or ``key=`` word stands in the value. A label behind ``-`` is
+  a command option. Only the value is hidden: the label and the next
+  fields stay as the other rules leave them.
   Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``, ``APP_KEY=x``);
@@ -57,12 +58,14 @@ backslash there. So ``{"msg":"run --password \\"made up\\""}`` hides
 ``\\"made up\\"`` whole. A string inside such a string is read the same
 way, up to three levels deep.
 
-The finder that the named pattern uses (:mod:`.patterns`) knows the
-``api_key`` rule, which runs right after this one. A value that this rule
+The named pattern (:mod:`.patterns`) reports every value it reads. When the
+``api_key`` rule runs right after this one in a policy, the engine uses
+:data:`.patterns.COMMAND_SECRET_BEFORE_API_KEY` instead: a value that this rule
 reads and that rule hides whole is left to it, so the answer stays as it
 was. A value that the ``api_key`` rule hides only in part is hidden whole,
 together with that part. So this rule changes an answer only where it
-hides more of a secret value.
+hides more of a secret value, and a policy without the ``api_key`` rule
+still hides every value.
 
 Names that look like a secret but are not one stay: paging tokens
 (``--next-token``, ``<NextToken>``, ``<ContinuationToken>``), a short list
@@ -682,10 +685,6 @@ def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -
     return "=" not in field
 
 
-#: White space ends an unquoted connection string value that no ``;`` ends.
-_WHITE: Final = re.compile(r"\s")
-
-
 def _connection_span(
     text: str, match: re.Match[str], quotes: _OuterQuotes, marks: _ClosingMarks
 ) -> list[tuple[int, int]]:
@@ -712,11 +711,6 @@ def _connection_span(
             return []
         word = _value_span(text, start, close)
         return [] if word is None else [word]
-    if not text.startswith(";", stop_at):
-        # No ``;`` ends the value: the words after its first white space stay.
-        white = _WHITE.search(text, start, stop_at)
-        if white is not None:
-            stop_at = white.start()
     # A value hidden by an earlier rule is not part of this one.
     earlier = _PLACEHOLDER.search(text, start, stop_at)
     if earlier is not None:
@@ -958,7 +952,11 @@ def _decoded(text: str, start: int, end: int) -> tuple[str, list[int]]:
         parts.append(text[pos : escape.start()])
         starts.extend(range(pos, escape.start()))
         sequence = escape.group(0)
-        char = chr(int(sequence[2:], 16)) if sequence[1] == "u" else _ESCAPED_CHARS.get(sequence[1])
+        if len(sequence) == 6:
+            char: str | None = chr(int(sequence[2:], 16))
+        else:
+            # ``\u`` without four hex digits (``C:\users``) is a plain backslash.
+            char = _ESCAPED_CHARS.get(sequence[1])
         if char is None:
             parts.append(sequence)
             starts.extend(range(escape.start(), escape.end()))
@@ -1038,5 +1036,5 @@ class CommandSecretFinder:
         return _left_to_next_rule(text, spans, self._next_rule)
 
 
-#: The finder without the ``api_key`` rule: it reports every value it reads.
+#: The finder on its own: it reports every value it reads.
 COMMAND_SECRET: Final[CommandSecretFinder] = CommandSecretFinder()

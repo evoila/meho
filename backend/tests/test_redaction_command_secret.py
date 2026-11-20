@@ -29,11 +29,11 @@ from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.redaction.command_secret import COMMAND_SECRET
-from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.engine import _pattern_for, redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
-from meho_backplane.redaction.patterns import get_pattern, secret_spans
-from meho_backplane.redaction.policy import RedactionPolicy
+from meho_backplane.redaction.patterns import secret_spans
+from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
@@ -134,8 +134,8 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
     ),
     # A connection string value with spaces, or in braces with a ``;`` in it.
     (f"User ID=u;{_PASSWORD_IS}{PW} long phrase;Database=d", "long phrase", "User ID=u;"),
-    # With no ``;`` after it, the value ends at white space.
-    (f"Server=db;{_PWD_IS}{PW} long phrase", PW, "long phrase"),
+    # With no ``;`` after it, a last field runs to the end of its line.
+    (f"Server=db;{_PWD_IS}{PW} long phrase", "long phrase", "Server=db;"),
     (f"Server=db;{_PWD_IS}{{made-up;tail}};Database=d", "tail", "Server=db;"),
     (f"{_PW_IS}{PW} -suffix;Database=d", "-suffix", "Database=d"),
     # A quoted tool name: its options follow the closing quote.
@@ -326,7 +326,7 @@ _WHOLE_OUTPUT: Final[list[tuple[str, str]]] = [
         f"login {_PASSWORD_IS.lower()}{PW} user=alice; echo ok",
         f"login {_KEY_MARK} user=alice; echo ok",
     ),
-    (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_KEY_MARK} long phrase"),
+    (f"Server=db;{_PASSWORD_IS}{PW} long phrase", f"Server=db;{_MARK}"),
     (f"Server=db;{_PASSWORD_IS}made up long phrase;", f"Server=db;{_PASSWORD_IS}{_MARK};"),
     (f"{_PW_IS}{PW} long phrase;", f"{_PW_IS}{_MARK};"),
     # A ``pw=`` value with an option-like word, followed by a next field.
@@ -613,7 +613,10 @@ _AFTER_A_PASSWORD: Final[list[tuple[str, str]]] = [
     ),
     (f"{_PW_IS}{PW};Database=d", f"{_PW_IS}{_MARK};Database=d"),
     (f"{_PASSWORD_IS} {PW};Token=demo12 words", "[REDACTED:api_key] words"),
-    (f"Server=db;{_PWD_IS}{PW} long phrase", "Server=db;[REDACTED:api_key] long phrase"),
+    # A last field may hold spaces: the whole password is hidden, also its
+    # part that the api_key rule hides.
+    (f"Server=db;{_PWD_IS}{PW} long phrase", f"Server=db;{_MARK}"),
+    (f"Database=demo;{_PWD_IS}made up long phrase", f"Database=demo;{_PWD_IS}{_MARK}"),
 ]
 
 
@@ -664,8 +667,8 @@ def _hidden_characters(text: str, policy: RedactionPolicy) -> set[int]:
     answer it builds is checked against the engine's answer.
     """
     current, origin, hidden = text, list(range(len(text))), set()
-    for rule in policy.rules:
-        spans = secret_spans(get_pattern(rule.pattern), current)
+    for index, rule in enumerate(policy.rules):
+        spans = secret_spans(_pattern_for(rule, policy.rules[index + 1 : index + 2]), current)
         parts: list[str] = []
         places: list[int] = []
         pos = 0
@@ -741,6 +744,76 @@ def test_every_change_to_an_answer_is_a_secret_value_replaced_by_the_mark() -> N
             if found := _not_a_secret_value_change(text, policy):
                 wrong[text] = found
     assert wrong == {}
+
+
+#: A Windows path in quotes: ``\\u`` there is no Unicode escape.
+_WINDOWS_PATH: Final = 'copy "C:\\users\\public\\file.txt" backup'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _WINDOWS_PATH,
+        json.dumps({"msg": _WINDOWS_PATH, "ok": 1}),
+        _json_string(json.dumps({"msg": _WINDOWS_PATH})),
+        'note "C:\\u12\\x" and "\\u00zz" end',
+    ],
+)
+def test_a_plain_backslash_stays_as_it_is(text: str) -> None:
+    for policy in (get_default_policy(), _content_policy()):
+        assert redact(text, policy).redacted == text
+    assert scrub_content(text)[0] == text
+
+
+def test_a_password_after_a_windows_path_is_hidden() -> None:
+    line = f"{_WINDOWS_PATH} --password 'made up {PW}'"
+    for text in (line, json.dumps({"msg": line, "ok": 1})):
+        for out in (redact(text, get_default_policy()).redacted, scrub_content(text)[0]):
+            assert PW not in out
+            assert "made up" not in out
+            assert "C:" in out
+        if text.startswith("{"):
+            assert json.loads(redact(text, get_default_policy()).redacted)["ok"] == 1
+
+
+_COMMAND_RULE_ONLY: Final = RedactionPolicy(
+    id="test-command-line-secret-only",
+    version=1,
+    rules=(
+        RedactionRule(
+            name="strip-command-line-secret",
+            pattern="command_line_secret",
+            action="redact",
+            reason="the rule on its own",
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("run --password=example-password", f"run --password={_MARK}"),
+        (f"DB_PASSWORD={PW} app", f"DB_PASSWORD={_MARK} app"),
+        (f"Server=db;{_PWD_IS}{PW};Database=d", f"Server=db;{_PWD_IS}{_MARK};Database=d"),
+    ],
+)
+def test_the_rule_on_its_own_hides_every_value(line: str, expected: str) -> None:
+    """Without the api_key rule after it, no value is left to that rule."""
+    assert redact(line, _COMMAND_RULE_ONLY).redacted == expected
+
+
+def test_a_rule_between_this_rule_and_api_key_ends_the_handoff() -> None:
+    rules = get_default_policy().rules
+    at = next(i for i, rule in enumerate(rules) if rule.pattern == "command_line_secret")
+    between = RedactionRule(
+        name="strip-uuid-between", pattern="uuid", action="redact", reason="a rule in between"
+    )
+    policy = get_default_policy().model_copy(
+        update={"rules": (*rules[: at + 1], between, *rules[at + 1 :])}
+    )
+    out = redact("run --password=example-password", policy).redacted
+    assert out == f"run --password={_MARK}"
 
 
 #: Ordinary command lines with no secret in them.

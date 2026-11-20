@@ -63,7 +63,7 @@ put people in them.
 
 The first tenant of a site is made at install time by
 `meho admin keycloak bootstrap-clients` (see
-[Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-five-groups)).
+[Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-three-groups)).
 This guide adds the next tenant through MEHO's Keycloak operations, so
 each change is approved and stored in the audit log.
 

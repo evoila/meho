@@ -196,11 +196,11 @@ def _card_built(card: dict[str, Any] | None) -> bool:
 
 
 def _card_names_who(request: ApprovalRequest) -> bool:
-    """True when the card holds the facts of who the change gives rights to."""
+    """True when the card names the one login or group the change gives rights to."""
     if request.op_id in _NO_LOGIN_REALM_OPS:
         return True
     facts = grant_facts(request)
-    if facts is None:
+    if facts is None or not (facts.for_login or facts.for_group):
         return False
     preview = (request.proposed_effect or {}).get("preview")
     return (
@@ -231,8 +231,8 @@ async def console_check(
       approval window ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, and the approval
       sign-in level where ``APPROVAL_SIGN_IN_LEVEL`` asks for it);
     * the call waits when its approval card does not build against the
-      live system, or the card does not say who the change gives rights
-      to. Only an operation registered with
+      live system, or the card does not name the one login or group the
+      change gives rights to. Only an operation registered with
       :func:`register_no_login_realm_op` needs no such facts;
     * the call waits when the admin may not make the change alone
       (:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`):

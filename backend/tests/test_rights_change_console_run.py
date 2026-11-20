@@ -683,6 +683,15 @@ _CLIENT_UUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 async def test_a_tenant_admin_s_protocol_mapper_in_the_login_realm_writes_nothing(
     keycloak: KeycloakConnector,
 ) -> None:
+    dumped, post = await _create_mapper(_person())
+
+    assert dumped["status"] in {"awaiting_approval", "denied"}, dumped
+    assert not post.called
+    assert await _run_rows() == []
+
+
+async def _create_mapper(operator: Operator) -> tuple[dict[str, Any], respx.Route]:
+    """Dispatch a protocol mapper create of *operator*; returns the result and the POST."""
     params = {
         "id": _CLIENT_UUID,
         "representation": {
@@ -706,14 +715,35 @@ async def test_a_tenant_admin_s_protocol_mapper_in_the_login_realm_writes_nothin
             f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}/protocol-mappers/models"
         ).respond(201)
         result = await dispatch(
-            operator=_person(),
+            operator=operator,
             connector_id=_CONNECTOR_ID,
             op_id=_MAPPER_CREATE,
             target=target,
             params=params,
         )
+    dumped: dict[str, Any] = result.model_dump(mode="json")
+    return dumped, post
 
-    dumped = result.model_dump(mode="json")
-    assert dumped["status"] in {"awaiting_approval", "denied"}, dumped
+
+@pytest.mark.asyncio
+async def test_a_platform_admin_s_protocol_mapper_in_the_login_realm_waits(
+    keycloak: KeycloakConnector,
+) -> None:
+    dumped, post = await _create_mapper(_person(platform_admin=True))
+
+    assert dumped["status"] == "awaiting_approval", dumped
+    assert not post.called
+    assert await _run_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_a_tenant_admin_s_protocol_mapper_outside_the_login_realm_waits(
+    keycloak: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_LOGIN_REALMS, lambda: set())
+
+    dumped, post = await _create_mapper(_person())
+
+    assert dumped["status"] == "awaiting_approval", dumped
     assert not post.called
     assert await _run_rows() == []

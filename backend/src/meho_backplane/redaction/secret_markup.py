@@ -641,6 +641,9 @@ def _yaml_nodes(text: str) -> Iterator[tuple[int, int, bool, bool]]:
 def _yaml_value_spans(text: str) -> list[tuple[int, int]] | None:
     """The span of each value of *text* read as YAML; None when it is no YAML.
 
+    A text that the parser cannot read, such as a text with a lone surrogate
+    character, is no YAML.
+
     A scalar key and its scalar value are one span, so ``key: <tag>...``
     on one entry is read as one text. Every other scalar is a span of its
     own.
@@ -658,7 +661,9 @@ def _yaml_value_spans(text: str) -> list[tuple[int, int]] | None:
                 key = (start, end)
             elif is_scalar and end > start:
                 spans.append((start, end))
-    except yaml.YAMLError:
+    except (yaml.YAMLError, UnicodeEncodeError):
+        # The C parser cannot encode a lone surrogate (half of a UTF-16
+        # pair, which a JSON escape can give): such a text reads as no YAML.
         return None
     if key is not None:
         spans.append(key)
@@ -704,7 +709,7 @@ def _is_xml_document(text: str) -> bool:
     try:
         parser.feed(body)
         parser.close()
-    except ParseError:
+    except (ParseError, UnicodeEncodeError):
         return False
     except DefusedXmlException:
         return True

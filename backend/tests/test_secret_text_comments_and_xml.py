@@ -16,6 +16,7 @@ and a person's ``reveal_secret: true`` gets the raw text.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -53,6 +54,9 @@ _FAKE_ELEMENT = "FAKE" + "-made-up-element-4437"
 _FAKE_ATTR = "FAKE" + "-made-up-attr-5548"
 _FAKE_PAIR = "FAKE" + "-made-up-pair-6659"
 _FAKE_DEEP = "FAKE" + "-made-up-deep-7760"
+_FAKE_SURROGATE = "FAKE" + "-made-up-surrogate-8871"
+#: Half of a UTF-16 pair on its own, as a JSON escape can give it.
+_LONE_SURROGATE = chr(0xD800)
 _MARKER = "[REDACTED:param_name]"
 #: The XML decimal character reference of ``P``.
 _DECIMAL_P = "&" + chr(35) + str(ord("P")) + ";"
@@ -73,6 +77,8 @@ _PAIR_XML = (
 )
 #: XML comments do not nest: thousands of comment starts are read in one pass.
 _MANY_COMMENTS_XML = f"<config><dbPassword>{_FAKE_DEEP}</dbPassword></config>" + "<!--" * 5000
+_SURROGATE_XML = f"<dbPassword>{_FAKE_SURROGATE}</dbPassword> note {_LONE_SURROGATE}"
+_SURROGATE_PLAIN_XML = f"<note>token {_LONE_SURROGATE} rotation</note>"
 _DATA = {
     "comment.yaml": _COMMENT_YAML,
     "broken.yaml": _BROKEN_YAML,
@@ -89,7 +95,10 @@ _FAKES = (
     _FAKE_ATTR,
     _FAKE_PAIR,
     _FAKE_DEEP,
+    _FAKE_SURROGATE,
 )
+#: The answer of the ConfigMap read, by default :data:`_DATA`.
+_ANSWER_DATA: dict[str, str] = _DATA
 
 
 @pytest.fixture(autouse=True)
@@ -589,6 +598,13 @@ def test_xml_with_escaped_angle_brackets_in_a_json_string_is_hidden() -> None:
     assert json.loads(shown) == [xml.replace(_FAKE_PAIR, _MARKER)]
 
 
+def test_text_with_a_lone_surrogate_is_read_as_xml() -> None:
+    assert hide_secret_text(_SURROGATE_XML) == (
+        f"<dbPassword>{_MARKER}</dbPassword> note {_LONE_SURROGATE}"
+    )
+    assert hide_secret_text(_SURROGATE_PLAIN_XML) == _SURROGATE_PLAIN_XML
+
+
 def test_too_deep_step_hides_the_whole_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from meho_backplane.redaction import secret_text
 
@@ -678,7 +694,7 @@ class _NoOpKubernetesConnector(Connector):
 
 async def _config_map(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     return configmap_info(
-        V1ConfigMap(data=dict(_DATA), metadata=V1ObjectMeta(name="app", namespace="team-a"))
+        V1ConfigMap(data=dict(_ANSWER_DATA), metadata=V1ObjectMeta(name="app", namespace="team-a"))
     )
 
 
@@ -748,6 +764,24 @@ async def test_each_form_is_hidden_in_the_view_and_the_audit_copy(
     row = await _audit_row()
     assert row.raw_payload["data"][name].startswith(_FINGERPRINT)
     assert _shown_fakes(json.dumps(row.raw_payload)) == []
+
+
+async def test_text_with_a_lone_surrogate_is_read_as_xml_in_the_view(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_ANSWER_DATA",
+        {"secret.xml": _SURROGATE_XML, "plain.xml": _SURROGATE_PLAIN_XML},
+    )
+    await _register(stub_embedding_service)
+
+    result = await _read(PrincipalKind.AGENT, reveal=False)
+
+    assert result.status == "ok", result.error
+    shown = result.result["data"]
+    assert shown["secret.xml"] == f"<dbPassword>{_MARKER}</dbPassword> note {_LONE_SURROGATE}"
+    assert shown["plain.xml"] == _SURROGATE_PLAIN_XML
 
 
 async def test_reveal_by_a_person_returns_the_raw_texts(

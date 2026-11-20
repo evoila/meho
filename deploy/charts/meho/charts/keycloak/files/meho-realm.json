@@ -90,20 +90,6 @@
       }
     },
     {
-      "name": "MEHO-SA-Operators",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "operator"
-        ],
-        "meho_tenant": [
-          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:SA-Operators"
-        ]
-      }
-    },
-    {
       "name": "MEHO-Admins",
       "attributes": {
         "tenant_id": [
@@ -114,23 +100,6 @@
         ],
         "meho_tenant": [
           "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Admins"
-        ]
-      }
-    },
-    {
-      "name": "MEHO-Approvers",
-      "attributes": {
-        "tenant_id": [
-          "${MEHO_REALM_TENANT_ID}"
-        ],
-        "tenant_role": [
-          "read_only"
-        ],
-        "approver": [
-          "true"
-        ],
-        "meho_tenant": [
-          "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Approvers"
         ]
       }
     },

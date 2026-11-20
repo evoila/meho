@@ -194,7 +194,7 @@ async def test_run_without_keycloak_lets_the_upgrade_go_on(
     plan = (
         '{"keycloak_url":"http://localhost:9/auth","realm_file":"/x.json",'
         '"first_login_secret":"rel-core-first-login","admin_username":"admin",'
-        '"approver_username":"approver","console_admin_secret":"rel-core-console-admin",'
+        '"console_admin_secret":"rel-core-console-admin",'
         '"console_admin_username":"console-admin"}'
     )
     await run({PLAN_ENV: plan, ADMIN_SECRET_ENV: _SECRET})

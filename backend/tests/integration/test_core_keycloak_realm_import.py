@@ -12,7 +12,9 @@ environment values the subchart's StatefulSet sets. Then:
    own JWT check accepts the token as a ``read_only`` operator of the first
    tenant, without the approver flag. The token also carries the MCP
    audience.
-2. A person in MEHO-Approvers gets ``read_only`` plus the approver flag.
+2. The realm has three role groups and no MEHO-SA-Operators or
+   MEHO-Approvers group. The ``approver`` mapper still reads the flag from a
+   group that an admin adds.
 3. The three confidential clients authenticate with the secrets from the
    environment, so Keycloak filled the placeholders. ``meho-admin`` can read
    the realm's clients; ``meho-check-runner`` tokens carry only their own
@@ -260,9 +262,31 @@ async def test_reader_gets_tenant_and_role_from_the_group(
     assert operator.approver is False
 
 
+def test_the_realm_has_three_role_groups_and_no_approver_group(keycloak: _Keycloak) -> None:
+    groups = httpx.get(
+        f"{keycloak.base_url}/admin/realms/meho/groups", headers=_bootstrap_headers(keycloak)
+    ).json()
+    names = {g["name"] for g in groups}
+    assert {"MEHO-Readers", "MEHO-Operators", "MEHO-Admins", "MEHO-Platform-Admins"} <= names
+    assert not names & {"MEHO-SA-Operators", "MEHO-Approvers"}
+
+
 async def test_approvers_group_is_read_as_readers(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    admin = f"{keycloak.base_url}/admin/realms/meho"
+    httpx.post(
+        f"{admin}/groups",
+        headers=_bootstrap_headers(keycloak),
+        json={
+            "name": "MEHO-Approvers",
+            "attributes": {
+                "tenant_id": [_TENANT_ID],
+                "tenant_role": ["read_only"],
+                "approver": ["true"],
+            },
+        },
+    ).raise_for_status()
     operator = await _login(
         keycloak, "approver", "MEHO-Approvers", monkeypatch, f"{_PUBLIC_URL}/mcp"
     )

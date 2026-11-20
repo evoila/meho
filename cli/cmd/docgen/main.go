@@ -179,6 +179,13 @@ func render(root *cobra.Command) string {
 		"ends, refuses an empty value, control characters (also a tab inside the id) and " +
 		"invisible characters, allows at most 256 characters, and stores the text in " +
 		"Unicode form NFC.\n\n")
+	sb.WriteString("## Login session\n\n")
+	sb.WriteString("`meho login` makes a random id for the login session and stores it " +
+		"with the login. Every command sends it in the `Meho-Session-Id` header, next to " +
+		"`Meho-Work-Ref`. MEHO stores it as the session id of the audit rows of the " +
+		"request and marks those rows with `session_from_client: true`, so a CLI call is " +
+		"not counted as an agent session. A token refresh keeps the id; the next " +
+		"`meho login` makes a new one.\n\n")
 	sb.WriteString("## Current tenant\n\n")
 	sb.WriteString("One login can be in several tenants. MEHO then works in one current " +
 		"tenant, and every command sends it in the `Meho-Tenant` header. Choose it with " +

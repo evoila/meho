@@ -4034,6 +4034,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The default answer of every operation also hides secret-named fields inside text values, for example a password in a JSON or YAML file of a ConfigMap or in the last-applied note of kubectl. <code>k8s.cr.list</code> and <code>k8s.cr.info</code> hide credential fields in <code>spec_excerpt</code>, <code>status_excerpt</code> and <code>fields</code> for every kind, and mask the Helm values of a <code>HelmChartConfig</code>.</td>
+<td>None. A script that reads such a text value sees <code>"[REDACTED:param_name]"</code> in place of the secret. A person who needs the value sends the call with <code>reveal_secret: true</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A <code>secret.move</code> whose source or sink is a <code>keycloak:</code> ref is now a change of rights. The requester never approves it, and another admin (a tenant admin or a platform admin) must. Its approval card names, for each <code>keycloak:</code> side, the Keycloak target, how MEHO connects to it (host, port, http or https, TLS check) and the reference of its admin login. The approved run works only on that target, with that connection and admin login, and MEHO refuses it before any Keycloak login when one of them changed. A move that waits for approval from before the upgrade has no such card, and MEHO refuses it when it runs: nothing is read or written.</td>
 <td>Ask another admin to approve such moves. Send a move with a <code>keycloak:</code> side that waits for approval again after the upgrade. No schema action.</td>
 </tr>

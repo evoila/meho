@@ -71,6 +71,7 @@ from meho_backplane.operations.service_grants import (
     ServicePrincipalGrantService,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 
 _CONNECTOR_ID = "harbor-rest-2.x"
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000003288")
@@ -451,6 +452,7 @@ async def test_service_principal_proposes_destroy_and_adopts_result(
     await _seed_target()
 
     addon = _make_operator(sub="svc-addon", principal_kind=PrincipalKind.SERVICE)
+    await give_known_person(addon)
     args = _args()
 
     # 1) The add-on previews and gets the hash.

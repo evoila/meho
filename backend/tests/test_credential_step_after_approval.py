@@ -37,6 +37,7 @@ from meho_backplane.operations.composite import (
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
 from tests import _composite_wait_audit_helpers as h
+from tests._people_behind_helpers import give_service_a_known_person
 
 pytestmark = pytest.mark.asyncio
 
@@ -176,6 +177,7 @@ async def _requests() -> list[ApprovalRequest]:
 async def _approve_first_step_in_the_web_interface(op_id: str) -> Any:
     """A service login's run waits on its first step; a person approves it on the web."""
     service = h.operator(sub="service-requester", principal_kind=PrincipalKind.SERVICE)
+    await give_service_a_known_person(h.TENANT_ID, "service-requester")
     first = await h.run(op_id, service)
     assert first.status == "awaiting_approval", first.error
     [waiting] = await _requests()

@@ -415,6 +415,14 @@ for both kinds. List and show keep the role check alone. The revoke on
 `/ui/agents/grants/{id}/revoke` keeps it for an `auto-execute` grant; a
 `deny` or `needs-approval` grant needs a person (`ensure_ui_human`).
 
+## A grant makes its giver a person behind the agent
+
+The person who gave a grant that is in force (`agent_permission.created_by_sub`,
+not expired) counts as a requester of every change the agent asks for. They
+may approve such a request only where they may approve their own change, and
+never a change of rights. The giver of an expired grant does not count. See
+[The people behind a request](approvals.md#the-people-behind-a-request).
+
 ## Dependencies
 
 - `db/models.py` — `AgentPermission`, `PermissionVerdict` ORM model (owned by T3 #1052; T6 adds the `expires_at` column + index)

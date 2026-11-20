@@ -68,6 +68,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 
 _TENANT: UUID = UUID("00000000-0000-0000-0000-000000003197")
 _OP_ID = "DELETE:/vms/{vm}"
@@ -746,6 +747,7 @@ async def _agent_parks_destructive(embedding: list[float]) -> tuple[_RecordingHt
     await _seed_target(name="gh-prod")
     await _insert_destructive_descriptor(embedding=embedding)
     agent = _operator(sub="agent:deleter", principal_kind=PrincipalKind.AGENT)
+    await give_known_person(agent)
     args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
     preview = await preview_operation(agent, args)
     assert preview["status"] == "ok"

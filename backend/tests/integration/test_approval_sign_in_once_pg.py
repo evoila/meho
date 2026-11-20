@@ -38,6 +38,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     create_pending_request,
 )
+from tests._people_behind_helpers import give_known_person
 
 # ``pg_engine`` (imported for its side effect of being a discoverable
 # fixture) points the process sessionmaker at the testcontainer and seeds
@@ -88,6 +89,7 @@ def _reviewer() -> Operator:
 
 
 async def _park() -> uuid.UUID:
+    await give_known_person(_requester())
     async with get_sessionmaker()() as session:
         request = await create_pending_request(
             session,

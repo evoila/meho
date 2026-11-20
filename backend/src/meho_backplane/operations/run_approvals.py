@@ -69,11 +69,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, RunApproval, Tenant
 from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
 from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
+from meho_backplane.operations.people_behind import (
+    behind_subs,
+    find_people_behind,
+    is_person_behind,
+    people_behind_unknown,
+)
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.run_approval_notes import with_wait_notes
 from meho_backplane.operations.run_approval_schemas import (
@@ -248,17 +254,58 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     )
 
 
+async def _check_people_behind(
+    session: AsyncSession, operator: Operator, row: RunApproval
+) -> frozenset[str]:
+    """Apply the rule of the people behind the service login that asked.
+
+    MEHO looks them up now (:mod:`~meho_backplane.operations.people_behind`):
+    who paired or owns its add-on, and who gave one of its standing grants
+    in force. The pairing is found by the login id and by the client id
+    stored on the list when the add-on asked. A person behind it may
+    approve the list only when they may approve their own change
+    (:attr:`Operator.may_self_approve`). When MEHO knows nobody behind the
+    login, only an admin may approve the list.
+    Returns the subs of the people behind, for the rights-change check.
+    """
+    from meho_backplane.operations.approval_queue import is_admin_approver
+
+    people = await find_people_behind(
+        session,
+        tenant_id=operator.tenant_id,
+        sub=row.principal_sub,
+        client_id=row.principal_client_id,
+        kind=PrincipalKind.SERVICE.value,
+    )
+    if people_behind_unknown(PrincipalKind.SERVICE.value, people):
+        if is_admin_approver(operator):
+            return frozenset()
+        raise RunApprovalGroupError(
+            "requester_not_known: MEHO does not know who set up the login that asked for "
+            "this list, so only an Admin may approve it"
+        )
+    if is_person_behind(operator.sub, people) and not operator.may_self_approve:
+        raise RunApprovalGroupError(
+            "own_change: you set up the add-on or gave a grant to the login that asked for "
+            "this list, so it counts as your own change. Ask another person to approve it "
+            "on the Approvals page of the web interface"
+        )
+    return behind_subs(people)
+
+
 async def _check_approver_group(
     session: AsyncSession,
     operator: Operator,
     entries: Sequence[dict[str, object]],
     requester_sub: str,
+    behind: frozenset[str] = frozenset(),
 ) -> None:
     """Apply the approver-group rule of a single request to the whole list.
 
     An entry that is a change of rights needs another admin
     (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`),
-    the same check as a single request.
+    the same check as a single request. Neither the requester nor one of
+    *behind*, the people behind it, may approve it.
 
     A ``dangerous`` (or ``destructive``) operation of another principal may
     be approved only by the groups of
@@ -284,7 +331,7 @@ async def _check_approver_group(
     for index, raw in enumerate(entries):
         entry = RunApprovalEntry.model_validate(raw)
         if is_rights_change_op(entry.op_id) and not operator.may_approve_rights_change(
-            requester_sub
+            requester_sub, behind
         ):
             raise RunApprovalGroupError(
                 f"rights_change_required: entries[{index}] ({entry.op_id!r}): "
@@ -471,6 +518,7 @@ class RunApprovalService:
             row = RunApproval(
                 tenant_id=operator.tenant_id,
                 principal_sub=operator.sub,
+                principal_client_id=operator.client_id,
                 work_ref=payload.work_ref,
                 entries=[e.model_dump(mode="json", exclude_none=True) for e in payload.entries],
                 reason=payload.reason,
@@ -539,7 +587,8 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
-            await _check_approver_group(session, operator, row.entries, row.principal_sub)
+            behind = await _check_people_behind(session, operator, row)
+            await _check_approver_group(session, operator, row.entries, row.principal_sub, behind)
             row.approved_at = now
             row.approved_by_sub = operator.sub
             await session.commit()

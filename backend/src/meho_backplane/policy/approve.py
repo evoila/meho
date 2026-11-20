@@ -10,15 +10,19 @@
 2. A ``read_only`` person without the approver flag cannot decide.
 3. Only a pending request can be approved.
 4. **Floor:** a change of rights only another admin approves; the person
-   who asked never does. A change of a login's or a group's rights also
-   follows the rules on who the change is for (``grant_refusal``).
-5. An own change: a MEHO-Admin may approve it; a
-   person may approve their own ``caution`` change that waited only
-   because it came with a token, with a click in the web interface; and
-   the break-glass switch allows an own ``safe`` or ``caution`` change.
-6. Another person's ``dangerous`` or ``destructive`` change: only a
+   who asked never does, and neither do the people behind the agent,
+   service or runner login that asked. A change of a login's or a group's
+   rights also follows the rules on who the change is for
+   (``grant_refusal``).
+5. A machine login asked and MEHO knows nobody behind it: only an admin.
+6. An own change, also for the people behind the login that asked: a
+   MEHO-Admin may approve it; a person may approve their own ``caution``
+   change that waited only because it came with a token, with a click in
+   the web interface; and the break-glass switch allows an own ``safe``
+   or ``caution`` change.
+7. Another person's ``dangerous`` or ``destructive`` change: only a
    MEHO-Admin.
-7. The role floor of the operation.
+8. The role floor of the operation.
 
 It does not check what the approve checks at the moment of the click: the
 sign-in age, the deadline, the params and the preview binding.
@@ -61,6 +65,11 @@ class ApprovalAsk:
     rights_change: bool = False
     grant_refusal: str | None = None
     break_glass: bool = False
+    #: The casefolded subs of the people behind the agent, service or
+    #: runner login that asked (:mod:`meho_backplane.operations.people_behind`).
+    people_behind: frozenset[str] = frozenset()
+    #: A machine login asked and MEHO knows nobody behind it.
+    requester_unknown: bool = False
 
 
 def _no(rule_id: str, text: str, *, source: RuleSource = "default") -> tuple[bool, RuleRef]:
@@ -76,11 +85,18 @@ def _may_self_approve(asker: Asker) -> bool:
     return in_group and asker.tenant_chosen
 
 
-def _may_approve_rights_change(asker: Asker, requester_sub: str) -> bool:
-    if asker.sub.casefold() == requester_sub.casefold():
-        return False
+def _is_admin(asker: Asker) -> bool:
     is_admin = asker.tenant_role is TenantRole.TENANT_ADMIN or "platform_admin" in asker.roles
     return is_admin and asker.tenant_chosen
+
+
+def _is_own(asker: Asker, ask: ApprovalAsk) -> bool:
+    mine = asker.sub.casefold()
+    return mine == ask.requester_sub.casefold() or mine in ask.people_behind
+
+
+def _may_approve_rights_change(asker: Asker, ask: ApprovalAsk) -> bool:
+    return not _is_own(asker, ask) and _is_admin(asker)
 
 
 def _own_change(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
@@ -95,13 +111,15 @@ def _own_change(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
 
 
 def _group_rule(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
-    if ask.rights_change and not _may_approve_rights_change(asker, ask.requester_sub):
+    if ask.rights_change and not _may_approve_rights_change(asker, ask):
         return _no(
             "rights_change", "only another admin approves a change of rights", source="floor"
         )
     if ask.grant_refusal is not None:
         return _no("grant_change", ask.grant_refusal, source="floor")
-    if asker.sub == ask.requester_sub:
+    if ask.requester_unknown and not _is_admin(asker):
+        return _no("requester_not_known", "only an admin approves when nobody is known behind")
+    if asker.sub == ask.requester_sub or asker.sub.casefold() in ask.people_behind:
         return _own_change(asker, ask)
     if ask.risk not in _HIGH_RISK:
         return _yes("reviewer", "another person's lower-risk change")

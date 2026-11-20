@@ -338,8 +338,9 @@ def build_router() -> APIRouter:
     # ``{slug}`` route, so no shadowing concern against the stubs aggregate,
     # but registered before it for consistency with the other surfaces.
     router.include_router(build_account_router())
-    # First-start checks page: ``/ui/first-start``, the same list as the public
-    # ``GET /first-start`` endpoint. Literal path, registered before the stubs.
+    # First-start checks page: ``/ui/first-start``, the same list as the
+    # signed-in ``GET /api/v1/first-start`` endpoint. Literal path, registered
+    # before the stubs.
     router.include_router(build_first_start_router())
     # Vault / secrets console KV browser (G10.18-T1 #1956): ``/ui/vault`` +
     # ``/ui/vault/list`` + ``/ui/vault/read`` + ``/ui/vault/versions``. The

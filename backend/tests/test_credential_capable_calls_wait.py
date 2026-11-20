@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+import yaml
 
 from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.agents.grants import GrantValidationError as AgentGrantValidationError
@@ -254,6 +255,50 @@ def test_a_manifest_with_too_many_objects_counts(monkeypatch: pytest.MonkeyPatch
     items += "  - {apiVersion: v1, kind: ConfigMap, metadata: {name: c4}}\n"
     manifest = "apiVersion: v1\nkind: List\nitems:\n" + items
     assert manifest_holds_credential({"manifest": manifest}) is True
+
+
+def _shared_items_manifest(lists: int, objects: int) -> str:
+    """Many different list objects that all name one shared ``items`` array."""
+    shared = ", ".join(
+        f"{{apiVersion: v1, kind: ConfigMap, metadata: {{name: c{i}}}}}" for i in range(objects)
+    )
+    lists_text = ", ".join(
+        f"{{apiVersion: v1, kind: List, metadata: {{name: l{i}}}, items: *shared}}"
+        for i in range(lists)
+    )
+    return f"apiVersion: v1\nkind: List\nx: &shared [{shared}]\nitems: [{lists_text}]\n"
+
+
+def test_list_objects_that_share_one_items_array_read_it_once() -> None:
+    manifest = _shared_items_manifest(lists=3000, objects=3000)
+    assert manifest_holds_credential({"manifest": manifest}) is False
+    docs = list(yaml.safe_load_all(manifest))
+    started = time.perf_counter()
+    assert k8s_op_classes._holds_credential(docs) is False
+    assert time.perf_counter() - started < 0.5
+
+
+def test_list_objects_that_share_one_items_array_with_a_secret_count() -> None:
+    manifest = _shared_items_manifest(lists=50, objects=3).replace(
+        "x: &shared [", "x: &shared [{apiVersion: v1, kind: Secret}, "
+    )
+    assert manifest_holds_credential({"manifest": manifest}) is True
+
+
+def test_every_items_entry_counts_toward_the_object_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(k8s_op_classes, "MAX_CHECKED_OBJECTS", 5)
+    shared = (
+        "apiVersion: v1\nkind: List\n"
+        "c: &c {apiVersion: v1, kind: ConfigMap}\n"
+        "a: &a [*c, *c]\n"
+        "items: [{apiVersion: v1, kind: List, items: *a},"
+        " {apiVersion: v1, kind: List, items: *a}]\n"
+    )
+    assert manifest_holds_credential({"manifest": shared}) is False
+    separate = shared.replace("items: *a}]", "items: [*c, *c]}]")
+    assert manifest_holds_credential({"manifest": separate}) is True
 
 
 def test_a_list_object_that_refers_to_itself_is_read_once() -> None:

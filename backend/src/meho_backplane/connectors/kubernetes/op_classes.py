@@ -59,9 +59,10 @@ declare_credential_capable(("k8s.exec",))
 CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
 
 
-#: The most objects the check reads in one manifest. A manifest with more
-#: counts as one MEHO cannot read. YAML aliases let a small text name the
-#: same object many times; the check reads each object once.
+#: The most objects the check reads in one manifest: each document and each
+#: entry of an ``items`` array counts. A manifest with more counts as one MEHO
+#: cannot read. YAML aliases let a small text name the same object or the same
+#: ``items`` array many times; the check reads each of them once.
 MAX_CHECKED_OBJECTS: Final[int] = 10_000
 
 
@@ -70,35 +71,47 @@ def _is_list_kind(kind: str) -> bool:
     return kind.endswith("List")
 
 
+def _items_to_read(doc: Any) -> list[Any] | None:
+    """The ``items`` the check reads next, or ``None`` when *doc* counts.
+
+    *doc* counts when it is a credential kind or cannot be read. Only a list
+    object (``kind: List`` or ``<Kind>List``) has its ``items`` read. The
+    ``items`` field of any other kind is part of its spec.
+    """
+    if not isinstance(doc, Mapping):
+        return None
+    kind = doc.get("kind")
+    if not isinstance(kind, str) or not kind or kind.lower() in CREDENTIAL_KINDS:
+        return None
+    items = doc.get("items") if _is_list_kind(kind) else []
+    if items is None:
+        return []
+    return items if isinstance(items, list) else None
+
+
 def _holds_credential(docs: list[Any]) -> bool:
     """True when a doc is a credential kind, a list with one, or cannot be read.
 
-    Only a list object (``kind: List`` or ``<Kind>List``) has its ``items``
-    read. The ``items`` field of any other kind is part of its spec.
+    Each object and each ``items`` array is read once. Each document and each
+    ``items`` entry counts toward :data:`MAX_CHECKED_OBJECTS`.
     """
+    budget = len(docs)
     stack = list(docs)
     seen: set[int] = set()
-    while stack:
+    while stack and budget <= MAX_CHECKED_OBJECTS:
         doc = stack.pop()
         if id(doc) in seen:
             continue
         seen.add(id(doc))
-        if len(seen) > MAX_CHECKED_OBJECTS or not isinstance(doc, Mapping):
-            return True
-        kind = doc.get("kind")
-        if not isinstance(kind, str) or not kind:
-            return True
-        if kind.lower() in CREDENTIAL_KINDS:
-            return True
-        if not _is_list_kind(kind):
-            continue
-        items = doc.get("items")
+        items = _items_to_read(doc)
         if items is None:
-            continue
-        if not isinstance(items, list):
             return True
+        if not items or id(items) in seen:
+            continue
+        seen.add(id(items))
+        budget += len(items)
         stack.extend(items)
-    return False
+    return budget > MAX_CHECKED_OBJECTS
 
 
 def manifest_holds_credential(params: Mapping[str, Any]) -> bool:

@@ -35,8 +35,10 @@ agent grant and no run approval covers them
   ServiceAccount token Secret), in any document or any item of a list
   object (`kind: List` or `<Kind>List`), or a manifest MEHO cannot read.
   MEHO reads the manifest when the call is made. It reads each object
-  once, also when YAML aliases name it many times, and at most 10,000
-  objects; a larger manifest counts as one MEHO cannot read. The `items`
+  and each `items` array once, also when YAML aliases name them many
+  times. It reads at most 10,000 objects (each document and each entry
+  of an `items` array counts); a larger manifest counts as one MEHO
+  cannot read. The `items`
   field of any other kind (for example a custom resource) is not read. An apply of other kinds keeps the rules of `k8s.apply`.
 
 Both are declared in `op_classes.py` of the connector. The approval card

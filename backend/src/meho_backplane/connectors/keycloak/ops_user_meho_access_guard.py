@@ -143,8 +143,11 @@ class MehoAccessRefusedError(KeycloakDeleteRefusedError):
     """A user write that would take away MEHO's own access was refused.
 
     ``code`` is one of ``meho_service_login``, ``last_platform_admin``,
-    ``own_account`` or ``meho_access_not_checked``. ``reason`` is the plain
-    text without the op id and code; it names no user.
+    ``own_account`` or ``meho_access_not_checked``; the client and realm
+    writes add ``meho_own_client`` and ``meho_login_realm``
+    (:mod:`~meho_backplane.connectors.keycloak.ops_meho_own_login_guard`).
+    ``reason`` is the plain text without the op id and code; it names no
+    user.
     """
 
     def __init__(self, op_id: str, code: str, reason: str) -> None:

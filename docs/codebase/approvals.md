@@ -1996,11 +1996,121 @@ above). The two agent-run entry points in
   `principal_act=<agent-sub>`, so the rules for the person's own change
   apply.
 
+### The people behind a request
+
+A request made by an agent, a service login (an add-on) or a runner
+counts as a request of the people behind that login. The code is
+`backend/src/meho_backplane/operations/people_behind.py`.
+
+**Who counts.** `find_people_behind` looks in the login's tenant when the
+request is made (`create_pending_request`):
+
+| Login | People behind it (reason code) |
+|---|---|
+| Agent | who registered it (`registered`) or owns it (`owns`), from `agent_principal` by client id; who gave one of its grants in force (`gave_grant`, `agent_permission`, key = token `sub` or client id, not expired); who wrote (`agent_definition`) or last changed (`changed_agent_definition`) an agent definition with `identity_ref` = the client id; who made a schedule of those definitions, active or not (`made_schedule`); when one of those schedules waits for events, who made an event source of the tenant (`made_event_source`) |
+| Service login | who paired (`registered`) or owns (`owns`) its add-on (`addon_pairing` by `service_account_sub` or client id); who gave one of its standing grants in force (`gave_grant`, not revoked, not replaced, not expired) |
+| Runner | who registered (`registered`) or owns (`owns`) it (`runner_principal` by the token's `runner_id`, or by client id) |
+| Every machine login | who started (`started_run`) or last handed over (`handed_over_run`) a runbook run assigned to it that has not ended |
+| A person, or a delegated call | nobody: the person is the requester |
+
+**A machine login never counts as a person behind another login.**
+`machine_subs` (`backend/src/meho_backplane/auth/machine_logins.py`)
+leaves out every id that MEHO knows as an agent, service or runner login:
+a row of the `machine_login` table, or the login of an agent definition,
+an agent, an add-on or a runner of the tenant. Each REST call
+(`verify_jwt_and_bind`) and each MCP call (`verify_mcp_jwt_and_bind`) of
+a machine login adds its id to `machine_login` (`note_machine_login`,
+safe to run twice). So does the sign-in of a hosted agent run that a
+schedule or an event starts (`_authenticate_scheduled_agent`). When MEHO finds only machine logins, the list is
+empty and only an admin may approve.
+
+The checks investigator runs as an agent (`run_scheduled`), so its
+requests follow the agent row. A sensor never makes a request.
+
+**What MEHO stores.** Migration `0178` adds four columns and a table:
+
+- `approval_request.people_behind` — JSON list of
+  `{"sub", "name", "why"}`, one entry per person and reason. `NULL` for a
+  person's request. An empty list: MEHO knows nobody behind the login.
+  The name is the newest `principal_name` of the person in the tenant's
+  audit log, or `null`. A step of a multi-step operation that waits
+  again keeps the list of the first request (`ResumeRequester`).
+- `agent_definition.updated_by_sub` — set by every edit of a person
+  (`AgentDefinitionService.update`). An edit by a machine login keeps the
+  person who was there. The migration fills it from the newest successful
+  `agent.edit` audit row of the definition by a login that is not a
+  machine login, else from `created_by_sub`. A machine login here is a
+  row of `machine_login`, or the login of an agent definition, an agent,
+  an add-on pairing (client id or service login) or a runner of the
+  tenant: the same records `machine_subs` reads. It reads only audit rows from the time the definition
+  was created, so an edit of a deleted definition with the same name does
+  not count.
+- `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`
+  when a person hands the run over. A handover by a machine login keeps
+  the person who was there.
+- `run_approval.principal_client_id` — the client id of the add-on login
+  that asked for a run approval list. At approve time MEHO finds the
+  add-on pairing by the login id and by this client id. `NULL` on a list
+  from before the upgrade: then MEHO uses the login id alone.
+- `machine_login` — one row per tenant and login id that MEHO has seen
+  as an agent, service or runner login. The migration fills it from
+  the requests of such logins (`approval_request.principal_kind`) and
+  from the `client` block of the audit rows.
+
+**The rule.** One shared check, `_check_approver_group`, used by every
+approve door (`approve_request`, so REST approve and decide, the CLI and
+the web console) and by the "may I approve?" answer (`approve_right`,
+`approve_right_any_status`: the button, the lists, the waiting count and
+web push):
+
+1. A change of rights: `Operator.may_approve_rights_change(requester,
+   behind)` refuses the requester and every person behind it, also an
+   admin.
+2. A machine login asked and MEHO knows nobody behind it:
+   `_check_requester_known` lets only an admin approve
+   (`UnknownRequesterApprovalError`, 403). An unknown origin never gets
+   less control than a known one.
+3. `_check_self_approval` treats a person behind the login like the
+   requester: they may approve only where they may approve their own
+   change (`Operator.may_self_approve`, the web click on a `caution`
+   change that waited only for its token, the emergency switch for
+   `safe` and `caution`). Else `SelfApprovalForbiddenError` with
+   `behind=True`; its text says the change counts as the person's own
+   change, and who may approve it.
+
+Run approval lists (`RunApprovalService.approve`) look up the people
+behind the service login at approve time (`_check_people_behind`), so a
+list that waited across the upgrade follows the rule too. A person behind
+it may approve the list only when `may_self_approve` is true; nobody
+known: only an admin; a change of rights: never a person behind it. The
+policy evaluator (`policy/approve.py`) gets the same facts on
+`ApprovalAsk` (`people_behind`, `requester_unknown`), so shadow mode
+reports no difference. `tests/test_people_behind_doors_guard.py` lists
+every door and fails when a new function writes an approval without the
+check.
+
+**Audit.** When a person behind the login approves, the
+`approval.decision` audit row carries `self_approved: true`,
+`approver_behind_requester: true` and `approver_behind_why` (the reason
+codes). The `approval.approved` step event of an add-on carries only
+`self_approved: true`.
+
+**Where people see it.** REST `ApprovalRequestView.people_behind`
+(`sub`, `name`, `why`, `why_text`) and `people_behind_known`, only
+when a person calls the API: for a person's request, and for an agent,
+service or runner login that reads the request, the answer leaves both
+keys out; the web
+console request card ("Set up by Ann. Grant by Bob.") and the request
+modal ("Behind it"); `meho approvals show` ("Behind it:"). When MEHO
+knows nobody, each says "Set up by: not known".
+
 ### Troubleshooting — `self_approval_forbidden`
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `approve` returns `self_approval_forbidden` | The request is your own change, and you are not in MEHO-Admins. | Ask a person in one of the groups the refusal names to approve it on the Approvals page. On a one-operator tenant, make yourself an **Admin** (MEHO-Admins; the change applies at your next login), then approve with a click in the web interface. |
+| `approve` returns `self_approval_forbidden` and the text says you set up, changed or started the login that asked | You are one of the people behind the agent, service or runner login (see [The people behind a request](#the-people-behind-a-request)). | Ask another person the text names. |
+| `approve` refuses with "MEHO does not know who set up the login" | A machine login asked and `people_behind` is empty. | An admin approves it, or give the login a grant in MEHO so its next requests have a known person behind them. |
 
 ### Where operators see this
 

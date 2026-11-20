@@ -56,6 +56,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import DEFAULT_TENANT_ID
@@ -427,6 +428,7 @@ async def test_every_call_waits_for_approval(asker: Operator) -> None:
 
 async def _park_agent_call(target_id: uuid.UUID) -> uuid.UUID:
     agent = _operator("agent:a", kind=PrincipalKind.AGENT, role=TenantRole.OPERATOR)
+    await give_known_person(agent)
     call = await call_operation(agent, _args(target_id, secret_ref=_NEW_REF))
     assert call["status"] == "awaiting_approval", call
     return uuid.UUID(str(call["extras"]["approval_request_id"]))

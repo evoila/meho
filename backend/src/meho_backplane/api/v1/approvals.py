@@ -160,6 +160,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     get_decision_delegation,
     get_request,
+    is_self_approval,
     read_approval_result,
     record_approval_step_event,
     reject_request,
@@ -183,6 +184,7 @@ from meho_backplane.operations.approval_script import (
 from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write_reveal
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.people_behind import entries_of, people_behind_line
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
@@ -371,6 +373,27 @@ class OutcomeCheckRequestBody(BaseModel):
     )
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+class PersonBehindView(BaseModel):
+    """One person behind the agent, service or runner login that asked."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sub: str
+    #: The person's name from MEHO's records, or ``None`` when MEHO has none.
+    name: str | None = None
+    #: Why the person counts, as a code: ``registered``, ``owns``,
+    #: ``agent_definition``, ``changed_agent_definition``, ``gave_grant``,
+    #: ``made_schedule``, ``made_event_source``, ``started_run`` or
+    #: ``handed_over_run``.
+    why: str
+    #: The same reason in words, for example ``Set up by``.
+    why_text: str
+
+
 class ApprovalScriptPageView(BaseModel):
     """One page of the script of a waiting ``linux.script.run`` request."""
 
@@ -413,6 +436,17 @@ class ApprovalRequestView(BaseModel):
     #: the CLI mark a machine requester with it. ``None`` on a request made
     #: before MEHO saved it. Additive.
     principal_kind: str | None = None
+    #: The people behind the agent, service or runner login that asked
+    #: (who set it up, changed it, gave its grants, made its schedules or
+    #: started its run). They count as the requester. Left out of the
+    #: answer for a person's request, and when an agent, service or runner
+    #: login reads the request. Additive.
+    people_behind: list[PersonBehindView] | None = Field(default=None, exclude_if=_is_none)
+    #: ``False`` when a machine login asked and MEHO knows nobody behind it:
+    #: then only an Admin may approve. Left out of the answer for a
+    #: person's request, and when an agent, service or runner login reads
+    #: it. Additive.
+    people_behind_known: bool | None = Field(default=None, exclude_if=_is_none)
     op_id: str
     connector_id: str
     target_id: uuid.UUID | None
@@ -697,6 +731,23 @@ def _execution_outcome(dispatch_result: Any) -> str | None:
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
+def _people_behind_fields(row: ApprovalRequest, operator: Operator) -> dict[str, Any]:
+    """``people_behind`` and ``people_behind_known`` of *row* for *operator*.
+
+    Only a person reads them: for an agent, service or runner login that
+    calls the API, both fields stay ``None`` and the answer leaves them out.
+    """
+    if not is_human_principal(operator):
+        return {}
+    if people_behind_line(row.principal_kind, row.people_behind) is None:
+        return {}
+    people = [
+        PersonBehindView(sub=entry.sub, name=entry.name, why=entry.why, why_text=entry.why_text)
+        for entry in entries_of(row.people_behind)
+    ]
+    return {"people_behind": people, "people_behind_known": bool(people)}
+
+
 #: The ops whose REST card hides person-only fields from a caller that is not
 #: a person. Every other op's card comes back as stored, for every caller.
 _PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"k8s.apply", "linux.script.run"})
@@ -743,6 +794,8 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row. *right* (#3329) says
     whether the caller may approve the request; list and show pass it.
+    *operator* is the caller: the people behind a machine login are shown
+    only to a person.
     """
     expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
@@ -753,6 +806,7 @@ def _view(
         principal_act=row.principal_act,
         principal_name=row.principal_name,
         principal_kind=row.principal_kind,
+        **_people_behind_fields(row, operator),
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,
@@ -1986,7 +2040,7 @@ async def decide_approval_request(
             dispatch_result=dispatch_result.result,
             dispatch_error=dispatch_result.error,
             dispatch_execution_outcome=_execution_outcome(dispatch_result),
-            self_approved=request.principal_sub == operator.sub,
+            self_approved=is_self_approval(operator.sub, request),
             approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         )
 
@@ -2026,7 +2080,7 @@ async def _decide_in_background(
         reason=body.reason,
         decided_by=operator.sub,
         decided_by_name=operator.name,
-        self_approved=request.principal_sub == operator.sub,
+        self_approved=is_self_approval(operator.sub, request),
         approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         run_id=run_id,
     )

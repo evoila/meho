@@ -77,6 +77,7 @@ from meho_backplane.mcp.tools.topology import _annotate_handler
 from meho_backplane.mcp.tools.topology_bulk_import import _bulk_import_handler
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
 
@@ -331,6 +332,7 @@ async def test_decide_by_an_operator_is_refused_and_writes_nothing(
     """The topology writes need ``tenant_admin``, so the decider needs it too."""
     await _seed_edge_endpoints()
     agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(_TENANT_ID, "agent:proposer")
     parked = await _dispatch_topology(agent, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
     assert parked.status == "awaiting_approval", parked.error
     request_id = uuid.UUID(parked.extras["approval_request_id"])

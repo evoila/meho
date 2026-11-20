@@ -528,6 +528,20 @@ def test_xml_tags_in_two_yaml_values_keep_the_yaml_between(text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("head", "tail"),
+    [
+        ("<dbSecret>", "</dbSecret>"),
+        ('<?xml version="1.0"?>\n<dbSecret>', "</dbSecret>\n"),
+        ("\ufeff<c>\n  <dbSecret>", "</dbSecret>\n</c>"),
+    ],
+    ids=["root-element", "with-declaration", "child-with-byte-order-mark"],
+)
+def test_xml_document_that_reads_as_yaml_is_read_as_xml(head: str, tail: str) -> None:
+    text = f"{head}one: {_FAKE_ELEMENT}\nthree: four{tail}"
+    assert hide_secret_text(text) == f"{head}{_MARKER}{tail}"
+
+
+@pytest.mark.parametrize(
     "name",
     [
         "<![CDATA[dbPassword]]>",

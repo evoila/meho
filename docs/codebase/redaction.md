@@ -589,8 +589,10 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     its key on the same entry) and each comment is read on its own in the
     same way, so a start tag and a closing tag in two different YAML
     values or comment lines are no element, and the keys and values
-    between them stay. A text that reads as neither YAML nor JSON is read
-    as XML whole, so an element over more lines is still hidden. These steps
+    between them stay. A text that is one complete XML document (such as
+    one root element with `key: value` lines in it), or reads as neither
+    YAML nor JSON, is read as XML whole, so an element over more lines is
+    still hidden. These steps
     write the marker without quotes. A step that is too deep to read hides
     the whole text. An element with no closing tag is not touched, and
     text without a secret-named field comes back unchanged. The YAML read

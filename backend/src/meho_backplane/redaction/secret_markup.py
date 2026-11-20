@@ -33,8 +33,8 @@ hides them in the text:
   own, as text: its escapes are read before its XML, and only the hidden
   value changes in the JSON. In a YAML text, each value (with its key on
   the same entry) and each comment is read on its own, so a start tag and
-  a closing tag in two different values are no element. A text that reads
-  as neither is read as XML whole. A closing tag closes the
+  a closing tag in two different values are no element. A text that is one
+  complete XML document, or reads as neither, is read as XML whole. A closing tag closes the
   nearest open element with its name, so a child with the same name does
   not end its parent. Tags inside CDATA are text. The text of an XML
   comment is read on its own, in one pass: comments do not nest.
@@ -55,6 +55,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import xml.parsers.expat
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -688,20 +689,39 @@ def _hide_xml_in_yaml_values(text: str, values: list[tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+def _is_xml_document(text: str) -> bool:
+    """True when *text* is one complete XML document, such as one root element.
+
+    Such a text can also read as YAML (``key: value`` lines inside the root
+    element), but it is XML, so it is read as XML whole. Entities a DTD
+    could define count as defined, and no DTD is loaded.
+    """
+    body = text.lstrip("\ufeff \t\r\n")
+    if not body.startswith("<"):
+        return False
+    parser = xml.parsers.expat.ParserCreate()
+    parser.UseForeignDTD(True)
+    try:
+        parser.Parse(body, True)
+    except xml.parsers.expat.ExpatError:
+        return False
+    return True
+
+
 def hide_secret_xml(text: str) -> str:
     """Return *text* with secret-named values in its XML tags hidden.
 
     In a JSON text each string is read on its own, with its escapes read
     first, so a start tag and a closing tag in two different strings are
     no element, and the JSON between them stays. In a YAML text each value
-    and each comment is read on its own in the same way. Any other text is
-    read as XML whole.
+    and each comment is read on its own in the same way, unless the text is
+    one complete XML document. Any other text is read as XML whole.
     """
     if "<" not in text and not _JSON_ESCAPED_LT.search(text):
         return text
     if _is_json_collection(text):
         return _hide_xml_in_json_strings(text)
     values = _yaml_value_spans(text)
-    if values is None:
+    if values is None or _is_xml_document(text):
         return _hide_xml(text)
     return _hide_xml_in_yaml_values(text, values)

@@ -99,6 +99,8 @@ _HIDDEN: Final[list[tuple[str, str, str]]] = [
             "ROOT",
             "COOKIE",
             "WEBHOOK",
+            "HASH",
+            "ROUTING",
             "A",
         )
     ],
@@ -203,6 +205,14 @@ def test_hidden_forms_lose_the_value_and_keep_the_words(line: str, gone: str, ke
     assert gone not in out
     assert kept in out
     assert "[REDACTED:" in out
+
+
+@pytest.mark.parametrize("name", ["HASH_KEY", "ROUTING_KEY"])
+def test_a_hash_or_routing_key_is_hidden_in_the_answer_and_the_trace(name: str) -> None:
+    line = f"{name}={PW} run"
+    trace, _fired = scrub_content(line)
+    for out in (redact(line, get_default_policy()).redacted, trace):
+        assert out == f"{name}={_MARK} run"
 
 
 @pytest.mark.parametrize("line", _KEPT)

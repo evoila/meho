@@ -35,7 +35,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector

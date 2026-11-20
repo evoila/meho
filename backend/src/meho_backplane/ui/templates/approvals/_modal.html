@@ -405,6 +405,14 @@
           <dd class="text-right font-semibold">Another admin must approve</dd>
         </div>
       {% endif %}
+      {#- A change in MEHO's own login realm that can give platform admin
+          rights: only a platform admin approves it, and the card says why. -#}
+      {% if request.get("platform_admin_reason") %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-platform-admin>
+          <dt class="shrink-0 text-base-content/55">Platform admin must approve</dt>
+          <dd class="text-right [overflow-wrap:anywhere]">{{ request.get("platform_admin_reason") }}</dd>
+        </div>
+      {% endif %}
       {#- Approver routing: the login groups the request went to. Shown only
           when routing stored them; otherwise today's rule applies. -#}
       {% if request.who_can_approve %}
@@ -462,6 +470,23 @@
         <dt class="shrink-0 text-base-content/55">Requested by</dt>
         <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
+      {#- The people behind an agent, service or runner login: they count as
+          the requester, so the approver sees who is really asking. -#}
+      {% if request.people_behind is not none %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-people-behind>
+          <dt class="shrink-0 text-base-content/55">Behind it</dt>
+          <dd class="flex flex-col items-end gap-1 text-right">
+            {% for entry in request.people_behind %}
+              <span class="flex flex-wrap items-baseline justify-end gap-1">
+                <span class="text-base-content/55">{{ entry.why_text }}</span>
+                {{ subject(entry.person) }}
+              </span>
+            {% else %}
+              <span data-approval-people-behind-unknown>Set up by: not known. Only an Admin may approve.</span>
+            {% endfor %}
+          </dd>
+        </div>
+      {% endif %}
       {#- Run context (#3353): the external change-ticket ref the automation
           stamps and the originating run id, so the reviewer can trace the
           request to the work that issued it. -#}
@@ -584,6 +609,11 @@
         </dl>
       {% endif %}
 
+      {#- Why a call that reads, writes or makes a credential waits. -#}
+      {% if effect.get("credential_wait") %}
+        <p class="mt-2 text-xs" data-testid="approval-credential-wait">{{ effect.get("credential_wait") }}</p>
+      {% endif %}
+
       {% if effect.get("write_capability_warning") %}
         {#- #2331: the permission preflight found the connector identity likely
             lacks write capability. A warning, not a gate -- the approver may
@@ -658,6 +688,43 @@
             </div>
           </div>
         {% endif %}
+      {% endif %}
+
+      {#- What each container of a ``k8s.apply`` runs when its dry run failed.
+          MEHO builds the list from the manifest text, with secret values
+          hidden; only a person reads it. A preview that worked holds the
+          list in its own fields, shown in the table below. -#}
+      {% set run_commands = effect.get("run_commands") %}
+      {% if run_commands is sequence and run_commands is not string and run_commands | length %}
+        <div class="mt-3 rounded-box border border-base-300 p-3" aria-label="What each container runs" data-testid="approval-run-commands">
+          <h4 class="text-sm font-semibold">What each container runs</h4>
+          <ul class="mt-1 space-y-2 text-xs">
+            {% for entry in run_commands %}
+              <li>
+                {% if entry is mapping and entry.get("echo_omitted") %}
+                  <span class="opacity-80">{{ entry.get("echo_omitted") }}</span>
+                {% elif entry is mapping %}
+                  <table class="table table-xs">
+                    <tbody>
+                      {% for key, value in entry | dictsort %}
+                        <tr>
+                          <th class="align-top font-mono font-normal text-base-content/55">{{ key }}</th>
+                          <td class="font-mono [overflow-wrap:anywhere]">
+                            {% if value is mapping or (value is sequence and value is not string) %}
+                              <pre class="whitespace-pre-wrap text-xs">{{ value | tojson(indent=2) }}</pre>
+                            {% else %}
+                              {{ value }}
+                            {% endif %}
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
       {% endif %}
 
       {#- Blast-radius statement (#3197) for the destructive tier. The

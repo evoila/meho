@@ -56,9 +56,10 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
 * ``approver`` — whether this principal holds the **approve-only**
   capability: the right to decide (list / show / approve / reject /
   decide) parked approval requests, orthogonal to :class:`TenantRole`
-  and deliberately *decoupled from dispatch* (#3243). Lifted from a
-  configurable JWT claim (default ``approver``) and defaults to
-  ``False`` so every pre-existing token is unaffected (fail-closed).
+  and deliberately *decoupled from dispatch*. MEHO keeps the flag in
+  the code. No role gives it today; roles that customers define come
+  later. MEHO does not read the ``approver`` JWT claim. Defaults to
+  ``False``.
   The approvals plane admits a principal that is **either**
   ``operator``-or-higher **or** carries this flag
   (:func:`~meho_backplane.auth.rbac.require_approvals_access`), so a
@@ -126,12 +127,11 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
   (#5239); the flat ``tenant_id`` / ``tenant_role`` / ``approver`` claims
   are not used.
-* ``self_approver`` — whether the person is in the ``MEHO-SA-Operators``
-  group of the current tenant (#3327). SA-Operators may approve their own
-  changes, at every risk level that waits for approval (#3325). Read by
-  :func:`~meho_backplane.auth.jwt._extract_self_approver`: from the
-  current tenant's ``meho_tenants`` entry when the token has that claim,
-  else from the ``groups`` claim (group name ``JWT_SELF_APPROVER_GROUP``).
+* ``self_approver`` — whether the login group of the current tenant gives
+  self-approval (:func:`group_grant`). No default group gives it:
+  ``MEHO-SA-Operators`` is read as Operators. It stays ``False`` for a
+  token without a ``meho_tenants`` claim. Read by
+  :func:`~meho_backplane.auth.jwt._extract_self_approver`.
   When the request names another tenant of the list,
   :func:`~meho_backplane.auth.current_tenant.with_membership` reads it
   again from that tenant's entry, the same as ``approver``. A platform
@@ -167,6 +167,7 @@ the claim; a malformed value is dropped with a warning in the log, and
 the token stays valid.
 """
 
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Final, NamedTuple
 from uuid import UUID
@@ -175,6 +176,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
+    "OLD_GROUPS",
     "RUN_STOP_RULE",
     "GroupGrant",
     "Operator",
@@ -185,6 +187,7 @@ __all__ = [
     "group_grant",
     "is_human_principal",
     "may_stop_run",
+    "old_group_of",
 ]
 
 
@@ -279,10 +282,12 @@ class GroupGrant(NamedTuple):
 
     * ``role`` — the :class:`TenantRole`.
     * ``approver`` — the person may decide approval requests
-      (the same meaning as :attr:`Operator.approver`).
-    * ``self_approval`` — the person may approve their own change. Only
-      ``SA-Operators`` sets it. It sets :attr:`Operator.self_approver`
-      for the current tenant (#3327).
+      (the same meaning as :attr:`Operator.approver`). No group sets it
+      today; roles that customers define come later.
+    * ``self_approval`` — the person may approve their own change. No
+      default group sets it: an Admin approves their own change through
+      the ``tenant_admin`` role (:attr:`Operator.may_self_approve`).
+      It sets :attr:`Operator.self_approver` for the current tenant.
     """
 
     role: TenantRole
@@ -291,14 +296,27 @@ class GroupGrant(NamedTuple):
 
 
 #: The one table from login group kind to role and flags. It must match
-#: the table in ``docs/decisions/login-role-groups.md``.
+#: the table in ``docs/decisions/login-role-groups.md``. The two old
+#: groups stay known: ``SA-Operators`` is read as Operators and
+#: ``Approvers`` is read as Readers.
 _GROUP_GRANTS: dict[RoleGroup, GroupGrant] = {
     RoleGroup.READERS: GroupGrant(TenantRole.READ_ONLY, approver=False, self_approval=False),
     RoleGroup.OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False),
-    RoleGroup.SA_OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=True),
+    RoleGroup.SA_OPERATORS: GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False),
     RoleGroup.ADMINS: GroupGrant(TenantRole.TENANT_ADMIN, approver=False, self_approval=False),
-    RoleGroup.APPROVERS: GroupGrant(TenantRole.READ_ONLY, approver=True, self_approval=False),
+    RoleGroup.APPROVERS: GroupGrant(TenantRole.READ_ONLY, approver=False, self_approval=False),
 }
+
+
+#: The two old login group kinds. MEHO reads them as Operators and Readers.
+#: A routing entry that names one matches only the members of that group
+#: (:attr:`Operator.old_group`).
+OLD_GROUPS: frozenset[RoleGroup] = frozenset({RoleGroup.SA_OPERATORS, RoleGroup.APPROVERS})
+
+
+def old_group_of(group: RoleGroup) -> RoleGroup | None:
+    """*group* when it is one of the two old kinds, else ``None``."""
+    return group if group in OLD_GROUPS else None
 
 
 def group_grant(group: RoleGroup) -> GroupGrant:
@@ -393,12 +411,18 @@ class Operator(BaseModel):
     #: claim, and always empty for a machine login. The current tenant is
     #: picked from it per request (#5239).
     tenants: tuple[TenantMembership, ...] = ()
-    #: The person is in the SA-Operators group of the current tenant
-    #: (#3327). Off by default. Read it through :attr:`may_self_approve`.
+    #: The login group of the current tenant gives self-approval. No
+    #: default group does. Off by default. Read it through
+    #: :attr:`may_self_approve`.
     self_approver: bool = False
     #: The ``meho_tenants`` claim had a part MEHO could not read. Then
     #: ``self_approver`` stays off in every tenant (#3327).
     tenants_claim_malformed: bool = False
+    #: The old login group (SA-Operators or Approvers) the token names for the
+    #: current tenant, or ``None``. It gives no right. A routing entry that
+    #: names an old kind matches only the members of that group
+    #: (:func:`~meho_backplane.policy.routing.routing_refusal`).
+    old_group: RoleGroup | None = None
     #: The group kind the bindings of the policy file give this login in the
     #: current tenant (:mod:`meho_backplane.policy.bindings`). ``None`` when
     #: the ``POLICY_APPROVER_ROUTING`` switch is off or no binding matched.
@@ -462,9 +486,9 @@ class Operator(BaseModel):
 
         The one place the approval checks ask (#3328). True only for a
         person (``principal_kind=user``) in a chosen current tenant who
-        is in one of two groups there: MEHO-SA-Operators
-        (:attr:`self_approver`), or MEHO-Admins (the ``tenant_admin``
-        role, #5969). A platform admin who works in a tenant without a
+        is an Admin there (the ``tenant_admin`` role, MEHO-Admins), or
+        whose group gives self-approval (:attr:`self_approver`, no
+        default group does). A platform admin who works in a tenant without a
         role group there has the ``tenant_admin`` role
         (:attr:`role_from_platform_admin`), so they count as an admin.
         A machine login (agent, service, runner) always gets ``False``,
@@ -479,18 +503,21 @@ class Operator(BaseModel):
         in_a_self_approval_group = self.self_approver or self.tenant_role == TenantRole.TENANT_ADMIN
         return in_a_self_approval_group and self.tenant_chosen and is_human_principal(self)
 
-    def may_approve_rights_change(self, requester_sub: str) -> bool:
+    def may_approve_rights_change(self, requester_sub: str, behind: Iterable[str] = ()) -> bool:
         """Return ``True`` when this person may approve a change of rights.
 
         The one place that decides it, for every kind of rights change
         and every approval path (the approve, the "may I approve?" sign and
         run approvals). True only for a person in a chosen current tenant who
         is an admin there (the ``tenant_admin`` role or a platform admin)
-        and who is not *requester_sub*: the requester never approves their
-        own change of rights. No group, no risk level and no break-glass
-        switch changes that.
+        and who is neither *requester_sub* nor one of *behind*, the people
+        behind the agent, service or runner login that asked
+        (:mod:`~meho_backplane.operations.people_behind`): the requester and
+        the people behind it never approve their own change of rights. No
+        group, no risk level and no break-glass switch changes that.
         """
-        if self.sub.casefold() == requester_sub.casefold():
+        mine = self.sub.casefold()
+        if mine == requester_sub.casefold() or mine in {sub.casefold() for sub in behind}:
             return False
         is_admin = self.tenant_role == TenantRole.TENANT_ADMIN or self.platform_admin
         return is_admin and self.tenant_chosen and is_human_principal(self)

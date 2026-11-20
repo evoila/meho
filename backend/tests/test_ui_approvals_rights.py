@@ -39,11 +39,9 @@ from tests.test_ui_approvals import (
 )
 
 
-def _sa_operator(**kwargs: object) -> Operator:
-    """A person in the MEHO-SA-Operators group."""
-    return _operator(tenant_id=_TENANT_A, **kwargs).model_copy(  # type: ignore[arg-type]
-        update={"self_approver": True}
-    )
+def _admin(**kwargs: object) -> Operator:
+    """A person in the MEHO-Admins group."""
+    return _operator(tenant_id=_TENANT_A, role=TenantRole.TENANT_ADMIN, **kwargs)  # type: ignore[arg-type]
 
 
 def _own_destructive_request() -> uuid.UUID:
@@ -71,15 +69,15 @@ def _approve_button(body: str) -> str:
     return body.split('data-action="approve"')[1].split("</button>")[0]
 
 
-def test_an_sa_operator_sees_they_may_approve_their_own_change() -> None:
+def test_an_admin_sees_they_may_approve_their_own_change() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _own_destructive_request()
 
-    body = _modal(_sa_operator(), rid)
+    body = _modal(_admin(), rid)
 
     assert 'data-approve-right="yes"' in body
     assert 'data-approve-reason="own_change"' in body
-    assert "MEHO-SA-Operators and MEHO-Admins may approve their own changes." in body
+    assert "MEHO-Admins may approve their own changes." in body
     assert "disabled" not in _approve_button(body)
     # The armed approve confirm says it is a self-approval.
     assert 'data-approval-confirm="self-approval"' in body
@@ -138,10 +136,10 @@ def test_the_wrong_group_sees_why_and_approve_is_disabled() -> None:
     assert 'data-approve-right="no"' in body
     assert 'data-approve-reason="wrong_group"' in body
     assert "You cannot approve this request" in body
-    assert "MEHO-SA-Operator or a MEHO-Admin" in body
+    assert "Only a MEHO-Admin may approve" in body
     button = _approve_button(body)
     assert "disabled" in button
-    assert "MEHO-SA-Operator or a MEHO-Admin" in button
+    assert "Only a MEHO-Admin may approve" in button
     # No approve confirm state is reachable; Deny stays.
     assert 'data-confirm="approve"' not in body
     assert 'data-action="reject"' in body
@@ -218,14 +216,14 @@ def test_the_button_matches_what_the_click_does() -> None:
     refused = _seed_destructive_request()
     allowed = _own_destructive_request()
     operator = _operator(tenant_id=_TENANT_A)
-    sa_operator = _sa_operator()
+    admin = _admin()
 
     assert "disabled" in _approve_button(_modal(operator, refused))
-    assert "disabled" not in _approve_button(_modal(sa_operator, allowed))
+    assert "disabled" not in _approve_button(_modal(admin, allowed))
 
     resume_mock = AsyncMock(return_value=_dispatch_result())
     _post_decision(operator, refused, resume_mock=resume_mock)
-    _post_decision(sa_operator, allowed)
+    _post_decision(admin, allowed)
 
     assert _request_status(refused) == ApprovalRequestStatus.PENDING.value
     assert _request_status(allowed) == ApprovalRequestStatus.APPROVED.value
@@ -236,12 +234,12 @@ def test_a_self_approval_shows_a_confirmation_after_the_click() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _own_destructive_request()
 
-    response = _post_decision(_sa_operator(), rid)
+    response = _post_decision(_admin(), rid)
 
     assert response.status_code == 200, response.text  # type: ignore[attr-defined]
     body = response.text  # type: ignore[attr-defined]
     assert 'data-testid="approval-self-approved"' in body
-    assert "You approved your own change, as a member of MEHO-SA-Operators or MEHO-Admins." in body
+    assert "You approved your own change, as a member of MEHO-Admins." in body
     assert "The audit log records it as a self-approval." in body
 
 
@@ -265,12 +263,12 @@ def test_a_forced_own_destructive_approve_shows_the_refusal_text() -> None:
 
     body = response.text  # type: ignore[attr-defined]
     assert "You cannot approve your own request" in body
-    assert "Ask another person in MEHO-SA-Operators or MEHO-Admins to approve it" in body
+    assert "Ask another person in MEHO-Admins to approve it" in body
     for word in ("APPROVAL_ALLOW_SELF_APPROVAL", "agent-requester", "break-glass", "re-park"):
         assert word.lower() not in body.lower(), word
     # The refusal says where to approve (#3329), after the refusal text.
     assert 'data-testid="approval-refusal-hint"' in body
-    assert body.index("Ask another person in MEHO-SA-Operators") < body.index(WEB_APPROVAL_HINT)
+    assert body.index("Ask another person in MEHO-Admins") < body.index(WEB_APPROVAL_HINT)
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
 
@@ -285,7 +283,7 @@ def test_a_forced_wrong_group_approve_shows_the_refusal_text_and_the_hint() -> N
 
     body = response.text  # type: ignore[attr-defined]
     assert "Could not complete (403)" in body
-    assert "Only a MEHO-SA-Operator or a MEHO-Admin may approve" in body
+    assert "Only a MEHO-Admin may approve" in body
     assert 'data-testid="approval-refusal-hint"' in body
     assert WEB_APPROVAL_HINT in body
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value

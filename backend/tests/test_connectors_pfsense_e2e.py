@@ -331,6 +331,7 @@ _DANGEROUS_OP_IDS: frozenset[str] = frozenset(
 _PARAM_READ_OP_IDS: frozenset[str] = frozenset(
     {
         "pfsense.mgmt_flow.summary",
+        "pfsense.config.history",
         "pfsense.diag.ping",
         "pfsense.openvpn.csc.sync",
         "pfsense.openvpn.clients",
@@ -463,7 +464,7 @@ def test_pfsense_ops_registration_count() -> None:
         | _USER_WRITE_OP_IDS
     ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 31, f"Expected 31 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 32, f"Expected 32 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:

@@ -274,6 +274,35 @@ def _validate_op_pattern(op_pattern: str) -> None:
         raise GrantValidationError("op_pattern must be a non-empty string")
 
 
+def _refuse_credential_auto_execute(payload: AgentGrantCreate) -> None:
+    """Refuse an ``auto-execute`` grant whose pattern is the op id of a credential call.
+
+    An agent's call that reads, writes or makes a credential waits for a
+    person, whatever its grants say
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`,
+    checked by the policy gate). So such a grant would never run a call at
+    once. Not refused, because the grant then tells no lie:
+
+    * a pattern with a glob character: the gate keeps the credential calls
+      it matches waiting;
+    * a ``needs-approval`` or ``deny`` grant: it never runs a call at once;
+    * a credential read that is marked in code as one that returns no
+      secret value: its calls run at once, and with ``AGENT_GRANT_REQUIRED``
+      on an agent needs a grant for them.
+    """
+    from meho_backplane.operations.service_grants import credential_call_waits, credential_refusal
+
+    if payload.verdict is not PermissionVerdict.AUTO_EXECUTE:
+        return
+    if any(char in payload.op_pattern for char in "*?["):
+        return
+    if not credential_call_waits(payload.op_pattern):
+        return
+    refusal = credential_refusal(payload.op_pattern)
+    if refusal is not None:
+        raise GrantValidationError(refusal)
+
+
 def _validate_expires_at(expires_at: datetime | None) -> None:
     """Raise :exc:`GrantValidationError` when *expires_at* is in the past."""
     if expires_at is None:
@@ -337,6 +366,7 @@ class AgentGrantService:
         if payload.principal_sub == WHAT_IF_SUB:
             raise GrantValidationError(WHAT_IF_SUB_REFUSAL)
         _validate_op_pattern(payload.op_pattern)
+        _refuse_credential_auto_execute(payload)
         _validate_target_scope(payload.target_scope)
         _validate_expires_at(payload.expires_at)
 

@@ -29,6 +29,10 @@
   catalog check refuses that target is not named (#5069), so the error
   never sends the caller to a connector that would refuse the call.
 
+For a hosted agent with a connector list, both lists of names keep only
+connectors in its list
+(:data:`~meho_backplane.operations._target_connector_limit.allowed_connectors_var`).
+
 The extra lookups run only on this error path; a successful dispatch
 never pays for them.
 """
@@ -62,6 +66,7 @@ from meho_backplane.operations._lookup import (
     find_connectors_with_op,
     find_uninstalled_package_owner,
 )
+from meho_backplane.operations._target_connector_limit import allowed_connectors_var
 from meho_backplane.operations.license_reads import is_license_read_op_id
 
 __all__ = ["op_miss_result"]
@@ -118,7 +123,7 @@ async def op_miss_result(
     ):
         did_you_mean = await close_connector_ids(tenant_id=tenant_id, connector_id=connector_id)
         return result_unknown_connector(
-            connector_id, op_id, _elapsed_ms(started), did_you_mean=did_you_mean
+            connector_id, op_id, _elapsed_ms(started), did_you_mean=_within_limit(did_you_mean)
         )
 
     def refuses_target(row: EndpointDescriptor) -> bool:
@@ -141,8 +146,16 @@ async def op_miss_result(
         known_op_count,
         _elapsed_ms(started),
         connector_id=connector_id,
-        connectors_with_op=others,
+        connectors_with_op=_within_limit(others),
     )
+
+
+def _within_limit(connector_ids: list[str]) -> list[str]:
+    """*connector_ids* without the ones outside a bound connector list."""
+    allowed = allowed_connectors_var.get()
+    if allowed is None:
+        return connector_ids
+    return [cid for cid in connector_ids if cid in allowed]
 
 
 def _elapsed_ms(started: float) -> float:

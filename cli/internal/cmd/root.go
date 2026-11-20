@@ -627,7 +627,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// MEHO deployer onramp. The first verb (`admin keycloak
 	// bootstrap-clients`) idempotently creates the public CLI
 	// device-code + MCP browser-flow clients, their 6 protocol
-	// mappers + 4 default client scopes, the five MEHO role groups, and
+	// mappers + 4 default client scopes, the three MEHO role groups, and
 	// an admin user against a Keycloak realm — encoding the 5-step
 	// recipe documented in deploy/values-examples/README.md.
 	// Confidential-client provisioning is explicitly refused; this

@@ -21,16 +21,13 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import REASON_KEYS
 from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.operations._preview import build_proposed_effect
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
-from meho_backplane.operations.grant_approval import (
-    GRANT_REASON_STRICTER,
-    grant_changed_since_request,
-)
 from meho_backplane.settings import get_settings
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )
@@ -43,16 +40,18 @@ from tests.test_approval_grant_to_self import (
     _PLATFORM_GROUP,
     _PLATFORM_NAME,
     _REALM,
-    _REQUESTER,
     _approve,
     _connector_with,
     _ctx,
     _groups_by_id,
     _park,
     _person,
-    _row,
     _status,
 )
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _PARENT = "66666666-6666-6666-6666-666666666666"
 _ROLE = "meho-platform"
@@ -188,7 +187,7 @@ async def test_a_group_that_gives_the_platform_admin_role_needs_a_platform_admin
     other = await _effect(_connector(roles=roles[:1]), _ADD_PARAMS)
 
     assert effect["preview"]["grant"]["platform_admin"] is True
-    assert other["preview"]["grant"]["platform_admin"] is False
+    assert other["preview"]["grant"]["platform_admin_reason"] == REASON_KEYS
     await _needs_platform_admin(effect, _ADD_PARAMS)
 
 
@@ -200,7 +199,7 @@ async def test_the_role_is_not_read_when_no_platform_admin_role_is_set(
 
     effect = await _effect(_connector(roles_fail=True), _ADD_PARAMS)
 
-    assert effect["preview"]["grant"]["platform_admin"] is False
+    assert effect["preview"]["grant"]["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -250,7 +249,7 @@ async def test_a_group_too_deep_to_read_needs_a_platform_admin(
 
 
 @pytest.mark.asyncio
-async def test_a_role_that_differs_only_in_letter_case_needs_only_a_tenant_admin(
+async def test_a_role_that_differs_only_in_letter_case_gives_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_platform_role(monkeypatch)
@@ -259,15 +258,14 @@ async def test_a_role_that_differs_only_in_letter_case_needs_only_a_tenant_admin
 
     effect = await _effect(_connector(roles=roles), _ADD_PARAMS)
 
-    assert effect["preview"]["grant"]["platform_admin"] is False
-    request_id = await _park(_ADD_PARAMS, effect)
-    await _approve(request_id, _person("person-admin"), _ADD_PARAMS)
-    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+    # The group gives nothing; the harmless keys rule still asks for a platform admin.
+    assert effect["preview"]["grant"]["platform_admin_reason"] == REASON_KEYS
+    await _needs_platform_admin(effect, _ADD_PARAMS)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attributes", [{}, {"platform_admin": ["false"]}, {"team": ["ops"]}])
-async def test_a_normal_group_needs_only_a_tenant_admin(
+async def test_a_normal_group_gives_nothing(
     monkeypatch: pytest.MonkeyPatch, attributes: dict[str, list[str]]
 ) -> None:
     _set_platform_role(monkeypatch)
@@ -275,34 +273,9 @@ async def test_a_normal_group_needs_only_a_tenant_admin(
 
     effect = await _effect(_connector(roles=[{"id": "role-1", "name": "viewer"}]), _ADD_PARAMS)
 
-    assert effect["preview"]["grant"]["platform_admin"] is False
-    request_id = await _park(_ADD_PARAMS, effect)
-    await _approve(request_id, _person("person-admin"), _ADD_PARAMS)
-    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
-
-
-@pytest.mark.asyncio
-async def test_the_run_is_refused_when_the_group_gets_the_attribute_after_approval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The run reads the group again: it now gives platform admin, so it needs more."""
-    _groups_by_id(monkeypatch, {_GROUP: _ops_team()})
-    request_id = await _park(_ADD_PARAMS, await _effect(_connector(), _ADD_PARAMS))
-    await _approve(request_id, _person("person-admin"), _ADD_PARAMS)
-    _groups_by_id(monkeypatch, {_GROUP: _ops_team(platform_admin=["true"])})
-
-    async def _live_card(operator: Operator, **kwargs: Any) -> dict[str, Any]:
-        return await _effect(_connector(), kwargs["params"], op_id=kwargs["op_id"])
-
-    import meho_backplane.operations.approval_object_check as object_check_module
-
-    monkeypatch.setattr(object_check_module, "live_card", _live_card)
-
-    reason = await grant_changed_since_request(
-        _person(_REQUESTER), await _row(request_id), None, _ADD_PARAMS
-    )
-
-    assert reason == GRANT_REASON_STRICTER
+    # The group gives nothing; the harmless keys rule still asks for a platform admin.
+    assert effect["preview"]["grant"]["platform_admin_reason"] == REASON_KEYS
+    await _needs_platform_admin(effect, _ADD_PARAMS)
 
 
 @pytest.mark.asyncio

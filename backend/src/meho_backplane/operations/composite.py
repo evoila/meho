@@ -93,6 +93,7 @@ References
 
 from __future__ import annotations
 
+import enum
 import time
 import uuid
 from contextvars import ContextVar
@@ -104,8 +105,11 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
+    STEP_DONE_NO_RESULT,
+    STEP_RUN_AGAIN,
     StepJournal,
     current_step_journal,
+    is_credential_read,
 )
 from meho_backplane.operations.governed_subops import governed_subops_for
 from meho_backplane.settings import get_settings
@@ -128,6 +132,7 @@ __all__ = [
     "composite_resume_state",
     "composite_resume_state_var",
     "composite_resume_var",
+    "credential_step_waits_after_approval",
     "enforce_subop_policy",
     "get_dispatch_child",
     "run_governed_subop",
@@ -510,7 +515,11 @@ def get_dispatch_child(
             )
             if stop is not None:
                 return stop
-            entry = journal.start(connector_id, op_id, effective_target, params)
+            # The dispatcher checks a credential read's policy each time it
+            # is sent, and marks it when a person's approval let it go ahead.
+            entry = journal.start(
+                connector_id, op_id, effective_target, params, may_send_again=True
+            )
         # Bind the audit-tree + depth + op-id chain contextvars for
         # the duration of the recursive dispatch. Tokens make resets
         # exception-safe -- ``finally`` restores siblings' clean state.
@@ -528,14 +537,23 @@ def get_dispatch_child(
                 params=params,
             )
             if journal is not None and entry is not None:
-                journal.finish(entry, result.model_dump(mode="json"))
+                journal.finish(
+                    entry, result.model_dump(mode="json"), ended_well=_child_ended_well(result)
+                )
             return result
         finally:
+            if journal is not None:
+                journal.sending_again = None
             _composite_op_id_chain_var.reset(chain_token)
             composite_depth_var.reset(depth_token)
             parent_audit_id_var.reset(audit_token)
 
     return _dispatch_child
+
+
+def _child_ended_well(result: OperationResult) -> bool:
+    """True when a ``dispatch_child`` step ran and its change is known to have happened."""
+    return result.status == "ok" and result.extras.get("execution_outcome") != "uncertain"
 
 
 def _replayed_child(
@@ -548,8 +566,14 @@ def _replayed_child(
 ) -> OperationResult | None:
     """What a ``dispatch_child`` step returns without running, during a resume.
 
-    A step the earlier run finished returns its stored result. A step it
-    only started stops the run (``composite_resume_step_outcome_unknown``).
+    A step the earlier run finished returns its stored result. A credential
+    write or make that ended well returns ``ok`` with no result
+    (``extras["result_kept"]`` is ``False``). A ``run_again`` credential read
+    runs again, through the dispatcher and its policy check; the approval of
+    the run does not cover it
+    (:func:`~meho_backplane.operations.composite_steps.child_read_sent_again`).
+    A step the earlier run only started stops the run
+    (``composite_resume_step_outcome_unknown``).
     Before the approved step, a step the earlier run did not do is refused
     (``composite_resume_repeats_write``), unless the composite continues at
     an ``after_main_effect`` step on its own. ``None``: run the step.
@@ -561,10 +585,21 @@ def _replayed_child(
 
     replayed = journal.take(connector_id, op_id, target, params)
     if replayed is not None:
-        if replayed.get("status") == STEP_DONE:
+        status = replayed.get("status")
+        if status == STEP_RUN_AGAIN:
+            _log.info(
+                "composite_step_read_again", composite_op_id=journal.composite_op_id, op_id=op_id
+            )
+            journal.sending_again = op_id
+            return None
+        if status in (STEP_DONE, STEP_DONE_NO_RESULT):
             _log.info(
                 "composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id
             )
+            if status == STEP_DONE_NO_RESULT:
+                return OperationResult(
+                    status="ok", op_id=op_id, duration_ms=0.0, extras={"result_kept": False}
+                )
             return OperationResult.model_validate(replayed.get("result"))
         _log.error(
             "composite_resume_step_outcome_unknown",
@@ -615,7 +650,12 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
 
 
 def _covered_by_approved_run(
-    *, safety_level: str, requires_approval: bool, always_wait: bool = False
+    *,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    always_wait: bool = False,
+    stored_op_class: str | None = None,
 ) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
@@ -623,12 +663,38 @@ def _covered_by_approved_run(
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
     internal step, except a ``destructive`` step, a step marked
-    ``requires_approval`` and a step a classification entry makes always
-    wait: those keep their own approval.
+    ``requires_approval``, a step a classification entry makes always
+    wait and a step that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
+    those keep their own approval.
     """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
     if safety_level == "destructive" or requires_approval or always_wait:
         return False
+    if credential_call_waits(op_id, stored_op_class):
+        return False
+    return _runs_after_approval()
+
+
+def _runs_after_approval() -> bool:
+    """True while a run goes on after a person's approval (:data:`approved_run_var`, a resume)."""
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
+
+
+def credential_step_waits_after_approval(op_id: str, stored_op_class: str | None = None) -> bool:
+    """True when a step or child call of a run after an approval needs its own approval.
+
+    Such a run is checked with the rights of the person who approved it. A
+    step or child call that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    still waits for its own approval, whatever rights that person has and
+    whatever level the step declares. The approved step itself is cleared
+    before this check (:func:`_subop_resume_cleared`).
+    """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
+    return _runs_after_approval() and credential_call_waits(op_id, stored_op_class)
 
 
 def _resume_parent_for_current_composite(
@@ -675,13 +741,13 @@ def _unfinished_step_before_wait(op_id: str, duration_ms: float) -> OperationRes
     """Stop a step that would wait when an earlier step of the run has no stored end.
 
     The run after the approval would stop at that earlier step with
-    ``composite_resume_step_outcome_unknown``, so MEHO does not ask a person
-    for the approval and stops now with that error. ``None``: the step may wait.
+    ``composite_resume_step_outcome_unknown`` (or
+    ``composite_resume_read_not_sent`` for a credential read a person
+    approved), so MEHO does not ask a person for the approval and stops now
+    with that error. ``None``: the step may wait.
     The caller skips this check for an ``after_main_effect`` step: its run
     after the approval continues at that step and does not reach the earlier one.
     """
-    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
-
     ctx = composite_dispatch_var.get()
     journal = current_step_journal()
     if ctx is None or journal is None or journal.composite_op_id != ctx[0]:
@@ -689,17 +755,51 @@ def _unfinished_step_before_wait(op_id: str, duration_ms: float) -> OperationRes
     unfinished = journal.first_unfinished()
     if unfinished is None:
         return None
+    return _stopped_at_unfinished(journal, unfinished, duration_ms=duration_ms, waiting_op_id=op_id)
+
+
+def _stopped_at_unfinished(
+    journal: StepJournal,
+    step_op_id: str,
+    *,
+    duration_ms: float = 0.0,
+    waiting_op_id: str | None = None,
+) -> OperationResult:
+    """Stop the run at *step_op_id*, a stored step a resume does not send again.
+
+    A credential read gives ``composite_resume_read_not_sent``: a person
+    approved it, so a resume does not send it again. Any other step gives
+    ``composite_resume_step_outcome_unknown``: MEHO has no stored end for it.
+    """
+    from meho_backplane.operations._errors import (
+        result_composite_resume_read_not_sent,
+        result_composite_resume_step_outcome_unknown,
+    )
+
+    if is_credential_read(step_op_id):
+        _log.error(
+            "composite_resume_read_not_sent",
+            composite_op_id=journal.composite_op_id,
+            blocked_op_id=step_op_id,
+            waiting_op_id=waiting_op_id,
+        )
+        return result_composite_resume_read_not_sent(
+            composite_op_id=journal.composite_op_id,
+            step_op_id=step_op_id,
+            duration_ms=duration_ms,
+            waiting_op_id=waiting_op_id,
+        )
     _log.error(
         "composite_resume_step_outcome_unknown",
         composite_op_id=journal.composite_op_id,
-        blocked_op_id=unfinished,
-        waiting_op_id=op_id,
+        blocked_op_id=step_op_id,
+        waiting_op_id=waiting_op_id,
     )
     return result_composite_resume_step_outcome_unknown(
         composite_op_id=journal.composite_op_id,
-        step_op_id=unfinished,
+        step_op_id=step_op_id,
         duration_ms=duration_ms,
-        waiting_op_id=op_id,
+        waiting_op_id=waiting_op_id,
     )
 
 
@@ -803,19 +903,34 @@ async def enforce_subop_policy(
     it again, the seam returns ``composite_resume_step_outcome_unknown`` and
     the step is not sent again. A step that must be skipped on a resume, with
     its stored result, runs through :func:`run_governed_subop` instead.
-    """
-    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
 
+    A credential read on the list of reads that change nothing
+    (:mod:`~meho_backplane.operations.composite_steps`) is the exception.
+    When its policy let it go ahead with no person, a resume checks its policy again
+    (:func:`_read_again_refusal`) and lets the same read (same target and
+    params) go ahead again only when the policy still lets it go ahead with
+    no person; otherwise the run stops with ``composite_resume_read_not_sent``.
+    A read that a person approved is not sent again: the run stops with that
+    error.
+    """
     journal = current_step_journal()
-    if journal is not None and journal.take(connector_id, op_id, target, params) is not None:
-        _log.error(
-            "composite_resume_step_outcome_unknown",
-            composite_op_id=journal.composite_op_id,
-            blocked_op_id=op_id,
+    replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
+    if journal is not None and replayed is not None:
+        if replayed.get("status") != STEP_RUN_AGAIN:
+            return _stopped_at_unfinished(journal, op_id)
+        refused = await _read_again_refusal(
+            journal,
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=target,
+            params=params,
         )
-        return result_composite_resume_step_outcome_unknown(
-            composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
-        )
+        if refused is None:
+            journal.start(connector_id, op_id, target, params, may_send_again=True)
+        return refused
     gated = await _gate_subop(
         operator=operator,
         connector_id=connector_id,
@@ -827,9 +942,13 @@ async def enforce_subop_policy(
         resume_state=resume_state,
         after_main_effect=after_main_effect,
     )
-    if gated is None and journal is not None:
-        journal.start(connector_id, op_id, target, params)
-    return gated
+    if isinstance(gated, OperationResult):
+        return gated
+    if journal is not None:
+        journal.start(
+            connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
+        )
+    return None
 
 
 class SubopStep(NamedTuple):
@@ -869,50 +988,137 @@ async def run_governed_subop(
 
     During the run after an approval, a step the earlier run finished is
     not checked and not sent again: ``value`` is the stored result and
-    ``replayed`` is ``True``. A step the earlier run started but did not
-    finish, or whose result was not kept, stops the run with
-    ``composite_resume_step_outcome_unknown``. An exception from *call*
-    passes to the handler, and the step stays "started".
+    ``replayed`` is ``True``. A step that writes or makes a credential and
+    ended well gives ``value=None`` with ``replayed=True``: its result is
+    never kept, so a handler that needs the made or written value in a later
+    step gets ``None`` on a resume and must not depend on it. A credential
+    read on the list of reads that change nothing
+    (:mod:`~meho_backplane.operations.composite_steps`), whose policy let it
+    go ahead with no person, is sent again when its policy, checked again,
+    still lets it go ahead with no person (:func:`_read_again_refusal`).
+    Otherwise, for every other credential read and for a read that a person
+    approved, the run stops with ``composite_resume_read_not_sent`` and the
+    read is not sent. A step
+    the earlier run started but did not finish, or whose result was not
+    kept, stops the run with ``composite_resume_step_outcome_unknown``. An
+    exception from *call* passes to the handler, and the step stays
+    "started".
     """
-    from meho_backplane.operations._errors import result_composite_resume_step_outcome_unknown
-
     journal = current_step_journal()
-    if journal is not None:
-        replayed = journal.take(connector_id, op_id, target, params)
-        if replayed is not None:
-            if replayed.get("status") == STEP_DONE:
-                _log.info(
-                    "composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id
-                )
-                return SubopStep(stopped=None, value=replayed.get("result"), replayed=True)
-            _log.error(
-                "composite_resume_step_outcome_unknown",
-                composite_op_id=journal.composite_op_id,
-                blocked_op_id=op_id,
-            )
-            return SubopStep(
-                stopped=result_composite_resume_step_outcome_unknown(
-                    composite_op_id=journal.composite_op_id, step_op_id=op_id, duration_ms=0.0
-                )
-            )
-    gated = await _gate_subop(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        safety_level=safety_level,
-        requires_approval=requires_approval,
-        target=target,
-        params=params,
-        resume_state=resume_state,
-        after_main_effect=after_main_effect,
+    replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
+    if journal is not None and replayed is not None:
+        if replayed.get("status") != STEP_RUN_AGAIN:
+            return _replayed_subop(journal, op_id, replayed)
+        refused = await _read_again_refusal(
+            journal,
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=target,
+            params=params,
+        )
+        if refused is not None:
+            return SubopStep(stopped=refused)
+        may_send_again = True
+    else:
+        gated = await _gate_subop(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=target,
+            params=params,
+            resume_state=resume_state,
+            after_main_effect=after_main_effect,
+        )
+        if isinstance(gated, OperationResult):
+            return SubopStep(stopped=gated)
+        may_send_again = gated is _GoAhead.NO_PERSON
+    entry = (
+        journal.start(connector_id, op_id, target, params, may_send_again=may_send_again)
+        if journal is not None
+        else None
     )
-    if gated is not None:
-        return SubopStep(stopped=gated)
-    entry = journal.start(connector_id, op_id, target, params) if journal is not None else None
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)
     return SubopStep(stopped=None, value=value)
+
+
+def _replayed_subop(journal: StepJournal, op_id: str, replayed: dict[str, Any]) -> SubopStep:
+    """What a :func:`run_governed_subop` step with an entry of the earlier run gives back.
+
+    A finished step gives its stored result (``None`` for a credential write
+    or make). A step with no stored end, or a credential read a person
+    approved, stops the run.
+    """
+    if replayed.get("status") in (STEP_DONE, STEP_DONE_NO_RESULT):
+        _log.info("composite_step_replayed", composite_op_id=journal.composite_op_id, op_id=op_id)
+        return SubopStep(stopped=None, value=replayed.get("result"), replayed=True)
+    return SubopStep(stopped=_stopped_at_unfinished(journal, op_id))
+
+
+async def _read_again_refusal(
+    journal: StepJournal,
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult | None:
+    """Check the policy of a credential read before a resume sends it again.
+
+    The same policy check as a first send (:func:`apply_step_policy` and
+    :func:`policy_gate`). ``None`` when the policy lets the read go ahead
+    with no person. Any other answer (it must wait, or it is denied) stops
+    the run with ``composite_resume_read_not_sent``, and the read is not
+    sent. An approval of this run does not cover the read here.
+    """
+    from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+    from meho_backplane.operations._lookup import parse_connector_id
+    from meho_backplane.operations._validate import policy_gate
+    from meho_backplane.operations.op_policy import apply_step_policy
+    from meho_backplane.policy.stamp import take_rule
+
+    product, version, impl_id = parse_connector_id(connector_id)
+    descriptor = EndpointDescriptor(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        source_kind="composite",
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        parameter_schema={},
+    )
+    await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
+    verdict, _reason = await policy_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
+    )
+    take_rule()
+    if verdict is PermissionVerdict.AUTO_EXECUTE:
+        _log.info("composite_step_read_again", composite_op_id=journal.composite_op_id, op_id=op_id)
+        return None
+    return _stopped_at_unfinished(journal, op_id)
+
+
+class _GoAhead(enum.Enum):
+    """Why :func:`_gate_subop` let a step go ahead."""
+
+    #: The policy let the step go ahead with no person.
+    NO_PERSON = "no_person"
+    #: A person's approval cleared the step: its own, or the run's.
+    PERSON = "person"
 
 
 # code-quality-allow: the long policy and approval gate of a direct sub-op,
@@ -929,8 +1135,11 @@ async def _gate_subop(
     params: dict[str, Any],
     resume_state: dict[str, Any] | None = None,
     after_main_effect: bool = False,
-) -> OperationResult | None:
-    """The policy and approval gate of :func:`enforce_subop_policy`, without the step record."""
+) -> OperationResult | _GoAhead:
+    """The policy and approval gate of :func:`enforce_subop_policy`, without the step record.
+
+    Gives back the result that stops the step, or why the step may go ahead.
+    """
     # Lazy imports: this module is imported by the dispatcher, so a
     # top-level import of the policy/approval machinery (which imports
     # back into the operations package) would risk an import cycle.
@@ -967,6 +1176,7 @@ async def _gate_subop(
         _preflight_denied_refusal,
     )
     from meho_backplane.operations.op_policy import apply_step_policy
+    from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
     from meho_backplane.policy.stamp import take_rule
 
     started = time.monotonic()
@@ -991,7 +1201,7 @@ async def _gate_subop(
     # of re-parking forever. Checked before ``policy_gate`` so a service /
     # agent principal whose sub-op parked resumes without a standing grant.
     if _subop_resume_cleared(op_id=op_id, params=params):
-        return None
+        return _GoAhead.PERSON
 
     # Before the approved step, every step is one the first run did,
     # and the stored ones were replayed above. A governed step before it that
@@ -1034,6 +1244,8 @@ async def _gate_subop(
     # operation. Only the step's group key is read from a stored row; the
     # step runs without one.
     await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
+    # Some params make a step wait for a person, as for a called operation.
+    raise_descriptor_for_params(descriptor, params)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -1047,16 +1259,20 @@ async def _gate_subop(
     )
     step_rule = take_rule()
     if verdict is PermissionVerdict.AUTO_EXECUTE:
-        return None
+        if not credential_step_waits_after_approval(op_id) and not descriptor.credential_call:
+            return _GoAhead.NO_PERSON
+        _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
+        verdict = PermissionVerdict.NEEDS_APPROVAL
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
+        op_id=op_id,
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
         always_wait=descriptor.policy_always_wait,
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
-        return None
+        return _GoAhead.PERSON
 
     # #4646: the rows this gate writes read the verdict off
     # ``policy_decision_var`` (the ``approval.request`` row of a parked step,

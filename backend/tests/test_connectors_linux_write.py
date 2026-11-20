@@ -52,6 +52,7 @@ from meho_backplane.connectors.linux.ops import PathConfinementError
 from meho_backplane.connectors.linux.ops_write import (
     _MAX_SECRET_ENV,
     _RESERVED_ENV_NAMES,
+    ENV_NOTE,
     WRITE_OPS,
     LinuxWriteError,
     LinuxWriteSafetyError,
@@ -488,8 +489,9 @@ async def test_script_run_without_sudo_uses_run_command_not_sudo() -> None:
     assert result["stdout"] == ["ok"]
     sudo_mock.assert_not_awaited()
     run_command.assert_awaited_once()
-    # The wrapper is run under bash, not spliced into the login shell verbatim.
-    assert run_command.await_args.args[1].startswith("bash -c ")
+    # bash reads the wrapper from stdin; the command line is fixed.
+    assert run_command.await_args.args[1] == "bash -s"
+    assert "echo ok" in _decode_b64_tokens(run_command.await_args.kwargs["stdin"])
 
 
 def test_script_run_large_stdout_is_a_spillable_collection() -> None:
@@ -612,7 +614,7 @@ async def test_file_write_preview_echoes_shape_never_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_script_run_preview_shows_script_never_argument_or_env_values() -> None:
+async def test_script_run_preview_shows_script_and_env_values_never_argument_values() -> None:
     ctx = types.SimpleNamespace(
         params={
             "script": _SCRIPT_CANARY,
@@ -624,6 +626,7 @@ async def test_script_run_preview_shows_script_never_argument_or_env_values() ->
             "use_sudo": True,
         },
         target=types.SimpleNamespace(name="linux-1"),
+        agent_preview=False,
     )
     preview = await _linux_script_run_preview(ctx)  # type: ignore[arg-type]
     assert preview == {
@@ -636,11 +639,12 @@ async def test_script_run_preview_shows_script_never_argument_or_env_values() ->
         "use_sudo": True,
         "argument_bytes": len(_ARG_CANARY.encode("utf-8")),
         "env_var_names": ["MEHO_ENV_NAME"],
+        "env": {"MEHO_ENV_NAME": _ENV_VALUE_CANARY},
+        "env_note": ENV_NOTE,
         "working_directory": "/opt/app",
         "timeout_seconds": 30,
     }
-    for hidden_value in (_ARG_CANARY, _ENV_VALUE_CANARY):
-        assert hidden_value not in repr(preview)
+    assert _ARG_CANARY not in repr(preview)
 
 
 # ---------------------------------------------------------------------------
@@ -963,9 +967,11 @@ async def test_secret_env_resolves_on_non_sudo_path_too() -> None:
                 "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF},
             },
         )
-    cmd = run_command.await_args.args[1]  # bash -c '<wrapper>'
-    assert _SECRET_ENV_VALUE_CANARY not in cmd
-    assert _SECRET_ENV_VALUE_CANARY in _decode_b64_tokens(cmd)
+    cmd = run_command.await_args.args[1]
+    wrapper = run_command.await_args.kwargs["stdin"]
+    assert cmd == "bash -s"
+    assert _SECRET_ENV_VALUE_CANARY not in wrapper
+    assert _SECRET_ENV_VALUE_CANARY in _decode_b64_tokens(wrapper)
 
 
 @pytest.mark.asyncio

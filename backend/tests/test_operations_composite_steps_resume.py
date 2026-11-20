@@ -24,6 +24,8 @@ Covered:
 * the step record itself: a result with a secret-named value (also a
   number) is not kept, the result of a credential step is not kept under any
   field name, and a step is matched only on its own target.
+
+Credential steps before a wait: ``test_operations_composite_credential_steps_resume.py``.
 """
 
 from __future__ import annotations
@@ -57,10 +59,12 @@ from meho_backplane.operations.approval_rerun import (
 )
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
+    STEP_DONE_NO_RESULT,
     STEP_STARTED,
     StepJournal,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person, give_service_a_known_person
 
 from . import _composite_steps_helpers as s
 from . import _composite_wait_audit_helpers as h
@@ -136,8 +140,9 @@ async def _requests() -> list[ApprovalRequest]:
         return list((await s_.execute(stmt)).scalars().all())
 
 
-def _requester(kind: str) -> Operator:
+async def _requester(kind: str) -> Operator:
     if kind == "scheduled":
+        await give_service_a_known_person(h.TENANT_ID, "svc-scheduler")
         return h.operator(sub="svc-scheduler", principal_kind=PrincipalKind.SERVICE)
     return h.operator()
 
@@ -156,7 +161,7 @@ async def test_child_change_before_a_waiting_step_is_sent_once(
         stub_embedding_service, session, s.CHILD_THEN_WAIT_OP_ID, "child_change_then_wait_composite"
     )
 
-    first = await h.run(s.CHILD_THEN_WAIT_OP_ID, _requester(who))
+    first = await h.run(s.CHILD_THEN_WAIT_OP_ID, await _requester(who))
     assert s.sent == [s.CHANGE_CHILD_OP_ID]
 
     second = await _approve_and_resume(first)
@@ -185,7 +190,7 @@ async def test_change_before_a_waiting_credential_step_is_sent_once(
         "change_then_credential_composite",
     )
 
-    first = await h.run(s.STEP_THEN_CREDENTIAL_OP_ID, _requester(who))
+    first = await h.run(s.STEP_THEN_CREDENTIAL_OP_ID, await _requester(who))
     assert s.sent == [s.CHANGE_STEP]
 
     second = await _approve_and_resume(first)
@@ -206,6 +211,7 @@ async def test_change_before_a_waiting_step_is_sent_once_on_the_agents_path(
         "change_then_credential_composite",
     )
     agent = h.operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(h.TENANT_ID, "agent-requester")
     first = await h.run(s.STEP_THEN_CREDENTIAL_OP_ID, agent)
     assert first.status == "awaiting_approval", first.error
     assert s.sent == [s.CHANGE_STEP]
@@ -451,15 +457,21 @@ def test_result_with_a_secret_value_is_not_kept() -> None:
 
 
 @pytest.mark.parametrize(
-    "op_id", ["vault.kv.read", "vault.kv.put", "vault.token.create"], ids=["read", "write", "make"]
+    ("op_id", "status"),
+    [
+        ("vault.kv.read", STEP_STARTED),
+        ("vault.kv.put", STEP_DONE_NO_RESULT),
+        ("vault.token.create", STEP_DONE_NO_RESULT),
+    ],
+    ids=["read", "write", "make"],
 )
-def test_result_of_a_credential_step_is_not_kept(op_id: str) -> None:
+def test_result_of_a_credential_step_is_not_kept(op_id: str, status: str) -> None:
     """A credential step's result is not kept, also when the value is under a neutral name."""
     journal = StepJournal(composite_op_id="vault.composite.x")
     entry = journal.start("vault-1.x", op_id, None, {"path": "app"})
     journal.finish(entry, {"data": {"value": "made-up-value"}})
 
-    assert entry["status"] == STEP_STARTED
+    assert entry["status"] == status
     assert "result" not in entry
     assert "made-up-value" not in str(journal.stored())
 

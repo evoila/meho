@@ -80,7 +80,7 @@ type RawOperations struct {
 // printRawNote prints the note of raw_operations, when there is one.
 func printRawNote(w io.Writer, raw *RawOperations) {
 	if raw != nil && raw.Note != nil && *raw.Note != "" {
-		fmt.Fprintf(w, "note: %s\n", *raw.Note)
+		fmt.Fprintf(w, "note: %s\n", output.SafeText(*raw.Note))
 	}
 }
 
@@ -206,23 +206,23 @@ func getGroups(ctx context.Context, client operationsAPI, connectorID string, qu
 func printGroupsTable(w io.Writer, r *GroupsResponse) {
 	defer printRawNote(w, r.RawOperations)
 	if r.Note != "" {
-		defer fmt.Fprintf(w, "note: %s\n", r.Note)
+		defer fmt.Fprintf(w, "note: %s\n", output.SafeText(r.Note))
 	}
 	if r.NextCursor != nil && *r.NextCursor != "" {
-		defer fmt.Fprintf(w, "more groups: run again with --cursor %s\n", *r.NextCursor)
+		defer fmt.Fprintf(w, "more groups: run again with --cursor %s\n", output.SafeText(*r.NextCursor))
 	}
 	if len(r.Groups) == 0 {
-		fmt.Fprintf(w, "%s — 0 enabled groups\n", r.ConnectorID)
+		fmt.Fprintf(w, "%s — 0 enabled groups\n", output.SafeText(r.ConnectorID))
 		return
 	}
-	fmt.Fprintf(w, "%s — %d enabled group(s)\n", r.ConnectorID, len(r.Groups))
+	fmt.Fprintf(w, "%s — %d enabled group(s)\n", output.SafeText(r.ConnectorID), len(r.Groups))
 	fmt.Fprintf(w, "%-24s %4s  %-30s %s\n", "group_key", "ops", "name", "when_to_use")
 	for _, g := range r.Groups {
 		fmt.Fprintf(w, "%-24s %4d  %-30s %s\n",
-			truncate(g.GroupKey, 24),
+			truncate(output.SafeText(g.GroupKey), 24),
 			g.OperationCount,
-			truncate(g.Name, 30),
-			truncate(g.WhenToUse, 80),
+			truncate(output.SafeText(g.Name), 30),
+			truncate(output.SafeText(g.WhenToUse), 80),
 		)
 		printGroupOperations(w, g)
 	}
@@ -244,10 +244,11 @@ func printGroupOperations(w io.Writer, g GroupSummary) {
 		if op.Summary != nil {
 			summary = *op.Summary
 		}
-		fmt.Fprintf(w, "    %s (%s%s) %s\n", op.OpID, op.SafetyLevel, approval, summary)
+		fmt.Fprintf(w, "    %s (%s%s) %s\n",
+			output.SafeText(op.OpID), output.SafeText(op.SafetyLevel), approval, output.SafeText(summary))
 	}
 	if g.OperationsMore > 0 {
-		fmt.Fprintf(w, "    … %d more: use meho operation search with --group %s\n", g.OperationsMore, g.GroupKey)
+		fmt.Fprintf(w, "    … %d more: use meho operation search with --group %s\n", g.OperationsMore, output.SafeText(g.GroupKey))
 	}
 }
 

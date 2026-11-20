@@ -36,8 +36,8 @@ approval, so the park-time preview shows it. The fields are:
   SHA-256 of the script (``expected_sha256``).
 
 The arguments and the ``env`` values are not part of this module: the preview
-builder in :mod:`~meho_backplane.connectors.linux.ops_write` shows only their
-size and names.
+builder in :mod:`~meho_backplane.connectors.linux.ops_write` shows the size of
+the arguments and each ``env`` name with its value.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ __all__ = [
     "SCRIPT_SHOWN_MAX_BYTES",
     "ScriptPageOutOfRangeError",
     "ShownScript",
+    "has_secret_shape",
     "script_matches_expected",
     "script_page_fields",
     "script_preview_fields",
@@ -107,6 +108,16 @@ def _hide_secret_values(script: str) -> tuple[str, bool]:
     if not isinstance(shown, str):  # pragma: no cover -- str in, str out
         raise TypeError("redaction returned a non-string for a string")
     return shown, shown != script or bool(result.manifest)
+
+
+def has_secret_shape(text: str) -> bool:
+    """Whether *text* holds a value the script preview would hide as a secret.
+
+    The same rules as for the script text: a secret on a command line, a
+    password in a URL, a JWT, a bearer token, a private key block, a token
+    with a known vendor prefix.
+    """
+    return _hide_secret_values(text)[1]
 
 
 def script_too_large_message(size: int) -> str:

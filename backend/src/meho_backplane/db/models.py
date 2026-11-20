@@ -2039,6 +2039,12 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not a column. ``True`` on the row of one call whose params make it a
+    #: call that writes or makes a credential
+    #: (:func:`~meho_backplane.op_classes.declare_credential_check`). Then the
+    #: call waits for a person, and no standing grant, no agent grant and no
+    #: run approval covers it.
+    credential_call = False
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
@@ -2052,6 +2058,11 @@ class EndpointDescriptor(Base):
     policy_install_category = cast("str | None", None)
     policy_labels = cast(Mapping[str, str], MappingProxyType({}))
     policy_rule_ref = cast("str | None", None)
+    #: Not a column. On a row that ``apply_effective_policy`` returned, the
+    #: schema a call is checked against: a parameter whose switch is off
+    #: accepts no value there (``operations/switch_params.py``).
+    #: ``parameter_schema`` is then the shown schema, without it.
+    parameter_check_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -3863,6 +3874,9 @@ class WebSession(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Fernet ciphertext of the console approval sign-in's access token
+    # (#6282, migration 0176). NULL = no approval sign-in on this session.
+    approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -4267,6 +4281,10 @@ class AgentDefinition(Base):
         default=True,
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last changed the definition. NULL until the first
+    # change after migration ``0178`` on a row the migration could not fill.
+    # An edit by a machine login keeps the person.
+    updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -5240,6 +5258,30 @@ class RunnerPrincipal(Base):
             "last_seen_at",
             postgresql_using="btree",
         ),
+    )
+
+
+class MachineLogin(Base):
+    """A login id that MEHO has seen as an agent, service or runner login.
+
+    MEHO adds a row when such a login signs in
+    (:func:`~meho_backplane.auth.machine_logins.note_machine_login`).
+    The people-behind lookup reads it: a machine login never counts as a
+    person behind another login, and a change by a machine login does not
+    replace the person who last changed an agent definition or handed over
+    a runbook run. ``tenant_id`` has no foreign key: an MCP call notes the
+    login before any other write of the tenant.
+    """
+
+    __tablename__ = "machine_login"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -6445,6 +6487,10 @@ class RunApproval(Base):
     # JWT ``sub`` of the service principal that asked. Soft reference, no FK
     # -- same discipline as ServicePrincipalGrant.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # OAuth client id of the login that asked. MEHO finds the add-on pairing
+    # by it when a person approves the list (operations/people_behind.py).
+    # NULL on a list from before migration 0178.
+    principal_client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_ref: Mapped[str] = mapped_column(Text, nullable=False)
     entries: Mapped[list[dict[str, object]]] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=False
@@ -7281,7 +7327,7 @@ class ApprovalRequest(Base):
       NULL on every other request. Added by migration ``0153``.
 
     * ``approver_roles`` -- JSON nullable. The login group kinds that may
-      approve the request (for example ``["SA-Operators", "Admins"]``),
+      approve the request (for example ``["Operators", "Admins"]``),
       worked out from the policy file's ``routing`` section when the
       request started to wait (:mod:`meho_backplane.policy.routing`). Group
       kinds only, never people. At the click the person must be in one of
@@ -7582,6 +7628,14 @@ class ApprovalRequest(Base):
     # entry that set them. See the class docstring. Added by migration ``0167``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The people behind a request of an agent, service or runner login:
+    # ``[{"sub", "name", "why"}]``, set at park time by
+    # :mod:`meho_backplane.operations.people_behind`. NULL for a person's
+    # request. An empty list: MEHO knows nobody behind the login. Added by
+    # migration ``0178``.
+    people_behind: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, nullable=True, default=None
+    )
     # The categories the tenant's and the install's routing used. Added by
     # migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -8919,6 +8973,10 @@ class RunbookRun(Base):
         default=None,
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last handed the run to a new assignee. NULL when the
+    # run was never handed over. A handover by a machine login keeps the
+    # person. Added by migration ``0178``.
+    reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

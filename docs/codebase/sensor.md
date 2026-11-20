@@ -137,6 +137,13 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see
    `docs/codebase/spec-ingestion.md`, `IngestionResult`).
+   A `safe` read whose call waits for a person on every call
+   (`call_always_waits` in `meho_backplane.op_classes`, for example a
+   `proxmox.api.get` of a file inside a guest) is refused too: 422
+   `sensor_requires_safe_operation` at create and edit
+   (`SensorRequiresNoPersonError`) and `unknown`
+   (`reason: op_waits_for_person`) at dispatch, so a tick never adds an
+   approval request.
 5. **Connector fit check (#5858)**: when the body names a target, the
    service looks it up in the Sensor's tenant and checks the connector
    against the target's product and version (see **Connector fit** below).
@@ -490,9 +497,9 @@ and who. Code: `checks/acknowledgement.py`, table
   `SensorAcknowledgementCreate`: `expires_at` (required, with a time
   zone), `reason` (`accepted_risk` / `fix_planned` / `false_alarm`),
   `note` (1..500 characters). Gate `require_approvals_access` (role
-  `operator` or higher, or the `approver` claim, so a `read_only`
-  approver can acknowledge) and `require_human_principal`: agent,
-  service and runner tokens get 403, also with the `approver` claim.
+  `operator` or higher, or the `approver` flag, which MEHO keeps in the
+  code and no role gives today) and `require_human_principal`: agent,
+  service and runner tokens get 403, also with the `approver` flag.
   No MCP tool. Refusals: no or naive `expires_at` (422 at the body), an
   end time in the past or more than 90 days away (422
   `sensor_ack_invalid_end_time`), a green or never-checked Sensor (422

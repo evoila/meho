@@ -3,8 +3,8 @@
 
 """Who may approve, in the web interface (#3328).
 
-The web interface calls the same service checks as REST. A MEHO-SA-Operator
-or a MEHO-Admin approves their own change with a click; another person's ``destructive``
+The web interface calls the same service checks as REST. A MEHO-Admin
+approves their own change with a click; another person's ``destructive``
 change, approved by someone outside the groups that may approve it, shows
 the refusal text and stays pending.
 """
@@ -49,7 +49,8 @@ def _decision_payload(request_id: uuid.UUID) -> dict[str, Any]:
     return asyncio.run(_do())
 
 
-def test_an_sa_operator_approves_their_own_destructive_change_with_a_click() -> None:
+def test_an_operator_of_the_old_group_cannot_approve_their_own_destructive_change() -> None:
+    """MEHO-SA-Operators is read as Operators: the click is refused and nothing changes."""
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _seed_request(
         tenant_id=_TENANT_A,
@@ -58,22 +59,21 @@ def test_an_sa_operator_approves_their_own_destructive_change_with_a_click() -> 
         proposed_effect={"op_id": "vsphere.vm.destroy", "safety_level": "destructive"},
         preview_hash="preview-hash",
     )
-    sa_operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB).model_copy(
-        update={"self_approver": True}
-    )
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    resume_mock = AsyncMock(return_value=_dispatch_result())
 
-    response = _post_decision(sa_operator, rid)
+    response = _post_decision(operator, rid, resume_mock=resume_mock)
 
     assert response.status_code == 200, response.text  # type: ignore[attr-defined]
-    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
-    payload = _decision_payload(rid)
-    assert payload["self_approved"] is True
-    assert payload["approval_rule"] == "sa_operator_self_approval"
-    assert payload["approval_auth"]["channel"] == "web"
+    body = response.text  # type: ignore[attr-defined]
+    assert "You cannot approve your own change." in body
+    assert "MEHO-SA-Operators" not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
 
 
 def test_an_admin_approves_their_own_destructive_change_with_a_click() -> None:
-    """MEHO-Admins may approve their own changes, like MEHO-SA-Operators (#5969)."""
+    """MEHO-Admins may approve their own changes at every risk level."""
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _seed_request(
         tenant_id=_TENANT_A,
@@ -106,6 +106,6 @@ def test_an_operator_sees_why_they_cannot_approve_another_persons_destructive_ch
     body = response.text  # type: ignore[attr-defined]
     assert "403" in body
     assert "You cannot approve this destructive change of another person." in body
-    assert "MEHO-SA-Operator or a MEHO-Admin" in body
+    assert "Only a MEHO-Admin may approve" in body
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()

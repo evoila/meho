@@ -12,8 +12,9 @@ login when the row changed. These tests pin:
 * two independent caches: the process that serves the PATCH drops at once,
   and a second process that only reads the committed row logs in with the
   new credential on its next call;
-* the check itself: a first sighting, an unchanged row and a target without
-  ``updated_at`` drop nothing; a new ``updated_at`` drops once;
+* the check itself: a first sighting drops once; an unchanged row and a
+  target without ``updated_at`` drop nothing; a new ``updated_at`` drops
+  once;
 * the dispatcher runs the check before the handler;
 * the gateway sends ``updated_at`` to the runner, and the runner executor
   runs the check before the handler.
@@ -161,7 +162,11 @@ async def test_only_a_new_updated_at_drops_the_kept_login() -> None:
     _CONNECTOR_INSTANCE_CACHE[type("A", (), {})] = recorder  # type: ignore[index]
     target = _Target()
 
-    assert await forget_target_if_changed(target) is False  # first sighting
+    # The first sighting drops what this process keeps: a login kept before
+    # it may use target values the process cannot compare.
+    assert await forget_target_if_changed(target) is True
+    assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
+    recorder.calls.clear()
     assert await forget_target_if_changed(target) is False  # unchanged
     assert recorder.calls == []
 
@@ -205,10 +210,10 @@ async def test_a_call_during_a_running_drop_waits_until_the_drop_is_done() -> No
         async def invalidate_credentials(self, target: Any) -> None:
             events.append("fast_dropped")
 
+    target = _Target()
+    assert await forget_target_if_changed(target) is True  # first sighting, nothing cached yet
     _CONNECTOR_INSTANCE_CACHE[type("Slow", (), {})] = _SlowConnector()  # type: ignore[index, assignment]
     _CONNECTOR_INSTANCE_CACHE[type("Fast", (), {})] = _FastConnector()  # type: ignore[index, assignment]
-    target = _Target()
-    assert await forget_target_if_changed(target) is False  # first sighting
     changed = _Target(id=target.id, updated_at=_T1)
 
     async def _second_call() -> bool:
@@ -364,7 +369,8 @@ async def test_dispatcher_drops_the_kept_login_before_the_handler_runs() -> None
         params={},
     )
     assert first.status == "ok"
-    assert _ORDER == ["handler"]
+    # The first sighting drops too, before the handler runs.
+    assert _ORDER == ["drop", "handler"]
 
     changed = _Target(id=target.id, updated_at=_T1)
     second = await dispatch(
@@ -375,7 +381,7 @@ async def test_dispatcher_drops_the_kept_login_before_the_handler_runs() -> None
         params={},
     )
     assert second.status == "ok"
-    assert _ORDER == ["handler", "drop", "handler"]
+    assert _ORDER == ["drop", "handler", "drop", "handler"]
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +446,8 @@ async def test_the_runner_drops_the_kept_login_when_the_descriptor_changed(
     try:
         first = await execute_work_item(_runner_item(_descriptor(_T0), port))
         assert first.status == "ok"
-        assert recorder.calls == []
+        assert recorder.calls == ["invalidate_session", "invalidate_credentials"]  # first sighting
+        recorder.calls.clear()
         second = await execute_work_item(_runner_item(_descriptor(_T1), port))
         assert second.status == "ok"
         assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
@@ -485,6 +492,7 @@ async def test_the_runner_keeps_the_login_after_a_probe_and_drops_it_after_an_up
     port = server.sockets[0].getsockname()[1]
     try:
         assert (await execute_work_item(_from_gateway(port))).status == "ok"
+        recorder.calls.clear()  # the first sighting drops once
 
         row.updated_at = _T1  # a probe
         assert _from_gateway(port).target_descriptor.connection_changed_at == _T0

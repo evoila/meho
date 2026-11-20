@@ -1068,12 +1068,10 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- | --- |
 | MEHO-Readers | `read_only` | |
 | MEHO-Operators | `operator` | |
-| MEHO-SA-Operators | `operator` | |
 | MEHO-Admins | `tenant_admin` | |
-| MEHO-Approvers | `read_only` | `approver` = `true` |
 | MEHO-Platform-Admins | (none, and no `tenant_id`) | `platform_admin` = `true` |
 
-**A person is in exactly one of the five role groups.** `MEHO-Platform-Admins`
+**A person is in exactly one of the three role groups.** `MEHO-Platform-Admins`
 is not a role group; it only adds `platform_admin`. The mappers take the first
 group that has the attribute; with two groups the result is not
 predictable. The realm keeps Keycloak's default user profile, which does
@@ -1887,7 +1885,8 @@ incidents #634 / #697.
 
 A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
 in `ci.yml` has `continue-on-error: true`. The test images come through the
-Harbor image proxy (the `MEHO_TEST_*_IMAGE` job variables), so the login only
+Harbor image proxy (the step "Read the CI repository secrets" sets the
+`MEHO_TEST_*_IMAGE` variables), so the login only
 adds pull headroom on Docker Hub. A short network problem on the way to Docker
 Hub then costs nothing, and cannot throw a pull request out of the merge queue.
 `backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
@@ -2779,6 +2778,35 @@ number, so they stopped working when the value moved. When a value
 cannot carry a comment on its own line (for example a shell line that
 ends in `\`), move it to a line that can.
 
+### Private name check (`private-names-check.yml`)
+
+The job `Private name check` keeps internal names out of public text. It
+reads only the lines a pull request adds, in every file except
+`CHANGELOG.md`, and compares them with a list of patterns.
+Files that Git treats as binary are read as text too (`git diff --text`),
+so a NUL byte or a `-diff` attribute cannot hide an added line.
+
+- The list is the repository secret `PRIVATE_NAME_LIST`: one pattern per
+  line, case does not matter. It is not stored in this repository, and
+  the job never prints it.
+- On a hit the job prints the file and the line number and the sentence
+  "this line holds a word of the private name list". It never prints the
+  word, the pattern or the line.
+- It runs on `pull_request` and on `merge_group`, with no path filter.
+  A pull request from a fork gets no secrets, so the job prints a note
+  and passes. The merge queue checks the same lines before the merge.
+- With no secret set, a pull request gets a warning and passes, and so
+  does the CI of a fork. In the merge queue of this repository a missing
+  secret fails the job, so the check cannot go quiet unnoticed.
+- The logic is in `scripts/ci/check_private_names.py`. Its tests use made-up
+  words only (`backend/tests/test_ci_check_private_names.py`).
+- Why not hashes of the words in the repository: most names are short, so
+  anyone can guess them one by one from a list of hashes.
+- The source of the list is kept outside this repository. A maintainer
+  sets or changes the secret. To make the check required, register the
+  context `Private name check` in branch protection (a manual step, as for
+  the other required contexts).
+
 ### Coverage handoff to SonarCloud
 
 Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
@@ -2988,6 +3016,7 @@ their isolation posture:
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job pulls its scan image from the internal image proxy, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
+| `private-names-check.yml` | yes (runs `scripts/ci/check_private_names.py` from the checkout of the pull request over its added lines) | **hosted runner** for every event, also the merge queue; a fork pull request gets no secrets, so the job prints a note and skips the checkout |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
@@ -3002,9 +3031,9 @@ their isolation posture:
   A fork PR (`head.repo.full_name != github.repository`) skips the job;
   a skipped required job reports **Success**, so branch protection is
   satisfied while nothing executes on the internal pool. Used where the
-  job genuinely needs an internal resource — `security-scan.yml` runs in
-  a container pulled through the internal Harbor proxy, so relocating it to a disposable
-  runner is impossible; the real scan runs on the trusted `merge_group`
+  job genuinely needs an internal resource — the Semgrep job of
+  `security-scan.yml` pulls its scan image through the internal image proxy
+  with `docker run`, so relocating it to a disposable runner is impossible; the real scan runs on the trusted `merge_group`
   (queue admission) and `push` refs instead.
 
 - **Route to a disposable runner.** Where the job needs no internal
@@ -3058,15 +3087,15 @@ for a pool that is full. Three rules:
    two pull requests can raise the same plugin version, or break the
    docs build together. A queue run starts about
    12 jobs on `meho-runners-ci`, 6 on `meho-runners-ci-heavy-queue`
-   (the unit shards) and 11 hosted jobs (rule 3).
+   (the unit shards) and 12 hosted jobs (rule 3).
 3. **A short job that must stay and does not need a pool may use a
    hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
    `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
    Today these are: `docs-site.yml` `deploy` and `build`,
    `plugin-version-check.yml` `plugin-version`, `ci.yml` `changes`,
    `python-unit-lane`, `python-integration` and `helm-lint-template`,
-   `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
-   `check`. Each runs for seconds to about a minute, so it does not fill the
+   `chart.yml` `changes` and `helm-test-gate`, `migration-heads.yml`
+   `check`, and `private-names-check.yml` `check`. Each runs for seconds to about a minute, so it does not fill the
    hosted limit. The two kind installs of `chart.yml` (`helm-test` and
    `helm-test-byo`) are hosted too, for a different reason: they need
    more CPU than the heavy queue pool has today (#6347).

@@ -94,9 +94,11 @@ __all__ = [
     "SignInLevelInForce",
     "read_approval_sign_in",
     "read_failed",
+    "read_web_approval_sign_in",
     "sign_in_level_for_status",
     "sign_in_level_in_force",
     "sign_in_level_warning",
+    "web_sign_in_level_warning",
 ]
 
 ApprovalSignInState = Literal["ok", "flow_missing", "flow_differs", "not_bound", "not_checked"]
@@ -129,6 +131,9 @@ _KNOWN_NOT_CHECKED = frozenset(
 
 #: The states in which the read worked and the realm does not give the level.
 _NO_LEVEL_STATES = frozenset({"flow_missing", "flow_differs", "not_bound"})
+
+#: The ``detail`` of the console's state when its approval client setting is empty.
+_NO_WEB_CLIENT = "UI_KEYCLOAK_APPROVE_CLIENT_ID is empty"
 
 
 class ApprovalSignInStatus(BaseModel):
@@ -256,23 +261,30 @@ async def _state(kc: KeycloakAdminClient, client_id: str) -> tuple[ApprovalSignI
     return _client_state(client, client_id, flow_id)
 
 
-async def read_approval_sign_in(settings: Settings | None = None) -> ApprovalSignInStatus:
-    """The approval sign-in flow and its binding, read at most every :data:`_KEEP_S` s."""
+async def read_approval_sign_in(
+    settings: Settings | None = None, *, client_id: str | None = None
+) -> ApprovalSignInStatus:
+    """The approval sign-in flow and its binding, read at most every :data:`_KEEP_S` s.
+
+    *client_id* is the client whose binding is read; the default is the
+    command line's approval client. The console passes its own approval
+    client (#6282).
+    """
     settings = settings or get_settings()
-    key = (settings.keycloak_admin_url, settings.keycloak_cli_approve_client_id)
+    client_id = client_id or settings.keycloak_cli_approve_client_id
+    key = (settings.keycloak_admin_url, client_id)
     kept = _kept.get(key)
     if kept is not None:
         keep = _KEEP_FAILED_S if read_failed(kept[1]) else _KEEP_S
         if time.monotonic() - kept[0] < keep:
             return kept[1]
-    status = await _read(settings)
+    status = await _read(settings, client_id)
     _kept[key] = (time.monotonic(), status)
     return status
 
 
-async def _read(settings: Settings) -> ApprovalSignInStatus:
-    """Read the approval sign-in flow and its binding; never raises."""
-    client_id = settings.keycloak_cli_approve_client_id
+async def _read(settings: Settings, client_id: str) -> ApprovalSignInStatus:
+    """Read the approval sign-in flow and the binding of *client_id*; never raises."""
 
     def not_checked(reason: str) -> ApprovalSignInStatus:
         return ApprovalSignInStatus(state="not_checked", client=client_id, detail=reason)
@@ -340,18 +352,38 @@ class SignInLevel(NamedTuple):
     check_failed: bool = False
 
 
-async def sign_in_level_in_force(settings: Settings) -> SignInLevel:
+async def read_web_approval_sign_in(settings: Settings | None = None) -> ApprovalSignInStatus:
+    """The state of the console's approval client, read like the command line's (#6282).
+
+    An empty ``UI_KEYCLOAK_APPROVE_CLIENT_ID`` counts as a missing client
+    (``not_bound``), without a read: the console then has no approval
+    sign-in to offer.
+    """
+    settings = settings or get_settings()
+    client_id = settings.ui_keycloak_approve_client_id
+    if not client_id:
+        return ApprovalSignInStatus(state="not_bound", client="", detail=_NO_WEB_CLIENT)
+    return await read_approval_sign_in(settings, client_id=client_id)
+
+
+async def sign_in_level_in_force(settings: Settings, *, web: bool = False) -> SignInLevel:
     """What MEHO does now with a token of the approval client that lacks the level (#6281).
 
-    ``off``, ``observe`` and ``required`` are the setting itself. ``auto``
-    reads the approval sign-in (:func:`read_approval_sign_in`, kept for a
-    short time): ``observe`` only when MEHO knows for sure that the realm
-    does not give the level, else ``required``; also when the read failed.
+    ``off``, ``observe`` and ``required`` are the setting itself, with no
+    read of the realm. ``auto`` reads the approval sign-in
+    (:func:`read_approval_sign_in`, kept for a short time): ``observe``
+    only when MEHO knows for sure that the realm does not give the level,
+    else ``required``; also when the read failed. *web* reads the
+    console's approval client instead (:func:`read_web_approval_sign_in`,
+    #6282).
     """
     mode = settings.approval_sign_in_level
     if mode != "auto":
         return SignInLevel(sign_in_level_for_status(mode, None))
-    status = await read_approval_sign_in(settings)
+    if web:
+        status = await read_web_approval_sign_in(settings)
+    else:
+        status = await read_approval_sign_in(settings)
     return SignInLevel(sign_in_level_for_status(mode, status), check_failed=read_failed(status))
 
 
@@ -388,4 +420,32 @@ def sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str
     return (
         f"MEHO does not require the approval level: APPROVAL_SIGN_IN_LEVEL is {mode}. "
         "Set it to auto or required."
+    )
+
+
+def web_sign_in_level_warning(mode: str, status: ApprovalSignInStatus | None) -> str | None:
+    """The health warning for the console's approval client (#6282), else ``None``.
+
+    Only ``auto`` can differ between the two approval clients: it reads
+    each client's binding. For the other values,
+    :func:`sign_in_level_warning` already says it for both.
+    """
+    if mode != "auto" or status is None:
+        return None
+    if read_failed(status):
+        return (
+            "MEHO could not check the console approval client "
+            f"(approvals.web_sign_in is not_checked: {status.detail}). Until a check works, "
+            "MEHO refuses a console approval sign-in without the approval level."
+        )
+    if sign_in_level_for_status(mode, status) == "required":
+        return None
+    fix = (
+        "Set UI_KEYCLOAK_APPROVE_CLIENT_ID."
+        if status.detail == _NO_WEB_CLIENT
+        else _sign_in_fix(status)
+    )
+    return (
+        "The console does not require the approval level: APPROVAL_SIGN_IN_LEVEL is auto and "
+        f"approvals.web_sign_in is {status.state}, not ok. {fix}"
     )

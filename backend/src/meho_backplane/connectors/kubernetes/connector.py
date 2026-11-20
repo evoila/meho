@@ -1187,7 +1187,7 @@ class KubernetesConnector(Connector):
             list_core_objects,
             list_items,
         )
-        from meho_backplane.connectors.kubernetes.ops_customresource import custom_resource_row
+        from meho_backplane.connectors.kubernetes.ops_customresource import custom_resource_rows
 
         group: str = params["group"]
         version: str = params["version"]
@@ -1209,7 +1209,9 @@ class KubernetesConnector(Connector):
             )
         items = list_items(resp, group=group, plural=plural)
         fields: list[str] | None = params.get("fields")
-        rows = [custom_resource_row(obj, fields) for obj in items]
+        # Building a row reads every text value of the object, so it runs in a
+        # worker thread and the event loop stays free for other calls.
+        rows = await asyncio.to_thread(custom_resource_rows, items, fields)
         return {"rows": rows, "total": len(rows)}
 
     async def k8s_cr_info(
@@ -1256,7 +1258,7 @@ class KubernetesConnector(Connector):
             obj = await custom.get_cluster_custom_object(
                 group=group, version=version, plural=plural, name=name
             )
-        return custom_resource_row(obj, params.get("fields"))
+        return await asyncio.to_thread(custom_resource_row, obj, params.get("fields"))
 
     async def k8s_ls(
         self,

@@ -5,7 +5,8 @@
 
 Shows the same list as ``GET /api/v1/first-start``
 (:mod:`meho_backplane.first_start`). Read-only. It needs the admin role of
-the tenant, or a platform admin; others get 403. It names the systems of
+the tenant, or a platform admin; others get 403. The page asks only for a
+console session; the same admin check as the API decides who sees the list. It names the systems of
 the signed-in tenant that did not answer (of all tenants for a platform
 admin), and it passes the signed-in person to the checks, so a system whose
 login is in Vault is read with that person's token. It shares the runs and
@@ -22,13 +23,13 @@ from meho_backplane.first_start import (
     first_start_list,
     may_see_first_start,
 )
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.roles import resolve_ui_operator
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_first_start_router"]
 
-_require_ui_operator_dep = Depends(require_ui_operator)
+_require_ui_session_dep = Depends(require_ui_session)
 
 
 def build_first_start_router() -> APIRouter:
@@ -37,7 +38,7 @@ def build_first_start_router() -> APIRouter:
 
     async def _page(
         request: Request,
-        session_ctx: UISessionContext = _require_ui_operator_dep,
+        session_ctx: UISessionContext = _require_ui_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/first-start``."""
         operator = await resolve_ui_operator(session_ctx)

@@ -61,7 +61,10 @@ User docs: `docs-site/install/first-start-checks.md`.
    `connector.fingerprint(target, operator=operator)` for every live target.
    It stores nothing (unlike `probe_and_store_fingerprint`). An
    `asyncio.Semaphore` lets at most `_MAX_PROBES_AT_ONCE` (10) targets be
-   contacted at the same time. Both surfaces
+   contacted at the same time. The probes stop after
+   `_REACHABILITY_BUDGET_S` (15 seconds); a target not checked by then is
+   named as not checked, and the line is red. So the whole list answers
+   within the 45 seconds that `meho status --first-start` waits. Both surfaces
    pass the signed-in person. `_login_needs_person` decides which targets
    with a `secret_ref` are left out. A login in Google Secret Manager
    (`gsm:`, or no scheme when `CREDENTIAL_BACKEND=gsm`) is read with
@@ -114,6 +117,8 @@ session maker, the connector resolver.
 - The install scripts (`deploy/linux-server/lib/core.sh`) do not read the
   list: they have no login. The result names where to read it after the
   first login ([linux-server-install.md](linux-server-install.md)).
-- The console page `/ui/first-start` passes `require_ui_operator` and then
-  `may_see_first_start` on the lifted operator. When the role lift fails
+- The console page `/ui/first-start` needs only a console session
+  (`require_ui_session`); then `may_see_first_start` on the lifted operator
+  decides, the same check as the API. So a platform admin with the reader
+  role in the current tenant sees the list. When the role lift fails
   soft (`resolve_ui_operator` returns `None`), the page answers 403.

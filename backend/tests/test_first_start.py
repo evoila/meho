@@ -43,7 +43,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import require_ui_operator
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.routes import first_start as first_start_page
 from meho_backplane.ui.routes.first_start import build_first_start_router
 
@@ -596,6 +596,55 @@ async def test_checks_contact_a_fixed_number_of_systems_at_once() -> None:
     assert most == first_start._MAX_PROBES_AT_ONCE
 
 
+async def test_slow_systems_end_the_check_in_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Many systems that never answer do not make the list run past its time."""
+    monkeypatch.setattr(first_start, "_REACHABILITY_BUDGET_S", 0.2)
+    cancelled = 0
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [_target(f"esx-{n:02d}") for n in range(first_start._MAX_PROBES_AT_ONCE * 3 + 1)]
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        nonlocal cancelled
+        if target.name == "esx-00":
+            return "down"
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+        return "up"
+
+    started = time.monotonic()
+    line = await first_start.check_reachability(
+        tenant_id=_TENANT, list_targets=targets, probe_one=probe
+    )
+    assert time.monotonic() - started < 2
+    assert line.status == "fail"
+    assert "These systems did not answer: esx-00." in line.message
+    assert "were not checked, because the list stops after 0.2 seconds: esx-01," in line.message
+    assert "and 20 more." in line.message
+    # Only the probes that had started are stopped; the others never start.
+    assert cancelled == first_start._MAX_PROBES_AT_ONCE
+
+
+async def test_slow_systems_alone_make_the_line_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(first_start, "_REACHABILITY_BUDGET_S", 0.05)
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        return [_target("esx-slow")]
+
+    async def probe(target: Any, operator: Any) -> first_start.ProbeOutcome:
+        await asyncio.sleep(60)
+        return "up"
+
+    line = await first_start.check_reachability(
+        tenant_id=_TENANT, list_targets=targets, probe_one=probe
+    )
+    assert line.status == "fail"
+    assert line.message.startswith("These systems were not checked")
+
+
 # --- real TLS handshakes ----------------------------------------------------
 
 
@@ -753,7 +802,7 @@ def test_console_page_shows_the_same_list(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(first_start, "_probe_one", probe)
     page_app = FastAPI()
     page_app.include_router(build_first_start_router())
-    page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(tenant_id=_TENANT)
+    page_app.dependency_overrides[require_ui_session] = lambda: SimpleNamespace(tenant_id=_TENANT)
     page = TestClient(page_app).get("/ui/first-start")
     assert page.status_code == 200
     # The console and the API pass the signed-in person to every probe.
@@ -788,10 +837,42 @@ def test_console_page_needs_an_admin(monkeypatch: pytest.MonkeyPatch, person: An
     monkeypatch.setattr(first_start, "_live_targets", targets)
     page_app = FastAPI()
     page_app.include_router(build_first_start_router())
-    page_app.dependency_overrides[require_ui_operator] = lambda: SimpleNamespace(tenant_id=_TENANT)
+    page_app.dependency_overrides[require_ui_session] = lambda: SimpleNamespace(tenant_id=_TENANT)
     page = TestClient(page_app).get("/ui/first-start")
     assert page.status_code == 403
     assert seen == []
+
+
+def test_console_page_admits_a_platform_admin_with_the_reader_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The console session check lets the shared admin check decide."""
+    _patch_green(monkeypatch)
+    person = _operator(role=TenantRole.READ_ONLY, platform_admin=True)
+    scopes: list[Any] = []
+
+    async def lift(session_ctx: Any) -> Any:
+        return person
+
+    async def targets(tenant_id: Any = None) -> list[Any]:
+        scopes.append(tenant_id)
+        return []
+
+    monkeypatch.setattr(first_start_page, "resolve_ui_operator", lift)
+    monkeypatch.setattr(first_start, "_live_targets", targets)
+    page_app = FastAPI()
+
+    @page_app.middleware("http")
+    async def signed_in(request: Any, call_next: Any) -> Any:
+        request.state.ui_session = UISessionContext(
+            session_id=uuid.uuid4(), operator_sub=person.sub, tenant_id=_TENANT
+        )
+        return await call_next(request)
+
+    page_app.include_router(build_first_start_router())
+    page = TestClient(page_app).get("/ui/first-start")
+    assert page.status_code == 200
+    assert scopes == [None]  # the list of all tenants
 
 
 # --- the destination of the DNS name ----------------------------------------

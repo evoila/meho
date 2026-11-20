@@ -19,9 +19,10 @@ import (
 )
 
 // firstStartTimeout bounds the GET /api/v1/first-start call. The
-// backplane runs its own checks (each with a short limit) before it
-// answers.
-const firstStartTimeout = 30 * time.Second
+// backplane runs its own checks before it answers: the check of the
+// systems stops after 15 seconds, and the other checks add at most
+// about 15 seconds, so the list answers within this time.
+const firstStartTimeout = 45 * time.Second
 
 // runFirstStart implements `meho status --first-start`. It reads the
 // list with the login stored by `meho login`: the backplane shows the

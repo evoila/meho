@@ -113,6 +113,10 @@ _TARGET_TIMEOUT_S: float = 10.0
 _MAX_NAMES_SHOWN: int = 10
 #: At most this many systems are contacted at the same time.
 _MAX_PROBES_AT_ONCE: int = 10
+#: The reachability check ends after this many seconds. The other checks
+#: add at most about 15 seconds, so the whole list answers within the
+#: 45 seconds that ``meho status --first-start`` waits.
+_REACHABILITY_BUDGET_S: float = 15.0
 #: A finished list is kept this many seconds for later calls of the same tenant.
 _RESULT_HOLD_S: float = 10.0
 
@@ -664,8 +668,10 @@ def _systems(what: str, names: list[str]) -> str:
     return f"These systems {what}: {shown}{more}."
 
 
-def _reachability_line(total: int, down: list[str], unchecked: list[str]) -> FirstStartLine:
-    """Build the reachability line from the systems that are down or unchecked."""
+def _reachability_line(
+    total: int, down: list[str], unchecked: list[str], late: list[str]
+) -> FirstStartLine:
+    """Build the reachability line from the systems that are down, unchecked or late."""
     unchecked_note = (
         _systems(
             "could not be checked, because their login is in Vault and MEHO reads it "
@@ -674,14 +680,26 @@ def _reachability_line(total: int, down: list[str], unchecked: list[str]) -> Fir
         )
         + " Sign in to that tenant to check them."
     )
+    late_note = (
+        _systems(
+            f"were not checked, because the list stops after {_REACHABILITY_BUDGET_S:g} seconds",
+            late,
+        )
+        + " Check them one by one with meho targets probe."
+    )
     if down:
         message = (
             _systems("did not answer", down)
             + " Check that each one is switched on, that MEHO can reach its address, "
             "and that its login in MEHO is right."
         )
+        if late:
+            message = f"{message} {late_note}"
         if unchecked:
             message = f"{message} {unchecked_note}"
+        return _line("reachability", "fail", message)
+    if late:
+        message = late_note if not unchecked else f"{late_note} {unchecked_note}"
         return _line("reachability", "fail", message)
     if unchecked:
         answered = total - len(unchecked)
@@ -739,19 +757,38 @@ async def check_reachability(
         return _line(
             "reachability", "ok", "No systems are added yet, so there is nothing to reach."
         )
-    probe = probe_one or _probe_one
+    outcomes = await _probe_all(targets, operator, probe_one or _probe_one)
+    slugs = await (tenant_slugs or _tenant_slugs)() if tenant_id is None else None
+    paired = list(zip(targets, outcomes, strict=True))
+
+    def names(wanted: ProbeOutcome | None) -> list[str]:
+        return sorted(_label(t, slugs) for t, outcome in paired if outcome == wanted)
+
+    return _reachability_line(len(targets), names("down"), names("needs_person"), names(None))
+
+
+async def _probe_all(
+    targets: list[Target],
+    operator: Operator | None,
+    probe: Callable[[Target, Operator | None], Awaitable[ProbeOutcome]],
+) -> list[ProbeOutcome | None]:
+    """Probe *targets*, at most ``_MAX_PROBES_AT_ONCE`` at the same time.
+
+    The probes end after ``_REACHABILITY_BUDGET_S`` seconds. A target whose
+    probe has not ended by then gets ``None``: it is named as not checked in time.
+    """
     limit = asyncio.Semaphore(_MAX_PROBES_AT_ONCE)
 
     async def probe_limited(target: Target) -> ProbeOutcome:
         async with limit:
             return await probe(target, operator)
 
-    outcomes = await asyncio.gather(*(probe_limited(t) for t in targets))
-    slugs = await (tenant_slugs or _tenant_slugs)() if tenant_id is None else None
-    paired = list(zip(targets, outcomes, strict=True))
-    down = sorted(_label(t, slugs) for t, outcome in paired if outcome == "down")
-    unchecked = sorted(_label(t, slugs) for t, outcome in paired if outcome == "needs_person")
-    return _reachability_line(len(targets), down, unchecked)
+    tasks = [asyncio.create_task(probe_limited(t)) for t in targets]
+    _done, pending = await asyncio.wait(tasks, timeout=_REACHABILITY_BUDGET_S)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    return [None if task in pending else task.result() for task in tasks]
 
 
 # --- The list ---------------------------------------------------------------

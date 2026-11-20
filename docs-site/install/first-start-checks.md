@@ -47,7 +47,8 @@ script that reads `ok` never sees green when no check ran.
 The checks change nothing. The list runs at most once at a time for each
 tenant: calls that arrive during a run get the result of that run, and a
 finished list is kept for 10 seconds. The reachability check contacts at
-most 10 systems at the same time.
+most 10 systems at the same time, and it stops after 15 seconds. A system
+still without an answer by then is named in the line, and the line is red.
 
 A line is `ok` (green), `warn` (a warning), `fail` (red) or `skipped`. A warning does not make the list red, and the install goes on. A line is skipped when the
 check cannot run or has no meaning: the certificate check waits until the DNS

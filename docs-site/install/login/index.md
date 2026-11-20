@@ -19,12 +19,12 @@ on each login client copies them into the token.
 | Group | Role in MEHO | What the person can do |
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
-| `MEHO-Operators` | `operator` | Run actions. Their `dangerous` and `destructive` changes wait for an admin (on an older realm, also a MEHO-SA-Operator). |
+| `MEHO-Operators` | `operator` | Run actions. Their `dangerous` and `destructive` changes wait for an admin. |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
 
 A realm made by an older MEHO version can also have `MEHO-SA-Operators`
-and `MEHO-Approvers`. They keep working. A new realm does not have
-them, so a recipe that maps people into them stops the setup.
+and `MEHO-Approvers`. MEHO reads them as `MEHO-Operators` and
+`MEHO-Readers`. A new realm does not have them, so a recipe that maps people into them stops the setup.
 
 `MEHO-Platform-Admins` is separate. It adds `platform_admin` to the
 token and gives no tenant or role. Only the first admin needs it.

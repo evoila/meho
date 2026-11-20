@@ -83,6 +83,7 @@ _BACKPLANE_AUDIENCE = "meho-backplane"
 _LOGIN_CLIENT = "meho-cli"
 
 # The three role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The second value says whether the token carries the `approver` claim.
 _ROLE_GROUPS = {
     "MEHO-Readers": (TenantRole.READ_ONLY, False),
     "MEHO-Operators": (TenantRole.OPERATOR, False),
@@ -335,7 +336,8 @@ async def test_member_of_one_group_gets_its_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    assert operator.approver is False
+    assert operator.self_approver is False
     assert operator.platform_admin is False
 
 
@@ -529,7 +531,7 @@ async def test_a_person_only_in_a_team_group_gets_the_claims_bindings_match(
             {"bindings": [{"match": match, "kind": "SA-Operators", "categories": ["network"]}]}
         )
         bound = bind(operator, claims, entries)
-        assert bound.bound_kind is RoleGroup.SA_OPERATORS, match
+        assert bound.bound_kind is RoleGroup.OPERATORS, match
         assert bound.bound_categories == frozenset({"network"})
     short = {"match": {"group": "/Network"}, "kind": "SA-Operators", "categories": ["*"]}
     assert bind(operator, claims, bindings_from_document({"bindings": [short]})).bound_kind is None

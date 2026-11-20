@@ -1132,12 +1132,16 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     headers = _master_headers(keycloak)
     flow_id, bound = _approval_flow_and_binding(keycloak)
     assert flow_id and bound == flow_id
-    (client,) = httpx.get(
-        f"{admin}/clients", headers=headers, params={"clientId": "meho-cli-approve"}
-    ).json()
-    # Keycloak refuses to delete a flow a client is bound to: unbind first.
-    client["authenticationFlowBindingOverrides"] = {"browser": ""}
-    httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
+    # Keycloak refuses to delete a flow a client is bound to: unbind both
+    # approval clients first (the console's one is bound too, #6282).
+    for client_id in ("meho-cli-approve", "meho-web-approve"):
+        (client,) = httpx.get(
+            f"{admin}/clients", headers=headers, params={"clientId": client_id}
+        ).json()
+        client["authenticationFlowBindingOverrides"] = {"browser": ""}
+        httpx.put(
+            f"{admin}/clients/{client['id']}", headers=headers, json=client
+        ).raise_for_status()
     httpx.delete(f"{admin}/authentication/flows/{flow_id}", headers=headers).raise_for_status()
     assert _approval_flow_and_binding(keycloak) == (None, None)
     capfd.readouterr()
@@ -1149,6 +1153,10 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     assert f"login flow {_APPROVAL_FLOW}: created" in output
     flow_id, bound = _approval_flow_and_binding(keycloak)
     assert flow_id and bound == flow_id
+    (console,) = httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": "meho-web-approve"}
+    ).json()
+    assert console["authenticationFlowBindingOverrides"] == {"browser": flow_id}
     steps = httpx.get(
         f"{admin}/authentication/flows/meho%20approval%20sign-in%20level/executions",
         headers=headers,

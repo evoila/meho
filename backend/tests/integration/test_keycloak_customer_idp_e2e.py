@@ -626,7 +626,8 @@ async def test_customer_group_member_gets_the_meho_role_through_the_broker(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
     assert operator.platform_admin is False
 
 

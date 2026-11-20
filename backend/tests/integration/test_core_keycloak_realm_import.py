@@ -271,7 +271,7 @@ def test_the_realm_has_three_role_groups_and_no_approver_group(keycloak: _Keyclo
     assert not names & {"MEHO-SA-Operators", "MEHO-Approvers"}
 
 
-async def test_the_approver_mapper_reads_the_flag_from_a_group_an_admin_adds(
+async def test_approvers_group_is_read_as_readers(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     admin = f"{keycloak.base_url}/admin/realms/meho"
@@ -292,7 +292,7 @@ async def test_the_approver_mapper_reads_the_flag_from_a_group_an_admin_adds(
     )
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.READ_ONLY
-    assert operator.approver is True
+    assert operator.approver is False
 
 
 def _token_claims(access_token: str) -> dict[str, Any]:

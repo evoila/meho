@@ -27,15 +27,16 @@ the end, then return to the trail.
 | `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`config.keycloakAudience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
 | `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only, with its own login flow | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
-| `meho approval sign-in level` | Login flow, bound to `meho-cli-approve` | Asks for the password (and the one-time code, when the person has one). Gives the approval level `meho-approve`. |
+| `meho approval sign-in level` | Login flow, bound to `meho-cli-approve` and `meho-web-approve` | Asks for the password (and the one-time code, when the person has one). Gives the approval level `meho-approve`. |
 | `acr.loa.map` | Realm attribute (**Realm settings → General → ACR to LoA mapping**) | Names the sign-in levels: `meho-approve` is level 2, `meho-touch` is level 3. |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | `meho-mcp-code`, `meho-mcp-desktop` | **Public** clients, copies of `meho-mcp` | The Claude Code plugin and the Claude Desktop extension, each with a login of its own, when `MCP_CLIENT_PER_TOOL_KIND` is on. See [The MCP clients of the AI tools](#the-mcp-clients-of-the-ai-tools). |
 | `meho-mcp-profile-<name>` | **Public** client, copy of `meho-mcp` plus a fixed claim (optional) | A session tied to one MCP tool profile. See [A login client for one tool profile](#a-login-client-for-one-tool-profile). |
 | `meho-web` | Confidential client, authorization-code + PKCE | The MEHO web UI. Redirect URI `https://<host>/ui/auth/callback`. |
+| `meho-web-approve` | Confidential client with the secret of `meho-web`, authorization-code + PKCE, with the login flow `meho approval sign-in level` | The sign-in before an approve in the web UI. Redirect URI `https://<host>/ui/auth/approval-callback`. See [The console approval client](#the-console-approval-client-meho-web-approve). |
 | `meho approval touch` | Login flow, bound to `meho-web`, with two levels | Level 1 is the normal console login. Level 3 (`meho-touch`) asks for a passkey touch every time. See [The passkey touch level](#the-passkey-touch-level). |
 | `meho-admin`, `meho-check-runner` | Confidential service clients | MEHO manages clients and users in the realm (`meho-admin`), and runs scheduled checks (`meho-check-runner`) |
-| 8 protocol mappers | On the login clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
+| 8 protocol mappers | On the login clients (`meho-cli-approve` and `meho-web-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On the login clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
 | `offline_access` | Built-in client scope, optional on `meho-cli` and `meho-mcp` | The long login that renews itself |
@@ -142,7 +143,10 @@ console session, and it checks that this sign-in asked for the password
 or a passkey.
 When the sign-in is too old, the console shows **Sign in to approve**
 and asks for the password again (see
-[The web console session](#the-web-console-session)).
+[The web console session](#the-web-console-session)). When MEHO requires
+the approval level, the console asks for the same level as the command
+line, with its own approval client (see
+[The console approval client](#the-console-approval-client-meho-web-approve)).
 
 Create a second public client with these settings:
 
@@ -317,7 +321,9 @@ does now in `approvals.sign_in_level_in_force` (`off`, `observe` or
 `required`), and a warning in `approvals.sign_in_level_warning` whenever
 MEHO does not require the level (the value is `off` or `observe`, or it
 is `auto` and MEHO acts as `observe`), and also when MEHO could not read
-the realm. The audit row of an approval records the mode in force in
+the realm. The warning covers the console's approval client too (see
+[The console approval client](#the-console-approval-client-meho-web-approve)).
+The audit row of an approval records the mode in force in
 `level_in_force`.
 
 - With the default `auto`, MEHO requires the level as soon as the realm
@@ -326,10 +332,74 @@ the realm. The audit row of an approval records the mode in force in
   the command line and REST: the client then signs in through the
   realm's normal flow and gets `acr` `1`. `approvals.sign_in` names the
   cause.
-- Known limit: when MEHO requires the level, a person who has only a company account
-  (no MEHO password) cannot approve on the command line. They approve in
-  the web interface.
-- The web interface does not use this check. It has its own checks.
+- Known limit: when MEHO requires the level, a person who signs in only
+  through a company login (no MEHO password) cannot approve in the web
+  interface and not on the command line, until they have a MEHO password
+  and a one-time code. On the built-in Keycloak with the default `auto`,
+  this starts with the upgrade to v0.49.0: it adds the client
+  `meho-web-approve` and binds it, and from then on the console needs the
+  approval sign-in level. What you can do: give these approvers a MEHO
+  password and a one-time code, or set `APPROVAL_SIGN_IN_LEVEL=observe`
+  for now.
+- The web interface uses the same setting for its own approval client
+  `meho-web-approve`. See
+  [The console approval client](#the-console-approval-client-meho-web-approve).
+
+#### The console approval client `meho-web-approve`
+
+The console's normal login (`meho-web`) never gives the approval level,
+also right after a new login. So the console has a second client, used
+only for the sign-in before an approve. The console's normal login does
+not change.
+
+| Setting | Value | Why |
+|---|---|---|
+| Client ID | `meho-web-approve` (suggested) | Must match `UI_KEYCLOAK_APPROVE_CLIENT_ID` on the backplane (default `meho-web-approve`). |
+| Client authentication | **On**, with the **same secret as `meho-web`** | The backplane uses one secret (`UI_KEYCLOAK_CLIENT_SECRET`) for both console clients. |
+| Standard flow | **On**, PKCE method `S256` | The browser sign-in. |
+| Direct access grants, device grant, service accounts | **Off** | Each of them would skip the approval flow. |
+| Valid redirect URIs | `https://<host>/ui/auth/approval-callback` | The approval sign-in comes back here. |
+| Use refresh tokens | **Off** | The console keeps the token only until the next approve. |
+| Access token lifespan | `900` seconds | As long as the approval window. |
+| Default client scopes | `basic`, `roles`, `web-origins`, `acr`, `profile`, `email` | The same as `meho-cli-approve`. |
+| Protocol mappers | The same as `meho-cli-approve` | The token must carry the claims MEHO checks. |
+| Authentication flow overrides → Browser Flow | `meho approval sign-in level` | The flow gives the approval level. |
+
+What happens:
+
+- Under `required` (and under `auto` when MEHO's check of this client's
+  binding is `ok`), the Approve button needs the console approval
+  sign-in. The console sends the person to Keycloak with this client,
+  `prompt=login`, `max_age=0` and `acr_values=meho-approve`. The person
+  types the password (and the code). The console keeps the token with
+  the session and approves with it while it is recent. A normal console
+  session never approves, also a fresh one.
+- Under `observe` the console approves as before and records the level
+  it saw. Under `off` it approves as before.
+- The audit row of every approval records the channel (`web` or
+  `rest`), the `acr` and `level_in_force`.
+
+A sign-in through a company login from the approval page does not run the
+approval flow's steps, so it gets no level, and MEHO refuses it under
+`required`. Keycloak still shows the company login's button on that page.
+Keycloak can set a login theme for one client, and such a theme could
+hide the button; MEHO does not ship one yet.
+
+`/api/v1/health` shows this client's state in `approvals.web_sign_in`
+(the same states as `approvals.sign_in`) and what MEHO does for the
+console in `approvals.web_sign_in_level_in_force`. Under `auto` the two
+clients can differ: `approvals.sign_in_level_warning` also warns when the
+console does not require the level, or when MEHO could not read this
+client. When the console refuses an approve for a missing level, its
+message says: "An admin must check approvals.web_sign_in in
+/api/v1/health."
+
+The Keycloak that ships with the MEHO chart creates this client on the
+next upgrade. On your own Keycloak, create it by hand as above, then run
+`meho admin keycloak bootstrap-clients` (or bind the flow by hand):
+it binds an existing `meho-web-approve` to `meho approval sign-in level`.
+It does not create the client, because the client needs the console's
+secret.
 
 #### Add the approval flow to a running realm through MEHO
 
@@ -589,7 +659,7 @@ rejected on every call. Add these eight mappers to the client:
 | `meho-mcp-audience` | Audience mapper (**Included Custom Audience** = `https://<backplane-host>/mcp`, **no trailing slash**) | adds the MCP resource URI to `aud` | Tokens work for the REST API but not for `/mcp`. |
 | `tenant-id` | User Attribute (**User Attribute** = `tenant_id`, **Claim JSON Type** `String`) | `tenant_id`, from the person's group | Rejected with `missing_tenant_claim`. |
 | `tenant-role` | User Attribute (**User Attribute** = `tenant_role`, **Claim JSON Type** `String`) | `tenant_role`, from the person's group | Rejected with `missing_tenant_role_claim`. |
-| `approver` | User Attribute (**User Attribute** = `approver`, **Claim JSON Type** `boolean`) | `approver`, only for `MEHO-Approvers` | Nobody with the `read_only` role can approve. |
+| `approver` | User Attribute (**User Attribute** = `approver`, **Claim JSON Type** `boolean`) | `approver`, only for `MEHO-Approvers` | MEHO does not read this claim for approval, so the mapper is not needed for approval. |
 | `platform-admin` | User Attribute (**User Attribute** = `platform_admin`, **Claim JSON Type** `boolean`) | `platform_admin`, only for `MEHO-Platform-Admins` | Nobody gets rights across tenants. |
 | `meho-tenants` | User Attribute (**User Attribute** = `meho_tenant`, **Token Claim Name** = `meho_tenants`, **Claim JSON Type** `String`, **Multivalued** on, **Aggregate attribute values** on) | `meho_tenants`, a list with one entry per role group of the person | The token does not list the person's tenants. One tenant still works. |
 | `groups-claim` | Group-membership mapper | `groups` | Group-gated surfaces silently return empty results. |
@@ -769,13 +839,18 @@ one. Create at least one user with:
   `tenant_admin` role, and in **`MEHO-Platform-Admins`**.
 
 A `dangerous` or `destructive` change waits until a person approves it
-with a click. A member of **`MEHO-Admins`** may approve their own risky
-change, on purpose, in the web interface. So the first admin can approve
-their own changes. A person in `MEHO-Operators` needs an admin to
-approve their risky changes (see
+with a click. A member of **`MEHO-Admins`**
+may approve their own risky change, on purpose, in the web interface. So
+the first admin can approve their own changes. A person in
+`MEHO-Operators` needs an admin to approve their
+risky changes. A login holds exactly one role group (see
 [Who may approve their own changes](#who-may-approve-their-own-changes)
 and the
 [decision record on approval groups](https://github.com/evoila/meho/blob/main/docs/decisions/approval-groups-and-self-approval.md)).
+
+Also create a second person in **`MEHO-Operators`**, for daily work
+without admin rights. This person runs changes and may approve other
+people's `safe` and `caution` changes.
 
 The user's email does not need to be verified for device-code login to
 complete.
@@ -1167,24 +1242,21 @@ realm settings. So on a running realm, do one of these:
 
 ## Approve-only principal
 
-By default, clearing the approval queue needs the **operator** role. For
-separation of duties you can instead grant a dedicated approver the
-**`approver`** capability — an optional claim, orthogonal to the tenant
-role. A principal provisioned as `read_only` role **plus**
-`approver=true` may approve and reject parked requests but is refused
-`call_operation`: "approve, but never operate." (See
-[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver).)
+Clearing the approval queue needs the **operator** role. MEHO keeps an
+**`approver`** capability in the code: a `read_only` login with it would
+approve and reject waiting requests but is refused `call_operation`
+(see
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-segregated-approver)).
+No role gives it today. Roles that customers define come later:
 
-The claim is fail-closed — absent or malformed means *not* an approver.
-To make a person an approver, create a group **`MEHO-Approvers`** like
-the groups in [Step 5](#step-5-create-the-three-groups), put the person
-in it, and in no other role group. That group carries `tenant_role` = `read_only` and
-`approver` = `true`, and the `approver` mapper from
-[Step 3](#step-3-add-the-protocol-mappers) copies it into the
-token. Its **Token Claim Name** must match the backplane's
-`JWT_APPROVER_CLAIM_NAME` (default `approver`). The person keeps a low
-tenant role (`read_only`), so the capability adds approval power
-without adding dispatch power.
+- MEHO reads the old group **`MEHO-Approvers`** as Readers. Its members
+  do not approve and do not see the Approvals pages.
+- MEHO does not read the `approver` claim of the token, in any token
+  form. A token that carries it gets no approval right from it.
+
+To let a person approve, put them in `MEHO-Operators` (other people's
+`safe` and `caution` changes) or `MEHO-Admins` (also `dangerous` and
+`destructive` changes, and their own changes).
 
 ## Remember the browser, and passkeys
 

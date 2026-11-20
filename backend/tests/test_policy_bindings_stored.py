@@ -23,8 +23,7 @@ from sqlalchemy import delete
 from meho_backplane.auth.operator import Operator, RoleGroup, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequestStatus, TenantPolicy
-from meho_backplane.operations.approval_queue import ApprovalRoutingError
-from meho_backplane.operations.approval_rights import ApproveRightReason, approve_right
+from meho_backplane.operations.approval_rights import approve_right
 from meho_backplane.policy.bindings import bind_current_tenant
 from meho_backplane.policy.document import document_of, parse_policy_file
 from meho_backplane.policy.service import export_policy
@@ -84,8 +83,8 @@ async def test_exported_shipped_bindings_count_for_a_listed_login_after_the_impo
         await _store(_TENANT, document_of(parsed.model))
 
         after = await bind_current_tenant(_listed_operator(), claims)
-        assert after.bound_kind is RoleGroup.SA_OPERATORS
-        assert after.self_approver is True
+        assert after.bound_kind is RoleGroup.OPERATORS
+        assert after.self_approver is False
     finally:
         await _store(_TENANT, None)
 
@@ -104,26 +103,26 @@ _BOUND_AND_ROUTED: dict[str, Any] = {
 
 
 @pytest.mark.asyncio
-async def test_a_binding_sets_the_kind_that_the_routing_checks() -> None:
+async def test_old_kinds_in_a_stored_file() -> None:
+    """A stored binding of ``SA-Operators`` gives ``Operators``.
+
+    A stored routing entry of ``SA-Operators`` keeps the old kind: only a
+    person whose token names the old group approves, not every Operator.
+    """
     await _store(_TENANT_A, _BOUND_AND_ROUTED)
     try:
         bound = await bind_current_tenant(_person(_OTHER), {"groups": ["/MEHO-Operators/Network"]})
-        assert bound.bound_kind is RoleGroup.SA_OPERATORS
-        not_bound = await bind_current_tenant(
-            _person("person-third"), {"groups": ["/MEHO-Operators"]}
-        )
-        assert not_bound.bound_kind is None
+        assert bound.bound_kind is RoleGroup.OPERATORS
+        assert bound.self_approver is False
 
         request_id = await _park("caution")
         row = await _load(request_id)
         assert row.approver_roles == ["SA-Operators"]
-        right = approve_right(not_bound, row)
-        assert (right.may_approve, right.reason) == (False, ApproveRightReason.NOT_ROUTED)
-        with pytest.raises(ApprovalRoutingError):
-            await _approve(request_id, not_bound)
+        assert approve_right(bound, row).may_approve is False
 
-        assert approve_right(bound, row).may_approve is True
-        approved = await _approve(request_id, bound)
+        member = bound.model_copy(update={"old_group": RoleGroup.SA_OPERATORS})
+        assert approve_right(member, row).may_approve is True
+        approved = await _approve(request_id, member)
         assert approved.status == ApprovalRequestStatus.APPROVED.value
     finally:
         await _store(_TENANT_A, None)

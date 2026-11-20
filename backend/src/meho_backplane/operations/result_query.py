@@ -72,6 +72,7 @@ from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     SpilledRowSet,
     get_result_handle_store,
+    record_connector_scope,
     result_profile_scope,
 )
 from meho_backplane.jsonflux.query.contract import (
@@ -92,6 +93,10 @@ from meho_backplane.jsonflux.query.json_pointer import (
 from meho_backplane.jsonflux.query.result_catalog import (
     ResultFieldCatalog,
     _build_catalog_from_admitted,
+)
+from meho_backplane.operations._target_connector_limit import (
+    allowed_connectors_var,
+    stored_result_within_limit,
 )
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.operations.result_query_no_match import no_match_hint, returns_one_row_always
@@ -582,14 +587,27 @@ async def _run_admitted_read[T](
     at once, and the worker keeps the lease until it finishes.
 
     Raises :class:`ResultHandleNotFoundError` when the operator has no
-    tenant or the store holds no record, :class:`ResultReadRejectedError`
-    from admission, :class:`ResultQueryTimeoutError` on expiry, and
+    tenant, the store holds no record, or a hosted agent with a connector
+    list reads a record not stored under a list inside its own
+    (:func:`~._target_connector_limit.stored_result_within_limit`),
+    :class:`ResultReadRejectedError` from admission, :class:`ResultQueryTimeoutError` on expiry, and
     whatever *work* raises.
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
     timeout_seconds = get_settings().result_query_timeout_seconds
     guard = _WorkerGuard()
+    allowed = allowed_connectors_var.get()
+
+    def limited_work(raw: bytes, guard: _WorkerGuard) -> T:
+        # A hosted agent with a connector list reads only results stored
+        # under a list inside its own; any other result is a miss.
+        if allowed is not None and not stored_result_within_limit(
+            record_connector_scope(raw), allowed
+        ):
+            raise ResultHandleNotFoundError(handle_id)
+        return work(raw, guard)
+
     async with admit_result_read(operator) as lease:
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -597,7 +615,7 @@ async def _run_admitted_read[T](
                 if raw is None:
                     raise ResultHandleNotFoundError(handle_id)
                 return await run_on_result_read_executor(
-                    lease, work, raw, guard, on_abandon=guard.abandon
+                    lease, limited_work, raw, guard, on_abandon=guard.abandon
                 )
         except TimeoutError as exc:
             raise ResultQueryTimeoutError(

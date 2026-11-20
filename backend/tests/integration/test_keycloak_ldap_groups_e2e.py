@@ -487,7 +487,8 @@ async def test_a_directory_member_gets_the_groups_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
     assert operator.platform_admin is False
 
 
@@ -643,7 +644,8 @@ async def test_b_directory_member_gets_the_parent_groups_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
     assert operator.platform_admin is False
 
 

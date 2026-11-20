@@ -130,12 +130,13 @@ Detail payloads land in ``extras``. Codes:
 * ``target_connector_mismatch`` -- a typed/composite op whose handler is
   a connector method, called on a target whose connector does not have
   that method (a linux op on an rke2 target). Refused right after the
-  target check, before the policy gate and any wait for approval, with
-  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
+  connector list check, before the policy gate and any wait for approval,
+  with one audit row (:mod:`~meho_backplane.operations._target_connector_match`).
 * ``connector_not_allowed`` -- a hosted agent with a connector list called
   an op on a target whose connector is not in the list, or that resolves
-  no single connector. Refused right after the mismatch check, before the
-  policy gate, with one audit row and no approval request
+  no single connector. Refused right after the target check and before the
+  mismatch check, so the answer names only connectors in the list. One
+  audit row, no approval request
   (:mod:`~meho_backplane.operations._target_connector_limit`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
@@ -489,6 +490,10 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     get_dispatch_child,
 )
+from meho_backplane.operations.composite_steps import (
+    child_read_sent_again,
+    mark_child_cleared_by_person,
+)
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
@@ -519,6 +524,7 @@ from meho_backplane.operations.shutdown_drain import (
     shutting_down_result,
     track_operation,
 )
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.uncertain_outcome import (
     changes_target,
     connection_lost_after_send,
@@ -3492,6 +3498,57 @@ async def _build_proposed_effect(
         return None
 
 
+def _preview_failed_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> dict[str, Any]:
+    """The ``proposed_effect`` of a request whose preview build raised.
+
+    Keeps the op identity and the risk level and class from the catalog,
+    so the approval rules read the operation's real level. The
+    ``preview_failed`` key lets the approval card say that MEHO could not
+    build the preview.
+    """
+    effect = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+    effect["op_class"] = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
+    effect["safety_level"] = descriptor.safety_level
+    effect["preview_populated"] = False
+    effect["preview_failed"] = True
+    return effect
+
+
+async def _build_park_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``proposed_effect`` a parked request stores; never ``None``.
+
+    :func:`_build_proposed_effect`, or :func:`_preview_failed_effect` when
+    that build raised.
+    """
+    effect = await _build_proposed_effect(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+    if effect is not None:
+        return effect
+    return _preview_failed_effect(
+        op_id=op_id, connector_id=connector_id, descriptor=descriptor, target=target
+    )
+
+
 async def _destructive_binding_refusal(
     *,
     op_id: str,
@@ -3798,8 +3855,9 @@ async def _handle_needs_approval(
     # secret-free result under ``proposed_effect["permission_preflight"]``
     # so a write Vault would deny surfaces a "this write will be denied"
     # banner at park time instead of failing only after a four-eyes
-    # approval. Fail-soft too: a probe fault degrades to no banner.
-    proposed_effect = await _build_proposed_effect(
+    # approval. Fail-soft too: a probe fault degrades to no banner. When the
+    # build raises, the request still stores the catalog risk level.
+    proposed_effect = await _build_park_effect(
         op_id=op_id,
         connector_id=connector_id,
         descriptor=descriptor,
@@ -3955,9 +4013,9 @@ def _params_error(
     param is rejected as ``invalid_params`` here rather than defaulting
     onto the vendor query string in ``_split_ingested_params``.
     """
-    schema_to_validate = descriptor.parameter_schema
+    schema_to_validate = schema_for_checks(descriptor)
     if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+        schema_to_validate = ingested_schema_for_validation(schema_to_validate)
     try:
         validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:
@@ -4153,20 +4211,10 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
-    # #5948: a connector-bound op whose handler the target's connector does
-    # not have (a linux op on an rke2 target) cannot run. Refused here, before
-    # the policy gate and any wait for approval, with its own audit row.
-    mismatch = await refuse_target_connector_mismatch(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params_hash=params_hash,
-        started=started,
-    )
-    if mismatch is not None:
-        return mismatch
     # A hosted agent with a connector list may use only targets whose
-    # connector is in the list. Refused here too, before the policy gate.
+    # connector is in the list. Refused here, before the policy gate. This
+    # check comes first, so its answer (which names only the listed
+    # connectors) is the one a caller with a list gets.
     not_allowed = await refuse_target_connector_not_allowed(
         operator=operator,
         descriptor=descriptor,
@@ -4176,6 +4224,18 @@ async def _dispatch_now(
     )
     if not_allowed is not None:
         return not_allowed
+    # A connector-bound op whose handler the target's connector does not
+    # have (a linux op on an rke2 target) cannot run. Refused here too,
+    # before the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
     # A target whose known version is outside the range of the connector
     # picked for it (through the fallback entry) is refused the same way.
     outside = await refuse_version_outside_range(
@@ -4384,16 +4444,26 @@ async def _dispatch_now(
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval.
+            # ``requires_approval`` step keeps its own approval. A credential
+            # read that a resume sends again is refused whenever it would wait,
+            # also when it is destructive or needs its own approval: an
+            # approval request for it alone cannot finish the waiting run.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
                 and approved_run_var.get()
-                and descriptor.safety_level != "destructive"
-                and not descriptor.requires_approval
             ):
-                _log.info("composite_child_covered_by_approved_run", op_id=op_id)
-                verdict = PermissionVerdict.AUTO_EXECUTE
+                if child_read_sent_again(op_id):
+                    verdict = PermissionVerdict.DENY
+                    gate_reason = (
+                        f"composite_resume_read_not_sent: the step {op_id!r} reads a "
+                        "credential; the run after an approval sends it again only when "
+                        "its policy lets it go ahead with no person"
+                    )
+                elif descriptor.safety_level != "destructive" and not descriptor.requires_approval:
+                    _log.info("composite_child_covered_by_approved_run", op_id=op_id)
+                    mark_child_cleared_by_person(op_id)
+                    verdict = PermissionVerdict.AUTO_EXECUTE
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):
@@ -4653,7 +4723,8 @@ async def _dispatch_now(
 
         # #3879: a target changed on another server (or by this one, before
         # this process saw it) must not be served with the login kept for its
-        # old values. One dict lookup per dispatch; a drop only on a change.
+        # old values. One dict lookup per dispatch; a drop only on a change,
+        # and also the first time this process sees the target.
         if target is not None:
             await forget_target_if_changed(target)
 

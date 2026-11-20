@@ -184,7 +184,7 @@ async def test_wait_names_who_may_approve(client: TestClient, embedding: AsyncMo
         web_call = _ask(client, _token(key), **_groups(_CAUTION, "Operators", via="web")).json()
     assert token_call["answer"] == "wait", token_call
     assert token_call["approvers"] == {
-        "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
+        "groups": ["MEHO-Operators", "MEHO-Admins"],
         "rule": "default",
         "floor": None,
     }
@@ -206,7 +206,7 @@ async def test_a_destructive_call_waits_on_a_floor(
         mock_discovery_and_jwks(r, public_jwks(key))
         body = _ask(client, _token(key), **_groups(_DESTRUCTIVE, "Admins", via="web")).json()
     assert body["answer"] == "wait", body
-    assert body["approvers"]["groups"] == ["MEHO-SA-Operators", "MEHO-Admins"]
+    assert body["approvers"]["groups"] == ["MEHO-Admins"]
     floor = body["evaluator"]["floor"]
     assert floor["source"] == "floor"
     assert floor == body["evaluator"]["rule"]

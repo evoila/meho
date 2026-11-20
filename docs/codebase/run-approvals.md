@@ -13,7 +13,7 @@ operations one run may use and approve it once.
 2. **A person approves it in MEHO**, on REST or with
    `meho approvals runs approve <id>`. The CLI shows the list and asks for
    `yes` first. The same group rule as for one request holds: a list with a
-   `dangerous` operation needs a MEHO-SA-Operator or a tenant admin.
+   `dangerous` operation needs a tenant admin.
 3. **The add-on reads the result.** It polls
    `GET /api/v1/service-principals/run-approvals/{id}` until the status is
    `approved` (or `revoked`).
@@ -38,8 +38,10 @@ status. MEHO records the decision; there is no second-person step.
   never deleted. The partial unique index `run_approval_open_run_idx`
   lets one run hold at most one open row (see below).
 - `Tenant.run_approval_target_kinds_enabled` (migration `0143`, default
-  `false`): the tenant setting for target kinds. It is set with the
-  settings file (`policies.run_approval_target_kinds`).
+  `false`): the tenant setting for target kinds
+  (`policies.run_approval_target_kinds`). Only the settings file sets it;
+  turning it on applies only in the web console, which has no settings
+  page yet.
 - `operations/run_approval_schemas.py`: `RunApprovalEntry`,
   `RunApprovalCreate`, `RunApprovalRevoke`, `RunApprovalRead`
   (`status`: `pending`, `approved`, `revoked`, `ended`, `expired`).
@@ -234,7 +236,7 @@ approve. With the switch off, nothing changes.
 | `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, an entry that runs a command as root on the host, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request. An entry that reads a credential is accepted and named in `entries_that_wait` |
 | `GET` | `/api/v1/service-principals/run-approvals` | approvals access (`operator` role or `approver`); filters `principal_sub`, `status` |
 | `GET` | `.../{id}` | approvals access; 404 across tenants |
-| `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a MEHO-SA-Operator or a tenant admin, the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
+| `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a tenant admin (MEHO-Admins), the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
 | `POST` | `.../{id}/revoke` | a person with approvals access. Body `{"reason": ...}` (optional). Works on a pending request too (turns it down) |
 | `POST` | `.../{id}/end` | the principal that asked; 404 for anyone else |
 

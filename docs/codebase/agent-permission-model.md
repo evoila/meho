@@ -68,7 +68,7 @@ One sentence per level:
   first get a `preview_hash` from `preview_operation` and pass it to
   `call_operation`; without a matching hash, MEHO refuses the call and
   stores no approval request (#3197). Who may approve it follows the
-  group rules (for example a MEHO-SA-Operator). Agents never approve.
+  group rules (for example a MEHO-Admin). Agents never approve.
 
 So an agent's `caution`, `dangerous` and `destructive` requests all wait
 for a person's approval (#3980). With the switch `on`, this holds only

@@ -26,12 +26,12 @@ one login. At the end:
 
     - **Putting a person in a group** is a change of rights. Another
       admin (a tenant admin or a platform admin) must approve it, never
-      the person who asked. A MEHO-SA-Operator who is not an admin cannot
+      the person who asked. An Operator cannot
       approve it. See
       [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
     - **Taking a person out of a group** only takes rights away. A
-      MEHO-SA-Operator or a MEHO-Admin may approve their own; anyone else
-      needs a second person (a MEHO-SA-Operator or an admin).
+      MEHO-Admin may approve their own; anyone else
+      needs a second person (an admin).
 
 ## How it works
 
@@ -402,7 +402,7 @@ A platform admin **may**:
   tenant, the role of that group applies instead.
 - approve their own changes in a tenant where they act as `tenant_admin`.
   They count as an admin there, so they may approve their own changes
-  like members of `MEHO-SA-Operators` and `MEHO-Admins`. This does not
+  like members of `MEHO-Admins`. This does not
   cover a change of rights: another admin must approve that.
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
@@ -411,8 +411,8 @@ A platform admin **may**:
 
 A platform admin **may not**:
 
-- get the `approver` flag from the platform admin group. It comes only
-  from an `Approvers` group of the current tenant.
+- get the `approver` flag from the platform admin group. No role gives
+  this flag today (the old `Approvers` group is read as Readers).
 - pick a tenant that does not exist. MEHO answers
   `403 tenant_not_found` and never makes a tenant from a typo.
 - move a machine login. Agent, service and runner logins always stay in

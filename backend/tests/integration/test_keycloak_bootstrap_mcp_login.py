@@ -516,7 +516,8 @@ async def test_role_group_gives_tenant_and_role(
     operator = await _verify(fresh_keycloak, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role.value == want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
 
 
 @pytest.mark.asyncio

@@ -1439,7 +1439,7 @@ working (`ops_meho_own_login_guard.py`):
 | Write | What MEHO refuses | What stays allowed |
 |---|---|---|
 | `client.delete` | deleting a client MEHO itself signs in with | deleting any other client |
-| `client.update` | every other change of a client MEHO itself signs in with | `name`, `description`; a new address in `redirectUris` or `webOrigins` when every address the client has stays; `enabled: true`; `authenticationFlowBindingOverrides` set to `""` (the client uses the realm's login flow again) |
+| `client.update` | every other change of a client MEHO itself signs in with | `name`, `description`; a new address in `redirectUris` or `webOrigins` when every address the client has stays; `enabled: true`; `authenticationFlowBindingOverrides` set to `""` (the client uses the realm's login flow again), but not on the approval clients (`KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_APPROVE_CLIENT_ID`): their own login flow is the approval sign-in, so MEHO refuses every change of it |
 | `realm.update` | every other change of the login realm, for example `enabled: false`, a new `realm` name, `sslRequired`, `attributes` such as `frontendUrl`, a login flow, `defaultSignatureAlgorithm` | `displayName`, `displayNameHtml`; `smtpServer`; the event settings (`eventsEnabled`, `eventsExpiration`, `eventsListeners`, `enabledEventTypes`, `adminEventsEnabled`, `adminEventsDetailsEnabled`); the languages (`internationalizationEnabled`, `supportedLocales`, `defaultLocale`); `enabled: true`; `browserFlow: "browser"` |
 
 - **MEHO's own clients** come from MEHO's settings

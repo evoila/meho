@@ -8,7 +8,8 @@ In MEHO's own login realm
 
 * ``keycloak.client.delete`` of a client MEHO itself uses;
 * ``keycloak.client.update`` of such a client, unless every change is on
-  :data:`OWN_CLIENT_CHANGES`;
+  :data:`OWN_CLIENT_CHANGES` (on an approval client:
+  :data:`APPROVAL_CLIENT_CHANGES`);
 * ``keycloak.realm.update`` of the login realm, unless every change is on
   :data:`LOGIN_REALM_CHANGES`.
 
@@ -20,6 +21,9 @@ sign-in clients of the AI tools (``meho-mcp`` and one per tool kind). A
 param of the call never adds or removes one. MEHO judges the client as
 Keycloak stores it: a client named by its internal id is read first, and
 its ``clientId`` is compared without letter case and spaces at the ends.
+The **approval clients** (:func:`meho_approval_client_ids`) are the clients
+of the CLI approval and the web approval; their own login flow is the
+approval sign-in, so MEHO keeps it.
 
 **A change** is a key whose value after the write differs from the value
 Keycloak holds now. A key sent with the value it already has is no change.
@@ -73,12 +77,14 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "APPROVAL_CLIENT_CHANGES",
     "CLIENT_UPDATE_OP",
     "LOGIN_REALM_CHANGES",
     "OWN_CLIENT_CHANGES",
     "REALM_UPDATE_OP",
     "blocked_changes",
     "login_realm_park_reason",
+    "meho_approval_client_ids",
     "meho_own_client_ids",
     "refuse_login_realm_write",
     "refuse_own_client_write",
@@ -149,6 +155,15 @@ OWN_CLIENT_CHANGES: Final[dict[str, ChangeCheck]] = {
     "authenticationFlowBindingOverrides": _unbinds_only,
 }
 
+#: The changes of an approval client that stay allowed: those of
+#: :data:`OWN_CLIENT_CHANGES` but its own login flow, which is the approval
+#: sign-in.
+APPROVAL_CLIENT_CHANGES: Final[dict[str, ChangeCheck]] = {
+    key: check
+    for key, check in OWN_CLIENT_CHANGES.items()
+    if key != "authenticationFlowBindingOverrides"
+}
+
 #: The changes of MEHO's login realm that stay allowed: names shown on the
 #: login page, the mail server, the event settings, the languages, turning
 #: the realm on, and setting the browser login flow back to Keycloak's own.
@@ -195,6 +210,13 @@ def meho_own_client_ids() -> frozenset[str]:
     return frozenset(name.casefold() for name in map(_text, names) if name is not None)
 
 
+def meho_approval_client_ids() -> frozenset[str]:
+    """The client ids (lower case) of the clients of the CLI and the web approval."""
+    settings = get_settings()
+    names = (settings.keycloak_cli_approve_client_id, settings.ui_keycloak_approve_client_id)
+    return frozenset(name.casefold() for name in map(_text, names) if name is not None)
+
+
 def blocked_changes(
     current: dict[str, Any], requested: dict[str, Any], allowed: dict[str, ChangeCheck]
 ) -> list[str]:
@@ -227,18 +249,34 @@ def _not_checked(op_id: str, what: str) -> MehoAccessRefusedError:
     )
 
 
-def _is_own_client(op_id: str, client: Any, named: str | None) -> bool:
-    try:
-        own = meho_own_client_ids()
-    except Exception as exc:
-        raise _not_checked(op_id, "MEHO could not read its settings") from exc
+def _client_names(op_id: str, client: Any, named: str | None) -> set[str]:
+    """The names (lower case) of the client: its stored ``clientId`` and the one the call sent."""
     stored = _text(client.get("clientId")) if isinstance(client, dict) else None
     if stored is None:
         raise _not_checked(op_id, "the client has no client id")
     names = {stored.casefold()}
     if named is not None:
         names.add(named.casefold())
-    return not names.isdisjoint(own)
+    return names
+
+
+def _is_own_client(op_id: str, client: Any, named: str | None) -> bool:
+    try:
+        own = meho_own_client_ids()
+    except Exception as exc:
+        raise _not_checked(op_id, "MEHO could not read its settings") from exc
+    return not _client_names(op_id, client, named).isdisjoint(own)
+
+
+def _client_changes(op_id: str, client: Any, named: str | None) -> dict[str, ChangeCheck]:
+    """The allowed changes of MEHO's own *client*: fewer on an approval client."""
+    try:
+        approval = meho_approval_client_ids()
+    except Exception as exc:
+        raise _not_checked(op_id, "MEHO could not read its settings") from exc
+    if _client_names(op_id, client, named).isdisjoint(approval):
+        return OWN_CLIENT_CHANGES
+    return APPROVAL_CLIENT_CHANGES
 
 
 def _may_be_own_client(client: Any, named: str | None) -> bool:
@@ -262,7 +300,7 @@ async def _answered_login_realm(
         )
     except Exception:
         return None
-    name = _text(stored.get("realm")) if stored is not None else None
+    name = _text(stored.get("realm")) if isinstance(stored, dict) else None
     return None if name is None else is_meho_login_realm(name)
 
 
@@ -304,7 +342,8 @@ async def refuse_own_client_write(
     if op_id == CLIENT_DELETE_OP:
         action = "deleting it"
     else:
-        blocked = blocked_changes(client, requested or {}, OWN_CLIENT_CHANGES)
+        allowed = _client_changes(op_id, client, named_text)
+        blocked = blocked_changes(client, requested or {}, allowed)
         if not blocked:
             return
         action = f"changing {', '.join(blocked)}"
@@ -323,11 +362,10 @@ def refuse_login_realm_write(realm: str, stored: Any, requested: dict[str, Any])
     stores it, and *requested* the representation of the update.
     """
     stored_name = _text(stored.get("realm")) if isinstance(stored, dict) else None
-    names = [name for name in (realm, stored_name) if name is not None]
-    if not any(is_meho_login_realm(name) for name in names):
-        return
-    if not isinstance(stored, dict):
+    if stored_name is None:
         raise _not_checked(REALM_UPDATE_OP, "the realm came back in an odd shape")
+    if not (is_meho_login_realm(realm) or is_meho_login_realm(stored_name)):
+        return
     blocked = blocked_changes(stored, requested, LOGIN_REALM_CHANGES)
     if not blocked:
         return

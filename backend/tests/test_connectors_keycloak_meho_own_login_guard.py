@@ -10,14 +10,17 @@ manages MEHO's own login realm. What is proven:
 
 * each write that can break MEHO's sign-in is refused before approval and
   when it runs, for a person, an agent login and a service login, with and
-  without a standing grant;
+  without a standing grant; a standing grant never runs these writes
+  without approval;
 * a client is MEHO's own by MEHO's settings, also when the call names it by
   its internal id or the stored client id has other letter case;
 * a client that becomes MEHO's own while the request waits is refused when
   the approved call runs;
 * a realm named in another spelling that Keycloak answers as the login
   realm counts as the login realm, before approval and at the run; when
-  MEHO cannot read the realm, the run is refused;
+  MEHO cannot read the realm, or the realm comes back without its name,
+  the run is refused;
+* an approval client keeps its own login flow;
 * each allowed change waits for approval and runs;
 * the same writes on another client, or in another realm, are not refused;
 * the refusal text names no client the caller did not name and gives no
@@ -241,9 +244,9 @@ _CALLERS = {
 }
 
 
-async def _grant(caller: Operator, op_id: str) -> None:
-    """A standing grant that lets *caller* run *op_id* on the login realm target."""
-    target_id = (await _target(_LOGIN_REALM_TARGET)).id
+async def _grant(caller: Operator, op_id: str, target: str = _LOGIN_REALM_TARGET) -> None:
+    """A standing grant that lets *caller* run *op_id* on *target*."""
+    target_id = (await _target(target)).id
     async with get_sessionmaker()() as session:
         if caller.principal_kind is PrincipalKind.AGENT:
             session.add(
@@ -383,7 +386,7 @@ async def test_the_write_is_refused_before_approval(
     assert written == []
 
 
-@pytest.mark.parametrize("granted", [False, True], ids=["no-grant", "standing-grant"])
+@pytest.mark.parametrize("granted", [False, True], ids=["no-grant", "approved-and-granted"])
 @pytest.mark.parametrize("caller_kind", list(_CALLERS))
 @pytest.mark.parametrize(("op_id", "params", "words", "code"), _REFUSED, ids=_REFUSED_IDS)
 async def test_the_write_is_refused_when_it_runs(
@@ -403,6 +406,32 @@ async def test_the_write_is_refused_when_it_runs(
         result = await _run(op_id, params, caller)
         written = _writes(mock)
     _refused_on_run(result, code)
+    assert written == []
+
+
+#: Writes the check lets through: (op_id, params).
+_NOT_REFUSED: list[tuple[str, dict[str, Any]]] = [
+    (_CLIENT_UPDATE, {"id": _OTHER_UUID, "representation": {"enabled": False}}),
+    (_CLIENT_DELETE, {"id": _OTHER_UUID}),
+    (_REALM_UPDATE, {"representation": {"displayName": "MEHO sign-in"}}),
+]
+
+
+@pytest.mark.parametrize("caller_kind", ["agent", "service"])
+@pytest.mark.parametrize(("op_id", "params"), _NOT_REFUSED, ids=_REFUSED_IDS)
+async def test_a_standing_grant_does_not_run_the_write_without_approval(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    params: dict[str, Any],
+    caller_kind: str,
+) -> None:
+    caller = _CALLERS[caller_kind]()
+    await _grant(caller, op_id)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _Keycloak(mock, _LOGIN_REALM)
+        call = await _call(op_id, params, caller)
+        written = _writes(mock)
+    assert call["status"] == "awaiting_approval", call
     assert written == []
 
 
@@ -593,6 +622,36 @@ async def test_when_meho_cannot_read_the_realm_the_client_write_is_refused_on_ru
     assert written == []
 
 
+async def test_a_realm_answer_without_its_name_refuses_the_realm_update_on_run(
+    spelled_target: str,
+) -> None:
+    params = {"representation": {"enabled": False}}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _SPELLED_REALM)
+        del api.realm["realm"]
+        call = await _call(_REALM_UPDATE, params, target=spelled_target)
+        result = await _run(_REALM_UPDATE, params, target=spelled_target)
+        written = _writes(mock)
+    assert call["status"] in {"denied", "awaiting_approval"}, call
+    _refused_on_run(result, "meho_access_not_checked")
+    assert written == []
+
+
+async def test_a_realm_answer_that_is_a_list_refuses_the_client_update_on_run(
+    spelled_target: str,
+) -> None:
+    params = {"id": _OWN_UUID, "representation": {"enabled": False}}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _SPELLED_REALM)
+        api.realm = [_realm_rep(_LOGIN_REALM)]  # type: ignore[assignment]
+        call = await _call(_CLIENT_UPDATE, params, target=spelled_target)
+        result = await _run(_CLIENT_UPDATE, params, target=spelled_target)
+        written = _writes(mock)
+    assert call["status"] in {"denied", "awaiting_approval"}, call
+    _refused_on_run(result, "meho_access_not_checked")
+    assert written == []
+
+
 # ---------------------------------------------------------------------------
 # Other changes that can lock MEHO out
 # ---------------------------------------------------------------------------
@@ -630,6 +689,27 @@ async def test_other_changes_of_meho_own_client_are_refused(
         result = await _run(_CLIENT_UPDATE, params)
         written = _writes(mock)
     _refused_before_approval(call, _OWN_CLIENT_WORDS)
+    _refused_on_run(result, "meho_own_client")
+    assert written == []
+
+
+@pytest.mark.parametrize("approval_client", ["meho-cli-approve", "meho-web-approve"])
+async def test_an_approval_client_keeps_its_own_login_flow(
+    kc: KeycloakConnector,  # noqa: F811
+    approval_client: str,
+) -> None:
+    params = {
+        "id": _OWN_UUID,
+        "representation": {"authenticationFlowBindingOverrides": {"browser": ""}},
+    }
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _LOGIN_REALM)
+        api.clients[_OWN_UUID]["clientId"] = approval_client
+        call = await _call(_CLIENT_UPDATE, params)
+        result = await _run(_CLIENT_UPDATE, params)
+        written = _writes(mock)
+    _refused_before_approval(call, _OWN_CLIENT_WORDS)
+    assert "authenticationFlowBindingOverrides" in call["error"]
     _refused_on_run(result, "meho_own_client")
     assert written == []
 

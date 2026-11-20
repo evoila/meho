@@ -239,10 +239,18 @@ def test_a_list_or_a_second_document_with_a_deployment_waits() -> None:
 
 
 @pytest.mark.parametrize(
-    "kind", ["ConfigMap", "Service", "Namespace", "Ingress", "ServiceAccount", "NetworkPolicy"]
+    ("kind", "api_version"),
+    [
+        ("ConfigMap", "v1"),
+        ("Service", "v1"),
+        ("Namespace", "v1"),
+        ("Ingress", "networking.k8s.io/v1"),
+        ("ServiceAccount", "v1"),
+        ("NetworkPolicy", "networking.k8s.io/v1"),
+    ],
 )
-def test_an_apply_of_other_kinds_keeps_its_rules(kind: str) -> None:
-    assert manifest_needs_a_person({"manifest": _manifest(kind)}) is False
+def test_an_apply_of_other_kinds_keeps_its_rules(kind: str, api_version: str) -> None:
+    assert manifest_needs_a_person({"manifest": _manifest(kind, api_version)}) is False
 
 
 def test_only_the_manifest_of_a_secret_is_hidden_after_the_run() -> None:

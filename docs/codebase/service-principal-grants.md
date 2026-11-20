@@ -162,23 +162,21 @@ and no run approval covers it.
   Kubernetes API file (`connectors/kubernetes/ingested_paths.py`): every
   call that reads or writes a Secret, runs a command in a pod (`exec`,
   `attach`), opens a port forward or a proxy, or makes a ServiceAccount
-  token, and every write (`POST`, `PUT`, `PATCH`) of a pod or an object
-  that runs one, an ephemeral container, a role or a binding, an object
-  of External Secrets, Sealed Secrets or cert-manager, or a certificate
-  signing request.
+  token, and every write (`POST`, `PUT`, `PATCH`) of an object that is
+  not one of the plain objects of `k8s.apply` (read by API group and
+  plural), an ephemeral container, or the approval of a certificate
+  signing request. A path can have any prefix in front.
 - A connector can also tell from the params of one call that it writes a
   credential: `declare_credential_check` (`op_classes.py`). Today two
   operations use it:
   - `k8s.apply`: a manifest that holds (in any document, or any item of a
-    list object such as `kind: List`) a `Secret`, an object that runs a
-    pod (`Pod`, `Deployment`, `StatefulSet`, `DaemonSet`, `ReplicaSet`,
-    `ReplicationController`, `Job`, `CronJob`, `PodTemplate`), an object
-    that gives rights (`Role`, `ClusterRole`, `RoleBinding`,
-    `ClusterRoleBinding`) or an object that makes or reads a Secret
-    (`ExternalSecret`, `ClusterExternalSecret`, `SecretStore`,
-    `ClusterSecretStore`, `PushSecret`, `SealedSecret`, `Certificate`), or
-    a manifest MEHO cannot read, makes the call a credential call
-    (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`).
+    list object such as `kind: List`) an object that is not plain, or a
+    manifest MEHO cannot read, makes the call a credential call
+    (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`). The
+    plain objects are the table `PLAIN_OBJECTS` in the same file (see
+    [connectors-kubernetes.md](connectors-kubernetes.md)). So a grant, an
+    agent grant or a run approval on `k8s.apply` covers only an apply of
+    plain objects.
   - `proxmox.api.get`: a path that reads inside a guest, opens a console
     or returns a stored secret
     (`connectors/proxmox/op_classes.py::path_reads_guest_or_secret`, see
@@ -191,7 +189,7 @@ and no run approval covers it.
   `descriptor_credential_reason` and `descriptor_credential_waits` read
   it. So such a call waits for a person, and no grant and no run approval
   covers it. Grant create still takes `k8s.apply` and `proxmox.api.get`:
-  an apply of other kinds and a plain read keep their rules.
+  an apply of plain objects and a plain read keep their rules.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
   (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.

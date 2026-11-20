@@ -283,7 +283,7 @@ def test_list_objects_that_share_one_items_array_read_it_once() -> None:
     assert manifest_holds_credential({"manifest": manifest}) is False
     docs = list(yaml.safe_load_all(manifest))
     started = time.perf_counter()
-    assert k8s_op_classes._holds_credential(docs) is False
+    assert k8s_op_classes._any_object_counts(docs, k8s_op_classes._is_credential_kind) is False
     assert time.perf_counter() - started < 0.5
 
 

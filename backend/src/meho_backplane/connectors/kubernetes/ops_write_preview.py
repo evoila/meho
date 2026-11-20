@@ -553,6 +553,62 @@ def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+#: The keys of a :func:`apply_run_commands` entry that hold what it runs.
+_RUN_KEYS = ("command", "args", "exec_commands")
+
+
+def _command_text(entry: dict[str, Any]) -> str:
+    """What *entry* runs as one text: its command line and its hook and probe commands."""
+    parts = [f"{key}: {json.dumps(entry[key])}" for key in ("command", "args") if key in entry]
+    exec_commands = entry.get("exec_commands")
+    if isinstance(exec_commands, dict):
+        parts.extend(f"{where}: {json.dumps(cmd)}" for where, cmd in exec_commands.items())
+    return "; ".join(parts)
+
+
+def _name_only(entry: dict[str, Any], text: str) -> dict[str, Any]:
+    """*entry* without what it runs: the object, the container, the image and the ``cut`` note."""
+    cut = {key: value for key, value in entry.items() if key not in _RUN_KEYS}
+    cut["cut"] = (
+        f"what this container runs is {len(text.encode('utf-8'))} bytes; the card shows "
+        f"only its start, as the list keeps at most {MANIFEST_ECHO_MAX_BYTES} bytes"
+    )
+    cut["command_cut"] = ""
+    return cut
+
+
+def _cut_entry(entry: dict[str, Any], room: int) -> dict[str, Any] | None:
+    """*entry* with what it runs cut to fit in *room* bytes, or ``None`` when it cannot fit.
+
+    The object, the container and the image stay. What it runs becomes
+    one text (:func:`_command_text`) in ``command_cut``, cut at the end,
+    and ``cut`` says so.
+    """
+    text = _command_text(entry)
+    cut = _name_only(entry, text)
+    if _entry_bytes(cut) > room:
+        return None
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        cut["command_cut"] = text[:middle]
+        if _entry_bytes(cut) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    cut["command_cut"] = text[:low]
+    return cut
+
+
+def _omitted_containers(count: int) -> dict[str, Any]:
+    """The closing entry that counts the containers the list has no room for."""
+    return {
+        "omitted_containers": count,
+        "echo_omitted": f"{count} more container(s) not shown; the list keeps "
+        f"at most {MANIFEST_ECHO_MAX_BYTES} bytes",
+    }
+
+
 def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
     """What each container of a ``k8s.apply`` manifest runs, safe to show a person.
 
@@ -561,10 +617,14 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
     each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
     hidden the way the Job previews hide them (:func:`_hide_command_secrets`). Then *redact*,
-    the shared params redaction, runs over the entries. The entries count
-    toward :data:`MANIFEST_ECHO_MAX_BYTES`; the entries that do not fit are
-    counted in one closing entry. An empty list when no document runs a
-    container.
+    the shared params redaction, runs over the entries. An empty list when
+    no document runs a container.
+
+    The entries count toward :data:`MANIFEST_ECHO_MAX_BYTES`. Room is kept
+    for the name of every later container, so an entry that is too large
+    is cut (:func:`_cut_entry`) and the next ones are still named.
+    Only when the names alone do not fit does one closing entry count the
+    containers left out.
 
     The ``manifest`` echo of the same preview shows only the size of each
     command line. This list is for the person who approves: an agent never
@@ -575,23 +635,29 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
         for doc in _parse_manifest(manifest)
         for container in _containers_in(doc)
     ]
+    redacted = redact(entries) if entries else []
+    # The least room each entry needs: whole, or cut down to its name.
+    least = [
+        min(_entry_bytes(entry), _entry_bytes(_name_only(entry, _command_text(entry))))
+        for entry in redacted
+    ]
+    later_least = [0] * (len(least) + 1)
+    for index in range(len(least) - 1, -1, -1):
+        later_least[index] = later_least[index + 1] + least[index]
+    if later_least[0] > MANIFEST_ECHO_MAX_BYTES:
+        # The names do not all fit: keep room for the closing count instead.
+        closing = _entry_bytes(_omitted_containers(len(redacted)))
+        later_least = [closing] * len(redacted) + [0]
     shown: list[dict[str, Any]] = []
     used = 0
-    redacted = redact(entries) if entries else []
     for index, entry in enumerate(redacted):
-        size = _entry_bytes(entry)
-        if used + size > MANIFEST_ECHO_MAX_BYTES:
-            left = len(redacted) - index
-            shown.append(
-                {
-                    "omitted_containers": left,
-                    "echo_omitted": f"{left} more container(s) not shown; the list keeps "
-                    f"at most {MANIFEST_ECHO_MAX_BYTES} bytes",
-                }
-            )
+        room = MANIFEST_ECHO_MAX_BYTES - used - later_least[index + 1]
+        fitted = entry if _entry_bytes(entry) <= room else _cut_entry(entry, room)
+        if fitted is None:
+            shown.append(_omitted_containers(len(redacted) - index))
             break
-        shown.append(entry)
-        used += size
+        shown.append(fitted)
+        used += _entry_bytes(fitted)
     return shown
 
 

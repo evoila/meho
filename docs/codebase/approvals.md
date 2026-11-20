@@ -3130,7 +3130,9 @@ preview. The `manifest` echo above shows only the size of each command
 line. When the dry run fails, the stored request has the
 `preview_unavailable` marker and, for a person, a top-level `run_commands`
 built from the manifest text (`register_preview_failure_keys` in
-`operations/_preview.py`). An agent never reads `run_commands`: its own
+`operations/_preview.py`). The console card shows that list in a "What
+each container runs" block under the warning that the preview failed
+(`approvals/_modal.html`). An agent never reads `run_commands`: its own
 preview has no such key, and the stored request it reads (MCP tools and
 the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 

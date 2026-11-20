@@ -272,7 +272,9 @@ manages, not only in MEHO's own login realm:
 Some changes of rights always wait, also for an admin in the web console:
 a change that reads, writes or makes a credential (for example a new
 password, a new user, or the realm settings with the mail password), a
-`destructive` change, and a `secret.move` with a `keycloak:` side.
+`destructive` change, a change with the "always wait" mark (from an
+override or a classification rule), and a `secret.move` with a
+`keycloak:` side.
 
 When you may not approve such a change, MEHO answers "This is a change
 of rights. Only an admin may approve it." On the command line and over

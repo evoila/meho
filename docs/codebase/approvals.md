@@ -1404,8 +1404,10 @@ when all of this holds:
 
 - the operation is registered with `register_rights_change_op` or
   `register_grant_op` (`is_rights_change_op`);
-- it is not `destructive`, and it does not read, write or make a
-  credential (`credential_call_waits`). Those always wait. A change of
+- it is not `destructive`, it has no "always wait" mark
+  (`policy_always_wait`, from an override or a classification rule), and
+  it does not read, write or make a credential (`credential_call_waits`).
+  Those always wait. A change of
   rights only by its params (`register_rights_change_check`, for example a
   `secret.move` with a `keycloak:` side) always waits too;
 - the caller is a person with a web session and an admin

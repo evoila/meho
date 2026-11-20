@@ -17,6 +17,8 @@ it (:func:`console_refusal`).
 The call still waits when:
 
 * it is ``destructive``: such a call always waits for a person;
+* it has the "always wait" mark (an override or a classification rule):
+  such a call always waits for a person;
 * it reads, writes or makes a credential
   (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
   such a call always waits for a person;
@@ -80,6 +82,7 @@ def runs_at_once_in_console(operator: Operator, descriptor: EndpointDescriptor) 
     return (
         is_rights_change_op(descriptor.op_id)
         and descriptor.safety_level != "destructive"
+        and not getattr(descriptor, "policy_always_wait", False)
         and not credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None))
         and operator.web_session
         and is_human_principal(operator)

@@ -395,6 +395,7 @@ def admin_console_rights_change(asker: Asker, asked: Asked) -> bool:
         and asker.tenant_chosen
         and "rights_change" in asked.op_class
         and "credential_waits" not in asked.op_class
+        and "classified_always_wait" not in asked.op_class
         and asked.risk != "destructive"
     )
 

@@ -17,7 +17,8 @@ a respx-mocked Keycloak Admin REST API:
   admin.
 
 The gate keeps the wait for a change of rights that reads, writes or makes
-a credential, for a ``destructive`` one, and for a ``secret.move`` with a
+a credential, for a ``destructive`` one, for one with the "always wait"
+mark, and for a ``secret.move`` with a
 Keycloak side. The policy evaluator gives the same answers.
 
 Fixture values are made up.
@@ -320,12 +321,37 @@ async def test_a_change_of_rights_that_writes_a_credential_waits(
     assert runs_at_once_in_console(_person(), descriptor) is False
 
 
-def test_a_destructive_change_of_rights_and_a_secret_move_wait() -> None:
+@pytest.mark.asyncio
+async def test_an_always_wait_change_of_rights_waits_for_an_admin_in_the_console(
+    keycloak: KeycloakConnector,
+) -> None:
+    descriptor = await lookup_descriptor(
+        tenant_id=_TENANT_ID,
+        product="keycloak",
+        version="26.x",
+        impl_id="keycloak-admin",
+        op_id=_ADD,
+    )
+    assert descriptor is not None
+    descriptor.policy_always_wait = True
+
+    verdict, _reason = await policy_gate(
+        operator=_person(), descriptor=descriptor, target=None, connector_id=_CONNECTOR_ID
+    )
+
+    assert verdict.value == "needs-approval"
+    assert runs_at_once_in_console(_person(), descriptor) is False
+
+
+def test_a_destructive_or_always_wait_change_of_rights_and_a_secret_move_wait() -> None:
     destructive = EndpointDescriptor(op_id=_ADD, safety_level="destructive", parameter_schema={})
     move = EndpointDescriptor(op_id="secret.move", safety_level="dangerous", parameter_schema={})
     plain = EndpointDescriptor(op_id=_ADD, safety_level="dangerous", parameter_schema={})
+    marked = EndpointDescriptor(op_id=_ADD, safety_level="dangerous", parameter_schema={})
+    marked.policy_always_wait = True
 
     assert runs_at_once_in_console(_person(), destructive) is False
+    assert runs_at_once_in_console(_person(), marked) is False
     assert runs_at_once_in_console(_person(), move) is False
     assert runs_at_once_in_console(_person(), plain) is True
     assert runs_at_once_in_console(_person(web=False), plain) is False
@@ -376,6 +402,7 @@ def _asked(*marks: str, risk: str = "dangerous") -> Asked:
         (_asker(kind="agent", via="token"), _asked("rights_change"), Lookups(), Verdict.WAIT),
         (_asker(), _asked("rights_change", "credential_waits"), Lookups(), Verdict.WAIT),
         (_asker(), _asked("rights_change", risk="destructive"), Lookups(), Verdict.WAIT),
+        (_asker(), _asked("rights_change", "classified_always_wait"), Lookups(), Verdict.WAIT),
         (_asker(), _asked(), Lookups(), Verdict.WAIT),
     ],
     ids=[
@@ -387,6 +414,7 @@ def _asked(*marks: str, risk: str = "dangerous") -> Asked:
         "agent",
         "credential",
         "destructive",
+        "always-wait",
         "not-a-rights-change",
     ],
 )

@@ -9,6 +9,7 @@ proof, and the proof does not change with ``DATABASE_URL``. Without it,
 ``warn`` that names the setting, and MEHO logs one warning at start.
 """
 
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,7 +20,9 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 from meho_backplane import first_start
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
+from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations._validate import (
     InstallKeyMissingError,
     derive_install_key,
@@ -40,10 +43,9 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BACKPLANE_URL", _SITE)
     monkeypatch.delenv("PARAMS_HASH_KEY", raising=False)
     get_settings.cache_clear()
-    first_start.reset_public_run_for_testing()
     yield
     get_settings.cache_clear()
-    first_start.reset_public_run_for_testing()
+    app.dependency_overrides.pop(verify_jwt_and_bind, None)
 
 
 def _set_key(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
@@ -87,7 +89,13 @@ def _patch_green_site(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def _dns_line() -> dict[str, Any]:
-    response = TestClient(app).get("/first-start")
+    app.dependency_overrides[verify_jwt_and_bind] = lambda: Operator(
+        sub="admin-sub",
+        raw_jwt="not-a-real-token",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    response = TestClient(app).get("/api/v1/first-start")
     assert response.status_code == 200
     body = response.json()
     line: dict[str, Any] = body["checks"][0]

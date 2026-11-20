@@ -9,7 +9,8 @@ a machine login when:
 
 * the login signed in as one: :func:`note_machine_login` adds a
   :class:`~meho_backplane.db.models.MachineLogin` row on each REST and MCP
-  call of an agent, service or runner login; or
+  call of an agent, service or runner login, and when a hosted agent run that
+  a schedule or an event starts signs in; or
 * the id is the login of an agent definition, an agent, an add-on or a
   runner of the tenant.
 """

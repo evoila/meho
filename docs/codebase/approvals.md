@@ -2013,7 +2013,8 @@ a row of the `machine_login` table, or the login of an agent definition,
 an agent, an add-on or a runner of the tenant. Each REST call
 (`verify_jwt_and_bind`) and each MCP call (`verify_mcp_jwt_and_bind`) of
 a machine login adds its id to `machine_login` (`note_machine_login`,
-safe to run twice). When MEHO finds only machine logins, the list is
+safe to run twice). So does the sign-in of a hosted agent run that a
+schedule or an event starts (`_authenticate_scheduled_agent`). When MEHO finds only machine logins, the list is
 empty and only an admin may approve.
 
 The checks investigator runs as an agent (`run_scheduled`), so its

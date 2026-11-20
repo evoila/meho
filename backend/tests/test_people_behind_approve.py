@@ -22,8 +22,10 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 
+from meho_backplane.agent.invocation import AgentInvoker
 from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -309,6 +311,64 @@ async def test_only_an_admin_approves_when_only_a_machine_login_set_up_the_agent
         async with get_sessionmaker()() as session:
             await note_machine_login(session, machine)
             await session.commit()
+
+    request_id = await _park(_agent())
+    assert (await _load(request_id)).people_behind == []
+    operator = _login(_OTHER)
+    admin = _login("some-admin", role=TenantRole.TENANT_ADMIN)
+
+    assert not await _surfaces_agree(request_id, operator)
+    with pytest.raises(UnknownRequesterApprovalError):
+        await _approve(request_id, operator)
+    assert await _surfaces_agree(request_id, admin)
+    assert (await _approve(request_id, admin)).status == "approved"
+
+
+async def test_only_an_admin_approves_when_a_hosted_scheduled_run_handed_over_the_runbook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hosted_sub = "hosted-agent-sa"
+    hosted_client = "agent:hosted"
+    await _add(
+        AgentDefinition(
+            tenant_id=_TENANT,
+            name="hosted",
+            identity_ref=hosted_client,
+            model_tier="standard",
+            system_prompt="p",
+            toolset={},
+            turn_budget=5,
+            created_by_sub="someone",
+        )
+    )
+    hosted = _login(hosted_sub, kind=PrincipalKind.AGENT, client_id=hosted_client)
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=hosted),
+    )
+    signed_in, _ = await AgentInvoker()._authenticate_scheduled_agent(
+        "hosted",
+        agent_client_id=hosted_client,
+        agent_client_secret=SecretStr("test-secret"),
+        settings=get_settings(),
+    )
+    assert signed_in.sub == hosted_sub
+    await _add(
+        RunbookRun(
+            tenant_id=_TENANT,
+            template_slug="patch",
+            template_version=1,
+            assigned_to=_AGENT_SUB,
+            target="host-1",
+            params={},
+            started_by=hosted_sub,
+            reassigned_by=hosted_sub,
+        )
+    )
 
     request_id = await _park(_agent())
     assert (await _load(request_id)).people_behind == []

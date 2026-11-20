@@ -57,8 +57,8 @@
         <h4 class="text-sm font-semibold">State-changing operation</h4>
         <p class="text-xs [overflow-wrap:anywhere]">
           This creates a client scope in the realm. It is
-          <span class="font-semibold">a change of rights</span>. Confirming runs
-          it at once, after MEHO checks that you may make it.
+          <span class="font-semibold">a change of rights</span>. Confirming makes
+          a request that waits for approval.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-warning badge-sm" data-write-safety>safety: caution</span>
@@ -140,7 +140,7 @@
         </button>
         <button type="submit" data-action="create" class="btn btn-warning btn-sm gap-1">
           {{ icon("key-round", class="size-4") }}
-          Create
+          Create (request approval)
         </button>
       </div>
     </form>

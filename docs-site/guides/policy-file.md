@@ -301,7 +301,7 @@ bindings:
   it. Bind only groups that your tenant manages. An admin of the tenant
   decides the bindings: an import with a token waits until an admin
   approves it in the web console, and an admin's import in the web console
-  runs at once.
+  runs at once through the Run window, after a fresh sign-in.
 
 !!! note "Off by default"
 

@@ -37,7 +37,7 @@ func decodeBody(t *testing.T, r *http.Request) map[string]any {
 var waitingAnswer = map[string]any{
 	"status":              "awaiting_approval",
 	"approval_request_id": "<approval-id>",
-	"message":             "The change waits until another tenant admin approves it.",
+	"message":             "The change waits until a tenant admin approves it in the web console.",
 	"matched_operations":  2,
 	"changed_operations":  1,
 }

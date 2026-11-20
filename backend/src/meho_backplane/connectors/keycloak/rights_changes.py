@@ -9,7 +9,8 @@ has which role, who may sign in, or how strong a sign-in is, is a change
 of rights. For each such write:
 
 * an admin's call in the web console runs at once, after the checks of
-  who may make it (:mod:`~meho_backplane.operations.rights_change_console`);
+  :mod:`~meho_backplane.operations.rights_change_console`; a write that
+  does not change one login or group always waits;
 * every other call waits, and only an admin (a tenant admin or a platform
   admin) approves it, in the web console; the admin may be the one who
   asked;

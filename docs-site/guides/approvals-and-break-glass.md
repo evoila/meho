@@ -277,8 +277,10 @@ a change that reads, writes or makes a credential (for example a new
 password, a new user, or the realm settings with the mail password), a
 change whose values carry a credential (for example a client update
 with a new client secret), a `destructive` change, a change with the "always wait" mark (from an
-override or a classification rule), and a `secret.move` with a
-`keycloak:` side.
+override or a classification rule), a `secret.move` with a
+`keycloak:` side, and a Keycloak write that does not change one login or
+group (for example a new client scope or protocol mapper, a change of a
+realm or a client, or turning a login on).
 
 When you may not approve such a change, MEHO answers "This is a change
 of rights. Only an admin may approve it." On the command line and over

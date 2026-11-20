@@ -487,9 +487,11 @@ role, who may sign in, or how strong a sign-in is, is a change of rights.
 For such a write:
 
 - an admin's call in the web console runs at once
-  (`operations/rights_change_console.py`), after the checks of who may make
-  it. A write that reads, writes or makes a credential (`realm.update`,
-  `user.create`, `user.reset_password`) still waits;
+  (`operations/rights_change_console.py`), after a fresh sign-in and the
+  checks of who may make it. A write that reads, writes or makes a
+  credential (`realm.update`, `user.create`, `user.reset_password`) still
+  waits, and so does a write that does not change one login or group (one
+  that is not in `GRANT_OPS`);
 - every other call waits: a token call (command line, REST, MCP), also the
   admin's own token, an agent's call and an Operator's call;
 - only an admin (a tenant admin or a platform admin) approves a waiting
@@ -1052,8 +1054,8 @@ the existing mapper is changed.
   `keycloak.client_scope.list`.
 - Risk level `dangerous`, approval required, group `protocol_mapper_write`.
 - It is a change of rights: a mapper decides what goes into the login
-  token, so a change can give rights. An admin's call in the web console
-  runs at once; every other call waits for approval:
+  token, so a change can give rights. Each call waits for approval, also
+  an admin's call in the web console:
   - The op is registered with `register_rights_change_op`. Only a tenant
     admin or a platform admin approves it, with a click in the web console,
     and may be the requester. The self-approval switch does not cover it.

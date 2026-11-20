@@ -374,7 +374,7 @@ async def test_dry_run_shows_that_a_floor_still_waits(embedding: AsyncMock) -> N
 
 
 # ---------------------------------------------------------------------------
-# Only a person asks for policy.classify, and a second admin runs it
+# Only a person asks for policy.classify; an admin approves it or runs it in the console
 # ---------------------------------------------------------------------------
 
 _PARAMS = {"match": {"op": "clschk.vm.*"}, "category": "compute"}

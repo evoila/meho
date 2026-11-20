@@ -200,7 +200,8 @@ A binding edit is a change of rights: bindings change only through the
 policy import, and the import carries the rights-change mark
 ([policy.md](policy.md)). An import with a token waits until an admin
 approves it in the web console; that admin may be the one who asked. An
-admin's import in the web console runs at once. The
+admin's import in the web console runs at once through the Run window,
+after a fresh sign-in. The
 import diff has a `bindings` section with `added`, `changed` and
 `removed`.
 

@@ -14,8 +14,10 @@ hides them in the text:
   reads every line, and the lines below a secret-named key that are
   indented deeper are hidden with the value: a block value
   (``password: |``), a value that starts on the next line, and a value that
-  goes on over more lines. A note after the value (``# rotate monthly``)
-  stays.
+  goes on over more lines. A quoted value ends at its closing quote, also
+  when it holds an escaped quote (``\\"`` or ``''``). A note after the value
+  (``# rotate monthly``) stays, and so does a comment line below the key
+  that is not part of a block value.
 * :func:`hide_secret_xml` reads XML tags: the text of an element with a
   secret name (``<password>...</password>``, also with child elements), an
   attribute with a secret name (``dbPassword="..."``), and the ``value``
@@ -57,7 +59,14 @@ _FIELD_LINE: Final[re.Pattern[str]] = re.compile(
 )
 
 #: A YAML comment after a value: ``#`` at the start or after white space.
-_TRAILING_NOTE: Final[re.Pattern[str]] = re.compile(r"(?:^|[ \t]++)#")
+_TRAILING_NOTE: Final[re.Pattern[str]] = re.compile(r"[ \t]*+(?<![^ \t])#")
+
+#: A value in quotes that close on the line: ``\"`` inside double quotes and
+#: ``''`` inside single quotes are escaped quotes, not the closing quote.
+_QUOTED_VALUE: Final[re.Pattern[str]] = re.compile(r"\"(?:[^\"\\]|\\.)*+\"|'(?:[^']|'')*+'")
+
+#: The indicator of a YAML block value, such as ``|``, ``>-`` or ``|2+``.
+_BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][0-9+\-]{0,2}")
 
 #: Values under a secret name that are no secret.
 _KEPT_WORDS: Final[frozenset[str]] = frozenset(
@@ -125,23 +134,25 @@ def _content_end(text: str, line_end: int) -> int:
     return line_end - 1 if line_end > 0 and text[line_end - 1] == "\r" else line_end
 
 
-def _block_end(text: str, line_end: int, column: int) -> int:
-    """The end of the lines after *line_end* that are indented deeper than *column*.
+def _deeper_lines(text: str, line_end: int, column: int) -> list[tuple[int, int, bool]]:
+    """The lines after *line_end* that are indented deeper than *column*.
 
-    Blank lines inside the block count; blank lines after its last line do
-    not. Returns *line_end* when no such line follows.
+    Each line is (start, end without the line break, the line is a comment).
+    Blank lines are left out.
     """
-    end = line_end
+    lines: list[tuple[int, int, bool]] = []
     cursor = line_end
     while cursor < len(text):
-        next_end = _line_end(text, cursor + 1)
-        line = text[cursor + 1 : next_end].rstrip("\r")
-        if line.strip():
-            if len(line) - len(line.lstrip(" \t")) <= column:
-                break
-            end = next_end
-        cursor = next_end
-    return end
+        start = cursor + 1
+        cursor = _line_end(text, start)
+        end = _content_end(text, cursor)
+        content = text[start:end].lstrip(" \t")
+        if not content:
+            continue
+        if end - start - len(content) <= column:
+            break
+        lines.append((start, end, content.startswith("#")))
+    return lines
 
 
 def _split_value(value: str) -> tuple[str, str]:
@@ -151,9 +162,9 @@ def _split_value(value: str) -> tuple[str, str]:
     other value ends where a YAML comment starts.
     """
     if value[:1] in ('"', "'"):
-        close = value.find(value[0], 1)
-        if close != -1:
-            return value[: close + 1], value[close + 1 :]
+        quoted = _QUOTED_VALUE.match(value)
+        if quoted is not None:
+            return value[: quoted.end()], value[quoted.end() :]
         return value, ""
     note = _TRAILING_NOTE.search(value)
     if note is None:
@@ -174,22 +185,37 @@ def _line_value_span(text: str, match: re.Match[str]) -> tuple[int, int, str] | 
     Outside a comment, the lines below the key that are indented deeper
     belong to the value (a block value such as ``password: |``, or a value
     that goes on over more lines) and are hidden with it. A note after the
-    value (``# rotate monthly``) stays.
+    value (``# rotate monthly``) stays. Below a value that is not a block
+    value, a comment line stays where it is.
     """
     value, note = _split_value(match["value"].rstrip(" \t\r"))
     start = match.start("value")
-    block_end = line_end = _line_end(text, match.start())
+    lines: list[tuple[int, int, bool]] = []
     if match["comment"] is None:
         column = match.start("key_token") - match.start()
-        block_end = _block_end(text, line_end, column)
-    if block_end == line_end:
+        lines = _deeper_lines(text, _line_end(text, match.start()), column)
+        if _BLOCK_INDICATOR.fullmatch(value.strip()) is not None:
+            lines = [(line_start, end, False) for line_start, end, _ in lines]
+        while lines and lines[-1][2]:
+            lines.pop()
+    parts = [value] + [
+        text[line_start:end].strip() for line_start, end, is_comment in lines if not is_comment
+    ]
+    if len(parts) == 1:
         if _keeps(value):
             return None
         return start, start + len(value), SECRET_FIELD_MARKER
+    if _keeps(" ".join(part for part in parts if part)):
+        return None
     lead = "" if text[start - 1] in " \t" else " "
     if note and note[0] not in " \t":
         note = " " + note
-    return start, _content_end(text, block_end), f"{lead}{SECRET_FIELD_MARKER}{note}"
+    kept = [f"{lead}{SECRET_FIELD_MARKER}{note}"]
+    for line_start, end, is_comment in lines:
+        if is_comment:
+            line_break = "\r\n" if text[line_start - 2 : line_start] == "\r\n" else "\n"
+            kept.append(line_break + text[line_start:end])
+    return start, lines[-1][1], "".join(kept)
 
 
 def hide_secret_lines(text: str, *, comments_only: bool) -> str:

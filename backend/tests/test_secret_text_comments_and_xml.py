@@ -235,6 +235,58 @@ def test_note_after_a_hidden_value_stays(text: str, expected: str) -> None:
     assert hide_secret_text(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f'bad: [\ndbPassword: "prefix\\"{_FAKE_BROKEN}" # rotate monthly\nport: 1\n',
+            f"bad: [\ndbPassword: {_MARKER} # rotate monthly\nport: 1\n",
+        ),
+        (
+            f"bad: [\ndbPassword: 'it''s {_FAKE_BROKEN}'  # rotate monthly\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER}  # rotate monthly\nport: 1\n",
+        ),
+        (
+            f'# dbPassword: "prefix\\"{_FAKE_COMMENT}" # rotate monthly\nport: 1\n',
+            f"# dbPassword: {_MARKER} # rotate monthly\nport: 1\n",
+        ),
+        (
+            f"# dbPassword: 'it''s {_FAKE_COMMENT}' # rotate monthly\nport: 1\n",
+            f"# dbPassword: {_MARKER} # rotate monthly\nport: 1\n",
+        ),
+    ],
+    ids=["double-quoted", "single-quoted", "comment-double-quoted", "comment-single-quoted"],
+)
+def test_quoted_value_with_an_escaped_quote_is_hidden_whole(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "bad: [\ndbPassword: true\n  # rotate monthly\nport: 1\n",
+            "bad: [\ndbPassword: true\n  # rotate monthly\nport: 1\n",
+        ),
+        (
+            f"bad: [\ndbPassword: {_FAKE_BROKEN}\n  # rotate monthly\nport: 1\n",
+            f"bad: [\ndbPassword: {_MARKER}\n  # rotate monthly\nport: 1\n",
+        ),
+        (
+            f"bad: [\r\ndbPassword: first\r\n  # rotate monthly\r\n  {_FAKE_BLOCK}\r\nport: 1\r\n",
+            f"bad: [\r\ndbPassword: {_MARKER}\r\n  # rotate monthly\r\nport: 1\r\n",
+        ),
+        (
+            f"bad: [\ndbSecret: |\n  # {_FAKE_BLOCK}\nport: 1\n",
+            f"bad: [\ndbSecret: {_MARKER}\nport: 1\n",
+        ),
+    ],
+    ids=["flag", "plain-value", "value-on-more-lines-crlf", "block-value-line"],
+)
+def test_comment_line_below_a_secret_key_stays(text: str, expected: str) -> None:
+    assert hide_secret_text(text) == expected
+
+
 def test_broken_yaml_keeps_flags_empty_and_masked_values() -> None:
     text = "bad: [\npassword: true\ndbSecret:\ntoken: '[REDACTED:api_key]'\nnext: 1\n"
     assert hide_secret_text(text) == text

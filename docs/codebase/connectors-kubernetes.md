@@ -59,8 +59,10 @@ agent grant and no run approval covers them
 Both are declared in `op_classes.py` of the connector. The approval card
 says in one line why the call waits; only a person reads that line. The
 card of a `k8s.apply` also names, for a person only, what each container
-runs: the object, the container, the image, and the `command` and `args`
-with secret values hidden (`run_commands`, see `approvals.md`).
+runs: the object, the container, the image, the `command` and `args`, and
+the `exec` commands of its lifecycle hooks and probes, with secret values
+hidden (`run_commands`, see `approvals.md`). It does so also when the dry
+run fails.
 The stored request of a `k8s.apply` of a Secret keeps its manifest only
 in the encrypted one-time handoff of the run, as a credential write does.
 The row of the request keeps no copy, also not when the request is

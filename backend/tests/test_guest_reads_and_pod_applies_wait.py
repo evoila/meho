@@ -44,6 +44,7 @@ from meho_backplane.connectors.kubernetes.op_classes import (
     manifest_holds_credential,
     manifest_needs_a_person,
 )
+from meho_backplane.connectors.kubernetes.ops_write_dangerous import ApplyRejectedError
 from meho_backplane.connectors.kubernetes.ops_write_preview import RUN_COMMANDS_KEY
 from meho_backplane.connectors.proxmox.op_classes import path_reads_guest_or_secret
 from meho_backplane.db.engine import get_sessionmaker
@@ -464,11 +465,17 @@ class _Descriptor:
 
 
 async def _apply_preview(
-    monkeypatch: pytest.MonkeyPatch, manifest: str, *, agent: bool
+    monkeypatch: pytest.MonkeyPatch, manifest: str, *, agent: bool, dry_run_fails: bool = False
 ) -> dict[str, Any]:
     async def _fake_apply(
         connector: Any, target: Any, operator: Any, params: dict[str, Any]
     ) -> dict[str, Any]:
+        if dry_run_fails:
+            raise ApplyRejectedError(
+                "the API server refused the dry run",
+                http_status=403,
+                upstream_message="denied by an admission webhook",
+            )
         return {"dry_run": True, "applied": [], "total": 0}
 
     monkeypatch.setattr(
@@ -535,6 +542,101 @@ async def test_an_agent_never_reads_what_the_containers_run(
     assert _proposed_effect_for(_person(), row) == stored  # type: ignore[arg-type]
 
 
+_HOOKED_POD = _manifest(
+    "Pod",
+    spec={
+        "containers": [
+            {
+                "name": "web",
+                "image": "registry.example.test/web:1",
+                "lifecycle": {
+                    "postStart": {"exec": {"command": ["sh", "-c", f"login --password {_TOKEN}"]}},
+                    "preStop": {"exec": {"command": ["drain", "--now"]}},
+                },
+                "startupProbe": {"exec": {"command": ["check", "--start"]}},
+                "livenessProbe": {"exec": {"command": ["check", "--token", _TOKEN]}},
+                "readinessProbe": {"exec": {"command": ["check", "--ready"]}},
+            },
+            {
+                "name": "side",
+                "image": "registry.example.test/side:1",
+                "livenessProbe": {"httpGet": {"path": "/healthz", "port": 8080}},
+            },
+        ]
+    },
+)
+
+
+@pytest.mark.asyncio
+async def test_the_card_names_the_commands_of_hooks_and_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effect = await _apply_preview(monkeypatch, _HOOKED_POD, agent=False)
+
+    web, side = effect["preview"][RUN_COMMANDS_KEY]
+    assert web["exec_commands"] == {
+        "lifecycle.postStart": ["sh", "-c", "login --password ***REDACTED***"],
+        "lifecycle.preStop": ["drain", "--now"],
+        "startupProbe": ["check", "--start"],
+        "livenessProbe": ["check", "--token", "***REDACTED***"],
+        "readinessProbe": ["check", "--ready"],
+    }
+    assert "exec_commands" not in side
+    assert _TOKEN not in json.dumps(effect)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_dry_run_still_names_what_each_container_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effect = await _apply_preview(monkeypatch, _HOOKED_POD, agent=False, dry_run_fails=True)
+
+    assert effect["preview_unavailable"] is True
+    assert "preview" not in effect
+    web, side = effect[RUN_COMMANDS_KEY]
+    assert web["object"] == "Pod/apps/a"
+    assert web["exec_commands"]["livenessProbe"] == ["check", "--token", "***REDACTED***"]
+    assert side["container"] == "side"
+    assert _TOKEN not in json.dumps(effect)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_never_reads_the_commands_of_a_failed_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own_preview = await _apply_preview(monkeypatch, _HOOKED_POD, agent=True, dry_run_fails=True)
+    assert own_preview["preview_unavailable"] is True
+    assert RUN_COMMANDS_KEY not in own_preview
+
+    stored = await _apply_preview(monkeypatch, _HOOKED_POD, agent=False, dry_run_fails=True)
+    shown = proposed_effect_for_agent(
+        "k8s.apply", stored, params={"manifest": _HOOKED_POD}, connector_id="k", tenant=None
+    )
+    assert shown is not None
+    assert RUN_COMMANDS_KEY not in shown
+    assert shown["preview_unavailable"] is True
+
+    row = SimpleNamespace(
+        op_id="k8s.apply",
+        proposed_effect=stored,
+        params={"manifest": _HOOKED_POD},
+        connector_id="kubernetes-1.x",
+        tenant_id=_TENANT,
+    )
+    for login in (_service(), _agent()):
+        assert RUN_COMMANDS_KEY not in _proposed_effect_for(login, row)  # type: ignore[arg-type]
+    assert _proposed_effect_for(_person(), row) == stored  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_dry_run_of_a_manifest_meho_cannot_read_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effect = await _apply_preview(monkeypatch, "kind: [unclosed", agent=False, dry_run_fails=True)
+    assert effect["preview_unavailable"] is True
+    assert RUN_COMMANDS_KEY not in effect
+
+
 @pytest.mark.asyncio
 async def test_the_card_of_an_apply_without_a_pod_has_no_command_list(
     monkeypatch: pytest.MonkeyPatch,
@@ -555,6 +657,46 @@ async def test_a_container_named_twice_by_an_alias_is_listed_once(
     )
     effect = await _apply_preview(monkeypatch, manifest, agent=False)
     assert [entry["container"] for entry in effect["preview"][RUN_COMMANDS_KEY]] == ["web"]
+
+
+# ---------------------------------------------------------------------------
+# The card of a waiting read names what it reads
+# ---------------------------------------------------------------------------
+
+
+async def _card(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    ctx = PreviewContext(
+        descriptor=_Descriptor(op_id=op_id),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_person(),
+        target=None,
+        params=params,
+        connector_id="c",
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    return effect
+
+
+@pytest.mark.asyncio
+async def test_the_card_of_a_waiting_proxmox_read_names_the_path_and_the_query() -> None:
+    params = {"path": "nodes/pve1/qemu/100/agent/file-read", "query": {"file": "/var/log/app.log"}}
+    assert path_reads_guest_or_secret(params)
+
+    effect = await _card("proxmox.api.get", params)
+
+    assert effect["params_echo"] == params
+
+
+@pytest.mark.asyncio
+async def test_the_card_of_a_waiting_kubernetes_api_call_names_its_params() -> None:
+    op_id = "POST:/api/v1/namespaces/{namespace}/pods/{name}/exec"
+    params = {"namespace": "apps", "name": "web", "command": "uptime"}
+    assert ingested_op_is_credential_call(op_id)
+
+    effect = await _card(op_id, params)
+
+    assert effect["params_echo"] == params
 
 
 # ---------------------------------------------------------------------------

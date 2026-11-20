@@ -3122,11 +3122,17 @@ names). Further connectors register their own builders as needed.
 
 For a person the `k8s.apply` preview also has `run_commands`: one entry
 per container (init, main and ephemeral, at any depth) with the object,
-the container name, the image and the `command` and `args`, with secret
-values hidden by the rules of the Job preview. The `manifest` echo above
-shows only the size of each command line. An agent never reads
-`run_commands`: its own preview has no such key, and the stored request it
-reads (MCP tools and the REST API) leaves it out.
+the container name, the image, the `command` and `args`, and in
+`exec_commands` the `exec` command of each lifecycle hook (`postStart`,
+`preStop`) and exec probe (`startupProbe`, `livenessProbe`,
+`readinessProbe`), with secret values hidden by the rules of the Job
+preview. The `manifest` echo above shows only the size of each command
+line. When the dry run fails, the stored request has the
+`preview_unavailable` marker and, for a person, a top-level `run_commands`
+built from the manifest text (`register_preview_failure_keys` in
+`operations/_preview.py`). An agent never reads `run_commands`: its own
+preview has no such key, and the stored request it reads (MCP tools and
+the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 
 ## Credential writes: what the approver sees (#4850)
 

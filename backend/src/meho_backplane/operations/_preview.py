@@ -119,6 +119,7 @@ __all__ = [
     "register_person_only_preview_keys",
     "register_preview_builder",
     "register_preview_builder_switch",
+    "register_preview_failure_keys",
     "register_preview_last_step",
     "without_person_only_effect_keys",
 ]
@@ -466,6 +467,10 @@ _PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] 
 #: preview a caller reads (:func:`register_agent_preview_filter`).
 _AGENT_PREVIEW_FILTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
+#: ``op_id`` -> a function that gives the keys a failed preview of the op
+#: still shows a person (:func:`register_preview_failure_keys`).
+_PREVIEW_FAILURE_KEYS: dict[str, Callable[[PreviewContext], dict[str, Any]]] = {}
+
 #: The keys a builder's result puts on a stored ``proposed_effect``.
 _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
 
@@ -517,6 +522,21 @@ def register_person_only_preview_keys(
     _PERSON_ONLY_PREVIEW_KEYS[op_id] = (enabled, keys)
 
 
+def register_preview_failure_keys(
+    op_id: str, build: Callable[[PreviewContext], dict[str, Any]]
+) -> None:
+    """Add the keys *build* gives to the failed preview of *op_id*, for a person only.
+
+    When the builder of *op_id* raises, the stored request holds the
+    ``preview_unavailable`` marker. *build* adds what the card can still show
+    from the params alone. MEHO keeps only the keys of
+    :data:`PERSON_ONLY_EFFECT_KEYS`, so a caller that is not a person never
+    reads them. The agent's own preview gets none, and a *build* that raises
+    adds nothing.
+    """
+    _PREVIEW_FAILURE_KEYS[op_id] = build
+
+
 def register_agent_preview_filter(
     op_id: str, preview_filter: Callable[[dict[str, Any]], dict[str, Any]]
 ) -> None:
@@ -530,8 +550,10 @@ def register_agent_preview_filter(
 
 
 #: Top-level keys of a stored ``proposed_effect`` that only a person reads:
-#: the line of the approval card that says why a credential call waits.
-PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait"})
+#: the line of the approval card that says why a credential call waits, and
+#: what each container of a ``k8s.apply`` runs when its dry run failed
+#: (:func:`register_preview_failure_keys`).
+PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
 
 
 def without_person_only_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
@@ -731,7 +753,10 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     except Exception as exc:
         # Fail-soft: a preview is a convenience, the park is the
         # safety-relevant action. Never let a dry-run fault block it.
-        return _preview_unavailable_marker(ctx, exc, op_id=op_id, op_class=op_class)
+        marker = _preview_unavailable_marker(ctx, exc, op_id=op_id, op_class=op_class)
+        if not ctx.agent_preview:
+            marker.update(_preview_failure_keys(ctx, op_id=op_id, marker=marker))
+        return marker
 
     if preview is None:
         return None
@@ -767,6 +792,33 @@ def _preview_unavailable_marker(
         "op_class": op_class,
         "preview_unavailable": True,
         "preview_error": reason,
+    }
+
+
+def _preview_failure_keys(
+    ctx: PreviewContext, *, op_id: str, marker: dict[str, Any]
+) -> dict[str, Any]:
+    """The person-only keys a failed preview of *op_id* still shows.
+
+    Only keys of :data:`PERSON_ONLY_EFFECT_KEYS` that the marker does not
+    hold yet. Empty when *op_id* registered none or its function raised.
+    """
+    build = _PREVIEW_FAILURE_KEYS.get(op_id)
+    if build is None:
+        return {}
+    try:
+        keys = build(ctx)
+    except Exception as exc:
+        _log.warning(
+            "proposed_effect_failure_keys_failed",
+            op_id=op_id,
+            error=preview_failure_reason(exc),
+        )
+        return {}
+    return {
+        key: value
+        for key, value in keys.items()
+        if key in PERSON_ONLY_EFFECT_KEYS and key not in marker
     }
 
 
@@ -933,7 +985,8 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     stores the ``preview_unavailable`` marker with the server's message in
     ``preview_error``, so the reviewer sees that the apply will be
     rejected instead of a clean-looking preview with no
-    ``resourceVersion`` and no ``uid`` (#3876).
+    ``resourceVersion`` and no ``uid`` (#3876). For a person, that marker
+    still names what each container runs (:func:`_k8s_apply_failure_keys`).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None
@@ -978,6 +1031,22 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
         apply_subject,
     )
 
+    _redact = _k8s_apply_redactor(ctx)
+    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    if not ctx.agent_preview:
+        run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
+        if run_commands:
+            echo[RUN_COMMANDS_KEY] = run_commands
+    subject = apply_subject(result.get("applied"))
+    if subject is not None:
+        echo["subject"] = subject
+    return echo
+
+
+def _k8s_apply_redactor(
+    ctx: PreviewContext,
+) -> Callable[[list[dict[str, Any]]], list[dict[str, Any]]]:
+    """The shared params redaction, run over a list of manifest dicts of *ctx*."""
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
 
     def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -989,15 +1058,26 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
         )
         return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
 
-    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
-    if not ctx.agent_preview:
-        run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
-        if run_commands:
-            echo[RUN_COMMANDS_KEY] = run_commands
-    subject = apply_subject(result.get("applied"))
-    if subject is not None:
-        echo["subject"] = subject
-    return echo
+    return _redact
+
+
+def _k8s_apply_failure_keys(ctx: PreviewContext) -> dict[str, Any]:
+    """``run_commands`` for the card of a ``k8s.apply`` whose dry run failed.
+
+    MEHO builds it from the manifest text, the same as on a preview that
+    worked (``ops_write_preview.apply_run_commands``). The card still says
+    that the preview is not available.
+    """
+    from meho_backplane.connectors.kubernetes.ops_write_preview import (
+        RUN_COMMANDS_KEY,
+        apply_run_commands,
+    )
+
+    manifest = ctx.params.get("manifest")
+    if not isinstance(manifest, str):
+        return {}
+    run_commands = apply_run_commands(manifest, redact=_k8s_apply_redactor(ctx))
+    return {RUN_COMMANDS_KEY: run_commands} if run_commands else {}
 
 
 async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -1069,6 +1149,7 @@ def _register_builtin_builders() -> None:
     it stages to (#3844).
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
+    register_preview_failure_keys("k8s.apply", _k8s_apply_failure_keys)
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",

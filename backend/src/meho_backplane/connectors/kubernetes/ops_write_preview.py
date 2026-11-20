@@ -512,12 +512,44 @@ def _containers_in(node: Any) -> list[dict[str, Any]]:
     return found
 
 
+#: The lifecycle hooks and the probes of a container that can run a command.
+_EXEC_HOOKS = ("postStart", "preStop")
+_EXEC_PROBES = ("startupProbe", "livenessProbe", "readinessProbe")
+
+
+def _exec_command(handler: Any) -> list[Any] | None:
+    """The ``exec.command`` of a hook or probe *handler*, secret values hidden."""
+    if not isinstance(handler, dict) or not isinstance(handler.get("exec"), dict):
+        return None
+    return _hide_command_line(handler["exec"]).get("command")
+
+
+def _exec_commands(container: dict[str, Any]) -> dict[str, list[Any]]:
+    """The commands the hooks and probes of *container* run, keyed by where they run.
+
+    The keys are ``lifecycle.postStart``, ``lifecycle.preStop`` and the probe
+    names. A hook or probe without an ``exec`` command is left out.
+    """
+    lifecycle = container.get("lifecycle")
+    handlers = {
+        f"lifecycle.{hook}": lifecycle.get(hook) if isinstance(lifecycle, dict) else None
+        for hook in _EXEC_HOOKS
+    }
+    handlers.update({probe: container.get(probe) for probe in _EXEC_PROBES})
+    commands = {where: _exec_command(handler) for where, handler in handlers.items()}
+    return {where: command for where, command in commands.items() if command is not None}
+
+
 def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
-    """What one container runs: its image and its command line, secret values hidden."""
+    """What one container runs: its image, its command line and the commands of
+    its hooks and probes, secret values hidden."""
     entry: dict[str, Any] = {"object": label, "container": container.get("name")}
     if "image" in container:
         entry["image"] = container.get("image")
     entry.update(_hide_command_line(container))
+    exec_commands = _exec_commands(container)
+    if exec_commands:
+        entry["exec_commands"] = exec_commands
     return entry
 
 
@@ -525,9 +557,10 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     """What each container of a ``k8s.apply`` manifest runs, safe to show a person.
 
     One entry per container (init, main and ephemeral containers, at any
-    depth of each document): the object, the container name, the image, and
-    the ``command`` and ``args`` with their secret values hidden the way the
-    Job previews hide them (:func:`_hide_command_secrets`). Then *redact*,
+    depth of each document): the object, the container name, the image, the
+    ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
+    each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
+    hidden the way the Job previews hide them (:func:`_hide_command_secrets`). Then *redact*,
     the shared params redaction, runs over the entries. The entries count
     toward :data:`MANIFEST_ECHO_MAX_BYTES`; the entries that do not fit are
     counted in one closing entry. An empty list when no document runs a

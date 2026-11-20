@@ -20,7 +20,10 @@ are:
   The key comes from ``PARAMS_HASH_KEY`` only. Without it, the destination
   route answers 404 and the DNS line is a ``warn`` that names the setting.
 * **Certificate** - MEHO opens a TLS connection to ``BACKPLANE_URL`` and
-  checks the chain, the name and the end date (at least 30 days left).
+  checks the chain, the name and the end date (at least 30 days left). It
+  trusts the system trust bundle, and also the CA in ``CONSOLE_CA_FILE``
+  when that setting names a file (form 2, written by ``meho-host
+  certificate``).
 * **Clock** - the time of this process against the time Keycloak and
   PostgreSQL report. Red above 60 seconds of difference. Keycloak may answer
   without a ``Date`` header (the core's Keycloak does). Then its time is not
@@ -72,6 +75,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -347,9 +351,38 @@ async def check_network(backplane_url: str, *, dns_ok: bool) -> FirstStartLine:
 # --- Certificate ------------------------------------------------------------
 
 
+#: The fix of a certificate that is not trusted, when ``CONSOLE_CA_FILE`` is
+#: set: on form 2 the customer's certificate and CA go in with this command.
+_INSTALL_OWN_CERTIFICATE = (
+    "Install a certificate from your own CA on the server: "
+    "sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
+)
+
+
 def _trust_context() -> ssl.SSLContext:
-    """TLS client context with the system trust bundle (``SSL_CERT_FILE`` is honoured)."""
-    return ssl.create_default_context()
+    """TLS client context with the system trust bundle (``SSL_CERT_FILE`` is honoured).
+
+    When ``CONSOLE_CA_FILE`` names a file, its CA is trusted too: on form 2
+    ``meho-host certificate`` puts the CA of the customer's certificate
+    there (#6698). It adds to the system trust bundle and does not replace
+    it. ``VERIFY_X509_STRICT``, a default since Python 3.13, is cleared
+    then, as in ``connectors/net/http_probe_trust.py``: it refuses private
+    CAs without key identifiers that ``meho-host certificate`` accepts.
+    Chain, name and date checks stay on. A file that cannot be read leaves
+    the system trust bundle alone, so the line says the certificate is not
+    trusted and names the command that writes the file again.
+    """
+    context = ssl.create_default_context()
+    ca_file = get_settings().console_ca_file
+    if not ca_file or not Path(ca_file).is_file():
+        return context
+    try:
+        context.load_verify_locations(cafile=ca_file)
+    except (OSError, ssl.SSLError) as exc:
+        _log.warning("first_start_console_ca_unreadable", error_type=type(exc).__name__)
+        return ssl.create_default_context()
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return context
 
 
 async def _fetch_peer_certificate(host: str, port: int) -> dict[str, object]:
@@ -381,6 +414,8 @@ def _cert_verify_failure(host: str, exc: ssl.SSLCertVerificationError) -> str:
             f"The certificate does not match the host name {host}. "
             "Use a certificate that lists this name, or fix BACKPLANE_URL."
         )
+    if get_settings().console_ca_file:
+        return f"The certificate of {host} is not trusted. {_INSTALL_OWN_CERTIFICATE}"
     return (
         f"The certificate of {host} is not trusted. "
         "Install the full chain, and add your own CA to the trust bundle of MEHO."

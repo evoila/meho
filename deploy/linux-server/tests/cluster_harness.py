@@ -5,8 +5,9 @@ meho-host certificate, keyholder and unseal (#4738).
 
 ClusterHost is the FakeHost of host_harness.py with three changes:
 
-- RKE2's kubectl is fake_cluster.py, which keeps the Secrets of namespace
-  meho and the state of the one OpenBao pod in $MEHO_FAKE/cluster.json.
+- RKE2's kubectl is fake_cluster.py, which keeps the Secrets and
+  ConfigMaps of namespace meho, the state of the one OpenBao pod and the
+  restarts of the meho Deployment in $MEHO_FAKE/cluster.json.
   The stub in front of it logs every call to calls.log, like every stub.
 - sleep is a stub that only logs, so the waits after a restart of OpenBao
   take no time.
@@ -71,6 +72,8 @@ def initial_state() -> dict[str, Any]:
             "starting": 0,
             "restarts": 0,
         },
+        "configmaps": {},
+        "deployment_restarts": 0,
         "fail": [],
         "down": False,
         "key_inputs": [],
@@ -122,7 +125,7 @@ class ClusterHost(FakeHost):
         self.save(state)
 
     def fail(self, *calls: str) -> None:
-        """Let these calls of the fake kubectl fail: patch, delete, create, restart."""
+        """Let these calls of the fake kubectl fail: patch, delete, create, apply, restart."""
         state = self.state()
         state["fail"] = list(calls)
         self.save(state)
@@ -137,6 +140,16 @@ class ClusterHost(FakeHost):
     def secret(self, name: str) -> dict[str, Any] | None:
         secret: dict[str, Any] | None = self.state()["objects"].get(name)
         return secret
+
+    def configmap(self, name: str) -> dict[str, str] | None:
+        """The decoded values of a ConfigMap of namespace meho, or None."""
+        values: dict[str, str] | None = self.state()["configmaps"].get(name)
+        return values
+
+    def deployment_restarts(self) -> int:
+        """How many times the meho Deployment was restarted."""
+        restarts: int = self.state()["deployment_restarts"]
+        return restarts
 
 
 class ClusterTestCase(HostTestCase):

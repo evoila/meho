@@ -40,7 +40,28 @@ User docs: `docs-site/install/first-start-checks.md`.
 2. `check_certificate` (skipped on DNS fail or plain http) opens TLS to
    `BACKPLANE_URL` with full verification; the `SSLCertVerificationError`
    verify code picks the fix sentence; then the end date is checked
-   (`CERT_MIN_DAYS_LEFT` = 30).
+   (`CERT_MIN_DAYS_LEFT` = 30). The trust comes from `_trust_context`,
+   which `check_destination` uses too:
+   - the system trust bundle of the container (`ssl.create_default_context`,
+     which honours `SSL_CERT_FILE`);
+   - plus the CA in `CONSOLE_CA_FILE` (`settings.console_ca_file`) when
+     the setting names a file (#6698). Form 2 sets it in
+     `values-single-node.yaml` to the optional ConfigMap
+     `meho-console-trust`, which `meho-host certificate` writes
+     ([linux-server-meho-host.md](linux-server-meho-host.md),
+     `certificate`). The CA is added with `load_verify_locations(cafile=)`,
+     and `VERIFY_X509_STRICT` is cleared then, as in
+     `connectors/net/http_probe_trust.py`. Python 3.13 and newer set that
+     flag by default, and it refuses a private CA without key identifiers
+     ("Missing Authority Key Identifier"). Chain, name and date checks
+     stay on. A file that cannot be read gives a warning in the log
+     (`first_start_console_ca_unreadable`) and the system trust bundle
+     only. A missing file (a fresh form-2 install, where the ConfigMap
+     does not exist) gives the system trust bundle only.
+
+   With `CONSOLE_CA_FILE` set, the "not trusted" sentence names
+   `sudo meho-host certificate --cert <chain.pem> --key <key.pem>` in place
+   of "the trust bundle of MEHO", which a form-2 customer cannot reach.
 3. `check_network` (skipped when the DNS line is red) resolves the host again
    and gives a `warn` line when any address is global (`ipaddress`
    `is_global`). Private, shared (100.64.0.0/10), loopback and link-local
@@ -103,8 +124,9 @@ kept lists.
 
 ## Dependencies
 
-`settings.backplane_url`, `settings.keycloak_discovery_base`, the database
-session maker, the connector resolver.
+`settings.backplane_url`, `settings.console_ca_file`,
+`settings.keycloak_discovery_base`, the database session maker, the
+connector resolver.
 
 ## Known issues
 

@@ -343,7 +343,8 @@ async def test_password_operation_audit_hash_does_not_depend_on_the_password(
 
     for password in ("first-test-value", "second-test-value"):
         result = await dispatch(
-            operator=_operator(),
+            # A person: an agent's credential write waits for a person.
+            operator=_operator("person-hashcheck", PrincipalKind.USER),
             connector_id="hashcheck-1.x",
             op_id=op_id,
             target=_Target(),

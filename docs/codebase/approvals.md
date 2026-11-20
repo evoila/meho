@@ -806,6 +806,33 @@ boundary (`except McpInvalidParamsError` in both `handle_tools_call` and
 branches that already set `400`/`403`/`404` pass through untouched, and a
 genuine handler fault still records `500`.
 
+## A credential call always waits for a person
+
+A call that reads, writes or makes a credential (the classes
+`credential_read`, `credential_write` and `credential_mint`) always waits
+for a person. No standing grant, no agent grant and no run approval covers
+it. One rule says so: `service_grants.never_covered_reason`, with
+`credential_grant_reason` for these classes. Grant create, run approval
+create and agent grant create (an exact op id with `auto-execute`) refuse
+such an operation with the reason "A standing grant, an agent grant or a
+run approval never covers 'OP': it reads, writes or makes a credential, so
+a person approves each call. Leave it out." The call of an agent or a
+service login waits also at level `safe`. The approval of a parent
+multi-step run does not cover such a step or child call: it waits for its
+own approval (`_covered_by_approved_run`). This holds also when the person
+who approved an earlier step has the rights to run it, and whatever level
+the step declares (`composite.credential_step_waits_after_approval`). When
+the person approves the step, the multi-step run goes on with this step
+cleared; when the person rejects it, the run ends and the step never runs.
+A child call (`dispatch_child`) that waits is its own request. When a
+person approves it, only the child runs, and the multi-step run does not
+go on. An install or tenant override does not turn
+off the approval that the code turns on for an operation that writes or
+makes a credential. Details:
+[service-principal-grants.md](service-principal-grants.md#credential-calls),
+[run-approvals.md](run-approvals.md),
+[agent-permission-grants.md](agent-permission-grants.md).
+
 ## G11.7-T1 policy hardening (#1401)
 
 Phase C of the wrapper-retirement effort moves connector **writes**
@@ -4918,11 +4945,16 @@ the run, so its remaining internal steps go ahead under that approval
 while the dispatcher runs it with `_approved=True` (it binds
 `approved_run_var`) or while `composite_resume_scope_var` is set (the
 re-entry of an approved step). Then a step whose gate says
-`NEEDS_APPROVAL` goes ahead, unless the step is `destructive` or marked
-`requires_approval`. A `DENY` stays a deny. The same holds for a child
-operation the composite runs through `dispatch_child`: the child's own
-`dispatch()` reads `approved_run_var` right after its policy gate and goes
-ahead on `NEEDS_APPROVAL` under the same two exceptions. This holds whoever runs the
+`NEEDS_APPROVAL` goes ahead, unless the step is `destructive`, marked
+`requires_approval`, or reads, writes or makes a credential
+(`service_grants.credential_call_waits`). A `DENY` stays a deny. The same
+holds for a child operation the composite runs through `dispatch_child`:
+the child's own `dispatch()` reads `approved_run_var` right after its
+policy gate and goes ahead on `NEEDS_APPROVAL` under the same three
+exceptions. A credential step or child waits for its own approval, also
+when the rights of the person who approved the run would let it run: the
+step's gate and the child's `dispatch()` turn an `AUTO_EXECUTE` into a wait
+(`credential_step_waits_after_approval`). This holds whoever runs the
 resume and however the approval was given: a web click, or the command
 line with a fresh sign-in (#3979). It matters since #3980: a reviewer's
 token, and a `dangerous` step in the web interface, would otherwise wait
@@ -4935,7 +4967,8 @@ finish in one resume is not `destructive` and not `requires_approval`**.
 A later step that is `destructive` or marked `requires_approval` waits for
 its own approval, also during a resume. The steps the run already did are
 stored with that new request, so its resume sends none of them again. See
-the next section.
+the next section. A child call that waits is its own request: its approval
+runs only the child, and the multi-step run does not go on.
 
 #### How a multi-step run goes on after an approval
 

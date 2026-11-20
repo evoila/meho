@@ -92,10 +92,8 @@ gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
 Four kinds of op are refused **before** any grant lookup, so even a stale grant
 row cannot auto-approve them: the `destructive` tier (the tier always
-parks for a human), an op that reads a credential (`classify_op` says
-`credential_read`; grant create refuses it with "A standing grant cannot
-cover OP: it shows a secret, so a person always approves it", and a wider
-grant never clears its wait; `credential_read_grant_reason`), an op with a parameter marked
+parks for a human), an op that reads, writes or makes a credential (see
+"Credential calls" below), an op with a parameter marked
 `x-meho-caller-address: true` (it connects to an address the caller
 gives; a grant never covers the address, so a person approves each call,
 and grant create refuses such a grant — `caller_address_grant_reason`), and an
@@ -106,10 +104,60 @@ change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
-holds: a credential read, per-call approval, a caller-address field,
+holds: a credential call, per-call approval, a caller-address field,
 always wait, a delete sign. The run approval gate uses the same function
 ([run-approvals.md](run-approvals.md)). Only a delete sign leaves room for
 a sandbox delete grant.
+
+### Credential calls
+
+One rule, in `service_grants.py`: a call that reads, writes or makes a
+credential always waits for a person. No standing grant, no agent grant
+and no run approval covers it.
+
+- The classes are `credential_read`, `credential_write` and
+  `credential_mint` (`CREDENTIAL_CLASSES`). The class comes from the class
+  stored on the row of an ingested operation first, then from the op id
+  (`resolve_op_class`: a connector's `declare_op_classes`, or the core
+  lists in `broadcast/events.py`). A step of a multi-step operation has
+  only its op id.
+- `credential_grant_reason` gives the reason: "A standing grant, an agent
+  grant or a run approval never covers 'OP': it reads, writes or makes a
+  credential, so a person approves each call." `never_covered_reason`
+  returns it with the kind `credential`.
+- Grant create refuses such an op by op id before the lookup, and by the
+  stored class after it. The answer is the reason plus "Leave it out."
+  (`credential_refusal`).
+- `credential_call_waits` says whether such a call waits: every
+  `credential_write` and `credential_mint` call, and a `credential_read`
+  call when its floor applies (a read marked in code as one that returns
+  no secret value runs at once; `vault.kv.read` waits only with
+  `reveal_secret`). The agent verdict and the run approval notes use it.
+- An install or tenant override that turns approval off does not turn it
+  off for an op that writes or makes a credential, when its code turns
+  approval on (`op_policy._with_floors`). So a person's own call of such
+  an op waits too. A `credential_read` op has its own floor for this.
+- A service call of such an op waits also at level `safe`
+  (`_service_safety_gate_reason` uses `credential_call_waits`), so the
+  read exceptions above still run at once.
+- When a service call of such an op waits, its reason ends with "the
+  operation reads, writes or makes a credential, so no standing grant, no
+  agent grant and no run approval covers it; a person approves each
+  call" (`_validate.CREDENTIAL_WAIT_NOTE`).
+- A grant row that names such an op stays stored, but it never runs the
+  call. `meho service-principals grants list` shows it as before.
+- The child operation check (`governed_subops.classify_subop_grantability`)
+  marks such a step as not grantable, with the same reason.
+- A guard test (`tests/test_credential_class_guard.py`) goes over every
+  registered operation. An operation that stores or returns a secret value
+  must have one of the three classes. The test finds such an operation by
+  a secret tag (`secret-write`, `credential-mint`, ...), by a
+  secret-shaped parameter name on a write, or by a secret-shaped text
+  field in its answer that it did not declare plain.
+- The shadow evaluator marks such a call `credential` (no grant and no
+  run approval clears it, `policy/floors.py::NO_GRANT_MARKS`) and, when it
+  waits, `credential_waits` (the floor of the same name, for an agent
+  and a service login).
 A call that sets a param a connector marks with `declare_wait_when_set`
 (`op_classes.py`; today `secret_field_map` and `flight_recorder_capture`
 of `targets.register`) waits for a person too: the dispatcher marks that

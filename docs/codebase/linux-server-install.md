@@ -119,10 +119,13 @@ them (see [The update](#the-update)). The other checks follow under
 "Step 1".
 
 The place answers are checked before any step runs, as wrong usage (exit
-code 2): `--first-tenant-id` must be a UUID, `--admin-user` and
-`--approver-user` take letters, digits and `. _ - @`, are put in lower
-case first (Keycloak keeps user names in lower case) and must then
-differ. So the values go into the Helm values and the install record as
+code 2): `--first-tenant-id` must be a UUID, `--admin-user` takes letters,
+digits and `. _ - @` and is put in lower case first (Keycloak keeps user
+names in lower case). There is no `--approver-user`: the install makes
+one Admin login. A record or a values file of an older install that has
+an `approver_user` or `approverUsername` key still works: the update
+ignores the key and writes both files again without it, and it leaves the
+login that exists in Keycloak as it is. So the values go into the Helm values and the install record as
 they are, with no escaping.
 
 **Why DNS needs care.** On Ubuntu, `systemd-resolved` answers from
@@ -252,7 +255,7 @@ own messages are dropped, so a failure shows only the script's line.
 
 | Path | Mode | Content |
 | --- | --- | --- |
-| `/var/lib/meho/first-login-passwords` | 0600 | one `key=value` line per key of `meho-core-first-login`: `admin_username`, `admin_password`, `approver_username`, `approver_password` |
+| `/var/lib/meho/first-login-passwords` | 0600 | one `key=value` line per key of `meho-core-first-login`: `admin_username`, `admin_password` (and `approver_username` and `approver_password` on a host whose Secret already has them) |
 | `/var/lib/meho/unseal-key` | 0600 | the `key` of `meho-core-vault-unseal`, one line |
 
 The first-login Secret must exist; the script stops otherwise. The unseal
@@ -307,7 +310,6 @@ because the update writes RKE2's settings again from the stored answers.
     "public_address": "",
     "first_tenant_id": "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",
     "admin_user": "admin",
-    "approver_user": "approver",
     "cluster_cidr": "10.42.0.0/16",
     "service_cidr": "10.43.0.0/16",
     "join_address": "",
@@ -396,7 +398,7 @@ counts as empty.
 The options of a first install stop an update with "An update keeps the
 install's answers", even with the same value: `--hostname`,
 `--public-address`, `--admin-network`, `--first-tenant-id`, `--admin-user`,
-`--approver-user`, `--cluster-cidr`, `--service-cidr`, `--join-address` and
+`--cluster-cidr`, `--service-cidr`, `--join-address` and
 `--join-token-file`. The SSH range changes only with
 `meho-host admin-network`. For the same reason the DNS check of an update
 names only the DNS record in its fix: when the record points elsewhere,

@@ -184,7 +184,7 @@ same in one line.
 
 Your login group decides. MEHO reads it only from your signed login
 token, never from a request field or a command-line flag. The groups
-come from the [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-five-groups).
+come from the [Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-three-groups).
 
 | Your group | Your own change | Another person's `safe` or `caution` change (also one marked `requires_approval`) | Another person's `dangerous` or `destructive` change | Another person's [change of rights](#changes-of-rights-need-another-admin) |
 |---|---|---|---|---|

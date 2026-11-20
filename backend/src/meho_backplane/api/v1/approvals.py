@@ -45,10 +45,11 @@ Every route above (plus ``/{id}`` show and ``/{id}/decide``) is gated by
 principal that is **either** ``operator``-or-higher on the linear tenant
 role lattice (``operator`` and ``tenant_admin`` retain access unchanged)
 **or** carries the orthogonal ``approver`` capability
-(``Operator.approver``). This decouples the *decide* right from the
-*dispatch* right: a dedicated approver provisioned as ``read_only`` role +
-``approver=true`` can clear a four-eyes gate here yet is denied
-``POST /api/v1/operations/call`` (still ``operator``-gated). The
+(``Operator.approver``). This keeps the *decide* right apart from the
+*dispatch* right: a principal with the flag may decide here but is denied
+``POST /api/v1/operations/call`` unless its role is ``operator`` or higher.
+MEHO does not set the flag from a token claim, and no role gives it today,
+so no ``read_only`` approver can be set up yet. The
 ``sub``-keyed self-approval refusal (#1401) is unchanged — an approver
 still cannot approve a request it parked. The principal-scoped
 ``GET /{id}/result`` read (#3209) is deliberately **not** on this gate: it

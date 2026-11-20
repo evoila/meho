@@ -1068,12 +1068,10 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- | --- |
 | MEHO-Readers | `read_only` | |
 | MEHO-Operators | `operator` | |
-| MEHO-SA-Operators | `operator` | |
 | MEHO-Admins | `tenant_admin` | |
-| MEHO-Approvers | `read_only` | `approver` = `true` |
 | MEHO-Platform-Admins | (none, and no `tenant_id`) | `platform_admin` = `true` |
 
-**A person is in exactly one of the five role groups.** `MEHO-Platform-Admins`
+**A person is in exactly one of the three role groups.** `MEHO-Platform-Admins`
 is not a role group; it only adds `platform_admin`. The mappers take the first
 group that has the attribute; with two groups the result is not
 predictable. The realm keeps Keycloak's default user profile, which does

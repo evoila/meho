@@ -17,10 +17,12 @@ import json
 import re
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import pytest
+import yaml
 
 from meho_backplane.core.company_login import (
     CLEANUP_CONFIG_KEY,
@@ -660,6 +662,39 @@ async def test_an_unknown_meho_group_stops_the_stage_before_any_change() -> None
         await _run(kc, group_map={"Ops": "MEHO-Nobody"})
     assert kc.providers == {}
     assert kc.provider_mappers == {}
+
+
+_GUIDES = Path(__file__).resolve().parents[2] / "docs-site" / "install"
+_GUIDES_WITH_GROUP_MAP = (
+    "company-login-authentik.md",
+    "login/customer-keycloak.md",
+    "login/entra-id.md",
+)
+
+
+def _guide_group_map(page: str) -> dict[str, str]:
+    """The ``groupMap`` of the Helm values example on an install guide page."""
+    text = (_GUIDES / page).read_text(encoding="utf-8")
+    for block in re.findall(r"```yaml\n(.*?)```", text, flags=re.DOTALL):
+        values = yaml.safe_load(block)
+        company = (values or {}).get("coreKeycloak", {}).get("companyLogin", {})
+        if "groupMap" in company:
+            group_map: dict[str, str] = company["groupMap"]
+            return group_map
+    raise AssertionError(f"{page} has no coreKeycloak.companyLogin.groupMap example")
+
+
+@pytest.mark.parametrize("page", _GUIDES_WITH_GROUP_MAP)
+async def test_the_group_map_of_each_install_guide_works_on_a_new_realm(page: str) -> None:
+    group_map = _guide_group_map(page)
+    kc = _fresh()
+    await _run(kc, group_map=group_map)
+    assert set(kc.mappers()) == {f"{MAPPER_PREFIX}{name}" for name in group_map}
+    assert {m["config"]["group"] for m in kc.mappers().values()} == {
+        "/MEHO-Readers",
+        "/MEHO-Operators",
+        "/MEHO-Admins",
+    }
 
 
 async def test_missing_rights_name_the_roles_to_add() -> None:

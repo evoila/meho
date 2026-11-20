@@ -13,16 +13,16 @@ import (
 
 const labBID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
 
-var extraRoles = []string{"Readers", "Operators", "SA-Operators", "Admins", "Approvers"}
+var extraRoles = []string{"Readers", "Operators", "Admins"}
 
 func groupWrites(fake *fakeKeycloak) int {
 	return fake.calls["POST /groups"] + fake.calls["PUT /groups/{uuid}"]
 }
 
-// --add-tenant makes the five groups of the extra tenant. They carry only
+// --add-tenant makes the three groups of the extra tenant. They carry only
 // meho_tenant, so an older MEHO gives a person who is only in them no
 // tenant. A second run with the same flags changes nothing.
-func TestBootstrap_AddTenantMakesFiveGroupsWithOnlyMehoTenant(t *testing.T) {
+func TestBootstrap_AddTenantMakesThreeGroupsWithOnlyMehoTenant(t *testing.T) {
 	fake := newFakeKeycloak()
 	opts := fullOpts()
 	opts.AddTenantName = "lab-b"
@@ -46,9 +46,14 @@ func TestBootstrap_AddTenantMakesFiveGroupsWithOnlyMehoTenant(t *testing.T) {
 			t.Errorf("group %s attributes = %v, want %v", g.Name, g.Attributes, want)
 		}
 	}
-	// 5 + platform + 5 extra.
-	if len(fake.groups) != 11 {
-		t.Errorf("expected 11 groups, got %d", len(fake.groups))
+	// 3 + platform + 3 extra.
+	if len(fake.groups) != 7 {
+		t.Errorf("expected 7 groups, got %d", len(fake.groups))
+	}
+	for _, name := range []string{"MEHO-lab-b-SA-Operators", "MEHO-lab-b-Approvers"} {
+		if fake.groupByName(name) != nil {
+			t.Errorf("group %s must not be made", name)
+		}
 	}
 
 	before := groupWrites(fake)
@@ -165,7 +170,7 @@ func TestBootstrap_FirstTenantIDInUrnFormGivesStandardMehoTenant(t *testing.T) {
 }
 
 // A realm made by the older command (groups with tenant_id and
-// tenant_role only, no platform group) gets meho_tenant on the five
+// tenant_role only, no platform group) gets meho_tenant on the three
 // groups and the platform group. The values it had stay; other
 // attributes stay too.
 func TestBootstrap_OneTenantRealmGetsMehoTenant(t *testing.T) {
@@ -176,9 +181,6 @@ func TestBootstrap_OneTenantRealmGetsMehoTenant(t *testing.T) {
 			"tenant_id":   {opts.TenantID},
 			"tenant_role": {g.TenantRole},
 			"note":        {"kept"},
-		}
-		if g.Approver {
-			attrs["approver"] = []string{"true"}
 		}
 		id := "uuid-old-" + g.Role
 		fake.groups[id] = &groupRep{ID: id, Name: g.Name, Attributes: attrs}
@@ -197,8 +199,8 @@ func TestBootstrap_OneTenantRealmGetsMehoTenant(t *testing.T) {
 			t.Errorf("%s lost a value: %v", g.Name, got)
 		}
 	}
-	if fake.calls["PUT /groups/{uuid}"] != 5 {
-		t.Errorf("PUT /groups/{uuid} = %d, want 5", fake.calls["PUT /groups/{uuid}"])
+	if fake.calls["PUT /groups/{uuid}"] != 3 {
+		t.Errorf("PUT /groups/{uuid} = %d, want 3", fake.calls["PUT /groups/{uuid}"])
 	}
 	if fake.groupByName(platformAdminGroupName) == nil {
 		t.Errorf("%s not created", platformAdminGroupName)
@@ -292,7 +294,7 @@ func TestBootstrap_DryRunListsTenantGroups(t *testing.T) {
 	}
 	for _, want := range []string{
 		"MEHO-Platform-Admins: platform_admin=true",
-		"MEHO-lab-b-SA-Operators: meho_tenant=" + labBID + ":lab-b:SA-Operators",
+		"MEHO-lab-b-Admins: meho_tenant=" + labBID + ":lab-b:Admins",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("dry-run stdout missing %q; got:\n%s", want, stdout)

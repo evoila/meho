@@ -682,14 +682,19 @@ has `env_var_names` only too: the builder adds `env` and `env_note` only
 when `ctx.agent_preview` is false.
 
 **The script gets the card's value.** The wrapper
-(`build_script_run_wrapper`) decodes each `env` value with a command
-substitution, which drops line breaks at the end. It adds an `x` after the
-value and takes it off again, so the script gets each value byte for byte as
-the card shows it, also a value that ends in line breaks or is empty.
+(`build_script_run_wrapper`) decodes each `env` and `secret_env` value with
+a command substitution, which drops line breaks at the end. Right after it,
+the wrapper adds the same number of line breaks back as `$'\n'`. No
+pattern is matched, so the host's locale (also a multibyte one such as
+`zh_CN.GBK`) cannot change the bytes: the script gets each value byte for
+byte as the card shows it, also a value that ends in line breaks or is
+empty. A value cannot hold a NUL byte: the check before the wait
+(`_refuse_nul_byte`) refuses an `env` value or a `secret_env` reference with one, and the run refuses a
+value read from Vault with one, before the script starts.
 
 **No secret in `env`.** The card shows every `env` value, so the op's check
-before the wait for approval (`_refuse_secret_in_env`, registered with
-`register_park_check`) refuses a call when an `env` name holds a secret
+before the wait for approval (`_refuse_before_wait`, registered with
+`register_park_check`; its part `_refuse_secret_in_env`) refuses a call when an `env` name holds a secret
 word (the command-line rule `is_secret_shaped_name`: `PASS`, `PWD`,
 `SECRET`, `TOKEN`, `KEY`, `CREDENTIAL`, `AUTH`, also inside a longer name)
 or an `env` value has a secret shape (`has_secret_shape`, the rules that

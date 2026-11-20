@@ -651,7 +651,14 @@ def _validate_env(raw: Any) -> dict[str, str]:
     env: dict[str, str] = {}
     for name, value in raw.items():
         env[_check_env_name(name, "env")] = str(value)
+        if "\x00" in env[name]:
+            raise LinuxWriteSafetyError(_nul_byte_message(f"env var {name!r}"))
     return env
+
+
+def _nul_byte_message(what: str) -> str:
+    """The refusal for a value with a NUL byte; *what* names the value, never shows it."""
+    return f"The value of {what} holds a NUL byte. A value passed to a script cannot hold one."
 
 
 def _bounded_timeout(raw: Any) -> int:
@@ -792,7 +799,10 @@ async def _resolve_secret_env(
             raise LinuxWriteError(
                 f"secret_env[{name!r}] vault path {path!r} has no field {field!r}"
             )
-        resolved[name] = strip_credential_value(secret_data[field])
+        value = strip_credential_value(secret_data[field])
+        if "\x00" in value:
+            raise LinuxWriteSafetyError(_nul_byte_message(f"secret_env[{name!r}] in Vault"))
+        resolved[name] = value
     return resolved
 
 
@@ -826,12 +836,14 @@ def build_script_run_wrapper(
         'chmod 0700 "$tmp"',
     ]
     for name, value in env.items():
-        # Command substitution drops trailing line breaks. The ``x`` after the
-        # value keeps them, and the second line takes it off again, so the
-        # script gets the value byte for byte as the approval card shows it.
+        # Command substitution drops the line breaks at the end of the value.
+        # ``$'\n'`` adds the same number back. No pattern is matched, so the
+        # host's locale cannot change the bytes: the script gets the value
+        # byte for byte as the approval card shows it.
         q_val = shlex.quote(_b64(value))
-        lines.append(f'{name}="$(printf %s {q_val} | base64 -d; printf x)"')
-        lines.append(f'export {name}="${{{name}%x}}"')
+        breaks = "\\n" * (len(value) - len(value.rstrip("\n")))
+        tail = f"$'{breaks}'" if breaks else ""
+        lines.append(f'export {name}="$(printf %s {q_val} | base64 -d)"{tail}')
     if working_directory is not None:
         q_wd = shlex.quote(working_directory)
         lines.append(f'cd {q_wd} || {{ echo "===MEHO_RUN_ERR:chdir===" >&2; exit 4; }}')
@@ -1207,6 +1219,28 @@ _SEND_IN_SECRET_ENV: Final[str] = (
 )
 
 
+def _refuse_nul_byte(params: dict[str, Any]) -> str | None:
+    """Refuse an ``env`` value or a ``secret_env`` reference with a NUL byte.
+
+    A value passed to a script cannot hold a NUL byte: bash would cut it.
+    A ``secret_env`` value is read from Vault only when the approved run
+    starts, so :func:`_resolve_secret_env` checks it then.
+    """
+    for key in ("env", "secret_env"):
+        mapping = params.get(key)
+        if not isinstance(mapping, dict):
+            continue
+        for name, value in mapping.items():
+            if isinstance(value, str) and "\x00" in value:
+                return _nul_byte_message(f"{key} var {str(name)!r}")
+    return None
+
+
+async def _refuse_before_wait(ctx: PreviewContext) -> str | None:
+    """The check of ``linux.script.run`` before the call waits for approval."""
+    return _refuse_nul_byte(ctx.params) or await _refuse_secret_in_env(ctx)
+
+
 async def _refuse_secret_in_env(ctx: PreviewContext) -> str | None:
     """Refuse a ``linux.script.run`` call with a secret in ``env``, before it waits.
 
@@ -1287,7 +1321,7 @@ def register_linux_write_previews() -> None:
     register_preview_builder("linux.file.write", _linux_file_write_preview)
     register_preview_builder("linux.script.run", _linux_script_run_preview)
     register_params_check("linux.script.run", _check_script_size)
-    register_park_check("linux.script.run", _refuse_secret_in_env)
+    register_park_check("linux.script.run", _refuse_before_wait)
     register_person_only_preview_keys(
         "linux.script.run", _person_only_keys_shown_to_agents, _PERSON_ONLY_SCRIPT_RUN_KEYS
     )

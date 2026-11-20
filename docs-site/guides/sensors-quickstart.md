@@ -1,10 +1,10 @@
 # Watch your estate with sensors
 
 Everything so far was interactive: you asked, MEHO answered. Sensors
-make the backplane watch on its own. A **sensor** pins one tuple —
-*operation + params + assertion + cadence + severity* — that a
+make the backplane watch on its own. A **[sensor](../reference/words.md#sensor)** pins one tuple —
+*[operation](../reference/words.md#operation) + params + assertion + cadence + severity* — that a
 built-in runner evaluates on a schedule, entirely deterministically
-(no LLM in the loop). **Dashboards** compose sensors into a single
+(no LLM in the loop). **[Dashboards](../reference/words.md#dashboard)** compose sensors into a single
 rolled-up state, and an optional agent **investigator** can triage a
 dashboard the moment it goes red.
 
@@ -14,7 +14,7 @@ and reads the result.
 
 !!! note "Prerequisites, roles, and maturity"
 
-    - A probe-green target and the operation ladder from
+    - A probe-green [target](../reference/words.md#target) and the operation ladder from
       [Run your first operations](first-operations.md) — a sensor is
       just an operation call on a timer.
     - Creating sensors and dashboards requires **tenant_admin**; an
@@ -26,7 +26,7 @@ and reads the result.
 
 ## The five states
 
-Every sensor evaluation lands in exactly one of five states — the
+Every sensor evaluation lands in exactly one of [five states](../reference/words.md#five-states) — the
 same vocabulary everywhere (sensor projection, dashboard rollup, UI):
 
 | State | Meaning |
@@ -39,7 +39,7 @@ same vocabulary everywhere (sensor projection, dashboard rollup, UI):
 
 ## Step 1 — pick a safe operation
 
-A sensor may only pin an operation whose `safety_level` is **`safe`**
+A sensor may only pin an operation whose [`safety_level`](../reference/words.md#risk-level) is **`safe`**
 — the runner auto-executes on a schedule with nobody watching, so
 `caution`/`dangerous` ops are refused at create time (422
 `sensor_requires_safe_operation`). Find the op exactly as in the
@@ -57,7 +57,7 @@ call we want the runner to repeat is the one you already ran by hand:
 
 ### Pick the connector version that matches the target
 
-A connector can state the target versions its operations work on, for
+A [connector](../reference/words.md#connector) can state the target versions its operations work on, for
 example `vmware-rest-8.0` for vCenter 8.0.x and `vmware-rest-9.0` for
 vCenter 9.0.x. MEHO checks the target's version each time the sensor
 runs. When the version is outside the connector's range, MEHO does not

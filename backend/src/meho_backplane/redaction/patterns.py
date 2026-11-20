@@ -53,8 +53,7 @@ import re
 from typing import Final, Protocol
 
 from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
-from meho_backplane.redaction.command_hand_off import hand_off
-from meho_backplane.redaction.command_secret import COMMAND_SECRET
+from meho_backplane.redaction.command_secret import CommandSecretFinder
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
@@ -62,7 +61,6 @@ __all__ = [
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
     "SecretFinder",
-    "command_secret_hand_off",
     "get_pattern",
     "secret_spans",
 ]
@@ -343,26 +341,13 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "url_secret": URL_SECRET,
-    # Every value it reads. The engine uses command_secret_hand_off() instead
-    # when the api_key rule runs right after it in the policy.
-    "command_line_secret": COMMAND_SECRET,
+    # A value the api_key rule hides is left to it, so its answer stays the same.
+    "command_line_secret": CommandSecretFinder(leave_to=_API_KEY),
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,
     "fqdn": _FQDN,
 }
-
-
-def command_secret_hand_off() -> tuple[SecretFinder, SecretFinder]:
-    """The ``command_line_secret`` and ``api_key`` finders for one run of the engine.
-
-    For a policy where the ``api_key`` rule runs right after the command
-    line rule (:mod:`.command_hand_off`): a value the ``api_key`` rule
-    hides whole is left to it, so that part of the answer stays as it was
-    without the command line rule.
-    """
-    return hand_off(_API_KEY)
-
 
 #: Stable, sorted tuple of pattern names; what the Pydantic policy
 #: schema validates rule.pattern against. Sorted for deterministic

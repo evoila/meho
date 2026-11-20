@@ -111,7 +111,7 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "name": "fr-command-line-secret",
                 "pattern": "command_line_secret",
                 "action": "redact",
-                "reason": "password or token on a command line, in a login or a connection string",
+                "reason": "password or token on a command line",
             },
             {
                 "name": "fr-api-key",

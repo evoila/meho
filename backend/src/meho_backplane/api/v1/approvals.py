@@ -111,7 +111,10 @@ from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeE
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
-from meho_backplane.operations._preview import proposed_effect_for_agent
+from meho_backplane.operations._preview import (
+    proposed_effect_for_agent,
+    without_person_only_effect_keys,
+)
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
@@ -706,12 +709,13 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     the full card, as in the console, and an agent, service or runner login
     reads what the MCP approval tools return (:func:`proposed_effect_for_agent`),
     so the ``env`` values of ``linux.script.run`` stay out. Every other card
-    is the stored one.
+    is the stored one, without the person-only keys for a caller that is not
+    a person (:func:`without_person_only_effect_keys`).
     """
-    if row.op_id not in _PERSON_ONLY_REST_CARD_OPS or (
-        is_human_principal(operator) and not is_agent_caller(operator)
-    ):
+    if is_human_principal(operator) and not is_agent_caller(operator):
         return row.proposed_effect
+    if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:
+        return without_person_only_effect_keys(row.proposed_effect)
     shown = proposed_effect_for_agent(
         row.op_id,
         row.proposed_effect,

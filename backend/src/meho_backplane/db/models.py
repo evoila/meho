@@ -2039,6 +2039,12 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not a column. ``True`` on the row of one call whose params make it a
+    #: call that writes or makes a credential
+    #: (:func:`~meho_backplane.op_classes.declare_credential_check`). Then the
+    #: call waits for a person, and no standing grant, no agent grant and no
+    #: run approval covers it.
+    credential_call = False
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or

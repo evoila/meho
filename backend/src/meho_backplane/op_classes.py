@@ -31,11 +31,14 @@ Example::
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Final
 
 __all__ = [
     "DECLARABLE_OP_CLASSES",
+    "declare_credential_capable",
+    "declare_credential_check",
+    "declare_hidden_stored_param",
     "declare_no_secret_value",
     "declare_op_classes",
     "declare_per_call_approval",
@@ -44,9 +47,12 @@ __all__ = [
     "declare_wait_when_set",
     "declared_op_class",
     "declared_op_ids",
+    "hidden_stored_param",
+    "is_credential_capable",
     "is_root_shell",
     "is_safe_write",
     "needs_per_call_approval",
+    "params_make_credential_call",
     "returns_no_secret_value",
     "waits_when_set",
 ]
@@ -66,6 +72,9 @@ _ROOT_SHELL: set[str] = set()
 _PER_CALL_APPROVAL: set[str] = set()
 _NO_SECRET_VALUE: set[str] = set()
 _WAIT_WHEN_SET: dict[str, frozenset[str]] = {}
+_CREDENTIAL_CAPABLE: set[str] = set()
+_CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
+_HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
 
 
 def declare_op_classes(
@@ -194,6 +203,85 @@ def waits_when_set(op_id: str, params: Mapping[str, Any]) -> bool:
     )
 
 
+def declare_credential_capable(op_ids: Iterable[str]) -> None:
+    """Mark *op_ids* as operations that can read, write or make a credential.
+
+    For an operation whose call can do anything the caller asks, for
+    example run a command in a container or send a raw write to a vendor
+    API. The op class stays as it is, so the approval card and the
+    broadcast still show the call. The credential rule holds for every
+    call: a person approves each one, and no standing grant, no agent
+    grant and no run approval covers it
+    (:func:`~meho_backplane.operations.service_grants.credential_grant_reason`).
+    Safe to call twice with the same ids.
+    """
+    _CREDENTIAL_CAPABLE.update(op_ids)
+
+
+def is_credential_capable(op_id: str) -> bool:
+    """Return ``True`` when a connector marked *op_id* with :func:`declare_credential_capable`."""
+    return op_id in _CREDENTIAL_CAPABLE
+
+
+def declare_credential_check(op_id: str, check: Callable[[Mapping[str, Any]], bool]) -> None:
+    """Register *check* to tell from the params whether a call of *op_id* handles a credential.
+
+    *check* gets the params of one call and returns ``True`` when the call
+    writes or makes a credential, for example a manifest that holds a
+    Kubernetes Secret. Such a call waits for a person, and no standing
+    grant, no agent grant and no run approval covers it. A call for which
+    *check* returns ``False`` keeps the rules of the operation. A new
+    check for the same op id replaces the old one.
+    """
+    _CREDENTIAL_CHECKS[op_id] = check
+
+
+def params_make_credential_call(op_id: str, params: Mapping[str, Any]) -> bool:
+    """Return ``True`` when the check of :func:`declare_credential_check` flags *params*.
+
+    A check that raises counts as ``True``: a call MEHO cannot read waits.
+    """
+    check = _CREDENTIAL_CHECKS.get(op_id)
+    if check is None:
+        return False
+    try:
+        return bool(check(params))
+    except Exception:
+        return True
+
+
+def declare_hidden_stored_param(
+    op_id: str, name: str, check: Callable[[Mapping[str, Any]], bool]
+) -> None:
+    """Hide the param *name* of a stored request of *op_id* when *check* flags its params.
+
+    A stored approval request keeps its params only until the run starts or
+    the request ends without a run. Then MEHO replaces the value of *name*
+    with a marker when *check* returns ``True`` for the params, the same way
+    it replaces a secret-named value. For example the manifest of a
+    ``k8s.apply`` that holds a Kubernetes Secret. A new entry for the same
+    op id replaces the old one.
+    """
+    _HIDDEN_STORED_PARAMS[op_id] = (name, check)
+
+
+def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
+    """The param of *params* that :func:`declare_hidden_stored_param` hides, or ``None``.
+
+    ``None`` when *op_id* has no entry, *params* has no such param, or the
+    check returns ``False``. A check that raises hides the param.
+    """
+    entry = _HIDDEN_STORED_PARAMS.get(op_id)
+    if entry is None or entry[0] not in params:
+        return None
+    name, check = entry
+    try:
+        flagged = bool(check(params))
+    except Exception:
+        flagged = True
+    return name if flagged else None
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -207,3 +295,6 @@ def _reset_declared_op_classes_for_testing() -> None:
     _PER_CALL_APPROVAL.clear()
     _NO_SECRET_VALUE.clear()
     _WAIT_WHEN_SET.clear()
+    _CREDENTIAL_CAPABLE.clear()
+    _CREDENTIAL_CHECKS.clear()
+    _HIDDEN_STORED_PARAMS.clear()

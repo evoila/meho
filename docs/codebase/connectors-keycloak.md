@@ -703,8 +703,12 @@ the other writes of one login or one group, no `platform_admin_reason`,
 no `harmless_keys_only`, and the `platform_admin` fact of the call only
 (not the one read from the login, and not the one of the harmless keys
 rule). The agent's own `preview_operation` with the switch off reads
-nothing more from Keycloak for it. The approval checks use the request a
-person reads, so the switch does not change who must approve.
+nothing more from Keycloak for it. A write in `master` or in the target's
+`admin_realm` (when that realm is not one of MEHO's own login) reads, for
+the caller, like a write in another realm: `login_realm` is `false`,
+`members` is `null` and `effective_roles` is empty. The stored request
+keeps these caller facts under `grant.agent_view`. The approval checks use
+the request a person reads, so the switch does not change who must approve.
 
 **The approval card.** `connectors/keycloak/ops_write_rights_card.py`
 shows the object as it is now next to the new values:

@@ -38,6 +38,10 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
   they could not be read, or when there are more than the cap. The
   approval then refuses: it cannot tell whether the approver is in the
   group.
+* ``agent_view``: only in ``master`` or the target's ``admin_realm`` when
+  that realm is not one of MEHO's own login. It holds the facts a caller
+  reads while ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off: the facts of a write
+  outside the login realm (:func:`_grant_as_agent_reads`).
 
 The same builder runs again right before the approved change runs, so
 the approval check can compare the ids with the live system. For
@@ -150,6 +154,11 @@ _LOGIN_OPS: Final[frozenset[str]] = frozenset(
 #: ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off.
 _AGENT_NO_GRANT: Final[frozenset[str]] = frozenset({"keycloak.user.reset_password"})
 
+#: The key of the ``grant`` block with the facts a caller reads while
+#: ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off, for a write in ``master`` or in the
+#: target's admin realm that is not one of MEHO's own login.
+_AGENT_VIEW: Final[str] = "agent_view"
+
 #: Why a group or role change needs a platform admin.
 REASON_GROUP_OR_ROLE: Final[str] = (
     "The group or role gives platform admin rights, or lets a login manage the realm."
@@ -185,17 +194,41 @@ def _agent_grant(grant: Any) -> Any:
     return shown
 
 
+def _outside_own_realm(preview: dict[str, Any], view: dict[str, Any]) -> None:
+    """Show *preview* as it is for a write outside the login realm (:data:`_AGENT_VIEW`)."""
+    grant = preview["grant"]
+    if isinstance(grant, dict):
+        grant.update(view, login_realm=False)
+        if "members" in grant:
+            grant["members"] = None
+    if "effective_roles" in preview:
+        preview["effective_roles"] = []
+
+
 def _grant_as_agent_reads(op_id: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """The stored preview of *op_id* as a caller reads it (:func:`_agent_grant`)."""
+    """The stored preview of *op_id* as a caller reads it (:func:`_agent_grant`).
+
+    While ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off, a write in ``master`` or in
+    the target's admin realm reads as a write outside the login realm
+    (:data:`_AGENT_VIEW`).
+    """
 
     def _filter(preview: dict[str, Any]) -> dict[str, Any]:
-        if agent_cards_on() or "grant" not in preview:
+        if "grant" not in preview:
             return preview
         shown = dict(preview)
+        grant = shown["grant"]
+        view = grant.get(_AGENT_VIEW) if isinstance(grant, dict) else None
+        if isinstance(grant, dict) and _AGENT_VIEW in grant:
+            shown["grant"] = {key: value for key, value in grant.items() if key != _AGENT_VIEW}
+        if agent_cards_on():
+            return shown
         if op_id in _AGENT_NO_GRANT:
             del shown["grant"]
-        else:
-            shown["grant"] = _agent_grant(shown["grant"])
+            return shown
+        shown["grant"] = _agent_grant(shown["grant"])
+        if isinstance(view, dict):
+            _outside_own_realm(shown, view)
         return shown
 
     return _filter
@@ -214,33 +247,37 @@ def _live_connector(ctx: PreviewContext) -> KeycloakConnector | None:
     return connector
 
 
-def is_login_realm_name(realm: str, target: object = None) -> bool:
+def is_login_realm_name(realm: str, target: object = None, *, own_only: bool = False) -> bool:
     """True when *realm* is a realm the login realm rule protects (letter case and spaces ignored).
 
     These are the realms of MEHO's own login, ``master`` (Keycloak's admin
     realm), and the ``admin_realm`` of *target* when it names one. A
     Keycloak admin in ``master`` or in the admin realm can change every
-    realm, also the one of MEHO's own login.
+    realm, also the one of MEHO's own login. With *own_only*, only the
+    realms of MEHO's own login count.
     """
-    names = {*_backplane_login_realms(), DEFAULT_ADMIN_REALM}
-    extras = getattr(target, "extras", None) or {}
-    admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
-    if isinstance(admin, str) and admin.strip():
-        names.add(admin)
+    names = set(_backplane_login_realms())
+    if not own_only:
+        names.add(DEFAULT_ADMIN_REALM)
+        extras = getattr(target, "extras", None) or {}
+        admin = extras.get("admin_realm") if isinstance(extras, Mapping) else None
+        if isinstance(admin, str) and admin.strip():
+            names.add(admin)
     return realm.strip().casefold() in {name.strip().casefold() for name in names}
 
 
-async def is_login_realm(ctx: PreviewContext) -> bool:
-    """True when the target manages a realm of :func:`is_login_realm_name`, or that cannot be read.
+async def login_realm_facts(ctx: PreviewContext) -> tuple[bool, bool]:
+    """Whether the target manages a protected realm, and whether it is one of MEHO's own login.
 
-    The name is the one Keycloak answers with for the target's realm
-    (``GET /admin/realms/{realm}``), not the text stored on the target: a
-    Keycloak database can match a realm name without letter case or with
-    a space at the end. When the read fails, the realm counts as MEHO's own.
+    The first value is :func:`is_login_realm_name`, the second the same with
+    ``own_only``. The name is the one Keycloak answers with for the target's
+    realm (``GET /admin/realms/{realm}``), not the text stored on the
+    target: a Keycloak database can match a realm name without letter case
+    or with a space at the end. When the read fails, both are ``True``.
     """
     connector = _live_connector(ctx)
     if connector is None:
-        return True
+        return True, True
     try:
         stored = resolve_realm_config(ctx.target).managed_realm.strip()
         answer = await connector._get_admin_json(
@@ -250,10 +287,19 @@ async def is_login_realm(ctx: PreviewContext) -> bool:
         )
         name = _text(answer.get("realm")) if isinstance(answer, dict) else None
         if name is None:
-            return True
-        return is_login_realm_name(name, ctx.target) or is_login_realm_name(stored, ctx.target)
+            return True, True
+        return (
+            is_login_realm_name(name, ctx.target) or is_login_realm_name(stored, ctx.target),
+            is_login_realm_name(name, own_only=True) or is_login_realm_name(stored, own_only=True),
+        )
     except Exception:
-        return True
+        return True, True
+
+
+async def is_login_realm(ctx: PreviewContext) -> bool:
+    """True when the target manages a protected realm (:func:`login_realm_facts`)."""
+    protected, _own = await login_realm_facts(ctx)
+    return protected
 
 
 async def _user_id(ctx: PreviewContext, user_params: tuple[str, ...]) -> str | None:
@@ -400,9 +446,20 @@ async def _login_platform(ctx: PreviewContext, user_id: str | None) -> bool | No
     return await login_has_platform_admin(connector, ctx, realm, user_id)
 
 
+async def _platform_by_call(op_id: str, ctx: PreviewContext) -> tuple[str | None, bool | None]:
+    """The group id and the ``platform_admin`` fact of the call, as outside the login realm."""
+    _user_params, group_id_param, group_name_param = GRANT_OPS[op_id]
+    if op_id == _CLIENT_ASSIGN and is_realm_management(ctx.params):
+        return None, True
+    if op_id in _LOGIN_OPS or group_id_param is None or group_name_param is None:
+        return None, _roles_include_platform_admin(ctx)
+    group_id = await _group(ctx, group_id_param, group_name_param)
+    return group_id, await _group_platform(op_id, ctx, group_id)
+
+
 def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
     """Wrap *builder* so its preview carries the ``grant`` block."""
-    user_params, group_id_param, group_name_param = GRANT_OPS[op_id]
+    user_params = GRANT_OPS[op_id][0]
 
     async def _wrapped(ctx: PreviewContext) -> dict[str, Any] | None:
         preview = await builder(ctx)
@@ -411,22 +468,16 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
         agent_off = ctx.agent_preview and not agent_cards_on()
         if agent_off and op_id in _AGENT_NO_GRANT:
             return preview
-        login_realm = await is_login_realm(ctx)
+        protected, own = await login_realm_facts(ctx)
+        # The agent's own preview with the switch off: only MEHO's own login realm counts.
+        login_realm = own if agent_off else protected
         user_id = await _user_id(ctx, user_params)
-        group_id: str | None = None
         reason, unread = REASON_GROUP_OR_ROLE, REASON_UNREAD
-        if op_id in _LOGIN_OPS:
-            platform: bool | None = _roles_include_platform_admin(ctx)
-            if platform is False and login_realm and not agent_off:
-                platform = await _login_platform(ctx, user_id)
-                reason, unread = REASON_LOGIN, REASON_LOGIN_UNREAD
-        elif op_id == _CLIENT_ASSIGN and is_realm_management(ctx.params):
-            platform = True
-        elif group_id_param is None or group_name_param is None:
-            platform = _roles_include_platform_admin(ctx)
-        else:
-            group_id = await _group(ctx, group_id_param, group_name_param)
-            platform = await _group_platform(op_id, ctx, group_id)
+        group_id, platform = await _platform_by_call(op_id, ctx)
+        outside = platform
+        if op_id in _LOGIN_OPS and platform is False and login_realm and not agent_off:
+            platform = await _login_platform(ctx, user_id)
+            reason, unread = REASON_LOGIN, REASON_LOGIN_UNREAD
         if op_id in _ROLE_OPS:
             platform = await _with_effective_roles(
                 op_id, ctx, preview, platform, login_realm=login_realm
@@ -445,6 +496,8 @@ def with_grant_facts(op_id: str, builder: PreviewBuilder) -> PreviewBuilder:
             grant["members"] = (
                 await _members(ctx, group_id) if login_realm and group_id is not None else None
             )
+        if login_realm and not own and not ctx.agent_preview:
+            grant[_AGENT_VIEW] = {"platform_admin": outside}
         preview["grant"] = grant
         return preview
 

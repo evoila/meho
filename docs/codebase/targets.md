@@ -47,8 +47,8 @@ agent's own `preview_operation` gets this card only with
 `PREVIEW_TYPED_WRITES` on; off, its preview is `unavailable`, as for a
 typed write that needs no approval
 (`operations/preview_needs_switch.py`). A
-settings import sends each target it creates or changes as one of these
-calls ([settings.md](settings.md)). The guard
+settings file that adds or changes a target is applied only in the web
+console ([settings.md](settings.md)). The guard
 `tests/test_targets_register_always_waits.py` fails when an operation of
 the target registry that makes or changes a target can be covered by a
 standing grant, a run approval or an agent grant.
@@ -203,8 +203,13 @@ Limits:
 - The kept logins live in each backplane process. The drop above runs
   only in the process that served the PATCH. Every other process (a
   second backplane server, a satellite runner) notices the change on
-  its next call: the dispatcher and the runner executor call
-  `forget_target_if_changed` with the target they just read. It keeps,
+  its next call: every path that takes a cached connector for a stored
+  target calls `forget_target_if_changed` with the target it just read.
+  These are the dispatcher, the runner executor, the topology refresh,
+  scope repair, the dispatch preview of an ingested operation, the
+  Kubernetes token store of the Vault connector, the Keycloak and
+  Linux secret stores, and `meho targets discover` with a seed target
+  (`GET /api/v1/targets/discover`). It keeps,
   per process, a change version for each target: the time a person last
   changed it (`connection_changed_at`), the connector class that
   serves it now (the class itself, not its name), and the product the last
@@ -228,8 +233,10 @@ Limits:
   per target, and the new change version is recorded only when every hook
   is done. So a call that arrives while a hook still runs waits for the
   drop, instead of treating the version as handled and reusing the old
-  login. Paths that call a connector without the dispatcher (topology
-  refresh, scope repair) do not run this check.
+  login. The first time a process sees a target, it records the version
+  and drops the kept logins for that target too: a login kept before then
+  may use values the process cannot compare. On a target with nothing
+  kept, this drop does nothing.
 - The handler does not commit on its own: the request's session
   commits after the response is sent, and the UI import calls it for
   many targets in one transaction. So the drop runs twice: once in the
@@ -641,7 +648,10 @@ and each register path says so and names the probe:
   not match there. The handler checks MEHO's policy for `targets.probe` on
   the found target (`secondary_target_refusal`) before the system is
   contacted. A deny grant for that target refuses the call, and nothing is
-  stored. Another target of the same agent is still probed.
+  stored. Another target of the same agent is still probed. The REST route
+  runs the same check (`probe_policy_refusal`) for an agent, service or
+  runner login and answers 403 `{"error": "denied", ...}` on a refusal. For
+  a person these rules are the role gate the route already has.
 - **A call that waits for approval.** An agent with a `needs-approval`
   grant parks the call; a reviewer runs the approved call as the reviewer.
   So the park records who asked and the requester's policy on the named

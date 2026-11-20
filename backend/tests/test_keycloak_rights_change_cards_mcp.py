@@ -25,11 +25,12 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import update
 
-from meho_backplane.api.v1.approvals import _view
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.api.v1.approvals import _view, get_approval_request, list_approvals
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
     KeycloakConnector,
 )
+from meho_backplane.connectors.secret.move_preview import _KEYCLOAK_CARD_KEYS
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.mcp.tools.approvals import _get_handler, _list_handler
@@ -163,7 +164,8 @@ def _rest_effect(rid: uuid.UUID) -> dict[str, Any]:
             assert row is not None
             return row
 
-    return dict(_view(asyncio.run(_load())).proposed_effect or {})
+    person = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    return dict(_view(asyncio.run(_load()), operator=person).proposed_effect or {})
 
 
 @pytest.mark.parametrize("case", [_CLIENT_UPDATE, _MAPPER_CREATE], ids=["client", "mapper"])
@@ -243,3 +245,92 @@ def test_a_request_without_a_stored_effect_reads_as_none(
     )
 
     assert shown is None
+
+
+def _agent() -> Operator:
+    return Operator(
+        sub="rest-card-agent",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.AGENT,
+    )
+
+
+def _rest_reads_by_an_agent(rid: uuid.UUID) -> list[dict[str, Any] | None]:
+    """``proposed_effect`` of *rid* from the REST detail and list answers, for an agent token."""
+    detail = asyncio.run(get_approval_request(rid, operator=_agent()))
+    listed = asyncio.run(
+        list_approvals(
+            status="pending",
+            work_ref=None,
+            limit=None,
+            offset=0,
+            order="newest",
+            outcome_unknown=False,
+            operator=_agent(),
+        )
+    )
+    rows = [row for row in listed if row.id == rid]
+    assert len(rows) == 1
+    return [detail.proposed_effect, rows[0].proposed_effect]
+
+
+def _stored_effect(rid: uuid.UUID) -> dict[str, Any] | None:
+    async def _load() -> dict[str, Any] | None:
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, rid)
+            assert row is not None
+            return row.proposed_effect
+
+    return asyncio.run(_load())
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+def test_rest_reads_of_a_client_update_by_an_agent_are_as_stored(
+    on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REST answer is the stored card, as before: only MCP reads follow the switch."""
+    op_id, params, now = _CLIENT_UPDATE
+    _switch(monkeypatch, on=on)
+    rid = _park(op_id, params, now)
+    stored = _stored_effect(rid)
+    assert stored is not None
+    assert "preview" in stored
+
+    for effect in _rest_reads_by_an_agent(rid):
+        assert effect == stored
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+def test_rest_reads_of_a_secret_move_by_an_agent_are_as_stored(
+    on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REST answer of a ``secret.move`` request keeps its Keycloak target fields."""
+    if on:
+        monkeypatch.setenv("SECRET_MOVE_LINUX_TARGET_CARD", "true")
+    else:
+        monkeypatch.delenv("SECRET_MOVE_LINUX_TARGET_CARD", raising=False)
+    get_settings.cache_clear()
+    sink = {"kind": "keycloak", "ref": "keycloak:example/example-app"}
+    sink.update(dict.fromkeys(sorted(_KEYCLOAK_CARD_KEYS), "made-up"))
+    stored = {
+        "op_id": "secret.move",
+        "connector_id": "secret",
+        "op_class": "credential_write",
+        "preview": {"action": "secret.move", "sink": sink, "merge": False},
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    rid = _seed_request(
+        tenant_id=_TENANT_A, op_id="secret.move", connector_id="secret", proposed_effect=stored
+    )
+    # An MCP read hides the Keycloak target fields; the REST read does not.
+    hidden = proposed_effect_for_agent(
+        "secret.move", stored, params=None, connector_id="secret", tenant=None
+    )
+    assert hidden is not None
+    assert hidden != stored
+
+    for effect in _rest_reads_by_an_agent(rid):
+        assert effect == stored

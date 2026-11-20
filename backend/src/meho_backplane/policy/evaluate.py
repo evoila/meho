@@ -135,8 +135,9 @@ class Asked:
 
     ``risk`` and ``always_wait`` are the effective values after overrides,
     classification and floors. ``op_class`` holds marks from the code:
-    ``root_shell``, ``credential_read``, ``per_call_approval``,
-    ``delete_shaped`` and ``classified_always_wait``. ``target`` is the
+    ``root_shell``, ``credential`` (the call reads, writes or makes a
+    credential), ``credential_waits`` (such a call waits for a person),
+    ``per_call_approval``, ``delete_shaped`` and ``classified_always_wait``. ``target`` is the
     target id, or ``None``.
     """
 

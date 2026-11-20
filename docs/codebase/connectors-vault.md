@@ -705,7 +705,7 @@ target registration) is documented in
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
 | `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
-| `vault.kv.generate` | `read_secret_version` + `create_or_update_secret` | caution | `write` |
+| `vault.kv.generate` | `read_secret_version` + `create_or_update_secret` | caution | `credential_mint` |
 
 All ten register into operation group `kv`.
 
@@ -728,7 +728,11 @@ stay `safe` and run at once. See
 
 **Make a password (`vault.kv.generate`, `ops_kv_generate.py`).** Makes a
 random password that meets a product's rules and stores it in one KV field.
-Other operations then use it by reference (path and field).
+Other operations then use it by reference (path and field). Its class is
+`credential_mint` (`_CREDENTIAL_MINT_OPS` in `broadcast/events.py`): it
+makes a credential, so each call waits for a person, and no standing grant,
+agent grant or run approval covers it
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
 
 - Params: `mount`, `path`, `field` (default `password`), `length` (default
   24), `min_upper`, `min_lower`, `min_digits` (default 1 each), `min_special`

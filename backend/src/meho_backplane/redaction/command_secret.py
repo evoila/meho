@@ -694,9 +694,9 @@ def _is_connection_field(
         return False
     if _NEXT_FIELD.match(text, stop) is not None:
         return True
-    if not quoted and _COMMAND_WORD.search(text, start, stop) is not None:
+    if not (text.startswith(";", stop) or _field_before(text, match)):
         return False
-    return _field_before(text, match) or text.startswith(";", stop)
+    return quoted or _COMMAND_WORD.search(text, start, stop) is None
 
 
 def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -> bool:

@@ -299,8 +299,8 @@ async def test_the_rest_and_web_views_show_the_mark() -> None:
     marked = await _row(await _park())
     plain = await _row(await _park(rights_change=False))
 
-    assert _view(marked).rights_change is True
-    assert _view(plain).rights_change is False
+    assert _view(marked, operator=_person(_REQUESTER)).rights_change is True
+    assert _view(plain, operator=_person(_REQUESTER)).rights_change is False
     assert project_request_to_view(marked)["rights_change"] is True
     assert project_request_to_view(plain)["rights_change"] is False
 

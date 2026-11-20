@@ -36,7 +36,10 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.topology.identity_mode import lock_identity_mode
 from meho_backplane.topology.refresh import _invoke_discover_topology
 from meho_backplane.topology.scope_repair.plan import (
@@ -90,6 +93,7 @@ async def _discover_one(target: Any) -> TargetDiscovery:
     }
     try:
         connector = get_or_create_connector_instance(resolve_connector(target))
+        await forget_target_if_changed(target)
         hints = await _invoke_discover_topology(
             connector, target, system_operator(target.tenant_id)
         )

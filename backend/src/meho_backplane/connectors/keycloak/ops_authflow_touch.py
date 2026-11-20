@@ -114,6 +114,7 @@ from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import (
     TOUCH_LEVEL,
     FlowNode,
 )
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
@@ -906,4 +907,9 @@ async def _touch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-register_rights_check(ENSURE_APPROVAL_TOUCH_OP_ID, _ROLES, _touch_preview, per_object=_PER_CLIENT)
+register_rights_check(
+    ENSURE_APPROVAL_TOUCH_OP_ID,
+    _ROLES,
+    with_current_binding(client=True)(_touch_preview),
+    per_object=_PER_CLIENT,
+)

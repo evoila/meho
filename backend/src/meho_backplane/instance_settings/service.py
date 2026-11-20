@@ -8,23 +8,26 @@
   reads the database and nothing else: no write, no outside system. The
   preview is exactly this.
 * :func:`apply_import` runs :func:`build_plan` and, when the file has no
-  mistakes, sends each target it creates or changes for approval
-  (:mod:`meho_backplane.instance_settings.target_requests`): a person
-  approves each target before MEHO writes it. Then it adds or updates (never
-  deletes) the rest in the request's one transaction, in the order tenants,
-  policies, conventions, with a savepoint per item so one failed item does
-  not spoil the rest. One ``audit_log`` row covers the whole import and the
-  revision keeps its id; each convention history row keeps the import's
-  ``request_id``. A file that changes nothing but targets writes no revision.
+  mistakes, adds or updates (never deletes) in the request's one transaction,
+  in the order tenants, policies, conventions, targets, with a savepoint per
+  item so one failed item does not spoil the rest. One ``audit_log`` row
+  covers the whole import and the revision keeps its id; each convention
+  history row keeps the import's ``request_id``. An unchanged file writes no revision.
 * :func:`list_history` returns the revisions, newest first, each with its
   diff worked out on read.
 
 Writes reuse the existing paths so the file cannot do anything the routes
 cannot: :mod:`meho_backplane.tenancy.policies` for the tenant columns,
 :class:`~meho_backplane.conventions.service.ConventionsService` for
-conventions, and the ``targets.register`` / ``targets.update`` operations
-(with their product, impl-id, ``secret_ref`` scope and TLS checks) for
-targets.
+conventions, and the ``create_target`` / ``update_target`` handlers (with
+their product, impl-id, ``secret_ref`` scope and TLS checks) for targets.
+A file that adds or changes a target applies only for a person in the web
+console (:func:`~meho_backplane.api.v1._wait_for_approval.runs_at_once`), the
+same rule as the target routes; any other caller gets 403 and nothing is
+written. The same rule holds for a file that turns on
+``run_approval_target_kinds`` or turns off ``announce_gate_enabled``
+(:mod:`~meho_backplane.instance_settings.console_only`). The preview has no
+such limit.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._wait_for_approval import runs_at_once
 from meho_backplane.api.v1.targets import (
     _canonicalise_and_validate_product,
     _enforce_tls_trust_exclusion,
@@ -53,6 +57,8 @@ from meho_backplane.api.v1.targets import (
     _to_full,
     _validate_preferred_impl_id,
     _validate_update_body_fields,
+    create_target,
+    update_target,
 )
 from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, is_human_principal
@@ -66,6 +72,11 @@ from meho_backplane.db.models import (
     TenantConvention,
 )
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.instance_settings.console_only import (
+    console_only_changes,
+    console_only_refusal,
+    console_only_warnings,
+)
 from meho_backplane.instance_settings.diff import DEFAULT_POLICIES, diff_specs, is_empty, summarise
 from meho_backplane.instance_settings.schema import (
     API_VERSION,
@@ -80,7 +91,6 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     parse_settings_file,
 )
-from meho_backplane.instance_settings.target_requests import TargetWrite, ask_for_target_writes
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.secret_field_map import merge_secret_field_map
@@ -96,6 +106,7 @@ from meho_backplane.version import deployed_version_label
 
 __all__ = [
     "DEFAULT_POLICIES",
+    "TARGET_WRITES_NEED_CONSOLE",
     "ImportPlan",
     "ImportResult",
     "SettingsExportRefusedError",
@@ -133,6 +144,14 @@ TARGET_KEYS: Final[tuple[str, ...]] = (
 )
 
 _conventions = ConventionsService()
+
+#: The 403 reason when a call with a token applies a file that adds or
+#: changes targets. Only a person in the web console writes targets at once,
+#: the same rule as ``POST`` and ``PATCH /api/v1/targets``.
+TARGET_WRITES_NEED_CONSOLE: Final[str] = (
+    "A settings file that adds or changes targets is applied in the web console. "
+    "A call with a token cannot write targets at once."
+)
 
 
 class SettingsForbiddenError(Exception):
@@ -206,15 +225,22 @@ def _target_block(row: TargetORM) -> dict[str, Any]:
 async def _load_state(
     session: AsyncSession,
     tenant_ids: list[uuid.UUID],
+    *,
+    lock: bool = False,
 ) -> tuple[
     dict[uuid.UUID, Tenant],
     dict[uuid.UUID, list[TenantConvention]],
     dict[uuid.UUID, list[TargetORM]],
 ]:
-    tenants = {
-        t.id: t
-        for t in (await session.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))).scalars()
-    }
+    query = select(Tenant).where(Tenant.id.in_(tenant_ids))
+    if lock:
+        # Held until the commit: a second import waits here and then reads the
+        # policies this one wrote, so its console-only check sees them. The id
+        # order keeps two imports of the same tenants from waiting on each other.
+        query = (
+            query.order_by(Tenant.id).with_for_update().execution_options(populate_existing=True)
+        )
+    tenants = {t.id: t for t in (await session.execute(query)).scalars()}
     conventions: dict[uuid.UUID, list[TenantConvention]] = {tid: [] for tid in tenant_ids}
     for row in (
         await session.execute(
@@ -349,6 +375,8 @@ class _TenantPlan:
     tenant_id: uuid.UUID
     index: int
     exists: bool
+    #: The file's block for this tenant (re-planned for a new tenant, see apply).
+    entry: SettingsTenant | None = None
     policies: dict[str, Any] | None = None
     #: (index, slug, ConventionCreate | ConventionUpdate)
     conventions: list[tuple[int, str, ConventionCreate | ConventionUpdate]] = field(
@@ -356,8 +384,6 @@ class _TenantPlan:
     )
     #: (index, name, TargetCreate | TargetUpdate)
     targets: list[tuple[int, str, TargetCreate | TargetUpdate]] = field(default_factory=list)
-    #: The stored id of each existing target the file changes, by name.
-    target_ids: dict[str, uuid.UUID] = field(default_factory=dict)
 
 
 @dataclass
@@ -372,6 +398,8 @@ class ImportPlan:
     file_sha256: str = ""
     api_version: str = API_VERSION
     exported_from: dict[str, Any] | None = None
+    #: File paths of policy changes that apply only in the web console.
+    console_only: list[str] = field(default_factory=list)
 
 
 def _detail_sentence(path: str, detail: Any) -> str:
@@ -634,7 +662,6 @@ def _plan_targets(
         desired[entry.name], update_body = planned
         if update_body is not None:
             plan.targets.append((i, entry.name, update_body))
-            plan.target_ids[entry.name] = row.id
             _add_realm_warnings(path, desired[entry.name], warnings)
     return [desired[name] for name in sorted(desired)]
 
@@ -647,12 +674,36 @@ def _add_realm_warnings(path: str, block: dict[str, Any], warnings: list[str]) -
     )
 
 
+def _before_blocks(
+    tenant_ids: list[uuid.UUID],
+    tenants: dict[uuid.UUID, Tenant],
+    conventions: dict[uuid.UUID, list[TenantConvention]],
+    targets: dict[uuid.UUID, list[TargetORM]],
+) -> dict[str, dict[str, Any]]:
+    """The stored blocks of the file's tenants that exist, keyed by tenant id."""
+    return {
+        str(tid): {
+            "id": str(tid),
+            "policies": _policies_block(tenants[tid]),
+            "conventions": [_convention_block(c) for c in conventions[tid]],
+            "targets": [_target_block(t) for t in targets[tid]],
+        }
+        for tid in tenant_ids
+        if tid in tenants
+    }
+
+
 async def build_plan(
     session: AsyncSession,
     operator: Operator,
     content: bytes,
+    *,
+    lock: bool = False,
 ) -> ImportPlan:
     """Check *content* and work out the diff. Reads the database; writes nothing.
+
+    With *lock*, the tenant rows of the file stay locked until the caller's
+    transaction ends (the apply uses this; the preview does not).
 
     Raises :class:`SettingsForbiddenError` when the caller may not import the
     tenants the file names (the preview has the same rules as the apply).
@@ -675,17 +726,8 @@ async def build_plan(
     if warning:
         plan.warnings.append(warning)
 
-    tenants, conventions, targets = await _load_state(session, tenant_ids)
-    plan.before = {
-        str(tid): {
-            "id": str(tid),
-            "policies": _policies_block(tenants[tid]),
-            "conventions": [_convention_block(c) for c in conventions[tid]],
-            "targets": [_target_block(t) for t in targets[tid]],
-        }
-        for tid in tenant_ids
-        if tid in tenants
-    }
+    tenants, conventions, targets = await _load_state(session, tenant_ids, lock=lock)
+    plan.before = _before_blocks(tenant_ids, tenants, conventions, targets)
     stored = stored_secret_mistakes(plan.before)
     if stored:
         # A diff shows "before" values and a revision keeps them for good, so a
@@ -697,7 +739,7 @@ async def build_plan(
     desired_view: dict[str, dict[str, Any]] = {}
     in_file: dict[str, dict[str, set[str]]] = {}
     for ti, (entry, tid) in enumerate(zip(model.spec.tenants, tenant_ids, strict=True)):
-        tenant_plan = _TenantPlan(tenant_id=tid, index=ti, exists=tid in tenants)
+        tenant_plan = _TenantPlan(tenant_id=tid, index=ti, exists=tid in tenants, entry=entry)
         tenant_operator = _operator_for(operator, tid)
         current = plan.before.get(str(tid)) or {
             "id": str(tid),
@@ -708,6 +750,8 @@ async def build_plan(
         policies, tenant_plan.policies = _plan_policies(entry, current["policies"])
         if tenant_plan.policies == current["policies"]:
             tenant_plan.policies = None
+        else:
+            plan.console_only.extend(console_only_changes(ti, current["policies"], policies))
         desired_view[str(tid)] = {
             "id": str(tid),
             "policies": policies,
@@ -735,18 +779,25 @@ async def build_plan(
 
     if plan.mistakes:
         return plan
+    plan.warnings.extend(console_only_warnings(operator, plan.console_only))
 
-    tenants_not_in_file: list[str] = []
-    if operator.platform_admin:
-        all_ids = (await session.execute(select(Tenant.id))).scalars()
-        tenants_not_in_file = sorted(str(t) for t in all_ids if t not in tenant_ids)
     plan.diff = diff_specs(
         plan.before,
         desired_view,
         in_file=in_file,
-        tenants_not_in_file=tenants_not_in_file,
+        tenants_not_in_file=await _tenants_not_in_file(session, operator, tenant_ids),
     )
     return plan
+
+
+async def _tenants_not_in_file(
+    session: AsyncSession, operator: Operator, tenant_ids: list[uuid.UUID]
+) -> list[str]:
+    """The other tenants' ids, for a platform_admin; an empty list for anyone else."""
+    if not operator.platform_admin:
+        return []
+    all_ids = (await session.execute(select(Tenant.id))).scalars()
+    return sorted(str(t) for t in all_ids if t not in tenant_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -763,11 +814,6 @@ class ImportResult:
     revision_id: uuid.UUID | None = None
     diff: dict[str, Any] | None = None
     failed: list[str] = field(default_factory=list)
-    #: One entry per target that waits for approval (``path``, ``name``,
-    #: ``op_id``, ``approval_request_id``).
-    waiting: list[dict[str, Any]] = field(default_factory=list)
-    #: One entry per target call that ran at once (``path``, ``name``, ``op_id``).
-    written: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def _apply_tenant_rows(
@@ -793,6 +839,38 @@ async def _apply_tenant_rows(
             )
             broken.add(tenant_plan.tenant_id)
     return broken
+
+
+async def _replan_new_tenants(
+    session: AsyncSession, plan: ImportPlan, live: list[_TenantPlan]
+) -> list[str]:
+    """Plan the policies of each new tenant again from its row, under the lock.
+
+    The plan read no row for a new tenant, so it planned from the defaults.
+    Another import may have created the row since (the insert waits for its
+    commit). So lock the row, plan the file's policies again from what is
+    stored, and return the console-only paths of that plan. When the row holds
+    more than an empty new tenant, it becomes the tenant's "before".
+    """
+    new = [tp for tp in live if not tp.exists]
+    if not new:
+        return []
+    tenants, _, _ = await _load_state(session, [tp.tenant_id for tp in new], lock=True)
+    stored = await load_tenant_blocks(session, [tp.tenant_id for tp in new])
+    paths: list[str] = []
+    for tp in new:
+        if tp.entry is None:
+            continue
+        current = _policies_block(tenants[tp.tenant_id])
+        desired, tp.policies = _plan_policies(tp.entry, current)
+        if tp.policies == current:
+            tp.policies = None
+        else:
+            paths.extend(console_only_changes(tp.index, current, desired))
+        block = stored[str(tp.tenant_id)]
+        if block["policies"] != DEFAULT_POLICIES or block["conventions"] or block["targets"]:
+            plan.before[str(tp.tenant_id)] = block
+    return paths
 
 
 async def _apply_policies(
@@ -855,20 +933,25 @@ async def _apply_conventions(
             failed.append(f"`{path}` ({slug}) could not be written{reason}.")
 
 
-def _target_writes(plan: ImportPlan) -> dict[uuid.UUID, list[TargetWrite]]:
-    return {
-        tenant_plan.tenant_id: [
-            TargetWrite(
-                path=f"spec.tenants[{tenant_plan.index}].targets[{i}]",
-                name=name,
-                body=body,
-                target_id=tenant_plan.target_ids.get(name),
-                tenant_exists=tenant_plan.exists,
-            )
-            for i, name, body in tenant_plan.targets
-        ]
-        for tenant_plan in plan.tenants
-    }
+async def _apply_targets(
+    session: AsyncSession,
+    operator: Operator,
+    tenant_plan: _TenantPlan,
+    failed: list[str],
+) -> None:
+    for i, name, body in tenant_plan.targets:
+        path = f"spec.tenants[{tenant_plan.index}].targets[{i}]"
+        try:
+            async with session.begin_nested():
+                if isinstance(body, TargetCreate):
+                    await create_target(body=body, operator=operator, session=session)
+                else:
+                    await update_target(name=name, body=body, operator=operator, session=session)
+        except HTTPException as exc:
+            failed.append(_detail_sentence(path, exc.detail))
+        except Exception as exc:
+            _log.warning("settings_import_target_failed", name=name, error=str(exc))
+            failed.append(f"`{path}` ({name}) could not be written.")
 
 
 async def apply_import(
@@ -879,34 +962,34 @@ async def apply_import(
     """Apply *content*: add or update, never delete. See the module docstring.
 
     Writes nothing when the file has mistakes (``result.plan.mistakes``) or
-    changes nothing (empty diff, no revision). Each target the file creates or
-    changes waits for approval (``result.waiting``) and is not written here.
-    The caller's session dependency commits the one transaction after the
-    route returns.
+    changes nothing (empty diff, no revision). Raises
+    :class:`SettingsForbiddenError` and writes nothing when the file adds or
+    changes a target, turns on ``run_approval_target_kinds`` or turns off
+    ``announce_gate_enabled``, and the caller is not a person in the web
+    console (:func:`runs_at_once`). The caller's session dependency
+    commits the one transaction after the route returns.
     """
-    plan = await build_plan(session, operator, content)
+    plan = await build_plan(session, operator, content, lock=True)
+    refusal = None if plan.mistakes else console_only_refusal(operator, plan.console_only)
+    if refusal is not None:
+        raise SettingsForbiddenError(refusal)
     result = ImportResult(plan=plan)
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff
         return result
+    if not runs_at_once(operator) and any(tp.targets for tp in plan.tenants):
+        raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
-    # Before any write of this import, so a request never waits on this
-    # transaction (the dispatcher writes the request in its own session).
-    asks = await ask_for_target_writes(
-        {tp.tenant_id: _operator_for(operator, tp.tenant_id) for tp in plan.tenants},
-        _target_writes(plan),
-    )
-    result.waiting = asks.waiting
-    result.written = asks.written
-    result.failed.extend(asks.failed)
+    tenant_ids = [tp.tenant_id for tp in plan.tenants]
+    broken = await _apply_tenant_rows(session, plan, result.failed)
+    live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
+    refusal = console_only_refusal(operator, await _replan_new_tenants(session, plan, live))
+    if refusal is not None:
+        raise SettingsForbiddenError(refusal)
 
     audit_id = uuid.uuid4()
     bind_preallocated_audit_id(audit_id)
     structlog.contextvars.bind_contextvars(audit_op_class="write")
-    tenant_ids = [tp.tenant_id for tp in plan.tenants]
-
-    broken = await _apply_tenant_rows(session, plan, result.failed)
-    live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
     for tenant_plan in live:
         await _apply_policies(session, tenant_plan, result.failed)
     for tenant_plan in live:
@@ -916,6 +999,11 @@ async def apply_import(
             tenant_plan,
             result.failed,
         )
+    for tenant_plan in live:
+        await _apply_targets(
+            session, _operator_for(operator, tenant_plan.tenant_id), tenant_plan, result.failed
+        )
+
     await session.flush()
     after = await load_tenant_blocks(session, tenant_ids)
     actual = diff_specs(plan.before, after)
@@ -946,14 +1034,12 @@ async def apply_import(
         audit_settings_tenant_ids=[str(t) for t in tenant_ids],
         audit_settings_summary=summary,
         audit_settings_failed=len(result.failed),
-        audit_settings_waiting=len(result.waiting),
     )
     _log.info(
         "settings_imported",
         revision_id=str(result.revision_id) if result.revision_id else None,
         tenants=len(tenant_ids),
         failed=len(result.failed),
-        waiting=len(result.waiting),
         summary=summary,
     )
     return result

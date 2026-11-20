@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Recovery codes for the one-time code of the two local accounts.
+"""Recovery codes for the one-time code of the first admin.
 
-The realm stage makes the first admin and the second person with the
+The realm stage makes the first admin with the
 required action ``CONFIGURE_TOTP``. Two realm settings add recovery codes
 (Keycloak 26.3 and later; twelve codes, each works once):
 

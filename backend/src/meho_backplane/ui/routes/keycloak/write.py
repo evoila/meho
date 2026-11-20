@@ -15,7 +15,7 @@ Both ops are registered ``requires_approval=True``
 (:mod:`meho_backplane.connectors.keycloak.ops_write`). The client-scope op is
 ``safety_level="caution"``. The protocol-mapper op is
 ``safety_level="dangerous"``: it wires the ``tenant_id`` / ``tenant_role``
-claims the backplane row-scopes on, so a MEHO-SA-Operator or a tenant admin
+claims the backplane row-scopes on, so a tenant admin
 must approve it.
 
 Why a session BFF, not a REST surface

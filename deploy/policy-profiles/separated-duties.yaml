@@ -13,13 +13,13 @@
 # while the switches POLICY_CLASSIFICATION (categories) and
 # POLICY_APPROVER_ROUTING (routing) are on.
 #
-# In this version a team is one of the five login group kinds (Readers,
-# Operators, SA-Operators, Admins, Approvers). Routing only narrows: a
+# In this version a team is one of the three login group kinds (Readers,
+# Operators, Admins). Routing only narrows: a
 # group never approves more than it may approve today.
 policy: v1
 description: >-
   Separated duties. Identity and secret changes only Admins approve.
-  Network and storage changes only SA-Operators and Admins approve.
+  Network and storage changes only Admins approve.
   Compute changes follow today's rule.
 taxonomy:
   categories: [network, storage, compute, identity, secrets, other]
@@ -58,6 +58,6 @@ routing:
   - match: {category: secrets}
     approvers: [Admins]
   - match: {category: network}
-    approvers: [SA-Operators, Admins]
+    approvers: [Admins]
   - match: {category: storage}
-    approvers: [SA-Operators, Admins]
+    approvers: [Admins]

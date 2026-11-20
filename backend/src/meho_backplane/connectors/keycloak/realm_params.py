@@ -8,7 +8,9 @@ Four ops take a realm name as a parameter: ``keycloak.realm.create`` and
 ``keycloak.realm.delete`` and ``keycloak.user.check_login`` (``realm``).
 Each value must pass
 :func:`~meho_backplane.targets.required_extras.realm_name_problem`, the same
-check a target's own realms pass. The value is never trimmed.
+check a target's own realms pass. The name of a new realm
+(``keycloak.realm.create``) must also be plain ASCII
+(:func:`is_plain_realm_name`). The value is never trimmed.
 
 :func:`realm_param` reads one value in a handler and raises
 :class:`ValueError` for a bad one. The params check registered here
@@ -28,7 +30,7 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.targets.required_extras import check_realm_name, realm_name_problem
 
-__all__ = ["REALM_PARAM_OPS", "check_realm_params", "realm_param"]
+__all__ = ["REALM_PARAM_OPS", "check_realm_params", "is_plain_realm_name", "realm_param"]
 
 #: op_id -> the params (``a.b`` for a nested field) that hold a realm name.
 REALM_PARAM_OPS: Final[dict[str, tuple[str, ...]]] = {
@@ -37,6 +39,10 @@ REALM_PARAM_OPS: Final[dict[str, tuple[str, ...]]] = {
     "keycloak.realm.delete": ("realm",),
     "keycloak.user.check_login": ("realm",),
 }
+
+
+_CREATE: Final[str] = "keycloak.realm.create"
+_NOT_PLAIN: Final[str] = "a new realm's name holds only plain ASCII characters, no accents"
 
 
 def _value(params: dict[str, Any], path: str) -> Any:
@@ -60,6 +66,18 @@ def realm_param(params: dict[str, Any], path: str, op_id: str) -> str | None:
     return check_realm_name(value, f"{op_id}: {path}")
 
 
+def is_plain_realm_name(name: str) -> bool:
+    """True when *name* holds only plain ASCII characters (``" "`` to ``"~"``).
+
+    The name of a realm that ``keycloak.realm.create`` makes must be such a
+    name: letters ``a`` to ``z`` and ``A`` to ``Z``, digits, the space and the
+    other ASCII signs that the realm name check allows (all but ``/``,
+    ``\\``, ``?``, ``#`` and ``%``). No letter with an accent: a Keycloak
+    database can match such a letter with the plain one.
+    """
+    return all(" " <= ch <= "~" for ch in name)
+
+
 def check_realm_params(op_id: str) -> ParamsCheck:
     """The params check of *op_id*: the first realm param that is not a plain name."""
 
@@ -69,6 +87,8 @@ def check_realm_params(op_id: str) -> ParamsCheck:
             if value is None or value == "":
                 continue
             problem = realm_name_problem(value)
+            if problem is None and op_id == _CREATE and not is_plain_realm_name(value):
+                problem = _NOT_PLAIN
             if problem is not None:
                 return params_problem(
                     path,

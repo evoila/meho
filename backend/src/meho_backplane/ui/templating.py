@@ -55,10 +55,17 @@ the candidate, but the factory below leaves the choice open).
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, Final
 
 from fastapi.templating import Jinja2Templates
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from jinja2 import (
+    ChoiceLoader,
+    Environment,
+    FileSystemLoader,
+    StrictUndefined,
+    select_autoescape,
+)
 from starlette.requests import Request
 
 from meho_backplane.connector_packages import installed_connector_packages
@@ -84,6 +91,29 @@ _TEMPLATES: Jinja2Templates | None = None
 _AUTOESCAPE_EXTS: Final[tuple[str, ...]] = ("html", "htm", "xml")
 
 
+def _template_loader() -> ChoiceLoader:
+    """Resolve templates from this package first, then from ``meho-ui``.
+
+    The console's own templates win on a name clash. That ordering is
+    deliberate and not merely conventional: it is what lets a surface be
+    moved onto a shared component one at a time. A conversion of 232
+    templates cannot be atomic, and a shadowing escape hatch that exists
+    beforehand is better than one improvised mid-migration.
+
+    The shared directory is resolved from the installed package, so it
+    works from a wheel in site-packages and from a source checkout alike
+    -- the same reason :func:`templates_dir` resolves from ``__file__``.
+    """
+    from meho_ui.shell import templates_dir as shared_templates_dir
+
+    return ChoiceLoader(
+        [
+            FileSystemLoader(str(templates_dir())),
+            FileSystemLoader(str(shared_templates_dir())),
+        ]
+    )
+
+
 def get_jinja_env() -> Environment:
     """Return the lazily-constructed UI Jinja2 environment.
 
@@ -97,7 +127,7 @@ def get_jinja_env() -> Environment:
     global _ENV
     if _ENV is None:
         _ENV = Environment(
-            loader=FileSystemLoader(str(templates_dir())),
+            loader=_template_loader(),
             autoescape=select_autoescape(_AUTOESCAPE_EXTS),
             undefined=StrictUndefined,
             # ``trim_blocks`` + ``lstrip_blocks`` reduce the
@@ -126,7 +156,35 @@ def get_jinja_env() -> Environment:
         # Installed connector packages (#5036): the same list GET /version
         # shows, rendered next to the deployed version on the dashboard.
         _ENV.globals["connector_packages"] = installed_connector_packages
+        _ENV.filters["visible_marks"] = visible_marks
     return _ENV
+
+
+#: The kinds of characters a reader cannot see as text: control (C0, DEL,
+#: C1), format (bidi controls, zero-width characters), line and paragraph
+#: separators, and lone surrogates. The same set the CLI escapes.
+_UNSEEN_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
+
+
+def visible_marks(text: str) -> str:
+    """*text* with each character a reader cannot see shown as a visible mark.
+
+    A new line and a tab stay. Any other control or format character is
+    shown as ``\\x1b`` (below U+0100) or ``\\u202e``, as ``meho approvals
+    show`` prints it. So a right-to-left override or an escape code cannot
+    change what an approver reads. The result is still escaped by autoescape.
+    """
+    if not any(unicodedata.category(ch) in _UNSEEN_CATEGORIES for ch in text):
+        return text
+    out: list[str] = []
+    for ch in text:
+        if ch in "\n\t" or unicodedata.category(ch) not in _UNSEEN_CATEGORIES:
+            out.append(ch)
+        elif ord(ch) < 0x100:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(f"\\u{ord(ch):04x}")
+    return "".join(out)
 
 
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:

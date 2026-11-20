@@ -13,9 +13,11 @@ The design is ``core.md`` §5; the file, the endpoints and the table are in
   sentence plus the diff (added / changed / not in file). Writes nothing and
   calls no outside system.
 * ``POST /api/v1/settings/import`` -- add or update, never delete. 422 with
-  the same body as the preview when the file has mistakes. Each target the
-  file creates or changes waits for a person's approval and is listed in
-  ``waiting_for_approval``; it is written once a person approves it.
+  the same body as the preview when the file has mistakes. 403 for a call
+  with a token when the file adds or changes a target: only a person in the
+  web console writes targets at once, as on ``/api/v1/targets``. The same
+  403 when the file turns on ``run_approval_target_kinds`` or turns off
+  ``announce_gate_enabled`` (:mod:`~meho_backplane.instance_settings.console_only`).
 * ``GET /api/v1/settings/history`` -- the revisions, newest first.
 * ``POST /api/v1/settings/conventions-drift`` -- compare a file that holds
   only conventions with the tenant's operational conventions: added, changed,
@@ -105,27 +107,6 @@ _settings_admin = Depends(_require_settings_admin)
 _human_settings_admin = Depends(_require_human_settings_admin)
 
 
-class SettingsTargetWritten(BaseModel):
-    """A target of the file whose call ran at once."""
-
-    model_config = ConfigDict(frozen=True)
-
-    path: str
-    name: str
-    op_id: str
-
-
-class SettingsTargetRequest(SettingsTargetWritten):
-    """A target of the file that waits for a person's approval.
-
-    ``already_waiting`` is true when an earlier call (an earlier import of
-    the same file, for example) made the request: the import made no new one.
-    """
-
-    approval_request_id: UUID
-    already_waiting: bool = False
-
-
 class SettingsImportResponse(BaseModel):
     """The preview and the apply answer: plain JSON, the mistakes and the diff.
 
@@ -134,13 +115,7 @@ class SettingsImportResponse(BaseModel):
     and ``after``) and ``not_in_file`` lists. It is ``null`` when the file has
     mistakes. On an apply, ``diff`` is what actually changed, ``failed`` lists
     the items that could not be written (the rest were), and ``revision_id`` is
-    the new revision (``null`` when nothing changed). ``waiting_for_approval``
-    lists each target the file creates or changes: it is not written yet, and
-    a person approves each one (``meho approvals``, or the console). When a
-    request with the same values already waits, the import lists that request
-    (``already_waiting``) and makes no new one. When a request for that target
-    waits with other values, ``failed`` names the target and the waiting
-    request. ``targets_written`` lists a target call that ran at once.
+    the new revision (``null`` when nothing changed).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -153,8 +128,6 @@ class SettingsImportResponse(BaseModel):
     applied: bool = False
     revision_id: UUID | None = None
     failed: list[str] = []
-    waiting_for_approval: list[SettingsTargetRequest] = []
-    targets_written: list[SettingsTargetWritten] = []
 
 
 class SettingsRevision(BaseModel):
@@ -257,8 +230,11 @@ async def import_settings(
 
     ``?preview=true`` changes nothing. Without it the import adds or updates
     (never deletes) in one transaction, or answers 422 with the mistakes and
-    writes nothing. Each target the file creates or changes waits for a
-    person's approval (``waiting_for_approval``).
+    writes nothing. A file that adds or changes a target applies only for a
+    person in the web console; a call with a token gets 403 and nothing is
+    written, the same rule as the target routes. The same holds for a file
+    that turns on ``run_approval_target_kinds`` or turns off
+    ``announce_gate_enabled``.
     """
     content = await _read_file(request)
     try:
@@ -290,8 +266,6 @@ async def import_settings(
         applied=result.applied,
         revision_id=result.revision_id,
         failed=result.failed,
-        waiting_for_approval=[SettingsTargetRequest.model_validate(w) for w in result.waiting],
-        targets_written=[SettingsTargetWritten.model_validate(w) for w in result.written],
     )
 
 

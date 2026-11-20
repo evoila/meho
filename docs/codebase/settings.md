@@ -120,6 +120,54 @@ spec:
 - An item in MEHO but not in the file is reported as "not in file" and left
   alone. **Nothing is ever deleted.** (A later `--prune` is its own Task.)
 
+### Policies that change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs. A
+file that loosens one of them applies only for a person in the web console
+(`runs_at_once` in `api/v1/_wait_for_approval.py`). The rule and the list
+are in `instance_settings/console_only.py`.
+
+| Policy | Widens an approval, turns a gate off, or changes who approves? | With a token |
+|---|---|---|
+| `run_approval_target_kinds` | Yes: `true` lets one run approval cover a whole target kind ([run-approvals.md](run-approvals.md)) | `false` -> `true` refused; `true` -> `false` applies |
+| `announce_gate_enabled` | Yes: `false` turns the announce gate off | `true` -> `false` refused; `false` -> `true` applies |
+| `flight_recorder.*` | No. Its own route `PATCH /api/v1/tenants/flight-recorder-policy` writes at once for a token | applies |
+| `mail_recipient_allowlist` | No. Its own route `PATCH /api/v1/tenants/mail-recipient-policy` writes at once for a token | applies |
+| `knowledge_wiki_collection` | No. It names a docs collection that knowledge search also reads, and each read still checks the caller's own entitlement to that collection | applies |
+
+The file has no install-level part, so an import writes no install setting.
+Tenant rows and conventions change no approval or gate.
+
+- A call with a token (the CLI, a script, an AI tool with a person's login)
+  that applies a file with such a change gets 403. The reason names each
+  path, for example `spec.tenants[0].policies.run_approval_target_kinds`.
+  MEHO writes nothing from the file, also not its other parts, and makes no
+  revision.
+- `policies: null` resets every policy. When the gate is on, that turns it
+  off, so the same rule applies.
+- A file with mistakes answers 422 first.
+- The preview with a token works. It shows the change in `diff` and names
+  each such path in `warnings`. It writes nothing.
+- A value equal to the stored one is no change and is not refused.
+- The web console cannot apply a settings file yet. Until it has a
+  settings page, these two changes cannot be made at all; they have no
+  REST route of their own. Turning the gate on applies with a token, so
+  after that the gate stays on until then.
+
+- The apply locks the rows of the tenants in the file before it reads
+  their policies, and holds the lock until its commit. A second import of
+  the same tenant waits, then reads what the first one wrote. So it checks
+  and writes the stored policies, not an older copy. The preview takes no
+  lock.
+- A tenant that is new in the file has no row to lock when the plan is
+  made, so the plan starts from the defaults. Right after the apply
+  creates the row (or waits for another import that creates it), it locks
+  the row, plans the file's policies again from what is stored, and runs
+  the console-only check again.
+
+Tests: `tests/test_settings_import_console_policies.py`, and on PostgreSQL
+`tests/integration/test_settings_import_overlap_pg.py`.
+
 ## Never in the file
 
 The schema refuses unknown keys, so none of these can be added by hand; the
@@ -276,10 +324,25 @@ file yet.
   tenant, also when its token carries the platform-admin claim: the same
   rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
   `tests/test_tenant_scope_person_only.py`.
-- Each target the file creates or changes waits for a person's approval,
-  also when a person imports with a token (CLI or API). Making or changing
-  a target always waits for a person ([targets.md](targets.md)). The rest
-  of the file is written at once.
+- A file that adds or changes a target applies only for a person in the
+  web console (`runs_at_once` in `api/v1/_wait_for_approval.py`), the same
+  rule as `POST` and `PATCH /api/v1/targets`. A call with a token (the CLI,
+  a script, an AI tool with a person's login) that applies such a file gets
+  403 with the reason "A settings file that adds or changes targets is
+  applied in the web console. A call with a token cannot write targets at
+  once." Nothing is written, and no approval request is made. While the
+  console has no settings page, add or change targets through the target
+  routes (a call with a token waits for approval there), then import the
+  file: its target entries then match and are no change. The preview
+  works with a token, and so does a file that changes no target (a target
+  entry equal to the stored one is no change). Two policies also change
+  only in the web console: `run_approval_target_kinds` turned on and
+  `announce_gate_enabled` turned off (see
+  [Policies that change only in the web console](#policies-that-change-only-in-the-web-console)).
+  The other parts of the file apply with a token, because their REST
+  routes write at once for a token too: tenants, the other policies
+  (`/api/v1/tenants/...`) and conventions (`/api/v1/conventions`). Tests:
+  `tests/test_settings_import_target_writes.py`.
 
 ## Endpoints
 
@@ -314,9 +377,7 @@ may not import, 413 for a body over 4 MiB):
   "diff": null,
   "applied": false,
   "revision_id": null,
-  "failed": [],
-  "waiting_for_approval": [],
-  "targets_written": []
+  "failed": []
 }
 ```
 
@@ -333,46 +394,26 @@ When there are no mistakes, `diff` holds one entry per section — `tenants`,
 ### `POST /api/v1/settings/import`
 
 Runs the same checks. With any mistake it answers 422 with the preview's
-body and writes nothing. Otherwise it adds or updates, never deletes:
+body and writes nothing. When the file adds or changes a target and the
+caller is not a person in the web console, it answers 403 and writes
+nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 
-- **Targets wait for a person.** First, each target the file creates or
-  changes goes to the dispatcher as one `targets.register` or
-  `targets.update` call, as the person who imports
-  (`instance_settings/target_requests.py`). Each call waits for approval;
-  the import writes no target. `waiting_for_approval` lists one entry per
-  target: `{path, name, op_id, approval_request_id, already_waiting}`.
-  When a request for the same call still waits (the same file imported
-  twice, for example), the import makes no new request: it lists that
-  request with `already_waiting: true`. The call is the same only when the
-  operation and every param match (`params_hash`). When a request for the
-  same target waits with other values (the host changed in the file, for
-  example), the import sends nothing for that target. `failed` names the
-  waiting request: a person approves or rejects it, then imports the file
-  again. A call that runs at once is listed
-  in `targets_written` (`{path, name, op_id}`). The approval card
-  shows the values: the new target's fields, or the old and the new value
-  of each changed field (also `extras`). A person approves each request in
-  the console or with `meho approvals approve <id>`; then MEHO writes the
-  target. A file that creates or changes no target makes no request. A
-  target in a tenant that the same file creates is not sent: its tenant
-  does not exist yet. `failed` says to import the file again.
-- Then one database transaction, in this order: tenants (`ensure_tenant`),
-  policies, conventions.
+- One database transaction, in this order: tenants (`ensure_tenant`),
+  policies, conventions, targets.
 - A savepoint per item, so one failed item does not spoil the whole import.
   Items that could not be written are listed in `failed` (one sentence
   each), and `ok` is then `false`; everything else is written.
 - The writes go through the same code as the REST routes:
   `tenancy/policies.py` for the tenant columns (`announce_gate_enabled` has
   no route of its own and is written there, audited), `ConventionsService`
-  for conventions, and the `targets.register` / `targets.update` operations
-  for targets.
+  for conventions, and `create_target` / `update_target` for targets.
 - One `audit_log` row covers the whole import (`op_id=settings.import`). Its
   `op_class` is `write` only when something is written; a refused or
   unchanged file leaves a `read` row. The revision row keeps its id. Every
   `tenant_convention_history` row the import writes keeps the import's
   `request_id` (convention history no longer points at `audit_log`, #3747).
-- `diff` in the answer is what actually changed (the targets that wait are
-  not in it); `revision_id` is the new revision.
+- `diff` in the answer is what actually changed; `revision_id` is the new
+  revision.
 - An unchanged file gives an empty diff and writes no revision.
 
 ### `POST /api/v1/settings/conventions-drift`

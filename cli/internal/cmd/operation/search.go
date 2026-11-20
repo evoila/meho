@@ -323,9 +323,9 @@ func printSearchTable(w io.Writer, connectorID, query string, r *SearchResponse,
 		fmt.Fprintf(w, "%-40s %-11s  %s\n", "op_id", "safety", "summary")
 		for _, h := range r.Hits {
 			fmt.Fprintf(w, "%-40s %-11s  %s\n",
-				truncate(h.OpID, 40),
-				h.SafetyLevel,
-				truncate(strDeref(h.Summary), 80),
+				truncate(output.SafeText(h.OpID), 40),
+				output.SafeText(h.SafetyLevel),
+				truncate(output.SafeText(strDeref(h.Summary)), 80),
 			)
 		}
 		return
@@ -337,9 +337,9 @@ func printSearchTable(w io.Writer, connectorID, query string, r *SearchResponse,
 			score = fmt.Sprintf("%6.3f", h.FusedScore)
 		}
 		fmt.Fprintf(w, "%-40s %s  %s\n",
-			truncate(h.OpID, 40),
+			truncate(output.SafeText(h.OpID), 40),
 			score,
-			truncate(strDeref(h.Summary), 80),
+			truncate(output.SafeText(strDeref(h.Summary)), 80),
 		)
 	}
 }

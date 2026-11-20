@@ -28,6 +28,7 @@ from tests.test_run_approvals import (
     _WRITE_OP,
     _approver,
     _descriptors,  # noqa: F401 -- autouse fixture: the operations the lists name
+    _known_person_behind,  # noqa: F401 -- autouse fixture: a known person behind the login
     _operator,
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )

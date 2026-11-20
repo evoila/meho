@@ -69,8 +69,8 @@ one, that test fails and the constant must be promoted into
 to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
 34 by the #3851 user logout, to 37 by the #3886 realm delete, to 45 by the login flow
 ops, to 48 by the passkey step op, to 49 by the user disable / enable PUT, to 54
-by the client role and credential delete writes, and to 55 by the client role users
-read of the remove card) were
+by the client role and credential delete writes, to 55 by the client role users
+read of the remove card, and to 56 by the realm roles a group gives) were
 served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
@@ -139,7 +139,12 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_GROUP_PATH": ("GET", "PUT", "DELETE"),
     "_GROUP_CHILDREN_PATH": ("GET", "POST"),
     "_GROUP_MEMBERS_PATH": ("GET",),
+    # The roles a group gives directly (the group member add approval card).
+    "_GROUP_REALM_COMPOSITE_PATH": ("GET",),
+    "_GROUP_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_GROUPS_PATH": ("GET",),
+    # Every realm role a user has (the platform admin check of a login).
+    "_USER_REALM_COMPOSITE_PATH": ("GET",),
     "_USER_GROUP_PATH": ("PUT", "DELETE"),
     # Realm delete approval card (#3886): user and group counts.
     "_USERS_COUNT_PATH": ("GET",),
@@ -248,6 +253,8 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/groups/{group-id}",
         "GET:/admin/realms/{realm}/groups/{group-id}/children",
         "GET:/admin/realms/{realm}/groups/{group-id}/members",
+        "GET:/admin/realms/{realm}/groups/{group-id}/role-mappings",
+        "GET:/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/composite",
         "GET:/admin/realms/{realm}/identity-provider/instances",
         "GET:/admin/realms/{realm}/roles",
         "GET:/admin/realms/{realm}/roles-by-id/{role-id}/composites",
@@ -260,6 +267,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}",
+        "GET:/admin/realms/{realm}/users/{user-id}/role-mappings/realm/composite",
         "GET:/admin/realms/{realm}/users/{user-id}/sessions",
         "POST:/admin/realms",
         "POST:/admin/realms/{realm}/authentication/executions/{executionId}/config",

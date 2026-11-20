@@ -43,6 +43,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.operations.deny_reasons import AGENT_GRANT_DENIED, POLICY_DENIED
 from meho_backplane.operations.governed_subops import register_governed_subops
+from tests._people_behind_helpers import give_known_person
 from tests.test_agent_grant_required import (
     _AGENT,
     _MULTI_RUNS,
@@ -144,6 +145,7 @@ async def _register_single(stub: AsyncMock) -> None:
 async def _park(operator: Operator, actor: str | None = None, op_id: str = _OP) -> uuid.UUID:
     """The call waits for approval; a person approves it. Returns the request id."""
     target = await _seed_vault_target()
+    await give_known_person(operator)
     with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: actor}):
         parked = await dispatch(
             operator=operator, connector_id="vault-1.x", op_id=op_id, target=target, params={}

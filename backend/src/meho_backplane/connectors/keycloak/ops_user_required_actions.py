@@ -41,8 +41,28 @@ is refused before it waits for approval, and again when the approved
 request runs. Nothing is written. The card and the result show the
 username stored in Keycloak whenever the user could be read.
 
-When the realm is the one MEHO's own sign-in uses and an added action sets
-up a passkey, the card says that the next sign-in can add a new passkey.
+The user this target signs in with is refused, because a required action on
+it can make Keycloak refuse the next sign-in of MEHO
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`). The
+refusal comes before approval and again when the approved request runs. A
+name in ``add`` that the realm does not know is also refused before approval.
+
+When the realm is the one MEHO's own sign-in uses, the card has one more
+line when the change:
+
+* adds a passkey set-up (the next sign-in can add a new passkey);
+* adds ``CONFIGURE_TOTP`` or ``CONFIGURE_RECOVERY_AUTHN_CODES`` (the person
+  gets a new way to sign in);
+* removes ``CONFIGURE_TOTP``, a passkey set-up or
+  ``CONFIGURE_RECOVERY_AUTHN_CODES`` (the person will not be asked to set it
+  up).
+
+The result's ``required_actions`` is the list read back from Keycloak after
+the write. It is ``null`` when MEHO does not know the list:
+
+* the read-back failed (``read_back_checked`` is ``false``);
+* the read-back ran, but Keycloak's answer had no usable
+  ``requiredActions`` list (``read_back_checked`` is ``true``).
 
 Why a new read, not ``keycloak.user.list``
 ==========================================
@@ -114,6 +134,8 @@ _OTP_CREDENTIAL_TYPE = "otp"
 #: Required actions that let the next sign-in add a passkey.
 _PASSKEY_REQUIRED_ACTIONS = frozenset({"webauthn-register", "webauthn-register-passwordless"})
 _PASSKEY_WARNING = "this lets the next sign-in to this account add a new passkey"
+#: Sign-in set-up steps (besides a passkey) that a change can add or remove.
+_SIGN_IN_SETUP_ACTIONS = frozenset({_OTP_REQUIRED_ACTION, "CONFIGURE_RECOVERY_AUTHN_CODES"})
 
 _DEFAULT_MAX_USERS = 100
 _MAX_USERS = 500
@@ -163,9 +185,14 @@ _UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "added": {"type": "array", "items": {"type": "string"}},
         "removed": {"type": "array", "items": {"type": "string"}},
         "required_actions": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {"type": "string"},
-            "description": "The user's required actions after the call.",
+            "description": (
+                "The user's required actions, read back from Keycloak after the write. "
+                "Null when MEHO does not know them: the read-back failed "
+                "(read_back_checked is false), or Keycloak's answer had no usable list "
+                "(read_back_checked is true)."
+            ),
         },
         "unrequested_changes": {
             "type": "array",
@@ -460,11 +487,20 @@ async def keycloak_user_required_actions_update(
     }
     if resulting == current:
         return result
+    read_back: dict[str, Any] = {}
     outcome = await read_merge_write(
-        self, operator, target, path=path, requested={"requiredActions": resulting}, before=user
+        self,
+        operator,
+        target,
+        path=path,
+        requested={"requiredActions": resulting},
+        before=user,
+        read_back_into=read_back,
     )
     result["unrequested_changes"] = outcome["unrequested_changes"]
     result["read_back_checked"] = outcome["read_back_checked"]
+    # What Keycloak holds now, not what MEHO sent. Unknown when it was not read back.
+    result["required_actions"] = _string_list(read_back.get("requiredActions"))
     return result
 
 
@@ -583,8 +619,9 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     requested = _opt_str(ctx.params.get("username"))
     if requested is not None:
         preview["requested_username"] = requested
-    if _adds_passkey_on_login_realm(preview["realm"], add):
-        preview["warning"] = _PASSKEY_WARNING
+    lines = _sign_in_lines(preview["realm"], add, remove)
+    if lines:
+        preview["warning"] = "; ".join(lines)
     connector = ctx.connector_instance
     target = ctx.target
     if connector is None or target is None:
@@ -624,14 +661,60 @@ async def _required_actions_update_preview(ctx: PreviewContext) -> dict[str, Any
     return preview
 
 
-def _adds_passkey_on_login_realm(realm: str | None, add: list[str]) -> bool:
-    """Whether *add* sets up a passkey in the realm MEHO's own sign-in uses."""
-    if realm is None or not _PASSKEY_REQUIRED_ACTIONS.intersection(add):
-        return False
-    return realm.casefold() in {name.casefold() for name in _backplane_login_realms()}
+def _is_login_realm(realm: str | None) -> bool:
+    """Whether *realm* is a realm MEHO's own sign-in uses."""
+    return realm is not None and realm.casefold() in {
+        name.casefold() for name in _backplane_login_realms()
+    }
+
+
+def _sign_in_lines(realm: str | None, add: list[str], remove: list[str]) -> list[str]:
+    """Card lines for a change that gives or takes away a sign-in step in MEHO's own realm."""
+    if not _is_login_realm(realm):
+        return []
+    lines: list[str] = []
+    if _PASSKEY_REQUIRED_ACTIONS.intersection(add):
+        lines.append(_PASSKEY_WARNING)
+    gained = sorted(_SIGN_IN_SETUP_ACTIONS.intersection(add))
+    if gained:
+        lines.append(f"this gives the person a new way to sign in ({', '.join(gained)})")
+    lost = sorted((_SIGN_IN_SETUP_ACTIONS | _PASSKEY_REQUIRED_ACTIONS).intersection(remove))
+    if lost:
+        lines.append(
+            f"this takes a sign-in set-up step away ({', '.join(lost)}): "
+            "the person will not be asked to set it up"
+        )
+    return lines
+
+
+async def _refuse_unknown_names(ctx: PreviewContext) -> str | None:
+    """Refuse a name in ``add`` that is not an enabled required action of the realm.
+
+    Runs before the request waits for approval, after the shared user check
+    (one user, and not the user the target signs in with). The reason names
+    no param value. The run checks the same thing again.
+    """
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+    connector = ctx.connector_instance
+    target = ctx.target
+    if not isinstance(connector, KeycloakConnector) or target is None:
+        return None
+    add = _names(ctx.params.get("add"))
+    if not add:
+        return None
+    realm = resolve_realm_config(target).managed_realm
+    allowed = await _enabled_required_actions(connector, ctx.operator, target, realm)
+    if any(name not in allowed for name in add):
+        return (
+            f"{REQUIRED_ACTIONS_UPDATE_OP_ID}: a name in 'add' is not an enabled required "
+            f"action of realm {realm!r}. Allowed names: {allowed}. Nothing was changed."
+        )
+    return None
 
 
 register_park_check(
-    REQUIRED_ACTIONS_UPDATE_OP_ID, refuse_other_user_check(REQUIRED_ACTIONS_UPDATE_OP_ID)
+    REQUIRED_ACTIONS_UPDATE_OP_ID,
+    refuse_other_user_check(REQUIRED_ACTIONS_UPDATE_OP_ID, then=_refuse_unknown_names),
 )
 register_preview_builder(REQUIRED_ACTIONS_UPDATE_OP_ID, _required_actions_update_preview)

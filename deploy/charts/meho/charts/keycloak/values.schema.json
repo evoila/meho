@@ -25,11 +25,11 @@
     "tenantName": {
       "type": "string",
       "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
-      "description": "The first tenant's short name (lowercase letters, digits and dashes). The five role groups carry it in the `meho_tenant` attribute."
+      "description": "The first tenant's short name (lowercase letters, digits and dashes). The three role groups carry it in the `meho_tenant` attribute."
     },
     "tenants": {
       "type": "array",
-      "description": "More tenants. The parent chart's bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one.",
+      "description": "More tenants. The parent chart's bootstrap Job makes the three groups `MEHO-<name>-<Role>` for each one.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -280,7 +280,7 @@
     "firstLogin": {
       "type": "object",
       "additionalProperties": false,
-      "description": "User names of the users the bootstrap Job makes at the first start: the first admin, the second person and the console admin (a user of realm master). The parent chart's Job reads them; the subchart only carries them.",
+      "description": "User names of the users the bootstrap Job makes at the first start: the one Admin login and the console admin (a user of realm master). The parent chart's Job reads them; the subchart only carries them.",
       "properties": {
         "adminUsername": {
           "type": "string",
@@ -290,6 +290,7 @@
         "approverUsername": {
           "type": "string",
           "minLength": 1,
+          "description": "Not used. The install makes one Admin login; the key is accepted and ignored.",
           "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }
         },
         "consoleAdminUsername": {

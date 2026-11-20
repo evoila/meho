@@ -56,6 +56,9 @@ _GATE_MARK = "data-approval-gate-reveal-secret"
 _STEP_MARK = "data-approval-in-order-reveal-secret"
 
 
+_PERSON = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+
 def _set_reveal(request_id: uuid.UUID) -> None:
     async def _do() -> None:
         async with get_sessionmaker()() as session, session.begin():
@@ -110,14 +113,14 @@ def test_read_views_carry_the_reveal_choice() -> None:
     shown = _load(_seed(reveal=True))
     plain = _load(_seed(reveal=False))
 
-    assert _view(shown).reveal_secret is True
+    assert _view(shown, operator=_PERSON).reveal_secret is True
     assert _row_to_dict(shown)["reveal_secret"] is True
     assert project_request_to_view(shown)["reveal_secret"] is True
 
-    assert _view(plain).reveal_secret is False
+    assert _view(plain, operator=_PERSON).reveal_secret is False
     assert _row_to_dict(plain)["reveal_secret"] is False
     assert project_request_to_view(plain)["reveal_secret"] is False
-    assert _view(plain).model_dump(mode="json")["reveal_secret"] is False
+    assert _view(plain, operator=_PERSON).model_dump(mode="json")["reveal_secret"] is False
 
 
 def test_rest_view_says_when_the_approved_request_waits_for_the_requester() -> None:
@@ -127,21 +130,21 @@ def test_rest_view_says_when_the_approved_request_waits_for_the_requester() -> N
     _set_reveal(write_rid)
     write = _load(write_rid)
 
-    assert _view(read).waits_for_requester is True
-    assert _view(read).reveal_changes_something is False
-    assert _view(plain).waits_for_requester is False
-    assert _view(plain).reveal_changes_something is False
+    assert _view(read, operator=_PERSON).waits_for_requester is True
+    assert _view(read, operator=_PERSON).reveal_changes_something is False
+    assert _view(plain, operator=_PERSON).waits_for_requester is False
+    assert _view(plain, operator=_PERSON).reveal_changes_something is False
     # A write that asked for the values also waits for the person who asked,
     # and the view says it changes something when it runs.
-    assert _view(write).waits_for_requester is True
-    assert _view(write).reveal_changes_something is True
+    assert _view(write, operator=_PERSON).waits_for_requester is True
+    assert _view(write, operator=_PERSON).reveal_changes_something is True
     # An op the class rules do not know as a read (here an apply) counts as
     # a change too: only a read is a read.
     other_rid = _seed_request(tenant_id=_TENANT_A, op_id="k8s.apply")
     _set_reveal(other_rid)
     other = _load(other_rid)
-    assert _view(other).waits_for_requester is True
-    assert _view(other).reveal_changes_something is True
+    assert _view(other, operator=_PERSON).waits_for_requester is True
+    assert _view(other, operator=_PERSON).reveal_changes_something is True
 
 
 def test_mcp_list_and_get_return_the_reveal_choice() -> None:

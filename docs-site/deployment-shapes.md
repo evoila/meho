@@ -130,8 +130,8 @@ control is load-bearing or where the setting differs.
 | **Network isolation** | `networkPolicy.enabled: true` (default-deny ingress + egress) is the baseline for any multi-tenant or production install. Enabling it makes the schema *require* an egress CIDR for each part you bring yourself (PostgreSQL, Vault, Keycloak), so it refuses to ship a wide subnet by accident; the built-in parts need none. Staging it off is a first-install convenience only, and a documented downgrade for anything past bring-up. | [`install/index.md` § Values file for your own parts](install/index.md#values-file-for-your-own-parts) `networkPolicy` block |
 | **Tenant credential scope** | `VAULT_KV_TENANT_SCOPE_PREFIX` defaults to `secret/tenants/{tenant_id}/` — on by default, so one tenant can never read another's Vault credentials. Keep it set on any multi-tenant deploy; emptying it (`VAULT_KV_TENANT_SCOPE_PREFIX=""`) removes the cross-tenant guard and is a documented downgrade, valid only mid-migration or on a genuinely single-tenant install. | [`install/credential-backends.md`](install/credential-backends.md#vault) |
 | **Reverse-proxy trust** | `config.forwardedAllowIps` names *only* the reverse proxy / ingress controller the backplane should trust `X-Forwarded-*` from — narrow it to the controller's source address, not the whole pod CIDR. Over-wide trust lets any in-cluster workload forge the client address. | [`install/tls-ingress.md` § Reverse-proxy trust](install/tls-ingress.md#reverse-proxy-trust-forwardedallowips) |
-| **Self-approval** | Only members of `MEHO-SA-Operators` and `MEHO-Admins` may approve their own changes; everyone else needs another person. `config.approvalAllowSelfApproval` defaults to `"false"`. Leave it off; `"true"` is an audited emergency break-glass that lets anyone approve their own `safe`/`caution` change and never reaches a `dangerous`/`destructive` operation. | [`guides/approvals-and-break-glass.md`](guides/approvals-and-break-glass.md) |
-| **Realm claim mappers** | On a shared, multi-user public client, take `tenant_id` and `tenant_role` from the person's login group (one of the five MEHO groups, read by the stock User Attribute mapper) — never install a hardcoded privileged `tenant_role` (e.g. `tenant_admin`) mapper that every user authenticating through that client inherits. A hardcoded claim is acceptable only on a single-identity lab client. | [`install/keycloak-realm.md`](install/keycloak-realm.md) |
+| **Self-approval** | Only members of `MEHO-Admins` may approve their own changes; everyone else needs another person. `config.approvalAllowSelfApproval` defaults to `"false"`. Leave it off; `"true"` is an audited emergency break-glass that lets anyone approve their own `safe`/`caution` change and never reaches a `dangerous`/`destructive` operation. | [`guides/approvals-and-break-glass.md`](guides/approvals-and-break-glass.md) |
+| **Realm claim mappers** | On a shared, multi-user public client, take `tenant_id` and `tenant_role` from the person's login group (one of the MEHO role groups, read by the stock User Attribute mapper) — never install a hardcoded admin-level `tenant_role` (e.g. `tenant_admin`) mapper that every user authenticating through that client inherits. A hardcoded claim is acceptable only on a single-identity lab client. | [`install/keycloak-realm.md`](install/keycloak-realm.md) |
 | **Outbound peer authentication** | No verification-disabled defaults on credential-bearing outbound paths. The SSH connector verifies the target host key fail-closed (an unpinned target is refused until its `known_hosts` line is provisioned on the secret); SMTP validates its TLS peer; bootstrap scripts trust a real CA rather than `curl -k`. Per-target opt-outs (`known_hosts_insecure`, `verify_tls: false`) are loud, audited, and never the default. | [`install/tls-ingress.md` § Outbound peer authentication](install/tls-ingress.md#outbound-peer-authentication-for-credential-bearing-connections) |
 | **CI / fork-PR isolation** | Untrusted pull-request code runs on disposable GitHub-hosted runners, never the internal `meho-runners-ci` pool, and the repository's fork-PR approval policy is `all_external_contributors` (a maintainer must approve any external fork run). Signing and deployment identities are separated from PR-triggered jobs. | [`docs/RELEASING.md` § Supply-chain and CI baseline](https://github.com/evoila/meho/blob/main/docs/RELEASING.md) |
 | **Deploy by digest + verify signature** | Pin `image.digest` (`sha256:…`) so the Deployment renders the exact content-addressed, scanned, cosign-signed digest the pipeline promoted, and `cosign verify` it (against the keyless workflow identity) before `helm upgrade` — ideally enforced at admission. The pipeline's quarantine → scan → promote ordering guarantees a promoted digest was scanned first. | [`install/index.md` § Step 3](install/index.md#step-3-install-the-chart), [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures) |
@@ -233,7 +233,7 @@ flowchart TB
   bp -->|"governed operations"| ta
   bp -->|"governed operations"| tb
   runner -->|"outbound-only poll and report"| bp
-  runner -->|"safe operations, approved caution changes"| tc
+  runner -->|"safe reads only"| tc
 ```
 
 **Pick this shape when:**
@@ -256,14 +256,13 @@ approval, and audit stay central; a gateway never self-authorises.
 
 The consequence is worth stating plainly to whoever is planning the
 rollout: **an enclave served only by a satellite gateway gets
-observation and, at most, small approved changes.** A tenant admin can
-turn on a write tier for one runner. Then `caution` operations on that
-runner's allowlist run there, each after a person approves it.
-`dangerous` and `destructive` operations never run on a satellite: they
-need the central backplane to reach the target itself. Design the
-segment map around that before anyone promises otherwise. How the write
-tier works:
-[Writes through a satellite](guides/satellite-gateway.md#writes-through-a-satellite).
+observation only.** A satellite runs `safe` reads. Changes through a
+satellite are not built yet. `dangerous` and `destructive` operations never
+run on a satellite: they need the central backplane to reach the target
+itself. Design the
+segment map around that before anyone promises otherwise. How a
+satellite works today:
+[What is not built yet](guides/satellite-gateway.md#what-is-not-built-yet).
 Implementation detail:
 [`docs/codebase/satellite-runner.md`](https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md).
 The satellite gateway is a **Beta** feature — see the

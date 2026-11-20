@@ -68,7 +68,7 @@ One sentence per level:
   first get a `preview_hash` from `preview_operation` and pass it to
   `call_operation`; without a matching hash, MEHO refuses the call and
   stores no approval request (#3197). Who may approve it follows the
-  group rules (for example a MEHO-SA-Operator). Agents never approve.
+  group rules (for example a MEHO-Admin). Agents never approve.
 
 So an agent's `caution`, `dangerous` and `destructive` requests all wait
 for a person's approval (#3980). With the switch `on`, this holds only
@@ -465,6 +465,15 @@ verdict of `policy_gate` is still the one that counts. For an agent the
 evaluator reads the matching grant through `matched_grant` (the same row
 match as `resolve_verdict`, before any ceiling) and applies the ceilings
 itself. See [policy-evaluator.md](policy-evaluator.md).
+
+## Who stands behind an agent's request
+
+A request an agent makes under its own login counts as a request of the
+people behind the agent: who registered or owns it, who gave its grants in
+force, who wrote or last changed its definition, and who made its schedules.
+They may approve it only where they may approve their own change. When MEHO
+knows nobody behind the agent, only an admin may approve. See
+[The people behind a request](approvals.md#the-people-behind-a-request).
 
 ## Dependencies
 

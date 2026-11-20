@@ -35,6 +35,11 @@ Route inventory
   id, history and dashboards. The runner also pauses a sensor after a few
   refused logins; a resume runs it again at once.
 
+* ``POST /api/v1/sensors/{sensor_id}/run`` -- run one sensor once now. It
+  makes the sensor due at once; the runner runs it at its next tick. Role:
+  ``tenant_admin``. Answers 202 with the sensor id and its next due time. A
+  paused sensor is 409 ``sensor_paused``. Op id ``sensor.run``.
+
 Tenant scoping + cross-tenant admin
 -----------------------------------
 
@@ -83,6 +88,11 @@ from meho_backplane.checks.sensor_edit import (
     SensorUpdate,
 )
 from meho_backplane.checks.sensor_edit import edit_sensor as apply_sensor_edit
+from meho_backplane.checks.sensor_run import (
+    SensorPausedError,
+    SensorRunAccepted,
+    request_sensor_run,
+)
 from meho_backplane.checks.service import (
     SensorAdminService,
     SensorConnectorMismatchError,
@@ -117,6 +127,7 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
     "create": "sensor.create",
     "delete": "sensor.delete",
     "edit": "sensor.edit",
+    "run": "sensor.run",
     "results": "sensor.results",
 }
 
@@ -346,6 +357,11 @@ async def edit_sensor(
     ``before`` and ``after`` with the changed fields (secret-named values
     hidden).
 
+    When the edit changes the connector, operation, params or check, and
+    the sensor runs as another person (not the editor, not ``__sensor__``),
+    the sensor's ``identity_sub`` becomes ``__sensor__``. ``before`` and
+    ``after`` show that change too.
+
     ``status`` (``paused`` or ``active``), sent alone, pauses or resumes the
     sensor. A paused sensor is not run and keeps its id, history and
     dashboards. Pause and resume are safe to send twice.
@@ -361,7 +377,7 @@ async def edit_sensor(
         target_tenant_id=target_tenant,
     )
     try:
-        result = await apply_sensor_edit(target_tenant, sensor_id, body)
+        result = await apply_sensor_edit(target_tenant, sensor_id, body, editor_sub=operator.sub)
     except SensorEditInvalidError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -387,3 +403,47 @@ async def edit_sensor(
         audit_after=scrub_secret_fields(result.after),
     )
     return result.sensor
+
+
+@router.post(
+    "/{sensor_id}/run",
+    response_model=SensorRunAccepted,
+    status_code=http_status.HTTP_202_ACCEPTED,
+)
+async def run_sensor_now(
+    sensor_id: Annotated[uuid.UUID, Path()],
+    operator: Annotated[Operator, _require_admin],
+    tenant_filter: UUID | None = Query(default=None),
+) -> SensorRunAccepted:
+    """Run one sensor once now.
+
+    ``tenant_admin`` only. The call makes the sensor due at once. The
+    runner runs it at its next tick, with its normal login and rules, and
+    the result shows in the sensor's results. The call never runs the
+    operation itself. A paused sensor is 409 ``sensor_paused``: resume it
+    first. A cross-tenant / absent id is 404 ``sensor_not_found``. A sensor
+    that is already due is fine: the call answers 202 and changes nothing.
+    """
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_SENSOR_OP_IDS["run"],
+        audit_op_class="write",
+        audit_sensor_id=str(sensor_id),
+    )
+    _bind_tenant_scope_contextvar(
+        operator_tenant_id=operator.tenant_id,
+        target_tenant_id=target_tenant,
+    )
+    try:
+        accepted = await request_sensor_run(target_tenant, sensor_id)
+    except SensorPausedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"{exc.error_code}: {exc}",
+        ) from exc
+    if accepted is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="sensor_not_found",
+        )
+    return accepted

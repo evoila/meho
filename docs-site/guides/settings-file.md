@@ -34,6 +34,31 @@ Only a person can preview or import a file. An agent, a service or a
 runner gets `403` with `human_principal_required`. So every change in
 the history names a real person.
 
+### Targets are changed in the web console
+
+A file that adds or changes a target is applied only by a person in the
+web console. This is the same rule as for the target API, where a call
+with a token waits for approval. When you send such a file with a token
+(the CLI, a script or an AI tool), MEHO saves nothing and answers `403`:
+
+```json
+{"detail": "A settings file that adds or changes targets is applied in the web console. A call with a token cannot write targets at once."}
+```
+
+- The preview still works with a token. It shows the target changes.
+- A file that changes no target still applies with a token. A target in
+  the file that is the same as the stored one is no change.
+- Two policies change only in the web console:
+  `run_approval_target_kinds` turned on and `announce_gate_enabled`
+  turned off. The web console cannot apply a settings file yet, so these
+  two changes cannot be made at all today. See
+  [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
+  The other policies and the conventions apply with a token.
+
+The web console does not have the settings file yet. Until it does, add
+or change each target with `meho targets` or the target API (with a
+token it waits for approval), then import the file.
+
 To call the API from a shell, get a token with the CLI. The value is a
 live login: do not log it or share it.
 
@@ -94,6 +119,32 @@ spec:
   preview shows a warning. The import still runs.
 - When a `tenant_admin` imports a file with only their own tenant, the
   tenant `id` may be left out.
+
+### Approval policies change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs:
+
+- `run_approval_target_kinds: true` lets one run approval cover a whole
+  target kind, not only one target.
+- `announce_gate_enabled: false` turns the announce gate off.
+
+These two changes apply only for a person in the web console. The web
+console cannot apply a settings file yet, so today these two changes
+cannot be made at all. When you send such a file with a token (the CLI, a
+script or an AI tool), MEHO answers `403`, names each policy, and saves
+nothing from the file, also not its other parts. This includes
+`policies: null` when the gate is on, because it turns the gate off.
+
+!!! warning "Turn the announce gate on only if you want to keep it on"
+    Turning the gate on applies with a token. Turning it off again
+    cannot be done until the web console can apply a settings file.
+
+- The preview works with a token. It shows the change in `diff` and
+  names it in `warnings`.
+- The other direction (`run_approval_target_kinds: false`,
+  `announce_gate_enabled: true`) applies with a token.
+- A value that is the same as the stored one is no change.
+- The other policies apply with a token.
 
 ### What is never in the file
 
@@ -188,6 +239,9 @@ What the import does:
   keeps that whole part as it is.
 - It runs the same checks as the preview. With any mistake it answers
   `422` with the preview's answer and saves nothing.
+- With a token, a file that adds or changes a target is refused with
+  `403` and nothing is saved (see
+  [Targets are changed in the web console](#targets-are-changed-in-the-web-console)).
 - It saves each item through the same rules as the normal API for
   targets and conventions. When one item fails, MEHO saves the others.
   The failed items are in `failed`, and `ok` is then `false`.
@@ -196,20 +250,6 @@ What the import does:
 - A file that changes nothing gives an empty `diff` and no new history
   entry.
 - One audit row covers the whole import.
-- **Targets wait for a person.** MEHO does not write a target from the
-  file at once. For each target the file creates or changes, it makes
-  one approval request. The answer lists them in
-  `waiting_for_approval`, each with its `path`, `name`, `op_id` and
-  `approval_request_id`. A person approves each one with
-  `meho approvals` or in the console. Only then does MEHO write the
-  target. The rest of the file is written at once.
-- When you import the same file again while a request still waits,
-  MEHO makes no second request for that target. It lists the waiting
-  request with `already_waiting: true`.
-- A target in a tenant that the same file creates gets no request yet,
-  because its tenant does not exist when MEHO asks. It is in `failed`.
-  Import the file a second time after the first import: then MEHO asks
-  for these targets too.
 
 ### What the checks refuse
 

@@ -210,6 +210,7 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_keycloak_realm.go # authenticated layer: warns about Keycloak targets MEHO refuses (GET /api/v1/targets/checks/keycloak-realm; all tenants for a platform admin).
     │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
     │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
@@ -1047,10 +1048,37 @@ lines (indented JSON, an error message) and keeps the line breaks.
   human output through `SafeText`. A stored request path with control
   codes shows as visible escapes, so each field stays on its own line
   and reads as the server holds it.
+- The commands that print text an agent or another member of the tenant
+  wrote use them too: `meho status --watch` (every text field of a feed
+  line, and the "unparseable event" line), `meho broadcast watch` (each
+  line without `--json`), `meho kb show`, `kb list`, the hit table of
+  `kb search` (its wiki hits print as they are), `meho conventions show`,
+  `list`, `history`, `meho list`, `meho recall`
+  (the body of one entry and the hit table), `meho runbook
+  show-template`, and `meho runbook start` and `next` (the template
+  slug, the step id, title and body, the op_id, the verify prompt and
+  the "Run complete" lines). A body goes through `SafeLines`, so its
+  line breaks stay; a tab in a body shows as `\x09`.
+- `meho docs ask` uses its own helpers (`sanitizeText`, `sanitizeBlock`
+  in `cmd/docs/ask.go`) for the answer and the sources.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control
   characters.
+- The commands that print text from an API description, a target system
+  or an uploaded session pass every server string through them too:
+  `meho operation search` (the hit table and the `--op-id` contract),
+  `meho operation groups`, `meho operation preview`, the failure text of
+  `meho operation call` and of every vendor verb (`dispatch.WriteErrorTrailer`,
+  `dispatch.RenderPreviewFailure`, the approval note and id of
+  `WriteParkedHint`, the preview step of `meho keycloak ... delete` and
+  the keycloak fallback result), the `meho audit trace` list, `meho targets describe`, and
+  `meho sessions show` and `list`. The escape runs before a column is cut
+  to its width. The `server_text_escape_test.go` file of each package
+  lists these renderers and checks that ESC and BEL show as `\x1b` and
+  `\x07`.
+- Commands not named here may print text from a server, a target or an
+  API description as it is.
 
 ### Sensitive-data discipline
 
@@ -1138,19 +1166,31 @@ that header from one place, so every verb gets it without its own flag.
   separator. Text that is not valid UTF-8 is refused too. Like the
   backplane, the CLI counts the length after it strips white space and
   makes the text NFC, so 130 decomposed letters (260 characters as typed)
-  pass. One difference, on purpose: the CLI looks for refused characters
-  before it strips white space. So it refuses a control character or a
-  line or paragraph separator also at the start or the end of the id: a
-  tab, a line feed, a vertical tab, a form feed, a carriage return (so
-  also CR LF), U+001C to U+001F, U+0085, U+2028 and U+2029.
-  The backplane strips these at the ends and takes the value. So the CLI
-  is stricter than the backplane, never looser. Such a character in a
-  flag or variable value is most likely a mistake. A given
+  pass. The CLI also strips first and checks after, so a control
+  character or a line or paragraph separator at the start or the end of
+  the id (a tab, a line feed, U+001C to U+001F, U+0085, U+2028, U+2029) is
+  stripped and accepted, as on the backplane. A given
   flag is always checked, so `--work-ref ""` is refused. An empty
   `MEHO_WORK_REF` means "not set". A bad value stops the command before
   any request leaves the CLI. A good value is cleaned with
   `api.CleanWorkRef` (it strips like Python's `str.strip` and makes the
   text NFC) and goes on the command context (`api.WithWorkRef`).
+- One Unicode difference is left. The backplane uses Unicode 16.0. The
+  CLI uses the Unicode 15.0 tables of the Go toolchain and of
+  `golang.org/x/text` (Go 1.26 has no newer tables). Both refuse the same
+  characters. But the NFC step joins 20 letter pairs of Unicode 16.0 only
+  on the backplane. They are in the blocks Todhri (U+105D2, U+105DA),
+  Tulu-Tigalari (U+11382, U+11384, U+1138B, U+11390, U+113C2), Gurung
+  Khema (U+1611E to U+16129) and Kirat Rai (U+16D63, U+16D67, U+16D69).
+  The CLI sends such an id in the form it was typed, and the backplane
+  makes it NFC when it arrives. So the stored value is the same. The
+  value that the CLI cleans before the send differs. Accept and refuse
+  differ in one case only: near the 256-character limit. The CLI counts
+  each of these pairs as two characters, and the backplane as one. So
+  the CLI can refuse an id made of many such pairs that the backplane
+  accepts (for example 130 pairs: 260 characters for the CLI, 130 for
+  the backplane). Move the CLI to Unicode 16.0 tables when the Go
+  toolchain has them.
 - One case list, `testdata/work_ref_cases.json`, is read by the Go test
   (`TestValidWorkRef_SharedCases`) and by the Python test
   (`backend/tests/test_work_ref_rule.py`), so the two rules cannot drift.
@@ -2915,7 +2955,7 @@ have to trust to run `meho login` against their secrets.
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
 public MCP browser-flow client + the **8 protocol mappers + 4 default
-client scopes + five MEHO role groups + `MEHO-Platform-Admins` + admin
+client scopes + three MEHO role groups + `MEHO-Platform-Admins` + admin
 user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
@@ -2991,14 +3031,13 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      **not** auto-inherit the realm's default-default scopes, so an
      explicit assignment is the only way to guarantee `sub` lands in
      the access token (RFC 9068 §2.2.1 requires it).
-  5. The five MEHO role groups (`roleGroups` in `bootstrap.go`):
-     `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
-     `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
-     `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
+  5. The three MEHO role groups (`roleGroups` in `bootstrap.go`):
+     `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`) and
+     `MEHO-Admins` (`tenant_admin`). Each carries
      `tenant_id` from `--tenant-id` (default the all-zero UUID) and
      `meho_tenant` = `<tenant-id>:<tenant-name>:<Role>` (`--tenant-name`,
      default `main`). Also `MEHO-Platform-Admins` (`platform_admin=true`)
-     and, with `--add-tenant <name>`, the five groups
+     and, with `--add-tenant <name>`, the three groups
      `MEHO-<name>-<Role>` of one more tenant, which carry only
      `meho_tenant` (`extraTenantGroups` in `tenants.go`). The tenant's
      UUID comes from `--add-tenant-id`, else from the `meho_tenant` value
@@ -3080,7 +3119,7 @@ Every step does a "does this exist?" check before mutating:
   Different → `PUT /groups/{id}` with the full attribute map (Keycloak
   replaces the whole map, so other attributes are carried over, and so
   is the group description); equal → skip. `approver` is removed from
-  every group except `MEHO-Approvers`. Old groups such as
+  each of these groups that has it. Old groups such as
   `meho-admins` are never touched.
 - User: `GET /users?exact=true&username=<name>`; missing → POST then
   `PUT /users/{id}/reset-password`; existing → skip the password
@@ -3180,10 +3219,10 @@ the CA cert is available.
 in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (8 mappers, 4 default scopes, 2 clients, 5 groups with
+  the recipe (8 mappers, 4 default scopes, 2 clients, 3 groups with
   their attributes plus `MEHO-Platform-Admins`, 1 user in `MEHO-Admins`
   and `MEHO-Platform-Admins`).
-- `tenants_test.go`: `--add-tenant` makes five groups with only
+- `tenants_test.go`: `--add-tenant` makes three groups with only
   `meho_tenant`, a second run changes nothing, a missing id is made once
   and read back, a one-tenant realm gains `meho_tenant`, and bad tenant
   flags stop before any Keycloak call.
@@ -3192,7 +3231,7 @@ in-memory state maps) through these scenarios, among others:
   exactly once across two runs.
 - Upgrade: a realm with the older fixed-value `tenant-id` /
   `tenant-role` mappers and a `meho-admins` group ends with only User
-  Attribute mappers, the five groups, the admin user also in
+  Attribute mappers, the three groups, the admin user also in
   `MEHO-Admins`, the old group left in place; a second run changes
   nothing.
 - Changed group attributes are set back; other attributes stay;
@@ -3221,9 +3260,8 @@ in-memory state maps) through these scenarios, among others:
 The unit suite proves the orchestrator's interaction shape.
 `backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
 proves the realm semantics against a real Keycloak 26.0 in CI: a
-person in each of the five groups gets the right `tenant_id` /
-`tenant_role` (and only the `MEHO-Approvers` person gets `approver`),
-both in the token Keycloak builds for `meho-cli` and through a real
+person in each of the three groups gets the right `tenant_id` /
+`tenant_role` and no `approver`, both in the token Keycloak builds for `meho-cli` and through a real
 `meho-mcp` login checked by the backplane's JWT code; a person in no
 group gets `401 missing_tenant_claim`; and an older realm with
 fixed-value mappers is upgraded, with a second run changing nothing.
@@ -3287,6 +3325,16 @@ so it is read-only rather than offline), `--json` (structured plan
 output), `--backplane` (override the configured backplane URL),
 `--secret-field connector_field=source_field` (repeatable; adds the
 pair to every target's secret field map).
+
+**Each row waits for approval.** The import sends one `POST` or `PATCH`
+per row with the person's token, so each row makes its own approval
+request and the summary counts it as "waiting for approval" (see
+[targets.md](targets.md)). The help text (`importManyRowsNote`) says
+what to do with a large file: import it in the web console, where it is
+written at once, or run it with `--work-ref`. Then a person goes
+through all its rows with
+`meho approvals approve --filter-work-ref <ref> --in-order`, which asks
+for a yes at each row.
 
 **Mapping rules.** The CLI parses the YAML as a generic
 `map[string]any` per entry and partitions every key:

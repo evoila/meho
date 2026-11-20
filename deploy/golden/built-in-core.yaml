@@ -389,20 +389,6 @@ data:
           }
         },
         {
-          "name": "MEHO-SA-Operators",
-          "attributes": {
-            "tenant_id": [
-              "${MEHO_REALM_TENANT_ID}"
-            ],
-            "tenant_role": [
-              "operator"
-            ],
-            "meho_tenant": [
-              "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:SA-Operators"
-            ]
-          }
-        },
-        {
           "name": "MEHO-Admins",
           "attributes": {
             "tenant_id": [
@@ -413,23 +399,6 @@ data:
             ],
             "meho_tenant": [
               "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Admins"
-            ]
-          }
-        },
-        {
-          "name": "MEHO-Approvers",
-          "attributes": {
-            "tenant_id": [
-              "${MEHO_REALM_TENANT_ID}"
-            ],
-            "tenant_role": [
-              "read_only"
-            ],
-            "approver": [
-              "true"
-            ],
-            "meho_tenant": [
-              "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Approvers"
             ]
           }
         },
@@ -1703,6 +1672,152 @@ data:
           ]
         },
         {
+          "clientId": "meho-web-approve",
+          "name": "MEHO console approvals",
+          "description": "Confidential client for the console's approval sign-in (authorization code with PKCE). It has the secret of meho-web. The console uses it only for the new sign-in before an approve; its own login flow gives the approval level (acr meho-approve).",
+          "enabled": true,
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "${MEHO_REALM_WEB_CLIENT_SECRET}",
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": false,
+          "frontchannelLogout": false,
+          "rootUrl": "${MEHO_REALM_PUBLIC_URL}",
+          "attributes": {
+            "pkce.code.challenge.method": "S256",
+            "oauth2.device.authorization.grant.enabled": "false",
+            "use.refresh.tokens": "false",
+            "access.token.lifespan": "900",
+            "client.use.lightweight.access.token.enabled": "false"
+          },
+          "authenticationFlowBindingOverrides": {
+            "browser": "b7e3c1d9-4a26-4f80-9c5e-1d8a2f6b3e47"
+          },
+          "redirectUris": [
+            "${MEHO_REALM_PUBLIC_URL}/ui/auth/approval-callback"
+          ],
+          "webOrigins": [],
+          "defaultClientScopes": [
+            "basic",
+            "roles",
+            "web-origins",
+            "acr",
+            "profile",
+            "email"
+          ],
+          "optionalClientScopes": [],
+          "protocolMappers": [
+            {
+              "name": "audience-meho-backplane",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "config": {
+                "included.client.audience": "meho-backplane",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            },
+            {
+              "name": "tenant-id",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "tenant_id",
+                "claim.name": "tenant_id",
+                "jsonType.label": "String",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "tenant-role",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "tenant_role",
+                "claim.name": "tenant_role",
+                "jsonType.label": "String",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "approver",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "approver",
+                "claim.name": "approver",
+                "jsonType.label": "boolean",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "platform-admin",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "platform_admin",
+                "claim.name": "platform_admin",
+                "jsonType.label": "boolean",
+                "aggregate.attrs": "false",
+                "multivalued": "false",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "meho-tenants",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "meho_tenant",
+                "claim.name": "meho_tenants",
+                "jsonType.label": "String",
+                "aggregate.attrs": "true",
+                "multivalued": "true",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            },
+            {
+              "name": "groups-claim",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "config": {
+                "claim.name": "groups",
+                "full.path": "false",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "introspection.token.claim": "true",
+                "userinfo.token.claim": "false"
+              }
+            }
+          ]
+        },
+        {
           "clientId": "meho-admin",
           "name": "MEHO admin",
           "description": "Confidential service client. MEHO uses it to manage clients and users in this realm.",
@@ -2453,7 +2568,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: a38dfef21e31221f9b1d0fcfefafb75ae73d663adb10bc70762884b866789dad
+        checksum/config: 7cb98999d944fcf901ae2e53d0f97a62b80399e9ff5df1e2e15575985ea6e03d
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -3728,7 +3843,11 @@ data:
   # texts for the biggest tools on the MCP tool list.
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
+  FILE_REF_PARAMS: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
+  # Tool profiles with a connector list. Off by default.
+  MCP_PROFILE_CONNECTOR_LISTS: "false"
+  MCP_CONNECTOR_PROFILES: ""
   # Claude Code and Claude Desktop sign in with their own login client.
   MCP_CLIENT_PER_TOOL_KIND: "false"
   # Category, labels and "always wait" on connectors, groups and
@@ -4033,7 +4152,7 @@ spec:
                   fieldPath: metadata.namespace
             # Names and addresses only; every secret below comes by reference.
             - name: MEHO_CORE_KEYCLOAK_PLAN
-              value: "{\"admin_username\":\"admin\",\"approver_username\":\"approver\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
+              value: "{\"admin_username\":\"admin\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
             # Values for the `${...}` placeholders of the realm file, the
             # same ones the Keycloak pod gets.
             - name: MEHO_REALM_PUBLIC_URL
@@ -4149,7 +4268,7 @@ spec:
           terminationMessagePolicy: FallbackToLogsOnError
           env:
             - name: MEHO_CORE_KEYCLOAK_PLAN
-              value: "{\"admin_username\":\"admin\",\"approver_username\":\"approver\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
+              value: "{\"admin_username\":\"admin\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
             # The secrets Job (-30) makes it. Optional, so a missing Secret
             # means "cannot tell" and not a pod that never starts.
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET

@@ -37,8 +37,10 @@ session.
 
 # Import for the side-effect: registers the approval previews of
 # k8s.secret.create and k8s.job.create (#4850), and of k8s.secret.update
-# and k8s.secret.delete.
+# and k8s.secret.delete, and the marks of the operations an ingest makes
+# from a Kubernetes API file (ingested_paths).
 from meho_backplane.connectors.kubernetes import (  # noqa: F401
+    ingested_paths,
     op_classes,
     ops_secret_write_preview,
     ops_write_preview,

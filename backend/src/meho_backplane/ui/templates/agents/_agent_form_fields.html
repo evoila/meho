@@ -108,12 +108,16 @@
 
   <label class="flex flex-col gap-1">
     <span class="text-sm font-medium">Turn budget</span>
+    {#- A text field, so the browser can cap its length: the server
+        refuses more than 8 characters before the form code runs. -#}
     <input
-      type="number"
+      type="text"
+      inputmode="numeric"
       name="turn_budget"
       required
-      min="1"
-      max="1000"
+      maxlength="8"
+      pattern="[0-9]{1,8}"
+      title="A whole number from 1 to 1000"
       value="{{ field_value('turn_budget') }}"
       class="input input-bordered input-sm w-full {{ error_class('turn_budget', 'input-error') }}"
       aria-label="Turn budget"
@@ -136,6 +140,10 @@
     aria-label="Identity reference"
     placeholder="agent-incident-triage"
     aria-describedby="agent-identity-ref-hint"
+    hx-get="/ui/agents/principals/live-grants"
+    hx-trigger="load, input changed delay:400ms"
+    hx-target="#agent-live-grants"
+    hx-swap="innerHTML"
   />
   <span id="agent-identity-ref-hint" class="text-xs opacity-60">
     Keycloak client id of a registered, non-revoked agent principal in
@@ -150,6 +158,7 @@
     name="system_prompt"
     required
     minlength="1"
+    maxlength="65536"
     class="textarea textarea-bordered min-h-[8rem] font-mono text-xs w-full {{ error_class('system_prompt', 'textarea-error') }}"
     aria-label="System prompt"
     placeholder="You are an incident-triage agent. ..."
@@ -172,5 +181,8 @@
 {#- The starting grant pick (#6192, #6389). The service needs it only
     when the agent that identity_ref names has no grant yet: at create,
     and at edit when identity_ref changes to another agent. -#}
+{#- The live grants of that agent (#6584), loaded by the identity_ref
+    field. When it has some, MEHO needs no pick. -#}
+<div id="agent-live-grants" aria-live="polite" data-live-grants-slot></div>
 {% set pick_for_definition = true %}
 {% include "agents/_starting_grants_field.html" %}

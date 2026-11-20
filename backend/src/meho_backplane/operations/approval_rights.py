@@ -17,15 +17,15 @@ same order, so the sign never says something else than the approve does:
 3. Only a ``pending`` request can be approved.
 4. The group rule (:func:`_check_approver_group`): a change of rights only
    for another admin, whatever the group of the requester; an own change only for
-   a MEHO-SA-Operator or a MEHO-Admin, with a click in the web interface when the
+   a MEHO-Admin, with a click in the web interface when the
    ``caution`` change waited only because it came with a token (#3980),
    or a ``safe`` / ``caution`` change under the break-glass switch;
-   another person's ``dangerous`` or ``destructive`` change only for a
-   MEHO-SA-Operator or an admin.
+   another person's ``dangerous`` or ``destructive`` change only for an admin.
 5. The role floor of the operation (:func:`_check_approver_role_floor`).
-6. With approver routing on, the login group kinds the request stored as
-   the ones that may approve it
-   (:func:`~meho_backplane.policy.routing.routing_refusal`).
+6. With approver routing on, the install's routing as it is now, when the
+   caller passes it (:class:`~meho_backplane.policy.routing_floor.InstallFloor`),
+   and then the login group kinds the request stored as the ones that may
+   approve it (:func:`~meho_backplane.policy.routing.routing_refusal`).
 
 The answer is about the person and the request. It does not check what
 the approve checks at the moment of the click: the sign-in age, the
@@ -55,6 +55,7 @@ from meho_backplane.operations.approval_queue import (
     _check_reviewer_role,
 )
 from meho_backplane.policy.routing import routing_enabled, routing_refusal
+from meho_backplane.policy.routing_floor import InstallFloor
 from meho_backplane.policy.shadow import shadow_approval
 
 __all__ = [
@@ -80,7 +81,7 @@ class ApproveRightReason(StrEnum):
 
     * ``ok`` — another person's change; this person may approve it.
     * ``own_change`` — the person's own change. With ``may_approve`` true,
-      a self-approval is allowed (a MEHO-SA-Operator or MEHO-Admin, a web click on a
+      a self-approval is allowed (a MEHO-Admin, a web click on a
       ``caution`` change that waited only for its token, or the
       break-glass switch for a lower-risk change); with false, it is
       refused.
@@ -95,8 +96,9 @@ class ApproveRightReason(StrEnum):
     * ``not_a_person`` — an AI tool or another machine login.
     * ``not_pending`` — the request is already decided, expired or
       withdrawn.
-    * ``not_routed`` — approver routing is on, and the request goes to
-      other login groups than the person's.
+    * ``not_routed`` — approver routing is on, and the install's routing
+      or the request's stored routing sends it to other login groups than
+      the person's.
     """
 
     OK = "ok"
@@ -127,8 +129,7 @@ class ApproveRight:
     ``rule`` is the :class:`ApprovalRule` that would allow the approval,
     or ``None`` when the person may not approve. ``message`` is plain text
     for the web interface. For a refusal it is the text the approve shows
-    when it refuses; for an own lower-risk change it also names the
-    break-glass switch, as the REST refusal does.
+    when it refuses: for an own change, who may approve it and where to ask.
     """
 
     may_approve: bool
@@ -147,7 +148,7 @@ def _allowed(rule: ApprovalRule) -> ApproveRight:
     if rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL:
         message = (
             "This is your own change. You may approve it, because members of "
-            "MEHO-SA-Operators and MEHO-Admins may approve their own changes. "
+            "MEHO-Admins may approve their own changes. "
             "The audit log records it as a self-approval."
         )
     elif rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL:
@@ -180,7 +181,7 @@ def self_approval_confirmation(rule: ApprovalRule | None) -> str | None:
     """
     if rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL:
         return (
-            "You approved your own change, as a member of MEHO-SA-Operators or "
+            "You approved your own change, as a member of "
             "MEHO-Admins. The audit log records it as a self-approval."
         )
     if rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL:
@@ -196,12 +197,17 @@ def self_approval_confirmation(rule: ApprovalRule | None) -> str | None:
     return None
 
 
-def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
+def approve_right(
+    operator: Operator, request: ApprovalRequest, *, floor: InstallFloor | None = None
+) -> ApproveRight:
     """Return whether *operator* may approve *request*, and why not.
 
     Runs the checks of
     :func:`~meho_backplane.operations.approval_queue.approve_request` in
     the same order and turns each refusal into an answer. Raises nothing.
+    *floor* is the install's routing as it is now
+    (:func:`~meho_backplane.policy.routing_floor.current_install_floor`),
+    which the click checks first; pass it so the answer matches the click.
     With the ``POLICY_ENGINE_SHADOW`` switch on, the policy evaluator
     gives its own answer next to it and logs a difference
     (:func:`~meho_backplane.policy.shadow.shadow_approval`). The evaluator
@@ -209,23 +215,33 @@ def approve_right(operator: Operator, request: ApprovalRequest) -> ApproveRight:
     """
     right = _right(operator, request, check_pending=True)
     shadow_approval(operator, request, today=right.may_approve)
-    return _routed(operator, request, right)
+    return _routed(operator, request, right, floor)
 
 
-def approve_right_any_status(operator: Operator, request: ApprovalRequest) -> ApproveRight:
+def approve_right_any_status(
+    operator: Operator, request: ApprovalRequest, *, floor: InstallFloor | None = None
+) -> ApproveRight:
     """Like :func:`approve_right`, but without the "still pending" check.
 
     The push messages (:mod:`meho_backplane.web_push.recipients`) ask who
     may approve a request also after it was decided: its decision message
     goes to the same people as its first message.
     """
-    return _routed(operator, request, _right(operator, request, check_pending=False))
+    return _routed(operator, request, _right(operator, request, check_pending=False), floor)
 
 
-def _routed(operator: Operator, request: ApprovalRequest, right: ApproveRight) -> ApproveRight:
-    """*right*, or a refusal when the person is not in the stored group kinds."""
+def _routed(
+    operator: Operator,
+    request: ApprovalRequest,
+    right: ApproveRight,
+    floor: InstallFloor | None,
+) -> ApproveRight:
+    """*right*, or a refusal when the install's routing or the stored group kinds refuse."""
     if not right.may_approve or not routing_enabled():
         return right
+    refusal = floor.refusal(operator, request) if floor is not None else None
+    if refusal is not None:
+        return _refused(ApproveRightReason.NOT_ROUTED, refusal)
     refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
     if refusal is None:
         return right
@@ -255,14 +271,7 @@ def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool)
         rule = _check_approver_group(operator, request, log_break_glass=False)
         _check_approver_role_floor(operator, request)
     except SelfApprovalForbiddenError as exc:
-        message = exc.reason_text
-        if not exc.high_risk:
-            # The break-glass switch can still allow a lower-risk own change.
-            message += (
-                " Or a deployment admin turns on APPROVAL_ALLOW_SELF_APPROVAL "
-                "for an audited break-glass."
-            )
-        return _refused(ApproveRightReason.OWN_CHANGE, message)
+        return _refused(ApproveRightReason.OWN_CHANGE, exc.reason_text)
     except ApprovalGroupForbiddenError as exc:
         return _refused(ApproveRightReason.WRONG_GROUP, exc.reason_text)
     except RightsChangeApprovalError as exc:

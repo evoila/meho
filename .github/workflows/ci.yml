@@ -691,37 +691,19 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      # Route testcontainers pulls through the in-cluster Harbor proxy
-      # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
-      # anonymous consumer auth, wired into runner DinD via
-      # meho-internal#75). The test code reads these env vars with a
-      # docker.io short-name default — see backend/tests/test_db_engine.py
-      # `MEHO_TEST_PGVECTOR_IMAGE`, backend/tests/test_broadcast_client.py
-      # `MEHO_TEST_VALKEY_IMAGE` — so the env-only swap requires no
-      # source-code changes.
-      # `docker/login-action` below stays load-bearing until #78's Half
-      # B sees a green cache-hit week and retires it.
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      # Vault dev-mode container for the G3.3-T7 kv/sys/auth e2e suite
-      # (backend/tests/integration/test_connectors_vault_dev_e2e.py).
-      # Same env-knob shape as the rows above: the test reads this with
-      # a docker.io short-name default (`hashicorp/vault:1.18`), so the
-      # Harbor-proxy swap is config-only — no source change. Pinned to
-      # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
-      # never breaks an unrelated PR.
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
-      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository secrets" below, not here: the images hold the image
+      # proxy name, and the step hides it in the public log.
       # #2949 — vendor vCenter spec-shelf wiring (see the checkout step
       # below + docs/decisions/vendor-spec-ci-provisioning.md).
-      # SPEC_SHELF_TOKEN_PRESENT surfaces *presence* of the
-      # SPEC_SHELF_TOKEN secret as a job-level boolean so the shelf
-      # checkout step can gate on it — the `secrets` context is NOT
-      # available in a step-level `if:` (same constraint the
-      # DOCKERHUB_USERNAME row above works around). Unlike that row,
-      # only the presence flag is surfaced, never the token value, so
-      # the secret is not exported into every step's environment.
-      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      # SPEC_SHELF_READY is `true` when both the SPEC_SHELF_TOKEN and the
+      # SPEC_SHELF_REPOSITORY secrets are set. The shelf steps
+      # gate on it, because the `secrets` context is NOT available in a
+      # step-level `if:` (same constraint the DOCKERHUB_USERNAME row above
+      # works around). Unlike that row, only this flag is surfaced, never
+      # the token value, so the secret is not exported into every step's
+      # environment.
+      SPEC_SHELF_READY: ${{ secrets.SPEC_SHELF_TOKEN != '' && secrets.SPEC_SHELF_REPOSITORY != '' }}
       # Points the spec-shelf resolver (tests/_spec_shelf.py) at the
       # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
       # was skipped (secret absent — fork PRs, Dependabot runs,
@@ -738,6 +720,35 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository secrets
+        # The repository secrets CI_IMAGE_PROXY (`<host>/<project>` of the
+        # image proxy cache of the CI cluster) and SPEC_SHELF_REPOSITORY
+        # (`<owner>/<name>` of the vendor spec shelf) hold internal names.
+        # They are secrets, so GitHub shows them as `***` in every log line.
+        # scripts/ci/repo_secrets.sh also hides the parts of them (the
+        # proxy host, the shelf name) and sets the test images below.
+        # In this repository an empty secret fails the job, so no test
+        # skips quietly. In another repository (a fork that runs the
+        # workflows itself) the images come from Docker Hub instead.
+        # The tests read each image with a Docker Hub default (for example
+        # backend/tests/test_db_engine.py and test_broadcast_client.py), so
+        # the swap needs no code change. The Vault image (the e2e suite in
+        # tests/integration/test_connectors_vault_dev_e2e.py) is pinned to
+        # the 1.18 LTS line, so an upstream release never breaks an
+        # unrelated pull request. The Docker Hub login below stays until the
+        # proxy has shown a week of green cache hits.
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          SPEC_SHELF_REPOSITORY: ${{ secrets.SPEC_SHELF_REPOSITORY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY SPEC_SHELF_REPOSITORY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          IMAGES
 
       - name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
@@ -763,7 +774,7 @@ jobs:
         # them. scripts/ci/spec_shelf.sh prints the shelf folders for the
         # sparse checkout below; the verify step after it checks each file.
         id: spec-shelf-list
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -803,10 +814,10 @@ jobs:
         # (the listed folders only), and the
         # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
         # safe.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          repository: ${{ secrets.SPEC_SHELF_REPOSITORY }}
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
@@ -831,7 +842,7 @@ jobs:
         # exact regression #2949 closes). Without the secret this step
         # skips and lane-skip stays the documented degraded mode.
         # Prints file *presence* only — never spec content.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf
 
@@ -845,13 +856,9 @@ jobs:
         # (https://docs.docker.com/docker-hub/usage/pulls/). Same
         # org-level secrets security-scan.yml uses, provisioned at
         # the evoila org level (visibility `all`) with 1Password
-        # vault custody — see meho-internal#74 for the regression
-        # context this addresses, and meho-internal
-        # `docs/dockerhub-ci-credential-custody.md` for where the
-        # credential actually lives and how to rotate it (the vault
-        # and item names stay in the internal repo; this one is
-        # public). Long-term, the in-cluster proxy cache from
-        # claude-rdc-hetzner-dc#463 retires this step.
+        # vault custody. How to rotate the credential is documented
+        # outside this public repo. Long-term, the in-cluster image
+        # proxy cache retires this step.
         #
         # The `if:` guard is what keeps Dependabot PRs green. A
         # Dependabot-triggered run reads the *Dependabot* secret store,
@@ -860,7 +867,7 @@ jobs:
         # password required" instead of no-opping, which failed this job
         # (and every other job carrying this step) on all 19 open
         # Dependabot PRs. Skipping the login is safe: every image above
-        # resolves through the harbor.evba.lab proxy cache, so an
+        # resolves through the image proxy cache, so an
         # unauthenticated run still pulls — it only gives up the Docker
         # Hub rate-limit headroom the login buys.
         #
@@ -1109,6 +1116,42 @@ jobs:
           path: ~/.cache/meho-ci-php-debs
           key: ${{ steps.php-debs.outputs.key }}
 
+      - name: Install the GBK locale data
+        # The linux.script.run locale test
+        # (tests/test_connectors_linux_script_env_locale.py) builds the
+        # zh_CN.GBK and zh_CN.GB18030 locales with `localedef` and runs the
+        # real script wrapper under them. It needs the glibc locale sources
+        # of the `locales` package. MEHO_REQUIRE_GBK_LOCALE below makes the
+        # test fail, not skip, when they are missing. The apt calls use the
+        # same short waits as the Install PHP CLI step.
+        shell: bash
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          ready() {
+            command -v localedef >/dev/null 2>&1 \
+              && [ -f /usr/share/i18n/locales/zh_CN ] \
+              && [ -f /usr/share/i18n/charmaps/GBK.gz ] \
+              && [ -f /usr/share/i18n/charmaps/GB18030.gz ]
+          }
+          if ready; then
+            echo "locale data ready"
+            exit 0
+          fi
+          apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
+          for attempt in 1 2; do
+            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
+                install -y --no-install-recommends locales && ready; then
+              echo "locale data ready"
+              exit 0
+            fi
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
+              echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2)"
+            fi
+          done
+          echo "::error::SETUP FAILURE, not a test failure: the locales package did not install after 2 tries (package mirror problem on the runner)"
+          exit 1
+
       - name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
         if: needs.changes.outputs.test_map == 'true'
@@ -1137,6 +1180,9 @@ jobs:
           # Same for the pfSense fragment tests and the Install PHP CLI
           # step above: FAIL (not skip) when php is missing.
           MEHO_REQUIRE_PHP: "1"
+          # Same for the linux.script.run locale test and the Install the
+          # GBK locale data step above.
+          MEHO_REQUIRE_GBK_LOCALE: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the
@@ -1254,14 +1300,28 @@ jobs:
           # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
           # node), shards that pass every test can take 674-710 s, and 660 s
           # dropped good pull requests from the merge queue.
-          budget_s=900
+          # All six shards: 1200 s (#6662), so every measured shard stays
+          # under 80 percent of its budget (960 s). Measured pytest wall in
+          # merge-queue run 44201692298 (all tests passed): shard 1 765 s,
+          # shard 2 915 s, shard 3 873 s, shard 4 850 s, shard 5 805 s,
+          # shard 6 854 s. Against 900 s that is 85, 102, 97, 94, 89 and 95
+          # percent. Against 1200 s it is 64, 76, 73, 71, 67 and 71 percent.
+          # Pull request runs 44212040368 and 44214999634 took 683-795 s.
+          # Why not a seventh shard: it changes the required check names, and
+          # a balanced split alone leaves the average near 840 s on these
+          # runners. Why not only shard 2: shards 3, 4 and 6 sit at 850-873 s.
+          # Fixture timing of shard 2 (MEHO_FIXTURE_TIMING_FILE): the
+          # `azure` and `registered` fixtures take 4.3 s per test,
+          # `_audit_db_url` 28 s per test file. The gate stays on. The
+          # 30-minute job limit still sits above setup plus 1200 s.
+          budget_s=1200
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
           # in each xdist worker, so a test that stops making progress fails
           # on its own after 180 s with its name and a stack dump of every
           # thread, instead of sitting silent (one dot per test, no names)
           # until the 30-min job cap. The shard then still lands inside the
-          # 900 s budget below. Mirrors the python-coverage job's guard;
+          # 1200 s budget below. Mirrors the python-coverage job's guard;
           # --timeout-method=signal (NOT thread) is load-bearing under xdist:
           # thread calls os._exit(), which xdist reads as a worker crash and
           # whose stack dump it swallows. 180 s is ~3x the slowest honest
@@ -1766,12 +1826,12 @@ jobs:
     # CORRECTION (#3172, 2026-08-27): the "<13.67 GiB pod limit" this job was
     # originally sized against NEVER existed — 13.67 GiB was #1982's measured
     # local peak, mistaken for the runner's cap. The live heavy-pool runner
-    # container limit (rdc-gitops apps/rke2-ci/meho-runners-heavy) was 8Gi,
+    # container limit (the pod template of the heavy pool) was 8Gi,
     # so the 12.48-GiB serial sweep never fit: every main-push run since
     # ~2026-06-20 died as an OOM runner-loss (absorbed job failure, null step
     # telemetry) or a memory-thrash wedge (pytest crawls to the 45-min step
     # cap, combine hangs on the debris — the v0.31.0 tag-gate blocker).
-    # rdc-gitops#115 resizes the pool to 14Gi (request == limit,
+    # A later change resized the pool to 14Gi (request == limit,
     # node-exclusive by memory), giving the sweep ~1.5 GiB of real headroom
     # on this same runs-on label.
     # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`
@@ -1830,7 +1890,7 @@ jobs:
     # push from 2026-06-20, collapsing SonarCloud coverage 65.8% -> ~24% (see
     # the memory table above and docs/codebase/sonarcloud.md) — was the pool's
     # 8Gi runner limit vs this job's 12.48-GiB serial sweep. Fixed IN PLACE by
-    # rdc-gitops#115 (heavy pool resized to 14Gi request==limit); this
+    # a later change (heavy pool resized to 14Gi request==limit); this
     # `runs-on:` label is correct and stays. An OOM would still only skip one
     # coverage upload (job stays non-blocking); quality-gate.yml makes that
     # skip fail-visible via an error annotation (#2513).
@@ -1878,16 +1938,28 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
-      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository secrets" (see python-unit-shard for why).
     defaults:
       run:
         working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository secrets
+        # Same as the step of the same name in python-unit-shard: it checks
+        # the repository secrets, hides their parts and sets the test images.
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          IMAGES
 
       - name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
@@ -2458,44 +2530,21 @@ jobs:
       # table allows it in `with:` / `env:` / `run:` only), so reading
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
-      MEHO_TEST_OPENBAO_IMAGE: ${{ vars.CI_IMAGE_PROXY && format('{0}/openbao/openbao:2.7.1', vars.CI_IMAGE_PROXY) || 'openbao/openbao:2.7.1' }}
-      # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
-      # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
-      # and the existing tests/integration/test_connectors_k8s_k3d.py).
-      # Pinned to the same minor the k3d/k3s fixture's in-code default
-      # uses (rancher/k3s:v1.32.5-k3s1) so the Harbor proxy serves the
-      # exact tag the testcontainers fixture asks for, without a docker.io
-      # round-trip.
-      MEHO_TEST_K3S_IMAGE: harbor.evba.lab/dockerhub-proxy/rancher/k3s:v1.32.5-k3s1
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository secrets" (see python-unit-shard for why).
       # The k3d test module runs once for each k3s tag in this list: the
       # oldest line the Kubernetes connector serves (1.32) and two lines
       # that upstream still maintains (1.35 and 1.37). The test takes the
-      # image name from MEHO_TEST_K3S_IMAGE above and swaps in each tag. An
-      # image that cannot be pulled skips its run with the reason shown
-      # (-rs below). The other k3s tests keep using the single image above.
+      # image name from MEHO_TEST_K3S_IMAGE and swaps in each tag. An image
+      # that cannot be pulled skips its run with the reason shown (-rs
+      # below). The other k3s tests keep using the single image.
       MEHO_TEST_K3S_TAGS: v1.32.5-k3s1,v1.35.10-k3s1,v1.37.2-k3s1
-      # G11.2-T7 (#1098) — Keycloak 26.x container fixture for the
-      # live-IdP integration test
-      # (backend/tests/integration/test_auth_keycloak_client_credentials.py).
-      # Unlike the rows above this one has **no docker.io short-name
-      # default** in the fixture: the Keycloak image is ~600 MB and an
-      # unauthenticated docker.io pull would reliably exhaust the
-      # cluster's shared NAT egress bucket, so the fixture skips when
-      # MEHO_TEST_KEYCLOAK_IMAGE is unset rather than falling back. The
-      # Harbor-proxied tag is the only path that runs the suite to
-      # pass; everywhere else (local dev sandboxes, agent sandboxes,
-      # any future fork PR job that doesn't see this env) the test
-      # skips cleanly with a clear remediation message.
-      MEHO_TEST_KEYCLOAK_IMAGE: harbor.evba.lab/dockerhub-proxy/keycloak/keycloak:26.0
       # #2949 — vendor spec-shelf wiring for the tests/integration
       # real-spec lanes. See the comment on the python-unit-shard job's
       # occurrence of these two rows for the full rationale
       # (presence-flag gating; the unconditional docs-root that degrades
       # to lane-skip when the shelf checkout was skipped).
-      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      SPEC_SHELF_READY: ${{ secrets.SPEC_SHELF_TOKEN != '' && secrets.SPEC_SHELF_REPOSITORY != '' }}
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -2503,6 +2552,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository secrets
+        # Same as the step of the same name in python-unit-shard: it checks
+        # the repository secrets, hides their parts and sets the test images.
+        # The Keycloak image has no Docker Hub fallback: the image is about
+        # 600 MB, and anonymous pulls would use up the shared pull limit. So
+        # without the proxy (only in another repository) it is empty, and
+        # the live Keycloak test skips (tests/integration/
+        # test_auth_keycloak_client_credentials.py). The k3s image uses the
+        # tag of the fixture's own default, so the proxy serves the exact
+        # tag the tests ask for.
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          SPEC_SHELF_REPOSITORY: ${{ secrets.SPEC_SHELF_REPOSITORY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY SPEC_SHELF_REPOSITORY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          MEHO_TEST_K3S_IMAGE: PROXY/rancher/k3s:v1.32.5-k3s1
+          MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
+          IMAGES
 
       - name: Start memory sampling
         # The same sampler as the unit shards (scripts/ci/memory_sampler.sh):
@@ -2524,7 +2597,7 @@ jobs:
         # them. scripts/ci/spec_shelf.sh prints the shelf folders for the
         # sparse checkout below; the verify step after it checks each file.
         id: spec-shelf-list
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -2541,10 +2614,10 @@ jobs:
         # licensing pointer (docs/decisions/vendor-spec-ci-
         # provisioning.md), the secret scope, and the fork/Dependabot
         # degrade-to-skip analysis.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          repository: ${{ secrets.SPEC_SHELF_REPOSITORY }}
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           sparse-checkout: ${{ steps.spec-shelf-list.outputs.paths }}
@@ -2554,7 +2627,7 @@ jobs:
       - name: Verify spec-shelf provisioned the pinned specs
         # Fail-loud layout guard — same rationale as the
         # python-unit-shard job's occurrence.
-        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf
 
@@ -2852,16 +2925,28 @@ jobs:
       # the secret through `env` is what makes the guard evaluatable.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # The 3 forward-compat rollback tests spin up pgvector via
-      # testcontainers; route the pull through the Harbor proxy cache like
-      # the sibling jobs (never `:latest`).
-      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
-      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      # testcontainers, through the image proxy cache like the sibling
+      # jobs (never `:latest`).
+      # The test images (MEHO_TEST_*_IMAGE) are set by the step "Read the
+      # CI repository secrets" (see python-unit-shard for why).
     defaults:
       run:
         working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository secrets
+        # Same as the step of the same name in python-unit-shard: it checks
+        # the repository secrets, hides their parts and sets the test images.
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          IMAGES
 
       - name: Docker Hub login (for testcontainers pulls)
         # Authenticated pulls avoid the shared-NAT Docker Hub anonymous

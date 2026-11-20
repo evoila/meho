@@ -4,8 +4,8 @@
 #
 # Steps 4 to 6 of install.sh (form-2 design, section 5): install the MEHO
 # core with the download's Helm, write the two one-time files, install the
-# meho command, write the CA of the console and the install record, and read
-# the first-start list. This file is sourced, not run.
+# meho command, write the CA of the console and the install record, and name
+# where to read the first-start list. This file is sourced, not run.
 #
 # No secret touches a command line, the output or a log here. The values of
 # a Secret go from kubectl straight into a file that only root can read.
@@ -19,8 +19,6 @@ readonly FIRST_LOGIN_TEMPLATE='{{range $key, $value := .data}}{{$key}}={{base64d
 readonly UNSEAL_KEY_TEMPLATE='{{base64decode .data.key}}{{"\n"}}'
 # Only the CA of the console's TLS Secret. The template never reads tls.key.
 readonly CONSOLE_CA_TEMPLATE='{{index .data "ca.crt" | base64decode}}'
-# The exit code of "meho status --first-start" when a line of the list is red.
-readonly FIRST_START_RED_EXIT=6
 
 # Set by read_download_version.
 MEHO_VERSION=""
@@ -28,10 +26,6 @@ MEHO_IMAGE_TAG=""
 CHART_VERSION=""
 RKE2_VERSION=""
 CHART_FILE=""
-
-# Set by read_first_start_list: green, red or unread, and the lines of the list.
-FIRST_START_STATE=unread
-FIRST_START_LINES=""
 
 # version_value <VERSION file> <key>: one value of the download's VERSION file.
 version_value() {
@@ -72,13 +66,14 @@ tenant_id() {
     fi
 }
 
-# render_place_values <hostname> <tenant id> <admin user> <approver user>:
+# render_place_values <hostname> <tenant id> <admin user>
+# <pod range> <service range> <addresses of this machine, one per line>:
 # print the answers of this place as Helm values (form-2 design, section 6).
 # The update writes this file again from the install record, so it also
 # drops the two network-policy ranges older installs wrote here: the chart
 # reaches its built-in parts by pod label since #4047.
 render_place_values() {
-    local hostname=$1 tenant_id=$2 admin_user=$3 approver_user=$4
+    local hostname=$1 tenant_id=$2 admin_user=$3
     cat <<EOF
 # Written by MEHO install.sh: the answers of this place. A later run of
 # install.sh passes this file to Helm again. It holds no secret.
@@ -89,13 +84,50 @@ coreKeycloak:
   firstTenantId: "${tenant_id}"
   firstLogin:
     adminUsername: "${admin_user}"
-    approverUsername: "${approver_user}"
 EOF
+    render_egress_values "$4" "$5" "$6"
 }
 
-# write_place_values takes the arguments of render_place_values.
+# render_egress_values <pod range> <service range> <addresses>: the
+# outgoing rule of the MEHO pod (#6612). The chart's NetworkPolicy lets it
+# reach only the built-in parts; on form 2 it also reaches every address
+# outside the built-in Kubernetes, on every port: the systems it manages
+# and the AI service. The pod range, the service range and the addresses of
+# this machine stay closed, so the pod reaches no other pod and none of
+# RKE2's own ports. Its own console address is reached through the Traefik
+# pod, by the chart's rule that values-single-node.yaml turns on
+# (networkPolicy.ingressControllerEgress). An address inside the two ranges,
+# such as the one of RKE2's flannel.1 interface, is closed by the range
+# already.
+render_egress_values() {
+    local pod_range=$1 service_range=$2 addresses=$3 address
+    cat <<EOF
+networkPolicy:
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: "0.0.0.0/0"
+            except:
+              - "${pod_range}"
+              - "${service_range}"
+EOF
+    while IFS= read -r address; do
+        [[ -n $address ]] || continue
+        cidrs_overlap "$address" "$pod_range" && continue
+        cidrs_overlap "$address" "$service_range" && continue
+        printf '              - "%s/32"\n' "$address"
+    done <<<"$addresses"
+}
+
+# write_place_values <hostname> <tenant id> <admin user>
+# <pod range> <service range>: render_place_values with the addresses of
+# this machine, into the file for root only.
 write_place_values() {
-    render_place_values "$@" | write_root_file "$MEHO_PLACE_VALUES" 0600
+    local addresses
+    addresses=$(machine_addresses) || addresses=""
+    [[ -n $addresses ]] ||
+        warn "No IPv4 address of this machine was found, so the network rule of MEHO cannot keep the ports of this machine closed to MEHO. MEHO still reaches the systems it manages."
+    render_place_values "$@" "$addresses" | write_root_file "$MEHO_PLACE_VALUES" 0600
     ok "wrote the answers of this place to $MEHO_PLACE_VALUES"
 }
 
@@ -162,8 +194,8 @@ install_cli() {
 }
 
 # write_console_ca: the CA that signed the console certificate goes to a file
-# that the admin gives to browsers and laptops, and that the first-start list
-# uses. Every run writes it again from the TLS Secret, so it follows a new
+# that the admin gives to browsers and laptops, so that they trust the
+# console. Every run writes it again from the TLS Secret, so it follows a new
 # certificate. A Secret without a CA certificate leaves no file and a warning:
 # a file from an earlier run could name a CA the console no longer uses.
 write_console_ca() {
@@ -171,43 +203,11 @@ write_console_ca() {
     if ! write_secret_file "$HELM_RELEASE-core-tls" "$CONSOLE_CA_TEMPLATE" "$MEHO_CONSOLE_CA_FILE" ||
         ! grep -q -e '-----BEGIN CERTIFICATE-----' "$file"; then
         rm -f "$file"
-        warn "The Secret $HELM_RELEASE-core-tls holds no CA certificate, so no file was written for it. The first-start list then trusts only the CA store of this machine."
+        warn "The Secret $HELM_RELEASE-core-tls holds no CA certificate, so no file was written for it."
         return 0
     fi
     chmod 0644 "$file"
     ok "wrote the CA of the console certificate to $MEHO_CONSOLE_CA_FILE"
-}
-
-# read_first_start_list <hostname>: the first-start list (#4042), read by the
-# meho command through the console address, as a person reads it. The command
-# trusts the console CA through SSL_CERT_FILE, which Go reads in place of the
-# system's CA file. A red line, or a list that cannot be read, does not fail
-# the install: the list names what to fix on the site, and the console page
-# /ui/first-start shows it again after the first login.
-read_first_start_list() {
-    local hostname=$1 ca_file="${HOST_ROOT}${MEHO_CONSOLE_CA_FILE}" list errors error="" rc=0
-    local -a environment=()
-    if [[ -f $ca_file ]]; then
-        environment=("SSL_CERT_FILE=$ca_file")
-    fi
-    list=$(mktemp)
-    errors=$(mktemp)
-    env "${environment[@]}" "${HOST_ROOT}${MEHO_CLI_PATH}" status --first-start \
-        --backplane "https://$hostname" >"$list" 2>"$errors" || rc=$?
-    FIRST_START_LINES=$(<"$list")
-    IFS= read -r error <"$errors" || true
-    rm -f "$list" "$errors"
-    if ((rc == 0)); then
-        FIRST_START_STATE=green
-        ok "the first-start list is green"
-    elif ((rc == FIRST_START_RED_EXIT)); then
-        FIRST_START_STATE=red
-        warn "The first-start list has a red line. Each red line says what to fix. A red line does not stop the install."
-    else
-        FIRST_START_STATE=unread
-        FIRST_START_LINES=""
-        warn "The first-start list could not be read: ${error:-the meho command ended with exit code $rc}. After the first login, open https://$hostname/ui/first-start."
-    fi
 }
 
 # print_console_ca_line: the line of the result that names the console CA.
@@ -217,24 +217,15 @@ print_console_ca_line() {
     fi
 }
 
-# print_first_start_list <hostname>: the state of the first-start list and its
-# lines, as the last part of the result.
+# print_first_start_list <hostname>: where to read the first-start list, as
+# the last line of the result. MEHO shows the list only after a login, so
+# the install does not read it.
 print_first_start_list() {
-    local line
-    case $FIRST_START_STATE in
-        green) printf '  First-start list:      green\n' ;;
-        red) printf '  First-start list:      a red line; each red line says what to fix\n' ;;
-        *) printf '  First-start list:      not read; after the first login, open https://%s/ui/first-start\n' "$1" ;;
-    esac
-    if [[ -n $FIRST_START_LINES ]]; then
-        while IFS= read -r line; do
-            printf '    %s\n' "$line"
-        done <<<"$FIRST_START_LINES"
-    fi
+    printf '  First-start list:      after the first login, open https://%s/ui/first-start, or run "meho login https://%s" and then "meho status --first-start"\n' "$1" "$1"
 }
 
 # render_install_record <date> <hostname> <public address> <tenant id>
-# <admin user> <approver user> <pod range> <service range> <join address>
+# <admin user> <pod range> <service range> <join address>
 # <from disk 0|1>: print /etc/meho/install.json. A later run of install.sh
 # reads it to find the install and its answers (form-2 design, section 7),
 # with read_install_record in lib/update.sh, which reads one key per line.
@@ -242,7 +233,7 @@ print_first_start_list() {
 # letters, digits and a few signs in them.
 render_install_record() {
     local from_disk=false
-    if ((${10})); then
+    if ((${9})); then
         from_disk=true
     fi
     cat <<EOF
@@ -256,10 +247,9 @@ render_install_record() {
     "public_address": "$3",
     "first_tenant_id": "$4",
     "admin_user": "$5",
-    "approver_user": "$6",
-    "cluster_cidr": "$7",
-    "service_cidr": "$8",
-    "join_address": "$9",
+    "cluster_cidr": "$6",
+    "service_cidr": "$7",
+    "join_address": "$8",
     "from_disk": ${from_disk}
   }
 }

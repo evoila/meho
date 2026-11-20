@@ -90,11 +90,12 @@ from meho_backplane.connectors.keycloak.ops_authflow_schemas import (
     ENSURE_APPROVAL_FLOW_OP_ID,
     WHEN_TO_USE_AUTHFLOW_BY_GROUP,
 )
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak_levels import (
     APPROVAL_LEVEL,
     APPROVAL_LEVEL_NAME,
@@ -269,9 +270,7 @@ async def _read_steps(
     realm: str,
     alias: str,
 ) -> list[Any]:
-    path = fill_path(
-        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(alias)}
-    )
+    path = fill_path(_AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": alias})
     return await get_admin_list_strict(connector, target, path, operator=operator)
 
 
@@ -308,7 +307,7 @@ async def _make_flow(
         idempotent_conflict=False,
     )
     for step in _STEPS:
-        values = {"realm": realm, "flowAlias": quote_segment(step.parent)}
+        values = {"realm": realm, "flowAlias": step.parent}
         if step.subflow:
             path = fill_path(_AUTH_FLOW_ADD_SUBFLOW_PATH, values)
             body = {
@@ -328,7 +327,7 @@ async def _make_flow(
     }
     executions_path = fill_path(
         _AUTH_FLOW_EXECUTIONS_PATH,
-        {"realm": realm, "flowAlias": quote_segment(APPROVAL_FLOW_ALIAS)},
+        {"realm": realm, "flowAlias": APPROVAL_FLOW_ALIAS},
     )
     for row in await _read_steps(connector, operator, target, realm, APPROVAL_FLOW_ALIAS):
         if not isinstance(row, dict):
@@ -366,7 +365,7 @@ async def _ensure_level_setting(
     )
     config_id = step.get("authenticationConfig")
     if config_id:
-        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(str(config_id))})
+        path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": str(config_id)})
         have = await connector._get_admin_json(target, path, operator=operator)
         config = have.get("config")
         values: dict[str, Any] = config if isinstance(config, dict) else {}
@@ -379,7 +378,7 @@ async def _ensure_level_setting(
         return False
     path = fill_path(
         _AUTH_EXECUTION_CONFIG_PATH,
-        {"realm": realm, "executionId": quote_segment(str(step.get("id")))},
+        {"realm": realm, "executionId": str(step.get("id"))},
     )
     await connector._write_admin(
         target,
@@ -596,13 +595,12 @@ async def keycloak_authflow_ensure_approval_flow(
 ) -> dict[str, Any]:
     """Make the approval sign-in flow when it is missing and bind it to the client."""
     realm = resolve_realm_config(target).managed_realm
-    realm_segment = quote_segment(realm)
     client_id = str(params.get("client_id") or _DEFAULT_CLIENT_ID).strip()
     client_uuid = await find_client_uuid(
         self,
         operator,
         target,
-        realm_segment,
+        realm,
         client_id,
         op_id=ENSURE_APPROVAL_FLOW_OP_ID,
         roles=_ROLES,
@@ -611,19 +609,17 @@ async def keycloak_authflow_ensure_approval_flow(
         raise KeycloakApprovalFlowError(
             "client_not_found", f"no client {client_id!r} in realm {realm!r}; nothing was changed"
         )
-    client_path = fill_path(
-        _CLIENT_PATH, {"realm": realm_segment, "client-uuid": quote_segment(client_uuid)}
-    )
-    await _check_levels(self, operator, target, realm_segment, client_path)
+    client_path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": client_uuid})
+    await _check_levels(self, operator, target, realm, client_path)
 
-    flow_id, created, steps = await _ensure_flow(self, operator, target, realm_segment)
+    flow_id, created, steps = await _ensure_flow(self, operator, target, realm)
 
     setting_added = level_changed = False
     step = "write the settings of the level step"
     try:
-        setting_added = await _ensure_level_setting(self, operator, target, realm_segment)
+        setting_added = await _ensure_level_setting(self, operator, target, realm)
         step = "write the realm's level map"
-        level_changed = await _ensure_level_name(self, operator, target, realm_segment)
+        level_changed = await _ensure_level_name(self, operator, target, realm)
         step = "bind it to the client"
         binding = await _bind(self, operator, target, client_path, flow_id)
     except httpx.HTTPStatusError as exc:
@@ -680,5 +676,8 @@ async def _approval_flow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 register_rights_check(
-    ENSURE_APPROVAL_FLOW_OP_ID, _ROLES, _approval_flow_preview, per_object=_PER_CLIENT
+    ENSURE_APPROVAL_FLOW_OP_ID,
+    _ROLES,
+    with_current_binding(client=True)(_approval_flow_preview),
+    per_object=_PER_CLIENT,
 )

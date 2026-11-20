@@ -299,6 +299,10 @@ _HOSTED_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
         "migration-heads.yml",
         "check",
     ): "about 40 seconds; it can break only when two pull requests meet, so it stays in the queue",
+    (
+        "private-names-check.yml",
+        "check",
+    ): "a few seconds of git diff and one script; it has no heavy work and uses no own pool",
     ("chart.yml", "helm-test"): (
         "kind installs need more CPU than the own heavy-queue pool has today; "
         "back to an own pool when the second runner pool exists (#6026)"
@@ -356,6 +360,63 @@ def test_no_merge_group_job_uses_a_hosted_label() -> None:
         "A merge-queue run then waits for a hosted runner and the queue can stop. "
         "Use the merge-queue route with an own pool label (see devops.md): " + "; ".join(bad)
     )
+
+
+# Jobs that keep the shared heavy label although their workflow has a
+# merge_group trigger. Each needs a reason.
+_SHARED_HEAVY_ON_MERGE_GROUP_ALLOWED: dict[tuple[str, str], str] = {
+    (
+        "ci.yml",
+        "python-coverage",
+    ): "its `if:` allows only the nightly run and a labelled pull request, never merge_group",
+}
+
+
+def _merge_group_shared_heavy_jobs(path: Path, wf: dict[Any, Any]) -> list[str]:
+    """Jobs that a merge_group event sends to the heavy pool that pull requests use."""
+    if "merge_group" not in _trigger_names(_triggers(wf)):
+        return []
+    found = []
+    for name, job in (wf.get("jobs") or {}).items():
+        job_if = " ".join(str(job.get("if", "")).split())
+        if job_if and "merge_group" not in job_if and _OTHER_EVENT_ONLY.fullmatch(job_if):
+            continue
+        if "uses" in job and "runs-on" not in job:
+            continue
+        if (path.name, name) in _SHARED_HEAVY_ON_MERGE_GROUP_ALLOWED:
+            continue
+        if _merge_group_label(_runs_on_str(job)) == "meho-runners-ci-heavy":
+            found.append(f"{path.name}:{name}")
+    return found
+
+
+def test_no_merge_group_job_uses_the_shared_heavy_pool() -> None:
+    bad: list[str] = []
+    for path in _workflow_files():
+        bad.extend(_merge_group_shared_heavy_jobs(path, _load_workflow(path)))
+    assert not bad, (
+        "These jobs can run on a merge_group event and use the heavy pool that pull "
+        "requests use. A merge-queue run then waits behind pull request runs. "
+        "Use the merge-queue route with 'meho-runners-ci-heavy-queue': " + "; ".join(bad)
+    )
+
+
+def test_merge_group_shared_heavy_check_flags_the_plain_label() -> None:
+    wf = {
+        "on": {"merge_group": {}, "pull_request": {}},
+        "jobs": {
+            "shared": {"runs-on": "meho-runners-ci-heavy"},
+            "routed": {
+                "runs-on": "${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue'"
+                " || 'meho-runners-ci-heavy' }}"
+            },
+            "nightly": {
+                "if": "github.event_name == 'schedule'",
+                "runs-on": "meho-runners-ci-heavy",
+            },
+        },
+    }
+    assert _merge_group_shared_heavy_jobs(Path("x.yml"), wf) == ["x.yml:shared"]
 
 
 def test_merge_group_hosted_check_flags_a_hosted_job() -> None:

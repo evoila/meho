@@ -167,13 +167,13 @@ func printTraceListTable(w io.Writer, r *api.AuditQueryResult) {
 		fmt.Fprintf(w, "%-36s  %-22s %-18s %-18s %-32s %s\n",
 			row.Id.String(),
 			truncate(formatTS(row.Ts), 22),
-			truncate(tenantLabel(row.TenantName, row.TenantId), 18),
-			truncate(target, 18),
-			truncate(row.OpId, 32),
-			truncate(row.ResultStatus, 8),
+			truncate(output.SafeText(tenantLabel(row.TenantName, row.TenantId)), 18),
+			truncate(output.SafeText(target), 18),
+			truncate(output.SafeText(row.OpId), 32),
+			truncate(output.SafeText(row.ResultStatus), 8),
 		)
 	}
 	if r.NextCursor != nil && *r.NextCursor != "" {
-		fmt.Fprintf(w, "NEXT: --cursor=%s  (paste to continue)\n", *r.NextCursor)
+		fmt.Fprintf(w, "NEXT: --cursor=%s  (paste to continue)\n", output.SafeText(*r.NextCursor))
 	}
 }

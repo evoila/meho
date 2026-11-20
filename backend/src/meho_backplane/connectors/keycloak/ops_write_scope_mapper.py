@@ -40,6 +40,9 @@ without both ids, both names and that content is refused too.
 The op is a change of rights: a mapper decides what goes into a login
 token. So the requester never approves it, and the approver is another
 admin (:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`).
+In MEHO's own login realm the approver is a platform admin when the mapper
+puts the platform admin claim or role into tokens now or after the change,
+or when MEHO cannot read the mapper (:mod:`.ops_write_platform_reach`).
 A person approves each call: no standing grant and no run approval covers
 it (:func:`~meho_backplane.op_classes.declare_per_call_approval`).
 
@@ -68,8 +71,14 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    REASON_MAPPER,
+    hide_grant_from_agent,
+    mapper_sets_platform_admin,
+    with_platform_facts,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
@@ -173,9 +182,7 @@ async def _resolve_scope(
                 f"{_OP_ID}: no client scope named {name!r} in realm {realm!r}"
             )
         return found, name
-    path = fill_path(
-        _CLIENT_SCOPE_PATH, {"realm": realm, "client-scope-id": quote_segment(scope_id)}
-    )
+    path = fill_path(_CLIENT_SCOPE_PATH, {"realm": realm, "client-scope-id": scope_id})
     scope = await get_or_none(connector, target, path, operator)
     if scope is None:
         raise KeycloakUserNotFoundError(
@@ -211,7 +218,7 @@ async def _resolve(
             target,
             fill_path(
                 _CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH,
-                {"realm": realm, "client-scope-id": quote_segment(scope_id)},
+                {"realm": realm, "client-scope-id": scope_id},
             ),
             operator=operator,
             strict=True,
@@ -226,8 +233,8 @@ async def _resolve(
         _CLIENT_SCOPE_PROTOCOL_MAPPER_PATH,
         {
             "realm": realm,
-            "client-scope-id": quote_segment(scope_id),
-            "id": quote_segment(mapper_id),
+            "client-scope-id": scope_id,
+            "id": mapper_id,
         },
     )
     mapper = await get_or_none(connector, target, path, operator)
@@ -430,7 +437,37 @@ async def _refuse_names_of_other_objects(ctx: PreviewContext) -> str | None:
     return None
 
 
+async def _sets_platform_admin(ctx: PreviewContext, realm: str) -> bool | None:
+    """Whether the mapper puts the platform admin claim or role into tokens, now or after it.
+
+    Both count: a change of a mapper that sets the claim now changes who gets
+    the claim. ``None`` when MEHO cannot read the mapper.
+    """
+    connector = _live_connector(ctx)
+    if connector is None:
+        return None
+    found = await _resolve(connector, ctx.operator, ctx.target, ctx.params)
+    representation = ctx.params.get("representation")
+    sent = representation.get("config") if isinstance(representation, dict) else None
+    config = found.mapper.get("config")
+    merged = {
+        **found.mapper,
+        "config": {
+            **(config if isinstance(config, dict) else {}),
+            **(sent if isinstance(sent, dict) else {}),
+        },
+    }
+    facts = [mapper_sets_platform_admin(found.mapper), mapper_sets_platform_admin(merged)]
+    if True in facts:
+        return True
+    return None if None in facts else False
+
+
 register_rights_change_op(_OP_ID)
 declare_per_call_approval([_OP_ID])
 register_park_check(_OP_ID, _refuse_names_of_other_objects)
-register_preview_builder(_OP_ID, _scope_mapper_preview)
+register_preview_builder(
+    _OP_ID,
+    with_platform_facts(_OP_ID, _scope_mapper_preview, (_sets_platform_admin, REASON_MAPPER)),
+)
+hide_grant_from_agent(_OP_ID)

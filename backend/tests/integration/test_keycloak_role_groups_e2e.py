@@ -5,21 +5,21 @@
 
 The Keycloak subchart imports
 ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` and the realm
-stage of the ``bootstrap`` Job makes the first two people (as in
+stage of the ``bootstrap`` Job makes the first admin (as in
 ``test_core_keycloak_realm_import.py`` and ``test_core_bootstrap_keycloak.py``).
 Against that real Keycloak:
 
-1. A new person in exactly one of the five role groups logs in and gets
+1. A new person in exactly one of the three role groups logs in and gets
    that group's ``tenant_id``, ``tenant_role`` and ``approver``; the
    backplane's own JWT check accepts the token with the same role.
 2. Once the person leaves the group, the next login has no ``tenant_id``
    and MEHO answers ``401 missing_tenant_claim``. A refresh of the session
    from before the change loses the claim too: Keycloak runs the client's
    mappers again on every refresh, with the person's current groups.
-3. The first admin is in MEHO-Admins and MEHO-Platform-Admins; the second
-   person is in MEHO-SA-Operators, which is ``operator``, so the approvals
-   plane lets them decide the admin's requests. (The full ask-and-approve
-   path through the REST API runs on the built-in realm in
+3. The first admin is in MEHO-Admins and MEHO-Platform-Admins, and the
+   realm has no approver login and no MEHO-SA-Operators or MEHO-Approvers
+   group. A person in MEHO-Operators clears the approvals plane. (The full
+   ask-and-approve path through the REST API runs on the built-in realm in
    ``test_core_bootstrap_keycloak.py``.)
 4. The team groups of the policy file's bindings, set up as
    ``docs-site/install/keycloak-realm.md`` says (full group paths on, the
@@ -82,13 +82,12 @@ _TENANT_ID = "6b0d7c55-41a8-4b52-9a8e-2f3c1d0e9a77"
 _BACKPLANE_AUDIENCE = "meho-backplane"
 _LOGIN_CLIENT = "meho-cli"
 
-# The five role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The three role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The second value says whether the token carries the `approver` claim.
 _ROLE_GROUPS = {
     "MEHO-Readers": (TenantRole.READ_ONLY, False),
     "MEHO-Operators": (TenantRole.OPERATOR, False),
-    "MEHO-SA-Operators": (TenantRole.OPERATOR, False),
     "MEHO-Admins": (TenantRole.TENANT_ADMIN, False),
-    "MEHO-Approvers": (TenantRole.READ_ONLY, True),
 }
 
 
@@ -101,8 +100,6 @@ class _Site:
     headers: Callable[[], dict[str, str]]
     admin_username: str
     admin_password: str
-    approver_username: str
-    approver_password: str
 
     @property
     def admin_url(self) -> str:
@@ -308,8 +305,6 @@ def site() -> Iterator[_Site]:
             headers=headers,
             admin_username=first_login["admin_username"],
             admin_password=first_login["admin_password"],
-            approver_username=first_login["approver_username"],
-            approver_password=first_login["approver_password"],
         )
         _allow_password_grant_on_cli(site)
         yield site
@@ -341,7 +336,8 @@ async def test_member_of_one_group_gets_its_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    assert operator.approver is False
+    assert operator.self_approver is False
     assert operator.platform_admin is False
 
 
@@ -395,17 +391,22 @@ async def test_leaving_the_group_removes_the_tenant_from_new_logins_and_refreshe
     assert str(refused.value.detail).startswith("missing_tenant_claim"), refused.value.detail
 
 
-# --- 3. The two people the setup makes ---------------------------------------
+# --- 3. The one person the setup makes ---------------------------------------
 
 
-async def test_first_admin_and_second_person_get_their_groups_and_roles(
+async def test_first_admin_gets_its_groups_and_the_realm_has_no_approver_login(
     site: _Site, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert _user_groups(site, site.admin_username) == {"MEHO-Admins", "MEHO-Platform-Admins"}
-    assert _user_groups(site, site.approver_username) == {"MEHO-SA-Operators"}
+    users = httpx.get(f"{site.admin_url}/users", headers=site.headers()).json()
+    assert site.admin_username in {user["username"] for user in users}
+    assert "approver" not in {user["username"] for user in users}
+    groups = {
+        g["name"] for g in httpx.get(f"{site.admin_url}/groups", headers=site.headers()).json()
+    }
+    assert not groups & {"MEHO-SA-Operators", "MEHO-Approvers"}
 
     _finish_first_login(site, site.admin_username)
-    _finish_first_login(site, site.approver_username)
 
     admin_token = _password_login(site, site.admin_username, site.admin_password)
     admin = await _verify(site, admin_token["access_token"], monkeypatch)
@@ -414,16 +415,16 @@ async def test_first_admin_and_second_person_get_their_groups_and_roles(
     assert admin.platform_admin is True
     assert admin.approver is False
 
-    approver_token = _password_login(site, site.approver_username, site.approver_password)
-    approver = await _verify(site, approver_token["access_token"], monkeypatch)
-    assert str(approver.tenant_id) == _TENANT_ID
-    assert approver.tenant_role is TenantRole.OPERATOR
-    assert approver.platform_admin is False
-    assert approver.approver is False
-    assert approver.sub != admin.sub, "two people"
-    # ``operator`` clears the approvals plane, so the second person can decide
-    # the first admin's requests (the self-approval refusal is per ``sub``).
-    assert require_approvals_access(approver) is approver
+
+async def test_a_member_of_operators_clears_the_approvals_plane(
+    site: _Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, password = _add_person(site, "plane-operator", "MEHO-Operators")
+
+    token = _password_login(site, "plane-operator", password)["access_token"]
+    operator = await _verify(site, token, monkeypatch)
+
+    assert require_approvals_access(operator) is operator
 
 
 # --- 4. Team groups for the policy file's bindings ----------------------------
@@ -530,7 +531,7 @@ async def test_a_person_only_in_a_team_group_gets_the_claims_bindings_match(
             {"bindings": [{"match": match, "kind": "SA-Operators", "categories": ["network"]}]}
         )
         bound = bind(operator, claims, entries)
-        assert bound.bound_kind is RoleGroup.SA_OPERATORS, match
+        assert bound.bound_kind is RoleGroup.OPERATORS, match
         assert bound.bound_categories == frozenset({"network"})
     short = {"match": {"group": "/Network"}, "kind": "SA-Operators", "categories": ["*"]}
     assert bind(operator, claims, bindings_from_document({"bindings": [short]})).bound_kind is None

@@ -1393,6 +1393,34 @@ type AgentDefinitionRead struct {
 	UpdatedAt    time.Time               `json:"updated_at"`
 }
 
+// AgentDefinitionSaved The answer of a create or an edit: the row and the live grants of its agent.
+//
+// “live_grants“ lists the grants of the agent that “identity_ref“
+// names that are live after the save, also the ones a starting grant
+// pick just wrote. When MEHO asks for no pick because the agent already
+// has a live grant, these are the grants that say what the agent may do.
+type AgentDefinitionSaved struct {
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub string             `json:"created_by_sub"`
+	Enabled      bool               `json:"enabled"`
+	Id           openapi_types.UUID `json:"id"`
+	IdentityRef  string             `json:"identity_ref"`
+
+	// LiveGrants The live grants of the agent that identity_ref names, after the save.
+	LiveGrants []LiveGrant `json:"live_grants"`
+
+	// LiveGrantsTruncated True when the agent has more live grants than live_grants lists.
+	LiveGrantsTruncated bool                    `json:"live_grants_truncated"`
+	ModelTier           string                  `json:"model_tier"`
+	Name                string                  `json:"name"`
+	OutputSchema        *map[string]interface{} `json:"output_schema"`
+	SystemPrompt        string                  `json:"system_prompt"`
+	TenantId            openapi_types.UUID      `json:"tenant_id"`
+	Toolset             map[string]interface{}  `json:"toolset"`
+	TurnBudget          int                     `json:"turn_budget"`
+	UpdatedAt           time.Time               `json:"updated_at"`
+}
+
 // AgentDefinitionUpdate PATCH body -- every field optional; only supplied fields change.
 //
 // “extra="forbid"“ for the same reason as
@@ -1920,15 +1948,17 @@ type ApprovalRequestView struct {
 	OutcomeCheck *OutcomeCheckView `json:"outcome_check,omitempty"`
 
 	// OutcomeUnknown Why an approved request is on the "outcome unknown" list (#5026).
-	OutcomeUnknown *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
-	ParamsHash     string                 `json:"params_hash"`
-	PreviewHash    *string                `json:"preview_hash"`
-	PrincipalAct   *string                `json:"principal_act"`
-	PrincipalKind  *string                `json:"principal_kind"`
-	PrincipalName  *string                `json:"principal_name"`
-	PrincipalSub   string                 `json:"principal_sub"`
-	ProposedEffect map[string]interface{} `json:"proposed_effect"`
-	ReleaseId      *string                `json:"release_id"`
+	OutcomeUnknown    *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
+	ParamsHash        string                 `json:"params_hash"`
+	PeopleBehind      *[]PersonBehindView    `json:"people_behind"`
+	PeopleBehindKnown *bool                  `json:"people_behind_known"`
+	PreviewHash       *string                `json:"preview_hash"`
+	PrincipalAct      *string                `json:"principal_act"`
+	PrincipalKind     *string                `json:"principal_kind"`
+	PrincipalName     *string                `json:"principal_name"`
+	PrincipalSub      string                 `json:"principal_sub"`
+	ProposedEffect    map[string]interface{} `json:"proposed_effect"`
+	ReleaseId         *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -2129,6 +2159,18 @@ type ApprovalRevealResult_Result struct {
 	union json.RawMessage
 }
 
+// ApprovalScriptPageView One page of the script of a waiting “linux.script.run“ request.
+type ApprovalScriptPageView struct {
+	ApprovalRequestId  openapi_types.UUID `json:"approval_request_id"`
+	Page               int                `json:"page"`
+	Pages              int                `json:"pages"`
+	Script             *string            `json:"script"`
+	ScriptBytes        int                `json:"script_bytes"`
+	ScriptSha256       *string            `json:"script_sha256"`
+	ScriptUnavailable  *string            `json:"script_unavailable"`
+	ScriptValuesHidden *bool              `json:"script_values_hidden,omitempty"`
+}
+
 // ApprovalSignInStatus The state of the approval sign-in flow and its binding (#6280).
 type ApprovalSignInStatus struct {
 	Client string                    `json:"client"`
@@ -2158,18 +2200,30 @@ type ApprovalSignInStatusState string
 // level: “off“, “observe“ or “required“ (“auto“ is “observe“
 // only while “sign_in“ shows for sure that the realm does not give the
 // level, and “required“ when it is “ok“ or its read failed).
-// “sign_in_level_warning“ is a short sentence whenever the level is not
-// required in practice or the read failed, else “None“.
+// “web_sign_in“ and “web_sign_in_level_in_force“ are the same for the
+// console's approval client (#6282): “auto“ reads each client's
+// binding, so the two can differ. “sign_in_level_warning“ is a short
+// sentence whenever the level is not required in practice for either
+// client or a read failed, else “None“.
+// “rights_change_admins“ is how many admins of the caller's tenant could
+// approve a change of rights (#6641,
+// :mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
+// count them. With one admin, a change of rights cannot be approved.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
 	EffectivePosture         string `json:"effective_posture"`
+	RightsChangeAdmins       *int   `json:"rights_change_admins"`
 
 	// SignIn The state of the approval sign-in flow and its binding (#6280).
 	SignIn             *ApprovalSignInStatus `json:"sign_in,omitempty"`
 	SignInLevel        *string               `json:"sign_in_level"`
 	SignInLevelInForce *string               `json:"sign_in_level_in_force"`
 	SignInLevelWarning *string               `json:"sign_in_level_warning"`
+
+	// WebSignIn The state of the approval sign-in flow and its binding (#6280).
+	WebSignIn             *ApprovalSignInStatus `json:"web_sign_in,omitempty"`
+	WebSignInLevelInForce *string               `json:"web_sign_in_level_in_force"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -2328,7 +2382,7 @@ type AuditClassCountsRequest struct {
 	TextChanged    *bool               `json:"text_changed"`
 	Until          *string             `json:"until"`
 
-	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -2352,7 +2406,7 @@ type AuditClassCountsRequest struct {
 //   - “agent_session_id“ ← “audit_log.agent_session_id“ (MCP session; #1009)
 //   - “work_ref“ ← “audit_log.work_ref“ (external change-ticket reference;
 //     work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat
-//     “work_ref“ filter on :class:`AuditQueryFilters` is exact-match.
+//     “work_ref“ filter on :class:`AuditQueryFilters` takes the whole id (see its field).
 //   - “principal_name“ ← “payload['principal_name']“ when set. The MCP
 //     audit-write helper (“write_mcp_audit_row“) populates it from
 //     “Operator.name“ since G0.15-T3 #1212; HTTP-chassis rows remain
@@ -2488,7 +2542,7 @@ type AuditQueryRequest struct {
 	TextChanged   *bool               `json:"text_changed"`
 	Until         *string             `json:"until"`
 
-	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -3355,14 +3409,15 @@ type BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost struct {
 
 // BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
 type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
-	Aliases   *string `json:"aliases"`
-	AuthModel *string `json:"auth_model,omitempty"`
-	Host      *string `json:"host,omitempty"`
-	Name      *string `json:"name,omitempty"`
-	Notes     *string `json:"notes"`
-	Port      *string `json:"port"`
-	Product   *string `json:"product,omitempty"`
-	SecretRef *string `json:"secret_ref"`
+	Aliases      *string `json:"aliases"`
+	AuthModel    *string `json:"auth_model,omitempty"`
+	Host         *string `json:"host,omitempty"`
+	ManagedRealm *string `json:"managed_realm"`
+	Name         *string `json:"name,omitempty"`
+	Notes        *string `json:"notes"`
+	Port         *string `json:"port"`
+	Product      *string `json:"product,omitempty"`
+	SecretRef    *string `json:"secret_ref"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -3395,13 +3450,14 @@ type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 
 // BodyUiConnectorsEditSubmitUiConnectorsNamePatch defines model for Body_ui_connectors_edit_submit_ui_connectors__name__patch.
 type BodyUiConnectorsEditSubmitUiConnectorsNamePatch struct {
-	Aliases   *string `json:"aliases"`
-	AuthModel *string `json:"auth_model,omitempty"`
-	Host      *string `json:"host,omitempty"`
-	Notes     *string `json:"notes"`
-	Port      *string `json:"port"`
-	Product   *string `json:"product,omitempty"`
-	SecretRef *string `json:"secret_ref"`
+	Aliases      *string `json:"aliases"`
+	AuthModel    *string `json:"auth_model,omitempty"`
+	Host         *string `json:"host,omitempty"`
+	ManagedRealm *string `json:"managed_realm"`
+	Notes        *string `json:"notes"`
+	Port         *string `json:"port"`
+	Product      *string `json:"product,omitempty"`
+	SecretRef    *string `json:"secret_ref"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -4051,7 +4107,7 @@ type BroadcastAnnounceRequest struct {
 	Targets        *[]string                               `json:"targets,omitempty"`
 	TtlMinutes     *int                                    `json:"ttl_minutes"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form).
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -4305,7 +4361,7 @@ type CallOperationBody struct {
 	PreviewHash *string                   `json:"preview_hash"`
 	Target      *CallOperationBody_Target `json:"target"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form).
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -6669,9 +6725,11 @@ type EventSourceUpdate struct {
 
 // ExplainApprovers The login groups that may approve another person's call, and the rule that says so.
 type ExplainApprovers struct {
+	// Floor The install's routing entry that fits, such as install:routing[0]. It is a floor: a tenant's routing can only narrow it. For a waiting request it is the install's routing as it is now, as at the approve click. Null when no install entry fits, and for a caller who is not a tenant admin or a platform admin.
+	Floor  *string  `json:"floor"`
 	Groups []string `json:"groups"`
 
-	// Rule default, rights_change, or a routing entry such as tenant:routing[0]. Null for a caller who is not a tenant admin or a platform admin.
+	// Rule default, rights_change, or the routing entries that fit, the install's first, such as install:routing[0], tenant:routing[1]. category_not_stored when MEHO does not know the category the install's policy gives the change (it gives it two categories, or a waiting request started before MEHO stored it) and an install entry that matches on a category could fit it; then no group may approve it. Null for a caller who is not a tenant admin or a platform admin.
 	Rule *string `json:"rule"`
 }
 
@@ -7111,8 +7169,15 @@ type HealthResponse struct {
 	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
 	// only while ``sign_in`` shows for sure that the realm does not give the
 	// level, and ``required`` when it is ``ok`` or its read failed).
-	// ``sign_in_level_warning`` is a short sentence whenever the level is not
-	// required in practice or the read failed, else ``None``.
+	// ``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the
+	// console's approval client (#6282): ``auto`` reads each client's
+	// binding, so the two can differ. ``sign_in_level_warning`` is a short
+	// sentence whenever the level is not required in practice for either
+	// client or a read failed, else ``None``.
+	// ``rights_change_admins`` is how many admins of the caller's tenant could
+	// approve a change of rights (#6641,
+	// :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
+	// count them. With one admin, a change of rights cannot be approved.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 
@@ -7279,9 +7344,11 @@ type HealthResponse struct {
 
 // ImportedSensor What the import did, or would do, to one Sensor.
 type ImportedSensor struct {
-	Action        ImportedSensorAction `json:"action"`
-	ChangedFields *[]string            `json:"changed_fields,omitempty"`
-	Name          string               `json:"name"`
+	Action            ImportedSensorAction `json:"action"`
+	ChangedFields     *[]string            `json:"changed_fields,omitempty"`
+	IdentitySubAfter  *string              `json:"identity_sub_after"`
+	IdentitySubBefore *string              `json:"identity_sub_before"`
+	Name              string               `json:"name"`
 }
 
 // ImportedSensorAction defines model for ImportedSensor.Action.
@@ -7900,6 +7967,19 @@ type KbWikiSearch struct {
 // KbWikiSearchReason defines model for KbWikiSearch.Reason.
 type KbWikiSearchReason string
 
+// KeycloakRealmCheck The Keycloak targets MEHO refuses; “all_tenants“ says how far the list goes.
+type KeycloakRealmCheck struct {
+	AllTenants bool                   `json:"all_tenants"`
+	Items      []KeycloakRealmProblem `json:"items"`
+}
+
+// KeycloakRealmProblem One Keycloak target MEHO refuses, and why.
+type KeycloakRealmProblem struct {
+	Name     string             `json:"name"`
+	Problem  string             `json:"problem"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+}
+
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
 // Mirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`
@@ -7940,6 +8020,25 @@ type LearningMetrics struct {
 	// Each ratio comes with its count and its base, and is ``null`` when the
 	// base is 0.
 	Search RetrievalNumbers `json:"search"`
+}
+
+// LiveGrant One live grant of an agent.
+type LiveGrant struct {
+	// ExpiresAt The end date; null when the grant has none.
+	ExpiresAt *time.Time         `json:"expires_at"`
+	Id        openapi_types.UUID `json:"id"`
+
+	// OpPattern The operations the grant covers ('*' = every operation).
+	OpPattern string `json:"op_pattern"`
+
+	// TargetName The name of the target; null for every target or a target MEHO cannot find.
+	TargetName *string `json:"target_name"`
+
+	// TargetScope '*' for every target, else the id of one target.
+	TargetScope string `json:"target_scope"`
+
+	// Verdict auto-execute, needs-approval or deny.
+	Verdict string `json:"verdict"`
 }
 
 // LivenessResponse “GET /api/v1/health/live“ response body.
@@ -8897,6 +8996,14 @@ type PairingHealth struct {
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
 
+// PersonBehindView One person behind the agent, service or runner login that asked.
+type PersonBehindView struct {
+	Name    *string `json:"name"`
+	Sub     string  `json:"sub"`
+	Why     string  `json:"why"`
+	WhyText string  `json:"why_text"`
+}
+
 // PolicyExplainBody The question of “POST /api/v1/policy/explain“.
 //
 // Ask about one call (“connector_id“ and “op_id“) for yourself
@@ -9847,7 +9954,7 @@ type RunApprovalCreate struct {
 	// Reason What the run does, for the approver.
 	Reason string `json:"reason"`
 
-	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef The run reference. Calls of the run send it in the Meho-Work-Ref header. Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form).
 	WorkRef string `json:"work_ref"`
 }
 
@@ -9875,21 +9982,24 @@ type RunApprovalListResponse struct {
 
 // RunApprovalRead One run approval with its status.
 type RunApprovalRead struct {
-	ApprovedAt    *time.Time            `json:"approved_at"`
-	ApprovedBySub *string               `json:"approved_by_sub"`
-	EndedAt       *time.Time            `json:"ended_at"`
-	Entries       []RunApprovalEntry    `json:"entries"`
-	ExpiresAt     time.Time             `json:"expires_at"`
-	Id            openapi_types.UUID    `json:"id"`
-	PrincipalSub  string                `json:"principal_sub"`
-	Reason        string                `json:"reason"`
-	RequestedAt   time.Time             `json:"requested_at"`
-	RevokedAt     *time.Time            `json:"revoked_at"`
-	RevokedBySub  *string               `json:"revoked_by_sub"`
-	RevokedReason *string               `json:"revoked_reason"`
-	Status        RunApprovalReadStatus `json:"status"`
-	TenantId      openapi_types.UUID    `json:"tenant_id"`
-	WorkRef       string                `json:"work_ref"`
+	ApprovedAt    *time.Time         `json:"approved_at"`
+	ApprovedBySub *string            `json:"approved_by_sub"`
+	EndedAt       *time.Time         `json:"ended_at"`
+	Entries       []RunApprovalEntry `json:"entries"`
+
+	// EntriesThatWait Entries that wait for a person; the reason says which calls. Filled by request, show and approve; null in list, revoke and end.
+	EntriesThatWait *[]RunApprovalWaitNote `json:"entries_that_wait"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	Id              openapi_types.UUID     `json:"id"`
+	PrincipalSub    string                 `json:"principal_sub"`
+	Reason          string                 `json:"reason"`
+	RequestedAt     time.Time              `json:"requested_at"`
+	RevokedAt       *time.Time             `json:"revoked_at"`
+	RevokedBySub    *string                `json:"revoked_by_sub"`
+	RevokedReason   *string                `json:"revoked_reason"`
+	Status          RunApprovalReadStatus  `json:"status"`
+	TenantId        openapi_types.UUID     `json:"tenant_id"`
+	WorkRef         string                 `json:"work_ref"`
 }
 
 // RunApprovalReadStatus defines model for RunApprovalRead.Status.
@@ -9898,6 +10008,21 @@ type RunApprovalReadStatus string
 // RunApprovalRevoke Body of “POST /api/v1/service-principals/run-approvals/{id}/revoke“.
 type RunApprovalRevoke struct {
 	Reason *string `json:"reason"`
+}
+
+// RunApprovalWaitNote An entry the run approval never covers; each of its calls waits for a person.
+//
+// The list keeps the entry (the request is not refused), and this note
+// says so to the add-on that asks and to the person who approves.
+type RunApprovalWaitNote struct {
+	ConnectorId string `json:"connector_id"`
+
+	// Entry The position of the entry in ``entries``, from 0.
+	Entry int    `json:"entry"`
+	OpId  string `json:"op_id"`
+
+	// Reason Why each call of this entry waits for a person.
+	Reason string `json:"reason"`
 }
 
 // RunCompletedResponse Returned by “meho_runbook_next“ when the previous step was the last.
@@ -10435,7 +10560,7 @@ type ScheduledTriggerCreate struct {
 	TenantId *openapi_types.UUID  `json:"tenant_id"`
 	Timezone *string              `json:"timezone,omitempty"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form).
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -11014,6 +11139,12 @@ type SensorResultRead struct {
 // SensorResultReadState defines model for SensorResultRead.State.
 type SensorResultReadState string
 
+// SensorRunAccepted Answer of the run route: the Sensor and when it is due.
+type SensorRunAccepted struct {
+	NextFireAt time.Time          `json:"next_fire_at"`
+	SensorId   openapi_types.UUID `json:"sensor_id"`
+}
+
 // SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
 //
 // The queryable half of the checks-runner watchdog: an external prober
@@ -11465,7 +11596,7 @@ type StartRunRequest struct {
 	Target       string                  `json:"target"`
 	TemplateSlug string                  `json:"template_slug"`
 
-	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters.
+	// WorkRef Ticket id. White space at both ends is removed; it must not be blank, must not hold control or invisible characters, and is at most 256 characters after cleaning (white space removed, one Unicode form).
 	WorkRef *string `json:"work_ref"`
 }
 
@@ -11908,6 +12039,50 @@ type TargetUpdate struct {
 	VerifyTls             *bool                   `json:"verify_tls"`
 	Version               *string                 `json:"version"`
 	VpnRequired           *bool                   `json:"vpn_required"`
+}
+
+// TargetWriteResult The answer of a target create or update: the target, plus warnings.
+//
+// “warnings“ holds plain lines about a setting that is allowed but
+// risky, for example a Keycloak target that manages the realm MEHO
+// itself signs in with
+// (:func:`~meho_backplane.targets.keycloak_realm_warnings.keycloak_realm_warnings`).
+// Empty when there is nothing to say.
+type TargetWriteResult struct {
+	Aliases []string `json:"aliases"`
+
+	// AuthModel Per-target identity model per v0.1-spec L447-454.
+	AuthModel AuthModel              `json:"auth_model"`
+	CreatedAt time.Time              `json:"created_at"`
+	DeletedAt *time.Time             `json:"deleted_at"`
+	Extras    map[string]interface{} `json:"extras"`
+
+	// Fingerprint Product and version from the last successful probe. null means the target is not probed yet (a new target is never probed): run POST /api/v1/targets/{name}/probe, or `meho targets probe <name>` in the CLI.
+	Fingerprint           *map[string]interface{} `json:"fingerprint"`
+	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
+	Fqdn                  *string                 `json:"fqdn"`
+	Host                  string                  `json:"host"`
+	Id                    openapi_types.UUID      `json:"id"`
+	Name                  string                  `json:"name"`
+	Notes                 *string                 `json:"notes"`
+	Port                  *int                    `json:"port"`
+	PreferredImplId       *string                 `json:"preferred_impl_id"`
+	Product               string                  `json:"product"`
+	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
+	SecretRef             *string                 `json:"secret_ref"`
+
+	// SecretRefDerived True when secret_ref is the path MEHO builds from the target name (tenants/<tenant_id>/<name>), as it does for a target added without a secret_ref.
+	SecretRefDerived *bool              `json:"secret_ref_derived,omitempty"`
+	TenantId         openapi_types.UUID `json:"tenant_id"`
+	TlsCaPin         *string            `json:"tls_ca_pin"`
+	TlsServerName    *string            `json:"tls_server_name"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	VerifyTls        *bool              `json:"verify_tls,omitempty"`
+	Version          *string            `json:"version"`
+	VpnRequired      bool               `json:"vpn_required"`
+
+	// Warnings Plain lines about a setting that is allowed but risky. Empty when none.
+	Warnings *[]string `json:"warnings,omitempty"`
 }
 
 // TargetsDiscoverResult Aggregated discover output across every connector for a product.
@@ -12679,6 +12854,21 @@ type WithdrawRequestBody struct {
 	Reason *string `json:"reason,omitempty"`
 }
 
+// WriteAwaitingApproval The 202 answer of a REST write that waits for approval.
+type WriteAwaitingApproval struct {
+	// ApprovalRequestId Id of the approval request. A person approves it in the console, with `meho approvals approve <id>`, or on REST.
+	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
+
+	// Message What happens next, in plain words.
+	Message string `json:"message"`
+
+	// OpId The operation that runs after approval, for example `targets.register`.
+	OpId string `json:"op_id"`
+
+	// Status Always `awaiting_approval`: nothing is written yet.
+	Status string `json:"status"`
+}
+
 // UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
 //
 // “kind“ is typed against :data:`_EdgeKindSlug` so a malformed kind
@@ -13019,7 +13209,7 @@ type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
 
 // ListRunsApiV1AgentsRunsGetParams defines parameters for ListRunsApiV1AgentsRunsGet.
 type ListRunsApiV1AgentsRunsGetParams struct {
-	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
@@ -13078,7 +13268,7 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Status Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
-	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Filter by external change-ticket reference, e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter. Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 
 	// Limit Return at most this many requests (1..500). Omit for no limit.
@@ -13135,6 +13325,13 @@ type GetApprovalResultApiV1ApprovalsRequestIdResultGetParams struct {
 
 // RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams defines parameters for RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost.
 type RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams defines parameters for GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet.
+type GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams struct {
+	// Page Page number, from 1.
+	Page          *int    `form:"page,omitempty" json:"page,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13247,7 +13444,7 @@ type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
 	ActorSub  *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
 
-	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	ActiveOnly    *bool   `form:"active_only,omitempty" json:"active_only,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -13544,6 +13741,11 @@ type FeedEndpointApiV1FeedGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// FirstStartSignedInApiV1FirstStartGetParams defines parameters for FirstStartSignedInApiV1FirstStartGet.
+type FirstStartSignedInApiV1FirstStartGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
 type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
@@ -13684,7 +13886,13 @@ type GetGroupsApiV1OperationsGroupsGetParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Cursor Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358).
-	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// IncludeRaw Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.
+	IncludeRaw *bool `form:"include_raw,omitempty" json:"include_raw,omitempty"`
+
+	// Group A `group_key`: list only this group. Used only while the backplane switch `GROUP_LISTING_OPERATIONS` is on; then each group also lists its typed and multi-step `operations`, and an answer ends early (with `next_cursor`) to stay under 12 KB.
+	Group         *string `form:"group,omitempty" json:"group,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13740,7 +13948,10 @@ type GetSearchApiV1OperationsSearchGetParams struct {
 	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
 
 	// IncludeScores Add the ranking scores (`fused_score`, `bm25_score`, `cosine_score`) to each ranked hit. Only honoured for a tenant_admin caller; ignored for everyone else.
-	IncludeScores *bool   `form:"include_scores,omitempty" json:"include_scores,omitempty"`
+	IncludeScores *bool `form:"include_scores,omitempty" json:"include_scores,omitempty"`
+
+	// IncludeRaw Also show raw operations made from the vendor API description. Used only while the backplane switch `SEARCH_TYPED_FIRST` is on; then the default is typed and multi-step operations only, and the answer has `raw_operations`.
+	IncludeRaw    *bool   `form:"include_raw,omitempty" json:"include_raw,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13842,7 +14053,7 @@ type ListRunsApiV1RunbooksRunsGetParams struct {
 	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
 	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
 
-	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
@@ -13953,7 +14164,7 @@ type ListTriggersApiV1SchedulerTriggersGetParams struct {
 	Kind   *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
 	Status *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
 
-	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after removing the white space are refused.
+	// WorkRef Ticket id to search for. It finds the id with white space at both ends removed and in Unicode form NFC, and also the text exactly as typed. A blank value, control or invisible characters, or more than 256 characters after cleaning (white space removed, one Unicode form) are refused.
 	WorkRef       *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string             `json:"authorization,omitempty"`
@@ -14031,6 +14242,12 @@ type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
 
 // ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
 type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
+
+// RunSensorNowApiV1SensorsSensorIdRunPostParams defines parameters for RunSensorNowApiV1SensorsSensorIdRunPost.
+type RunSensorNowApiV1SensorsSensorIdRunPostParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
 
 // ListGrantsApiV1ServicePrincipalsGrantsGetParams defines parameters for ListGrantsApiV1ServicePrincipalsGrantsGet.
 type ListGrantsApiV1ServicePrincipalsGrantsGetParams struct {
@@ -14192,6 +14409,11 @@ type ListTargetsApiV1TargetsGetParams struct {
 
 // CreateTargetApiV1TargetsPostParams defines parameters for CreateTargetApiV1TargetsPost.
 type CreateTargetApiV1TargetsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams defines parameters for KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet.
+type KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -14380,6 +14602,11 @@ type UiAgentPrincipalsListUiAgentsPrincipalsGetParams struct {
 	IncludeRevoked *bool `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
 }
 
+// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams defines parameters for UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet.
+type UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams struct {
+	IdentityRef *string `form:"identity_ref,omitempty" json:"identity_ref,omitempty"`
+}
+
 // UiAgentsRunsListUiAgentsRunsGetParams defines parameters for UiAgentsRunsListUiAgentsRunsGet.
 type UiAgentsRunsListUiAgentsRunsGetParams struct {
 	Status  *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -14418,6 +14645,11 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
+// ApprovalScriptPageUiApprovalsRequestIdScriptGetParams defines parameters for ApprovalScriptPageUiApprovalsRequestIdScriptGet.
+type ApprovalScriptPageUiApprovalsRequestIdScriptGetParams struct {
+	Page *int `form:"page,omitempty" json:"page,omitempty"`
+}
+
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
 type UiAuditPageUiAuditGetParams struct {
 	Target         *string             `form:"target,omitempty" json:"target,omitempty"`
@@ -14447,6 +14679,19 @@ type UiAuditResultsUiAuditResultsGetParams struct {
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
 	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
+}
+
+// UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams defines parameters for UiAuthApprovalCallbackUiAuthApprovalCallbackGet.
+type UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams struct {
+	Code             *string `form:"code,omitempty" json:"code,omitempty"`
+	State            *string `form:"state,omitempty" json:"state,omitempty"`
+	Error            *string `form:"error,omitempty" json:"error,omitempty"`
+	ErrorDescription *string `form:"error_description,omitempty" json:"error_description,omitempty"`
+}
+
+// UiAuthApprovalSignInUiAuthApprovalSignInGetParams defines parameters for UiAuthApprovalSignInUiAuthApprovalSignInGet.
+type UiAuthApprovalSignInUiAuthApprovalSignInGetParams struct {
+	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
 }
 
 // UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
@@ -15054,6 +15299,9 @@ type UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody = U
 
 // UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody defines body for UiAgentPrincipalsListUiAgentsPrincipalsGet for application/json ContentType.
 type UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody = UISessionContext
+
+// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody defines body for UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet for application/json ContentType.
+type UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody = UISessionContext
 
 // UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody defines body for UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet for application/json ContentType.
 type UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody = UISessionContext
@@ -17403,6 +17651,9 @@ type ClientInterface interface {
 	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost request
 	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet request
+	GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17646,6 +17897,9 @@ type ClientInterface interface {
 
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FirstStartSignedInApiV1FirstStartGet request
+	FirstStartSignedInApiV1FirstStartGet(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PollNextCommandApiV1GatewayRunnerNextGet request
 	PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17910,6 +18164,9 @@ type ClientInterface interface {
 	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
 	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RunSensorNowApiV1SensorsSensorIdRunPost request
+	RunSensorNowApiV1SensorsSensorIdRunPost(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListGrantsApiV1ServicePrincipalsGrantsGet request
 	ListGrantsApiV1ServicePrincipalsGrantsGet(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17999,6 +18256,9 @@ type ClientInterface interface {
 	CreateTargetApiV1TargetsPostWithBody(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet request
+	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18198,6 +18458,11 @@ type ClientInterface interface {
 
 	UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody request with any body
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody request with any body
 	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18318,6 +18583,9 @@ type ClientInterface interface {
 	// ApprovalRunStateUiApprovalsRequestIdRunGet request
 	ApprovalRunStateUiApprovalsRequestIdRunGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ApprovalScriptPageUiApprovalsRequestIdScriptGet request
+	ApprovalScriptPageUiApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAuditPageUiAuditGet request
 	UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -18332,6 +18600,12 @@ type ClientInterface interface {
 
 	// UiAuditDrawerUiAuditShowAuditIdGet request
 	UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthApprovalCallbackUiAuthApprovalCallbackGet request
+	UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthApprovalSignInUiAuthApprovalSignInGet request
+	UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthCallbackUiAuthCallbackGet request
 	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19742,6 +20016,18 @@ func (c *Client) RevealApprovedRequestApiV1ApprovalsRequestIdRevealPost(ctx cont
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequestWithBody(c.Server, requestId, params, contentType, body)
 	if err != nil {
@@ -20800,6 +21086,18 @@ func (c *Client) IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context,
 
 func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartSignedInApiV1FirstStartGet(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartSignedInApiV1FirstStartGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -21986,6 +22284,18 @@ func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Con
 	return c.Client.Do(req)
 }
 
+func (c *Client) RunSensorNowApiV1SensorsSensorIdRunPost(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunSensorNowApiV1SensorsSensorIdRunPostRequest(c.Server, sensorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListGrantsApiV1ServicePrincipalsGrantsGet(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(c.Server, params)
 	if err != nil {
@@ -22360,6 +22670,18 @@ func (c *Client) CreateTargetApiV1TargetsPostWithBody(ctx context.Context, param
 
 func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateTargetApiV1TargetsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -23258,6 +23580,30 @@ func (c *Client) UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx context.Context,
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequestWithBody(c.Server, contentType, body)
 	if err != nil {
@@ -23810,6 +24156,18 @@ func (c *Client) ApprovalRunStateUiApprovalsRequestIdRunGet(ctx context.Context,
 	return c.Client.Do(req)
 }
 
+func (c *Client) ApprovalScriptPageUiApprovalsRequestIdScriptGet(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalScriptPageUiApprovalsRequestIdScriptGetRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditPageUiAuditGetRequest(c.Server, params)
 	if err != nil {
@@ -23860,6 +24218,30 @@ func (c *Client) UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet(ctx conte
 
 func (c *Client) UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditDrawerUiAuditShowAuditIdGetRequest(c.Server, auditId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -29742,6 +30124,77 @@ func NewRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostRequest(server str
 	return req, nil
 }
 
+// NewGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetRequest generates requests for GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet
+func NewGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetRequest(server string, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/script", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Page != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "page", runtime.ParamLocationQuery, *params.Page); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequest calls the generic WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost builder with application/json body
 func NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequest(server string, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, body WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -34111,6 +34564,48 @@ func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1
 	return req, nil
 }
 
+// NewFirstStartSignedInApiV1FirstStartGetRequest generates requests for FirstStartSignedInApiV1FirstStartGet
+func NewFirstStartSignedInApiV1FirstStartGetRequest(server string, params *FirstStartSignedInApiV1FirstStartGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPollNextCommandApiV1GatewayRunnerNextGetRequest generates requests for PollNextCommandApiV1GatewayRunnerNextGet
 func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams) (*http.Request, error) {
 	var err error
@@ -35481,6 +35976,38 @@ func NewGetGroupsApiV1OperationsGroupsGetRequest(server string, params *GetGroup
 
 		}
 
+		if params.IncludeRaw != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_raw", runtime.ParamLocationQuery, *params.IncludeRaw); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Group != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "group", runtime.ParamLocationQuery, *params.Group); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -35950,6 +36477,22 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 		if params.IncludeScores != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_scores", runtime.ParamLocationQuery, *params.IncludeScores); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRaw != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_raw", runtime.ParamLocationQuery, *params.IncludeRaw); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -38898,6 +39441,77 @@ func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, se
 	return req, nil
 }
 
+// NewRunSensorNowApiV1SensorsSensorIdRunPostRequest generates requests for RunSensorNowApiV1SensorsSensorIdRunPost
+func NewRunSensorNowApiV1SensorsSensorIdRunPostRequest(server string, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/run", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListGrantsApiV1ServicePrincipalsGrantsGetRequest generates requests for ListGrantsApiV1ServicePrincipalsGrantsGet
 func NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(server string, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams) (*http.Request, error) {
 	var err error
@@ -40546,6 +41160,48 @@ func NewCreateTargetApiV1TargetsPostRequestWithBody(server string, params *Creat
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest generates requests for KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet
+func NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(server string, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/checks/keycloak-realm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -43415,6 +44071,68 @@ func NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequestWithBody(server string,
 	return req, nil
 }
 
+// NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequest calls the generic UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet builder with application/json body
+func NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequest(server string, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody generates requests for UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet with any type of body
+func NewUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetRequestWithBody(server string, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals/live-grants")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.IdentityRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "identity_ref", runtime.ParamLocationQuery, *params.IdentityRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest calls the generic UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet builder with application/json body
 func NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest(server string, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -44808,6 +45526,62 @@ func NewApprovalRunStateUiApprovalsRequestIdRunGetRequest(server string, request
 	return req, nil
 }
 
+// NewApprovalScriptPageUiApprovalsRequestIdScriptGetRequest generates requests for ApprovalScriptPageUiApprovalsRequestIdScriptGet
+func NewApprovalScriptPageUiApprovalsRequestIdScriptGetRequest(server string, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/script", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Page != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "page", runtime.ParamLocationQuery, *params.Page); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAuditPageUiAuditGetRequest generates requests for UiAuditPageUiAuditGet
 func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGetParams) (*http.Request, error) {
 	var err error
@@ -45327,6 +46101,152 @@ func NewUiAuditDrawerUiAuditShowAuditIdGetRequest(server string, auditId openapi
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest generates requests for UiAuthApprovalCallbackUiAuthApprovalCallbackGet
+func NewUiAuthApprovalCallbackUiAuthApprovalCallbackGetRequest(server string, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/approval-callback")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Code != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "code", runtime.ParamLocationQuery, *params.Code); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Error != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error", runtime.ParamLocationQuery, *params.Error); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ErrorDescription != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error_description", runtime.ParamLocationQuery, *params.ErrorDescription); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest generates requests for UiAuthApprovalSignInUiAuthApprovalSignInGet
+func NewUiAuthApprovalSignInUiAuthApprovalSignInGetRequest(server string, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/approval-sign-in")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReturnTo != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -54203,6 +55123,9 @@ type ClientWithResponsesInterface interface {
 	// RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse request
 	RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostParams, reqEditors ...RequestEditorFn) (*RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse, error)
 
+	// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse request
+	GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse, error)
+
 	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with any body
 	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error)
 
@@ -54446,6 +55369,9 @@ type ClientWithResponsesInterface interface {
 
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
+
+	// FirstStartSignedInApiV1FirstStartGetWithResponse request
+	FirstStartSignedInApiV1FirstStartGetWithResponse(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*FirstStartSignedInApiV1FirstStartGetResponse, error)
 
 	// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request
 	PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error)
@@ -54710,6 +55636,9 @@ type ClientWithResponsesInterface interface {
 	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
 	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
 
+	// RunSensorNowApiV1SensorsSensorIdRunPostWithResponse request
+	RunSensorNowApiV1SensorsSensorIdRunPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error)
+
 	// ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse request
 	ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error)
 
@@ -54799,6 +55728,9 @@ type ClientWithResponsesInterface interface {
 	CreateTargetApiV1TargetsPostWithBodyWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error)
 
 	CreateTargetApiV1TargetsPostWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error)
+
+	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse request
+	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error)
 
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
@@ -54998,6 +55930,11 @@ type ClientWithResponsesInterface interface {
 
 	UiAgentPrincipalsListUiAgentsPrincipalsGetWithResponse(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error)
 
+	// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse request with any body
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error)
+
+	UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error)
+
 	// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse request with any body
 	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error)
 
@@ -55118,6 +56055,9 @@ type ClientWithResponsesInterface interface {
 	// ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse request
 	ApprovalRunStateUiApprovalsRequestIdRunGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalRunStateUiApprovalsRequestIdRunGetResponse, error)
 
+	// ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse request
+	ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse, error)
+
 	// UiAuditPageUiAuditGetWithResponse request
 	UiAuditPageUiAuditGetWithResponse(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*UiAuditPageUiAuditGetResponse, error)
 
@@ -55132,6 +56072,12 @@ type ClientWithResponsesInterface interface {
 
 	// UiAuditDrawerUiAuditShowAuditIdGetWithResponse request
 	UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error)
+
+	// UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse request
+	UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error)
+
+	// UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse request
+	UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error)
 
 	// UiAuthCallbackUiAuthCallbackGetWithResponse request
 	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
@@ -56284,7 +57230,7 @@ func (r ListAgentsApiV1AgentsGetResponse) StatusCode() int {
 type CreateAgentApiV1AgentsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *AgentDefinitionRead
+	JSON201      *AgentDefinitionSaved
 	JSON422      *HTTPValidationError
 }
 
@@ -56535,7 +57481,7 @@ func (r ShowAgentApiV1AgentsNameGetResponse) StatusCode() int {
 type EditAgentApiV1AgentsNamePatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *AgentDefinitionRead
+	JSON200      *AgentDefinitionSaved
 	JSON422      *HTTPValidationError
 }
 
@@ -56803,6 +57749,29 @@ func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalScriptPageView
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -58311,6 +59280,29 @@ func (r FeedEndpointApiV1FeedGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartSignedInApiV1FirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FirstStartResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartSignedInApiV1FirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartSignedInApiV1FirstStartGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -59874,6 +60866,29 @@ func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) StatusCode() in
 	return 0
 }
 
+type RunSensorNowApiV1SensorsSensorIdRunPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *SensorRunAccepted
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunSensorNowApiV1SensorsSensorIdRunPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunSensorNowApiV1SensorsSensorIdRunPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListGrantsApiV1ServicePrincipalsGrantsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -60447,7 +61462,8 @@ func (r ListTargetsApiV1TargetsGetResponse) StatusCode() int {
 type CreateTargetApiV1TargetsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *Target
+	JSON201      *TargetWriteResult
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60461,6 +61477,29 @@ func (r CreateTargetApiV1TargetsPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateTargetApiV1TargetsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KeycloakRealmCheck
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60493,6 +61532,7 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
 type DeleteTargetApiV1TargetsNameDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON409      *struct {
 		Detail struct {
 			GraphNodeRefs int                                             `json:"graph_node_refs"`
@@ -60546,7 +61586,8 @@ func (r DescribeTargetApiV1TargetsNameGetResponse) StatusCode() int {
 type UpdateTargetApiV1TargetsNamePatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *Target
+	JSON200      *TargetWriteResult
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60847,6 +61888,7 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON201      *TopologyEdge
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60870,6 +61912,7 @@ type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *UnderscoreBulkImportResponse
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60892,6 +61935,7 @@ func (r BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse) StatusCode() int
 type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -60953,6 +61997,7 @@ func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
 type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *WriteAwaitingApproval
 	JSON422      *HTTPValidationError
 }
 
@@ -61675,6 +62720,28 @@ func (r UiAgentPrincipalsListUiAgentsPrincipalsGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -62292,6 +63359,28 @@ func (r ApprovalRunStateUiApprovalsRequestIdRunGetResponse) StatusCode() int {
 	return 0
 }
 
+type ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAuditPageUiAuditGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -62395,6 +63484,50 @@ func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthApprovalSignInUiAuthApprovalSignInGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthApprovalSignInUiAuthApprovalSignInGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthApprovalSignInUiAuthApprovalSignInGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -66830,6 +67963,15 @@ func (c *ClientWithResponses) RevealApprovedRequestApiV1ApprovalsRequestIdReveal
 	return ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp)
 }
 
+// GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse request returning *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse
+func (c *ClientWithResponses) GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse, error) {
+	rsp, err := c.GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGet(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse(rsp)
+}
+
 // WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with arbitrary body returning *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse
 func (c *ClientWithResponses) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error) {
 	rsp, err := c.WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
@@ -67606,6 +68748,15 @@ func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
+}
+
+// FirstStartSignedInApiV1FirstStartGetWithResponse request returning *FirstStartSignedInApiV1FirstStartGetResponse
+func (c *ClientWithResponses) FirstStartSignedInApiV1FirstStartGetWithResponse(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	rsp, err := c.FirstStartSignedInApiV1FirstStartGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartSignedInApiV1FirstStartGetResponse(rsp)
 }
 
 // PollNextCommandApiV1GatewayRunnerNextGetWithResponse request returning *PollNextCommandApiV1GatewayRunnerNextGetResponse
@@ -68459,6 +69610,15 @@ func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWit
 	return ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp)
 }
 
+// RunSensorNowApiV1SensorsSensorIdRunPostWithResponse request returning *RunSensorNowApiV1SensorsSensorIdRunPostResponse
+func (c *ClientWithResponses) RunSensorNowApiV1SensorsSensorIdRunPostWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *RunSensorNowApiV1SensorsSensorIdRunPostParams, reqEditors ...RequestEditorFn) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error) {
+	rsp, err := c.RunSensorNowApiV1SensorsSensorIdRunPost(ctx, sensorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse(rsp)
+}
+
 // ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse request returning *ListGrantsApiV1ServicePrincipalsGrantsGetResponse
 func (c *ClientWithResponses) ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1ServicePrincipalsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error) {
 	rsp, err := c.ListGrantsApiV1ServicePrincipalsGrantsGet(ctx, params, reqEditors...)
@@ -68739,6 +69899,15 @@ func (c *ClientWithResponses) CreateTargetApiV1TargetsPostWithResponse(ctx conte
 		return nil, err
 	}
 	return ParseCreateTargetApiV1TargetsPostResponse(rsp)
+}
+
+// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse request returning *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse
+func (c *ClientWithResponses) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error) {
+	rsp, err := c.KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp)
 }
 
 // DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request returning *DiscoverTargetsApiV1TargetsDiscoverGetResponse
@@ -69383,6 +70552,23 @@ func (c *ClientWithResponses) UiAgentPrincipalsListUiAgentsPrincipalsGetWithResp
 	return ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp)
 }
 
+// UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse
+func (c *ClientWithResponses) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBodyWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error) {
+	rsp, err := c.UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithResponse(ctx context.Context, params *UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetParams, body UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error) {
+	rsp, err := c.UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse(rsp)
+}
+
 // UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse
 func (c *ClientWithResponses) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error) {
 	rsp, err := c.UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx, contentType, body, reqEditors...)
@@ -69779,6 +70965,15 @@ func (c *ClientWithResponses) ApprovalRunStateUiApprovalsRequestIdRunGetWithResp
 	return ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse(rsp)
 }
 
+// ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse request returning *ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse
+func (c *ClientWithResponses) ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApprovalScriptPageUiApprovalsRequestIdScriptGetParams, reqEditors ...RequestEditorFn) (*ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse, error) {
+	rsp, err := c.ApprovalScriptPageUiApprovalsRequestIdScriptGet(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalScriptPageUiApprovalsRequestIdScriptGetResponse(rsp)
+}
+
 // UiAuditPageUiAuditGetWithResponse request returning *UiAuditPageUiAuditGetResponse
 func (c *ClientWithResponses) UiAuditPageUiAuditGetWithResponse(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*UiAuditPageUiAuditGetResponse, error) {
 	rsp, err := c.UiAuditPageUiAuditGet(ctx, params, reqEditors...)
@@ -69822,6 +71017,24 @@ func (c *ClientWithResponses) UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx
 		return nil, err
 	}
 	return ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp)
+}
+
+// UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse request returning *UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse
+func (c *ClientWithResponses) UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse(ctx context.Context, params *UiAuthApprovalCallbackUiAuthApprovalCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error) {
+	rsp, err := c.UiAuthApprovalCallbackUiAuthApprovalCallbackGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse(rsp)
+}
+
+// UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse request returning *UiAuthApprovalSignInUiAuthApprovalSignInGetResponse
+func (c *ClientWithResponses) UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse(ctx context.Context, params *UiAuthApprovalSignInUiAuthApprovalSignInGetParams, reqEditors ...RequestEditorFn) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error) {
+	rsp, err := c.UiAuthApprovalSignInUiAuthApprovalSignInGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse(rsp)
 }
 
 // UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
@@ -72816,7 +74029,7 @@ func ParseCreateAgentApiV1AgentsPostResponse(rsp *http.Response) (*CreateAgentAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest AgentDefinitionRead
+		var dest AgentDefinitionSaved
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -73165,7 +74378,7 @@ func ParseEditAgentApiV1AgentsNamePatchResponse(rsp *http.Response) (*EditAgentA
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AgentDefinitionRead
+		var dest AgentDefinitionSaved
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -73536,6 +74749,39 @@ func ParseRevealApprovedRequestApiV1ApprovalsRequestIdRevealPostResponse(rsp *ht
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ApprovalRevealResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse parses an HTTP response from a GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetWithResponse call
+func ParseGetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse(rsp *http.Response) (*GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApprovalScriptPageApiV1ApprovalsRequestIdScriptGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalScriptPageView
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -75632,6 +76878,39 @@ func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartSignedInApiV1FirstStartGetResponse parses an HTTP response from a FirstStartSignedInApiV1FirstStartGetWithResponse call
+func ParseFirstStartSignedInApiV1FirstStartGetResponse(rsp *http.Response) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartSignedInApiV1FirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FirstStartResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -77857,6 +79136,39 @@ func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Resp
 	return response, nil
 }
 
+// ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse parses an HTTP response from a RunSensorNowApiV1SensorsSensorIdRunPostWithResponse call
+func ParseRunSensorNowApiV1SensorsSensorIdRunPostResponse(rsp *http.Response) (*RunSensorNowApiV1SensorsSensorIdRunPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunSensorNowApiV1SensorsSensorIdRunPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest SensorRunAccepted
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListGrantsApiV1ServicePrincipalsGrantsGetResponse parses an HTTP response from a ListGrantsApiV1ServicePrincipalsGrantsGetWithResponse call
 func ParseListGrantsApiV1ServicePrincipalsGrantsGetResponse(rsp *http.Response) (*ListGrantsApiV1ServicePrincipalsGrantsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -78662,11 +79974,51 @@ func ParseCreateTargetApiV1TargetsPostResponse(rsp *http.Response) (*CreateTarge
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest Target
+		var dest TargetWriteResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse parses an HTTP response from a KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse call
+func ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp *http.Response) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KeycloakRealmCheck
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -78727,6 +80079,13 @@ func ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp *http.Response) (*Delet
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
 		var dest struct {
 			Detail struct {
@@ -78800,11 +80159,18 @@ func ParseUpdateTargetApiV1TargetsNamePatchResponse(rsp *http.Response) (*Update
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Target
+		var dest TargetWriteResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -79237,6 +80603,13 @@ func ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse(rsp *http.Response) (*
 		}
 		response.JSON201 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79270,6 +80643,13 @@ func ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse(rsp *http.Respo
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79296,6 +80676,13 @@ func ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp *http.Re
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -79381,6 +80768,13 @@ func ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp *http.Respon
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest WriteAwaitingApproval
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -80224,6 +81618,32 @@ func ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp *http.Response)
 	return response, nil
 }
 
+// ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse parses an HTTP response from a UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetWithResponse call
+func ParseUiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse(rsp *http.Response) (*UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentsLiveGrantsUiAgentsPrincipalsLiveGrantsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse parses an HTTP response from a UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithResponse call
 func ParseUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse(rsp *http.Response) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -80956,6 +82376,32 @@ func ParseApprovalRunStateUiApprovalsRequestIdRunGetResponse(rsp *http.Response)
 	return response, nil
 }
 
+// ParseApprovalScriptPageUiApprovalsRequestIdScriptGetResponse parses an HTTP response from a ApprovalScriptPageUiApprovalsRequestIdScriptGetWithResponse call
+func ParseApprovalScriptPageUiApprovalsRequestIdScriptGetResponse(rsp *http.Response) (*ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalScriptPageUiApprovalsRequestIdScriptGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiAuditPageUiAuditGetResponse parses an HTTP response from a UiAuditPageUiAuditGetWithResponse call
 func ParseUiAuditPageUiAuditGetResponse(rsp *http.Response) (*UiAuditPageUiAuditGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -81059,6 +82505,58 @@ func ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp *http.Response) (*UiAud
 	}
 
 	response := &UiAuditDrawerUiAuditShowAuditIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse parses an HTTP response from a UiAuthApprovalCallbackUiAuthApprovalCallbackGetWithResponse call
+func ParseUiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse(rsp *http.Response) (*UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthApprovalCallbackUiAuthApprovalCallbackGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse parses an HTTP response from a UiAuthApprovalSignInUiAuthApprovalSignInGetWithResponse call
+func ParseUiAuthApprovalSignInUiAuthApprovalSignInGetResponse(rsp *http.Response) (*UiAuthApprovalSignInUiAuthApprovalSignInGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthApprovalSignInUiAuthApprovalSignInGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -222,7 +222,7 @@ one transaction):
 - `list_runs(session, *, tenant_id, work_ref=None, status=None,
   agent_definition_id=None, limit=100, offset=0) -> list[AgentRun]` — the
   agent-run list read substrate (work_ref I3-T2 #1662), newest-first,
-  tenant-isolated. `work_ref` narrows to one exact change ticket
+  tenant-isolated. `work_ref` narrows to one change ticket (whole id)
   (composite `(tenant_id, work_ref)` index); `status` narrows to one
   lifecycle state; `agent_definition_id` narrows to runs produced by one
   agent definition (the name→id resolution lives at the caller — #2472);
@@ -259,6 +259,11 @@ one transaction):
   operator-authorized cancellation path. Requires at least
   `TenantRole.OPERATOR` (cancelling in-flight work is a control action,
   not a read); a `read_only` operator gets `UnauthorizedCancellationError`.
+  Only the run's owner (`identity_sub`) or a person who is an admin in the
+  tenant (the `tenant_admin` role or a platform admin)
+  may stop it (`auth.operator.may_stop_run`); anyone else gets
+  `RunNotOwnedCancellationError` (403 with the rule in the detail), so an
+  agent or service login stops only its own runs.
   Cancelling an already-terminal run surfaces as `IllegalTransitionError`
   (not a silent no-op). The function records the **durable intent**
   (`status='cancelled'` + `ended_at`). `AgentInvoker.cancel` then

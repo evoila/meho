@@ -42,6 +42,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import WRITE_OPS
 from meho_backplane.connectors.keycloak.ops_write_account_preview import _credential_warning
 from meho_backplane.connectors.keycloak.ops_write_grant import CREDENTIALS_CHANGED
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import REASON_KEYS
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -63,6 +64,11 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-account-e2e"
@@ -172,9 +178,14 @@ _FAILING_READS = [httpx.Response(500, json={}) for _ in range(4)]
 
 
 def _mount_token(mock: respx.MockRouter) -> None:
+    """Mount the admin token and the user read of the shared user check.
+
+    A test that mounts its own user read replaces this one (same route).
+    """
     mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
         200, json={"access_token": "kc-admin-token", "expires_in": 300}
     )
+    mock.get(_USER_PATH).respond(200, json={"id": _USER_UUID, "username": "jane.example"})
 
 
 def _mount_client_and_roles(
@@ -465,7 +476,7 @@ async def test_update_changes_only_the_fields_that_were_sent(kc: KeycloakConnect
     assert result["status"] == "ok", result
     assert result["result"] == {
         "id": _USER_UUID,
-        "username": None,
+        "username": "jane.example",
         "requested_fields": ["email"],
         "applied_fields": ["email"],
         "not_applied": [],
@@ -651,9 +662,12 @@ def _clean(*ids: str) -> list[dict[str, Any]]:
 
 
 def _mount_user_lookup(mock: respx.MockRouter) -> None:
+    """The user name lookup, and a user with no platform admin rights."""
     mock.get(f"/admin/realms/{_REALM}/users").respond(
         200, json=[{"id": _USER_UUID, "username": "jane.example"}]
     )
+    mock.get(_USER_PATH).respond(200, json={"id": _USER_UUID, "username": "jane.example"})
+    mock.get(f"{_USER_PATH}/groups").respond(200, json=[])
 
 
 async def test_delete_by_type_removes_every_match_and_lists_removed_and_remaining(
@@ -712,6 +726,24 @@ async def test_delete_by_id_removes_only_that_credential(kc: KeycloakConnector) 
     ]
     assert key.call_count == 1
     assert not other.called
+
+
+async def test_a_credential_id_with_a_slash_reaches_keycloak_encoded_once(
+    kc: KeycloakConnector,
+) -> None:
+    odd = {**_CREDENTIALS[0], "id": "cred/../pw"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_CREDENTIALS_PATH).mock(
+            side_effect=[httpx.Response(200, json=[odd]), httpx.Response(200, json=[])]
+        )
+        delete = mock.delete(url__regex=r".*/credentials/.*").respond(204)
+        result = await _run(
+            "keycloak.user.credential.delete", {"id": _USER_UUID, "credential_id": "cred/../pw"}
+        )
+    assert result["status"] == "ok", result
+    assert delete.call_count == 1
+    assert delete.calls.last.request.url.raw_path.endswith(b"/credentials/cred%2F%2E%2E%2Fpw")
 
 
 async def test_delete_with_no_match_names_the_types_the_user_has_and_deletes_nothing(
@@ -822,7 +854,7 @@ async def test_no_secret_data_reaches_a_result_a_card_or_an_audit_row(
     requester = _operator("kc-account-requester")
     # The change is in MEHO's own login realm, so another admin approves it.
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
     )
     remaining = [c for c in _CREDENTIALS if c["type"] != "otp"]
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -901,6 +933,7 @@ async def _park_sign_in_change(op_id: str, requester: Operator) -> uuid.UUID:
         _mount_user_lookup(mock)
         mock.get(_USER_PATH).respond(200, json=_USER_BEFORE)
         mock.get(_CREDENTIALS_PATH).respond(200, json=_CREDENTIALS)
+        mock.get(f"/admin/realms/{_REALM}").respond(200, json={"realm": _REALM})
         call = await call_operation(
             requester,
             {
@@ -1020,18 +1053,41 @@ async def test_a_realm_management_role_needs_a_platform_admin_in_the_login_realm
     await _approve_as(request_id, platform_admin)
 
 
-async def test_another_client_role_needs_a_tenant_admin_not_a_platform_admin(
+async def test_another_client_role_in_the_login_realm_needs_a_platform_admin(
     kc: KeycloakConnector,
 ) -> None:
-    request_id = await _park_client_role("assign", "account", _operator())
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        _mount_user_lookup(mock)
+        mock.get(f"/admin/realms/{_REALM}/clients").respond(
+            200, json=[{"id": _CLIENT_UUID, "clientId": "account"}]
+        )
+        mock.get(f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}").respond(
+            200, json={"id": _CLIENT_UUID, "clientId": "account"}
+        )
+        mock.get(f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}/roles/realm-admin").respond(
+            200,
+            json={
+                "id": "ffffffff-0000-0000-0000-000000000001",
+                "name": "realm-admin",
+                "clientRole": True,
+                "containerId": _CLIENT_UUID,
+                "composite": False,
+            },
+        )
+        request_id = await _park_client_role("assign", "account", _operator())
     async with get_sessionmaker()() as session:
         row = await session.get(ApprovalRequest, request_id)
     assert row is not None
-    assert row.proposed_effect["preview"]["grant"]["platform_admin"] is False
+    grant = row.proposed_effect["preview"]["grant"]
+    # The role gives nothing; the harmless keys rule still asks for a platform admin.
+    assert grant["platform_admin_reason"] == REASON_KEYS
     tenant_admin = _operator("kc-account-approver").model_copy(
         update={"tenant_role": TenantRole.TENANT_ADMIN}
     )
-    await _approve_as(request_id, tenant_admin)
+    with pytest.raises(ApprovalRoleFloorError):
+        await _approve_as(request_id, tenant_admin)
+    await _approve_as(request_id, tenant_admin.model_copy(update={"platform_admin": True}))
 
 
 # ---------------------------------------------------------------------------
@@ -1119,7 +1175,7 @@ async def test_a_credential_delete_does_not_run_when_the_credentials_changed(
 ) -> None:
     """Parked by type; a new credential of that type appears; the approved run is refused."""
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
     )
     new_otp = {**_CREDENTIALS[1], "id": "cred-otp-3", "userLabel": "New phone"}
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -1161,7 +1217,7 @@ async def _approve_and_resume_credential_delete(
 ) -> tuple[Any, respx.Route, respx.Route]:
     """Park a delete by type, approve it, run it; Keycloak answers *credential_reads* in order."""
     approver = _operator("kc-account-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
     )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
@@ -1225,10 +1281,10 @@ async def test_an_approved_credential_delete_stops_when_the_list_changes_after_t
 
 
 @pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
-async def test_outside_the_login_realm_a_self_approver_may_approve_their_own_change(
+async def test_outside_the_login_realm_a_self_approver_cannot_approve_their_own_change(
     kc: KeycloakConnector, op_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Not a change of rights there: the risk level's normal approval rules apply."""
+    """A change of rights in every realm: another admin must approve it."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/another-login")
     get_settings.cache_clear()
     requester = _operator().model_copy(update={"self_approver": True})
@@ -1236,7 +1292,27 @@ async def test_outside_the_login_realm_a_self_approver_may_approve_their_own_cha
     async with get_sessionmaker()() as session:
         row = await session.get(ApprovalRequest, request_id)
     assert row is not None
-    assert not row.rights_change
+    assert row.rights_change
     assert row.proposed_effect["preview"]["grant"]["login_realm"] is False
 
-    await _approve_as(request_id, requester)
+    with pytest.raises((RightsChangeApprovalError, ApprovalRoleFloorError)):
+        await _approve_as(request_id, requester)
+
+
+@pytest.mark.parametrize("op_id", sorted(_SIGN_IN_CHANGES))
+async def test_outside_the_login_realm_another_admin_approves_the_change(
+    kc: KeycloakConnector, op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/another-login")
+    get_settings.cache_clear()
+    request_id = await _park_sign_in_change(op_id, _operator())
+    admin = _operator("kc-account-admin").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN}
+    )
+
+    await _approve_as(request_id, admin)
+
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.status == "approved"

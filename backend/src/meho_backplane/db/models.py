@@ -783,7 +783,7 @@ AUDIT_LOG_CLIENT_AZP: sa.ColumnElement[str] = AuditLog.payload.op("->")(
     sa.literal_column("'client'")
 ).op("->>", return_type=sa.Text)(sa.literal_column("'azp'"))
 
-# Migration ``0173``: the newest row of one person for one login client
+# Migration ``0179``: the newest row of one person for one login client
 # (the last use on "Your tools" of the account page).
 Index(
     "audit_log_operator_sub_client_azp_occurred_at_idx",
@@ -2069,16 +2069,30 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not a column. ``True`` on the row of one call whose params make it a
+    #: call that writes or makes a credential
+    #: (:func:`~meho_backplane.op_classes.declare_credential_check`). Then the
+    #: call waits for a person, and no standing grant, no agent grant and no
+    #: run approval covers it.
+    credential_call = False
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
-    #: ``apply_step_classification`` returned. ``None``, empty and ``None``
+    #: ``apply_step_policy`` returned. ``None``, empty and ``None``
     #: otherwise. Search, the call contract and the approval request show them.
     #: Approver routing matches a ``routing`` entry's ``category`` on
-    #: ``policy_category``.
+    #: ``policy_category``; the install's entries match on
+    #: ``policy_install_category``, the category the install's entries alone
+    #: give the operation.
     policy_category = cast("str | None", None)
+    policy_install_category = cast("str | None", None)
     policy_labels = cast(Mapping[str, str], MappingProxyType({}))
     policy_rule_ref = cast("str | None", None)
+    #: Not a column. On a row that ``apply_effective_policy`` returned, the
+    #: schema a call is checked against: a parameter whose switch is off
+    #: accepts no value there (``operations/switch_params.py``).
+    #: ``parameter_schema`` is then the shown schema, without it.
+    parameter_check_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -3604,7 +3618,7 @@ class AgentAnnouncement(Base):
       backfill (newest-first tenant scan) and the retention prune's
       bounded ``created_at < cutoff`` delete.
     * ``agent_announcement_tenant_work_ref_idx`` --
-      ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
+      ``(tenant_id, work_ref)``. Drives the ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
     * ``agent_announcement_tenant_principal_created_at_idx`` --
@@ -3890,6 +3904,9 @@ class WebSession(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Fernet ciphertext of the console approval sign-in's access token
+    # (#6282, migration 0176). NULL = no approval sign-in on this session.
+    approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -4294,6 +4311,10 @@ class AgentDefinition(Base):
         default=True,
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last changed the definition. NULL until the first
+    # change after migration ``0178`` on a row the migration could not fill.
+    # An edit by a machine login keeps the person.
+    updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -4600,7 +4621,7 @@ class AgentRun(Base):
       the reaper's "what leases have expired" query without
       scanning the table. T4 #825.
     * ``agent_run_tenant_work_ref_idx`` -- composite b-tree on
-      ``(tenant_id, work_ref)``. Drives the tenant-scoped exact-match
+      ``(tenant_id, work_ref)``. Drives the tenant-scoped
       ``--work-ref`` filter on the agent-run list (work_ref I3-T2 #1662).
     """
 
@@ -4733,7 +4754,7 @@ class AgentRun(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T2 #1662 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # agent-run list surfaces. Mirrors runbook_runs_tenant_work_ref_idx.
         Index(
             "agent_run_tenant_work_ref_idx",
@@ -4923,6 +4944,10 @@ class OperationRun(Base):
       lock-step by the lifecycle service.
     * ``created_at`` / ``started_at`` / ``ended_at`` -- lifecycle
       timestamps.
+    * ``mcp_profile`` -- the MCP tool profile of the session that started
+      the run, when that profile has a connector list (#6099, migration
+      ``0174``); NULL otherwise. Only a session of the same profile reads
+      the run over MCP.
     """
 
     __tablename__ = "operation_run"
@@ -4950,6 +4975,7 @@ class OperationRun(Base):
         nullable=True,
         default=None,
     )
+    mcp_profile: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -5262,6 +5288,30 @@ class RunnerPrincipal(Base):
             "last_seen_at",
             postgresql_using="btree",
         ),
+    )
+
+
+class MachineLogin(Base):
+    """A login id that MEHO has seen as an agent, service or runner login.
+
+    MEHO adds a row when such a login signs in
+    (:func:`~meho_backplane.auth.machine_logins.note_machine_login`).
+    The people-behind lookup reads it: a machine login never counts as a
+    person behind another login, and a change by a machine login does not
+    replace the person who last changed an agent definition or handed over
+    a runbook run. ``tenant_id`` has no foreign key: an MCP call notes the
+    login before any other write of the tenant.
+    """
+
+    __tablename__ = "machine_login"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -6467,6 +6517,10 @@ class RunApproval(Base):
     # JWT ``sub`` of the service principal that asked. Soft reference, no FK
     # -- same discipline as ServicePrincipalGrant.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # OAuth client id of the login that asked. MEHO finds the add-on pairing
+    # by it when a person approves the list (operations/people_behind.py).
+    # NULL on a list from before migration 0178.
+    principal_client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_ref: Mapped[str] = mapped_column(Text, nullable=False)
     entries: Mapped[list[dict[str, object]]] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=False
@@ -6964,7 +7018,7 @@ class ScheduledTrigger(Base):
             postgresql_using="btree",
         ),
         # work_ref I3-T3 #1663 -- composite (tenant_id, work_ref) drives
-        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # the tenant-scoped ``--work-ref`` filter the
         # scheduled-trigger list surfaces. Mirrors
         # agent_run_tenant_work_ref_idx / runbook_runs_tenant_work_ref_idx.
         Index(
@@ -7267,11 +7321,11 @@ class ApprovalRequest(Base):
       instead of the un-executable raw key. The resume runs under the
       approving reviewer, who auto-executes every governed sub-op (all
       ``dangerous`` + ``requires_approval=False``), so the composite completes
-      in that single pass; a composite that would open a *second* governed gate
-      is unsupported and fails closed
-      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1), unless that gate is an ``after_main_effect`` step with saved
-      state (#4217). NULL for every non-composite (direct-op) park — those keep
+      in that single pass; a later step that needs its own approval waits
+      again. The optional key ``"steps"`` lists the steps the composite's run
+      already went through, with their results, so a re-entry does not send
+      them again (:mod:`~meho_backplane.operations.composite_steps`). NULL for
+      every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -7303,7 +7357,7 @@ class ApprovalRequest(Base):
       NULL on every other request. Added by migration ``0153``.
 
     * ``approver_roles`` -- JSON nullable. The login group kinds that may
-      approve the request (for example ``["SA-Operators", "Admins"]``),
+      approve the request (for example ``["Operators", "Admins"]``),
       worked out from the policy file's ``routing`` section when the
       request started to wait (:mod:`meho_backplane.policy.routing`). Group
       kinds only, never people. At the click the person must be in one of
@@ -7312,10 +7366,31 @@ class ApprovalRequest(Base):
       and on rows saved before this column: today's rule decides. Added by
       migration ``0167``.
 
-    * ``approver_rule`` -- Text nullable. The routing entry that set
-      ``approver_roles`` (``tenant:routing[0]``, ``install:routing[2]``),
+    * ``approver_rule`` -- Text nullable. The routing entries that set
+      ``approver_roles``, the install's first (``install:routing[2]``,
+      ``tenant:routing[0]``, ``install:routing[0], tenant:routing[1]``),
       or ``default`` when no entry fits and today's rule set them. NULL
       when ``approver_roles`` is NULL. Added by migration ``0167``.
+
+    * ``approver_category`` -- Text nullable. The category the tenant's
+      routing used when the request started to wait (the category the
+      classification gave the change). NULL when the change had no
+      category and when ``approver_roles`` is NULL. The empty text on a row
+      that had ``approver_roles`` before this column: MEHO does not know
+      its category. Added by migration ``0173``.
+
+    * ``approver_install_category`` -- Text nullable. The category that the
+      install's policy alone gives the change, when the request started to
+      wait. A tenant can move an operation to another category for its own
+      rules; the install's routing still uses this one. At the click MEHO
+      routes the request again with the install's current routing and this
+      category
+      (:func:`~meho_backplane.policy.routing_floor.install_floor_refusal`).
+      NULL and the empty text as for ``approver_category``. The empty text
+      also when the install's classification entries give the change two
+      categories. The click refuses a row with the empty text when an
+      install entry that matches on a category could fit it. Added by
+      migration ``0173``.
 
     * ``reveal_secret`` -- Boolean NOT NULL DEFAULT ``false``. The requester
       asked for the hidden values of the answer (``reveal_secret: true``;
@@ -7325,6 +7400,14 @@ class ApprovalRequest(Base):
       approved run reads it here, also the re-run of a failed credential
       write, whose encrypted input the first run deleted. ``false`` on rows
       saved before this column. Added by migration ``0131``.
+
+    * ``allowed_connectors`` -- JSON nullable. The connector ids a hosted
+      agent with a connector list could use when its call started to wait
+      (:mod:`~meho_backplane.operations._target_connector_limit`). The run
+      after the approval binds the list again, so the call and every step
+      of a multi-step operation stay on targets of those connectors. NULL
+      for a caller without a connector list and on rows saved before this
+      column. Added by migration ``0175``.
 
     Indexes
     -------
@@ -7575,6 +7658,21 @@ class ApprovalRequest(Base):
     # entry that set them. See the class docstring. Added by migration ``0167``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The people behind a request of an agent, service or runner login:
+    # ``[{"sub", "name", "why"}]``, set at park time by
+    # :mod:`meho_backplane.operations.people_behind`. NULL for a person's
+    # request. An empty list: MEHO knows nobody behind the login. Added by
+    # migration ``0178``.
+    people_behind: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, nullable=True, default=None
+    )
+    # The categories the tenant's and the install's routing used. Added by
+    # migration ``0173``.
+    approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    approver_install_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The connector list of the hosted agent that asked. See the class
+    # docstring. Added by migration ``0175``.
+    allowed_connectors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
@@ -8905,6 +9003,10 @@ class RunbookRun(Base):
         default=None,
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last handed the run to a new assignee. NULL when the
+    # run was never handed over. A handover by a machine login keeps the
+    # person. Added by migration ``0178``.
+    reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -9320,8 +9422,9 @@ class Sensor(Base):
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
-    # when the state changes so #2506's ``for:`` hysteresis can read how
-    # long the current state has held.
+    # when the state changes (or the first result confirms the initial
+    # ``unknown``) so the ``for:`` hysteresis can read how long the
+    # current state has held.
     last_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,

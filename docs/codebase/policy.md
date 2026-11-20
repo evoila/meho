@@ -32,7 +32,7 @@ classifications:
     risk: dangerous
 routing:
   - match: {category: "<category-a>"}
-    approvers: [SA-Operators, Admins]
+    approvers: [Operators, Admins]
   - match: {connector: "<connector-id-pattern>", risk: destructive}
     approvers: [Admins]
 ```
@@ -57,11 +57,17 @@ routing:
 - Each `routing` entry has a `match` (at least one of `category`,
   `connector`, `risk`; `connector` is a pattern, the other two are exact)
   and `approvers`: one to five of the login group kinds `Readers`,
-  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts: the
-  first entry that fits a waiting change wins, and a tenant's entries come
-  before the install's. Two entries with the same `match` are a mistake.
-  Routing only narrows who may approve; see
-  [approvals.md](approvals.md), "Approver routing".
+  `Operators`, `Admins`; the old kinds `SA-Operators` and `Approvers`
+  stay as written and match only the members of that old login group
+  (`Operator.old_group`, read from the token), never the whole new role.
+  The order counts:
+  in each file, the first entry that fits a waiting change wins. Two
+  entries with the same `match` are a mistake. Routing only narrows who
+  may approve; see [approvals.md](approvals.md), "Approver routing".
+- **The install's routing is a floor** (decision of 15 November 2026). A
+  tenant's routing can only make it narrower, never wider. The install's
+  entry that fits counts first, then the tenant's; a person must be in
+  both. See "The install's routing is a floor" below.
 - `bindings` (a tenant's file only) says which login group is which team:
   a group, matched by its full path or its group attribute, gets one of the
   five group kinds and a set of categories. They count only while the
@@ -142,7 +148,7 @@ is one sentence that names the entry:
   kind of the entry may approve ("A LEVEL change in category CAT can wait,
   but no role may approve it. It would wait until it expires."). An entry
   without `risk` is checked on all four risk levels. Readers never
-  approve; Operators and Approvers approve only `safe` and `caution`
+  approve; Operators approve only `safe` and `caution`
   changes of other people.
 - **Routing and the role floor** (`policy/validate.py`,
   `_routing_floor_mistakes`): only Admins approve an operation that needs
@@ -157,8 +163,171 @@ is one sentence that names the entry:
   entry with `risk: caution` that asks Admins covers the `caution` level,
   and a later entry is not checked at that level.
 
+- **A tenant's routing wider than the install's** (`policy/routing_floor.py`,
+  `tenant_floor_mistakes`, only while `POLICY_APPROVER_ROUTING` is on): see
+  the next section.
+
 At most 50 mistakes are listed, then one line says how many more there
 are.
+
+## The install's routing is a floor
+
+The rule: when the install's file says "changes of category X are approved
+by group A", a tenant can only narrow that. The people who may approve in
+the tenant are always some of the people the install allows. For a
+category that the install does not route, the tenant is free.
+
+Example. The install's file:
+
+```yaml
+routing:
+  - match: {category: network}
+    approvers: [Admins]
+```
+
+A tenant's file may say `approvers: [Admins]` for `category: network`
+(the same). The import refuses `approvers: [Operators, Admins]` (an added
+group), `approvers: [Operators]` (another group), and
+`match: {risk: caution}` with every group (it would take the network
+changes away from the install's routing). The sentence names the category
+and the install's groups: "`routing[0]` lets MEHO-Operators approve
+changes with category `network`, but the install's routing
+(`install:routing[0]`) lets only MEHO-Admins approve them. A tenant can
+only narrow the install's routing: name only these groups, or fewer."
+
+**A tenant that moves an operation to another category.** A tenant may
+give an operation another category for its own rules: by its file, by the
+single classification edit (`policy.classify`), by an override of the
+operation, or by a category of its own. The import does not refuse this.
+The install's routing for the operation still applies: the install's
+entries match on the category that the install's policy alone gives the
+operation (`Classification.install_category`, from the install's entries
+and the install's overrides only, carried as
+`EndpointDescriptor.policy_install_category`). The tenant's entries match
+on the category the classification gives (the tenant's). So the people
+who may approve are the ones the install allows for the install's
+category AND the ones the tenant allows for the tenant's category.
+
+**Narrower, exactly.** Routing names group kinds only (the five kinds). A
+login group, matched by its full path or its group attribute, counts as
+the kind its binding gives it ([policy-bindings.md](policy-bindings.md)).
+A tenant entry is narrower than an install entry when every kind it names
+is also named by the install entry. So the floor works per group kind,
+not per login group. The tenant's `bindings` decide which of its login
+groups belong to a kind: when a tenant binds one more login group to
+`Admins`, the people in it count as Admins for the install's routing too.
+
+**Which install entries a tenant entry is checked against.** Every
+install entry that can route a change the tenant entry also routes. Two
+entries can share a change unless one field of their `match` tells them
+apart:
+
+- `category` or `risk`: both entries set it, to different values.
+- `connector`: both set a pattern, and the patterns cannot fit the same
+  connector id. When one pattern has no wildcard (`*`, `?`, `[`), MEHO
+  checks that text against the other pattern. When both have wildcards
+  and differ, MEHO counts them as sharing a change.
+
+A field that one entry leaves out fits everything. All of this is decided
+from the two files, at import time.
+
+**Refused or only a warning.** The import refuses a wider tenant entry,
+with two exceptions. In these cases the import accepts the file and gives
+a warning with the same sentence and one more (`tenant_floor_warnings`):
+
+- An earlier entry of the same tenant fits every change that the wider
+  entry shares with the install entry. The first tenant entry that fits
+  counts, so the wider entry does not count for those changes. Example:
+  `routing[0]` is `{category: network} -> [Admins]` and `routing[1]` is
+  `{risk: caution} -> [every group]`. The warning ends "`routing[0]` comes
+  first and fits each of these changes, so `routing[1]` does not count for
+  them."
+- Both entries set a `connector` pattern with a wildcard, and the patterns
+  differ. MEHO cannot tell from the two patterns whether they fit the same
+  connector.
+
+Both are safe as warnings: at the run and at the click, the install's
+groups are the floor, so a wider entry never lets more people approve.
+
+**Export.** With `POLICY_APPROVER_ROUTING` on, `meho policy export` of a
+tenant writes a `# Has no effect where wider: ...` comment above each
+routing entry that names more groups than an install entry it can share a
+change with (`tenant_wider_notes`), the same sentence as the import. It
+is the same idea as the `# Has no effect:` comment of a classification
+entry.
+
+**At the run and at the click.** When a request starts to wait, the first
+install entry that fits counts, then the first tenant entry that fits. The
+stored group kinds are the kinds of both (`approver_rule` names both, the
+install's first, for example `install:routing[0], tenant:routing[1]`). At
+the approve click MEHO first routes the request again with the install's
+current file and the stored install category
+(`approval_request.approver_install_category`, migration `0173`; the
+tenant's category is in `approver_category`), then checks the stored
+kinds. The approval card, the "may approve" sign and the push recipients
+read the install's routing as it is now too (`InstallFloor`), so they say
+what the click decides. The approve audit row names the install entry
+that counted at the click (`approver_floor`).
+
+A step of a multi-step operation gets the same categories as a direct
+call of the same operation: the step gate reads the classification
+entries and the override rows of the operation (`classify_step`). So a
+step and a direct call wait for the same people. So a tenant entry stored
+before this rule, or an install file that changed later, never widens
+anything: where a tenant entry is wider, its extra groups do not count.
+Nothing fails open: an install routing that is not valid refuses the
+click. A request that waited with stored groups before migration `0173`
+has the empty text as both categories: MEHO does not know them. Such a request is
+refused when an install entry that matches on a `category` could fit it;
+reject it and start the call again. A request can have stored group
+kinds but no stored install category (NULL) in two cases:
+
+- It started to wait while `POLICY_CLASSIFICATION` was off. No change has
+  a category then, so MEHO stored none.
+- A build of main between 15 November 2026 and pull request #6542 wrote
+  it. Those builds stored the group kinds but not the install category.
+
+MEHO does the same in both cases. While `POLICY_CLASSIFICATION` is on,
+the category counts as "not known", like the empty text: the click is
+refused when an install entry that matches on a `category` could fit the
+request. Reject it and start the call again. While the switch is off, a
+`category` entry fits nothing for it, as when it started to wait, and the
+other install entries decide. A request without stored group kinds
+(it started to wait while the switch was off) keeps today's rule until it
+is decided or expires: the install's routing is not checked for it.
+
+**A change of the install's file.** The preview of an install import
+(`meho policy diff --scope install`) lists the tenants whose stored
+routing no longer fits: the diff key `routing_floor` (one item per tenant,
+with `tenant_id` and `entries`) and one warning per entry. It lists also
+the entries a tenant import only warns about (an earlier entry fits first,
+or two connector patterns MEHO cannot compare). The key is
+there only while `POLICY_APPROVER_ROUTING` is on. Those entries
+stay stored, but where they are wider they do not count.
+
+`meho policy explain` shows the routing entries that fit (`rule`) and the
+install's entry (`floor`): "Install's floor: install:routing[0] (a
+tenant's routing can only narrow it)". For a waiting request
+(`--request`) the groups and the floor come from the install's routing
+as it is now, as at the click (`install_floor`). A request that the click
+refuses for its unknown category shows no group and the rule
+`category_not_stored`. The install's category is also not known when the
+install's classification entries give the operation two categories (an
+operation registered after the install's import can match two such
+entries). Then explain shows no group for the call too, and the click
+refuses it, when an install entry that matches on a `category` could fit.
+
+**Two install categories: the rule** (decided on 17 November 2026).
+Nobody may approve such a change when any install entry that matches on a
+`category` could fit it, also when no install entry names either of the
+two categories. The reasons: MEHO stores only "category not known", not
+the two categories, so it cannot tell which install entry would count;
+and the cause is a mistake in the install's file that only the install's
+admin can fix (the install import refuses two categories for an operation
+it knows). So MEHO fails closed. Fix the install's file so the operation
+has one category, reject the waiting request, and start the call again.
+
+All of this runs only while `POLICY_APPROVER_ROUTING` is on.
 
 **The stricter of install and tenant counts** (decision of 12 November
 2026). For the risk level and for "always wait", the install and the
@@ -194,6 +363,10 @@ it.
   operations it matches) and `changes` (how many of those get other
   values). Entries are told apart by their whole `match` (each part on its
   own), so two different matches never share one line. `operations_changed` counts all operations whose values change.
+  An install import also has `routing_floor` while
+  `POLICY_APPROVER_ROUTING` is on: the tenants whose stored routing is
+  wider than the new file (see "The install's routing is a
+  floor").
   `based_on` is the SHA-256 of the meaning of the stored policy (key order,
   comments and empty keys do not count). It covers only the stored policy
   of the import's own scope. A tenant import does not notice a change to
@@ -291,5 +464,9 @@ round trip and no change over every operation),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,
 `backend/tests/test_policy_routing.py` (the `routing` section, its checks,
 diff and export, the "separated duties" file, the stored approver kinds
-and the click),
+and the click), `backend/tests/test_policy_routing_floor.py` (the
+install's routing as a floor: import, run, click, install diff),
+`backend/tests/test_policy_routing_step_floor.py` (a step and a direct
+call get the same approvers, warnings and export marks, the card and the
+approve audit row),
 `cli/internal/cmd/policy/file_test.go`.

@@ -114,6 +114,10 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_split_ready_imports.py",
     # Error types that show their own message, read from every module in the package.
     "tests/test_operations_own_message_of_secret_op.py",
+    # Every function in the package that writes an approval decision.
+    "tests/test_people_behind_doors_guard.py",
+    # Every guide and codebase docs page.
+    "tests/test_people_behind_docs.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane(?:\.[A-Za-z0-9_]+)+")

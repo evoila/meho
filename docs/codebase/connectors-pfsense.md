@@ -114,6 +114,12 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   allow-lists `USER_ROW_FIELDS` / `ROUTE_ROW_FIELDS`, and the `CONFIG_READ_OPS`
   tuple. See "`pfsense.user.list` and `pfsense.route.static.list`" below.
 
+- **Config change history** (`ops_config_history.py` and
+  `ops_config_history_meta.py`, #4989) — the listing parser
+  `parse_history_listing`, the section comparison `compare_revisions`, the
+  handler `pfsense_config_history`, and the `CONFIG_HISTORY_OPS` tuple. See
+  "`pfsense.config.history`" below.
+
 - **Destructive-delete handlers** (`ops_delete.py`, #3232 + #3313) — the
   connector's `safety_level="destructive"` ops. Config parsers
   (`parse_nat_port_forwards_xml` / `parse_aliases_xml`), the fail-closed
@@ -309,6 +315,7 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` | `safe` |
 | `pfsense.user.list` | `cat /cf/conf/config.xml` (`<system><user>` + `<system><group>`, allow-listed fields only) | `users` | `safe` |
 | `pfsense.route.static.list` | `cat /cf/conf/config.xml` (`<staticroutes><route>`, allow-listed fields only) | `routing` | `safe` |
+| `pfsense.config.history` | one `sh` loop that reads only the `<revision>` block of `/cf/conf/config.xml` and each `/cf/conf/backup/config-<time>.xml`; with `revision`: `cat` of two revision files | `config` | `safe` |
 | `pfsense.gateway.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `gateway_item` + `write_config()`) | `routing` | `caution` |
 | `pfsense.route.static.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `staticroutes/route` + `write_config()` + `system_routing_configure()`) | `routing` | `caution` |
 | `pfsense.nat.delete` | `cat /cf/conf/config.xml` guard (match one `<nat><rule>` by `<tracker>`) + `pfSsh.php playback` fragment (delete-by-tracker + `write_config()` + `filter_configure()`) + read-back verify | `nat` | `destructive` |
@@ -471,6 +478,12 @@ see the cleaned text.
   wrappers, entity references. Public certificates (`<crt>`), CSRs, SSH public
   keys (`authorizedkeys`) and WireGuard public keys stay. Plain free text is
   not checked for words, so a description that says "password" stays.
+- **The shared name rule.** A name that the shared rule of the other places
+  hides (`is_secret_param_name` in `broadcast/events.py`, see
+  `redaction.md`) is hidden here too, before the lists of this connector.
+  So this connector hides at least the names that every other place hides.
+  Only two plain settings skip it, by their exact lowercased name:
+  FRR `password_type` and WireGuard `hide_secrets`.
 - **Names that only look secret** (`_NOT_SECRET_NAMES` in
   `redaction_names.py`), checked against the package sources: the FRR
   route-map settings `community_set` / `community_match` / `community_action`
@@ -573,6 +586,68 @@ Two `safe` reads, with no approval. Each reads `config.xml` once and returns
   exception is not chained. The call then fails with `connector_error`, so a
   broken read never looks like "no users".
 - **CLI.** `meho pfsense user list` and `meho pfsense route list`.
+
+### `pfsense.config.history` — who changed the configuration, and what (#4989)
+
+pfSense keeps every saved configuration as a revision: the live
+`/cf/conf/config.xml` plus one file per older revision,
+`/cf/conf/backup/config-<unix time>.xml`. Each file has a top-level
+`<revision>` block with `time`, `description` and `username`. The firewall
+keeps `<system><backupcount>` backups (30 when it is not set).
+`pfsense.config.show` cannot answer "who changed this": it returns only the
+live file, so it has no older revisions to compare with.
+
+- **List (no `revision`).** One fixed `sh` loop prints, for each file, its
+  name, a read status (`0` when the file was read), its size and its first
+  `<revision>` block, then the read status and the stored `backupcount`.
+  Each read is checked by itself. A failed read of any file or of the backup
+  count, or an answer that stops before the backup count line, raises an
+  error. So a failed read never looks like a file without a `<revision>`
+  block. The answer is `{rows, total, kept, backup_count,
+  backup_count_is_default}`; each row is `{time, time_utc, user, description,
+  size, current}`, newest first, `current` true for the live file. `since` (a
+  unix time) keeps only revisions from that time on; `kept` still counts all
+  of them. A long list goes behind a result handle like any `rows` answer. A
+  file without a `<revision>` block takes its time from its name. When two
+  files have the same time, the live file wins. An empty or failed listing
+  raises; it is never an empty history. `user` and `description` go through
+  the same secret-shape check as the other config reads.
+- **Diff (`revision` = the `time` of a row).** The op reads that revision and
+  the next older one with `cat`, removes the known secrets from both with
+  `redact_config_xml` (the same rules as `pfsense.config.show`), and compares
+  them top-level section by section (`filter`, `system`, ...; the
+  `<revision>` block is left out). A section is changed when its raw text
+  differs, but its diff text is made from the cleaned text. So a changed
+  password does not show. A section that changed only in hidden values is
+  listed with `only_hidden_values_changed: true` and no diff lines. The raw
+  text is never returned. The answer is `{revision, user, description,
+  previous_revision, changed_sections: [{section, added, removed,
+  only_hidden_values_changed}], changed_total, diff, diff_omitted, note}`.
+  When the diff text is longer than 100000 characters, `diff` is `null` and
+  `diff_omitted` is true; the caller asks again with `section` for the diff of
+  one changed section (if that one is also longer, it is left out too).
+  The oldest kept revision has no previous one and says so.
+- **A save during the read.** Each file that is read must still hold the
+  revision the listing named (its `<revision><time>`). pfSense saves the old
+  live file as `backup/config-<its time>.xml` before it writes a new one. So
+  when the live file holds a newer revision, the op reads that backup
+  instead. Any other change raises an error that asks the caller to list
+  the history again. A diff is never labelled with the wrong revision or
+  user.
+- **Checks.** `revision`, `since` are whole unix times, `section` matches
+  `[A-Za-z0-9_.:#-]{1,64}` and needs `revision`; the file name that reaches
+  `cat` is one the listing printed and matches a fixed pattern. A failed read,
+  a file that cannot be parsed, and a failed secret removal raise an error
+  with fixed text that never quotes the file.
+- **The limit.** Only known secret fields and known secret shapes are
+  removed, the same as in `pfsense.config.show`. Free-text fields
+  (descriptions, notes, cron or shell commands, custom config text) can
+  still hold a secret that someone typed in. An older revision can still
+  hold such text after it was removed from the live file. `user` holds the
+  admin's name and source address (`admin@<address> (Local Database)`).
+  The op text, its `output_shape` and the `note` of a diff say this too.
+- **Not covered.** The created and updated stamps of single rules belong in a
+  rule-list read. There is no named CLI verb yet; call it through `call_operation`.
 
 ### `pfsense.mgmt_flow.summary` — management-plane flow classifier
 

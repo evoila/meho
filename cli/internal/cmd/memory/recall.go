@@ -342,7 +342,7 @@ func printRecallTable(w io.Writer, r *api.MemorySearchResponse) {
 			hit.Rank,
 			string(hit.Scope),
 			truncate(hit.Slug, 40),
-			truncate(hit.Snippet, 80),
+			output.SafeText(truncate(hit.Snippet, 80)),
 		)
 	}
 }

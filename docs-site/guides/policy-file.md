@@ -3,7 +3,7 @@
 The policy file says which category each connector, operation group and
 operation is in, which labels it has, and which operations always wait
 for approval. It can also route approvals: for example, only
-MEHO-SA-Operators and MEHO-Admins approve network changes.
+MEHO-Admins approve network changes.
 
 You keep the policy as one file, `policy: v1`. You can:
 
@@ -106,19 +106,25 @@ click.
 ```yaml
 routing:
   - match: {category: network}
-    approvers: [SA-Operators, Admins]
+    approvers: [Operators, Admins]
   - match: {connector: "<connector-id-pattern>", risk: destructive}
     approvers: [Admins]
 ```
 
 - `match` names a `category`, a `connector` (`*` is any text) and a
   `risk` level, or some of them. All that it names must fit.
-- `approvers` lists login group kinds: `Readers`, `Operators`,
-  `SA-Operators`, `Admins`, `Approvers`.
-- The first entry that fits wins. A tenant's entries come before the
-  install's. When no entry fits, the same people as today may approve.
+- `approvers` lists login group kinds: `Readers`, `Operators`, `Admins`.
+  A file may still use the old kinds `SA-Operators` and `Approvers`. Such
+  a kind matches only the people whose login token names that old group,
+  never every Operator or Reader. `SA-Operators` may approve only what an
+  Operator may approve. `Approvers` lets nobody approve: MEHO reads its
+  members as Readers.
+- In each file, the first entry that fits wins. When no entry fits, the
+  same people as today may approve.
+- **The install's routing is a floor.** A tenant can make it narrower,
+  never wider (see below).
 - Routing only makes the list shorter. A group never approves more than it
-  may today: for example, Operators and Approvers never approve another
+  may today: for example, Operators never approve another
   person's `dangerous` or `destructive` change.
 - MEHO refuses an entry that asks a group that may approve none of its
   changes, and an entry that leaves a risk level that nobody may approve.
@@ -134,22 +140,106 @@ the changes you may approve. A person outside the stored groups gets one
 sentence that names who may approve. A change that started to wait before
 the setting was on keeps today's rule.
 
+### The install's routing is a floor
+
+When the install's file says "changes of category X are approved by group
+A", a tenant can only narrow that. The people who may approve in the
+tenant are always some of the people the install allows. For a category
+that the install does not route, the tenant is free.
+
+Example. The install's file says:
+
+```yaml
+routing:
+  - match: {category: network}
+    approvers: [Operators, Admins]
+```
+
+A tenant's file may then say `approvers: [Admins]` for network changes.
+MEHO refuses the tenant's file when an entry:
+
+- adds a group, for example `[Readers, Operators, Admins]`;
+- names another group, for example `[Readers]`;
+- takes the network changes away from the install's entry, for example
+  `match: {risk: caution}` with every group.
+
+The refusal names the category and the install's groups.
+
+A tenant may give an operation another category for its own rules, also
+a category of its own. The install's routing for the operation still
+applies: MEHO uses the category that the install's file alone gives the
+operation for the install's entries, and the tenant's category for the
+tenant's entries. So the people who may approve are always some of the
+people the install allows, whatever category the tenant chooses.
+
+How MEHO decides: an entry is narrower when every group it names is also
+in the install's entry. A tenant entry is checked against every install
+entry that can fit the same change. Two entries cannot fit the same change
+when both name a `category` (or a `risk`) and the values differ, or when
+their `connector` patterns cannot fit the same connector. When both
+connector patterns have `*`, `?` or `[` and differ, MEHO counts them as
+fitting the same change.
+
+Two cases are only a warning, not a refusal. MEHO still accepts the file:
+
+- An earlier entry of the same tenant fits each of these changes first.
+  For example, `routing[0]` sends network changes to `[Admins]`, and
+  `routing[1]` sends every `caution` change to every group. A network
+  change always meets `routing[0]` first, so `routing[1]` does not count
+  for it.
+- Both connector patterns have `*`, `?` or `[` and differ. MEHO cannot
+  tell whether they fit the same connector.
+
+The floor works per group kind, not per login group. A login group,
+matched by its full path or its group attribute, counts as the group kind
+its binding gives it. So the tenant's `bindings` decide who is in a kind:
+when the tenant binds one more login group to `Admins`, its people count
+as Admins for the install's routing too.
+
+When a change waits, the install's entry counts first, then the tenant's.
+A person must be in both. At the approve click MEHO checks the install's
+file as it is then, with the install's category of the operation. So a tenant entry stored before this rule, or an
+install file that changed later, cannot widen anything. The approval
+card, the "may approve" sign and the push messages use the install's file
+as it is then too, so they show what the click decides. The audit row of
+the approval names the install entry that counted (`approver_floor`). A
+step of a multi-step operation waits for the same people as a direct call
+of the same operation. When the install's
+file changes, `meho policy diff --scope install` lists the tenants whose
+routing no longer fits. Their entries stay, but where they are wider they
+do not count. `meho policy export` of a tenant writes a
+`# Has no effect where wider:` comment above each such entry.
+
+When the install's own file gives an operation two categories, nobody may
+approve a change of it if an install entry that matches on a category
+could fit it. This holds also when no entry names either category. Give
+the operation one category in the install's file, reject the waiting
+request, and start the call again.
+
+MEHO also does not know the install's category of a waiting change that
+started to wait while `POLICY_CLASSIFICATION` was off, once you turn that
+switch on. The same rule holds: nobody may approve it if an install entry
+that matches on a category could fit it. Reject it and start the call
+again. While the switch stays off, an entry that matches on a category
+fits no change, so the other install entries decide.
+
 MEHO ships a starting file, "separated duties"
 (`deploy/policy-profiles/separated-duties.yaml`): identity and secret
 changes only Admins approve, network and storage changes only
-SA-Operators and Admins.
+Admins.
 
 ## Which login group is which team
 
 A tenant's file can say which login group is which team, in `bindings`.
-A binding gives a group one of the five group kinds (`Readers`,
-`Operators`, `SA-Operators`, `Admins`, `Approvers`) and a set of
-categories.
+A binding gives a group one of the three group kinds (`Readers`,
+`Operators`, `Admins`) and a set of categories. A file may still use the
+old kinds `SA-Operators` and `Approvers`: MEHO reads them as `Operators`
+and `Readers`.
 
 ```yaml
 bindings:
   - match: {group: /MEHO-Operators/Network}   # the full path of the group
-    kind: SA-Operators
+    kind: Operators
     categories: [network]
   - match: {attribute: "<tenant>-storage"}    # the group attribute meho_group
     kind: Operators
@@ -162,8 +252,8 @@ bindings:
   the attribute: see [Keycloak realm setup](../install/keycloak-realm.md).
 - `categories: ["*"]` means every category.
 - A binding never changes a person's base level (read-only, operator or
-  admin). It can only pick between the kinds of that level: `Operators`
-  or `SA-Operators`, `Readers` or `Approvers`.
+  admin). Each base level has one kind: `Readers`, `Operators` or
+  `Admins`.
 - A person whose groups match two kinds in one tenant cannot log in. Fix
   the bindings or the groups.
 - A person whose groups match no binding keeps the kind they have today.
@@ -176,16 +266,21 @@ bindings:
   tenant list (`meho_tenants`, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
   `meho policy export` shows them.
-- A shipped binding counts only when it agrees with the token. The group
-  alone never gives or takes the right to approve: a person in the
-  shipped approver group may approve only when the token also says
-  `approver: true`, and a person with `approver: true` keeps that right in
-  the shipped readers group. So with the setting on and no stored
-  bindings, every person may approve exactly what they may approve with
-  the setting off.
+- A shipped binding counts only when it agrees with the login. MEHO does
+  not read an `approver` claim, and no shipped group gives that right.
+  So a shipped binding on its own gives or takes no right to approve.
+  Approver routing by category can still make the list of people who may
+  approve a change shorter.
+- The self-approval group (the setting `JWT_SELF_APPROVER_GROUP`) can be
+  a group that is not in `JWT_ROLE_GROUPS`. Then a person can be in it
+  and in one role group. The old self-approval group counts as `Operators`.
+  Next to any other group, that group's kind stays.
+- With the default settings the self-approval group is a role group. A
+  person in it and in a second role group cannot log in
+  (`multiple_role_groups`), with the setting on or off.
 - A binding in your file (a stored binding) is your own choice. There the
-  group alone gives the flags of the kind: a read-only person in a group
-  bound to `Approvers` may approve, whatever the token says.
+  group alone gives the flags of the kind: a group bound to `Readers`
+  or `Operators` gives no right to approve, whatever the token says.
 - `meho policy export` with the setting on writes the shipped bindings into
   your file. After an import they are stored bindings, and then they count
   for every person, also for a person with a tenant list, whose groups may
@@ -296,8 +391,12 @@ meho policy explain --request <request-id>
   the place of your stored policy. It needs `POLICY_CLASSIFICATION`.
 - `--request` shows the rule stored on an approval request, and the
   groups that may approve it. The groups stored on the request count only
-  while `POLICY_APPROVER_ROUTING` is on. With it off, explain shows
-  today's groups, the same groups the approve check uses.
+  while `POLICY_APPROVER_ROUTING` is on. With it on, the install's routing
+  as it is now narrows them, as at the approve click. With it off, explain
+  shows today's groups, the same groups the approve check uses.
+- With routing on, "Who may approve" names the routing entries that fit,
+  the install's first. "Install's floor" names the install's entry: a
+  tenant's routing can only narrow it.
 
 Good to know:
 
@@ -342,7 +441,7 @@ operation that a file makes always wait:
 
 ```text
 Answer: wait (today's checks decide)
-Who may approve: MEHO-Operators, MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers (rule: default)
+Who may approve: MEHO-Operators, MEHO-Admins (rule: default)
 Today: needs-approval: <today's reason>
 Policy evaluator (shadow): wait, same as today
 Decided by: floor token_runs_only_safe: wait (<rule text>)

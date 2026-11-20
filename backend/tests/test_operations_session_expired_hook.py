@@ -8,7 +8,7 @@ the known set (a product that answers an ended session with 403 and a body
 of its own). It signs in again and repeats the call once only when that
 cannot send a change twice: a ``safe`` operation, or an ingested operation
 with one request. It never loops. A typed write, a multi-step operation and
-an approved call are not sent again. A real 403, a 5xx and a connector with
+an approved call that is not ``safe`` are not sent again. A real 403, a 5xx and a connector with
 no hook behave as before.
 """
 
@@ -34,10 +34,15 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.flight_recorder import capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._errors import result_connector_auth_failed
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._session_expired_hook import (
     mark_session_relogin,
     session_expired_by_hook,
+)
+from meho_backplane.operations.approval_queue import (
+    ApprovalResultState,
+    result_state_of_envelope,
 )
 from meho_backplane.settings import get_settings
 from tests.test_operations_connector_auth_failed import (
@@ -202,6 +207,13 @@ class _CompositeWriteConnector(_TypedWriteConnector):
     impl_id = "vcfops-composite-write"
 
 
+class _Status401Connector(_TypedWriteConnector):
+    """The known session-ended status (401): no hook is needed for it."""
+
+    impl_id = "vcfops-status-401"
+    first_status: ClassVar[int] = 401
+
+
 _TYPED_REF = f"{__name__}._TypedWriteConnector.write_then_read"
 _COMPOSITE_REF = f"{__name__}._composite_write_then_read"
 
@@ -221,7 +233,9 @@ def _web_operator() -> Operator:
     return _make_operator().model_copy(update={"web_session": True})
 
 
-def _assert_not_resent(result: Any, connector: _NoHook403Connector) -> None:
+def _assert_not_resent(
+    result: Any, connector: _NoHook403Connector, *, invalidations: int = 1
+) -> None:
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["cause"] == "session_ended_403_not_resent"
@@ -230,9 +244,9 @@ def _assert_not_resent(result: Any, connector: _NoHook403Connector) -> None:
     assert "did not send the operation again" in result.error
     assert "auth/permission fault" not in result.error
     assert "may or may not have been made" in result.extras["remediation"]
-    assert "Check the state on the product" in result.extras["remediation"]
+    assert "A person must check the target first" in result.extras["remediation"]
     assert connector.calls == 1
-    assert connector.invalidations == 1
+    assert connector.invalidations == invalidations
 
 
 async def _insert_descriptor(
@@ -244,6 +258,7 @@ async def _insert_descriptor(
     method: str = "GET",
     handler_ref: str | None = None,
     safety_level: str = "safe",
+    op_id: str = _OP_ID,
 ) -> None:
     session.add(
         EndpointDescriptor(
@@ -252,7 +267,7 @@ async def _insert_descriptor(
             product="vcfops",
             version="9",
             impl_id=impl_id,
-            op_id=_OP_ID,
+            op_id=op_id,
             source_kind=source_kind,
             method=method,
             path="/api/v2/events",
@@ -322,6 +337,7 @@ async def test_hook_yes_signs_in_once_and_repeats_the_call(
     assert rows[0].payload["result_status"] == "ok"
     assert rows[0].payload["session_relogin"] is True
     assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["result_unknown"] is False
     assert rows[0].payload["session_relogin_status"] == 403
 
 
@@ -346,6 +362,7 @@ async def test_hook_yes_and_same_answer_again_stops_with_a_clear_error(
     assert rows[0].payload["result_status"] == "error"
     assert rows[0].payload["session_relogin"] is True
     assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["result_unknown"] is False
 
 
 @pytest.mark.asyncio
@@ -365,6 +382,7 @@ async def test_hook_yes_and_refused_sign_in_makes_one_try_and_a_clear_error(
     assert len(rows) == 1
     assert rows[0].payload["session_relogin"] is True
     assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["result_unknown"] is False
     assert rows[0].payload["session_relogin_status"] == 403
 
 
@@ -469,6 +487,7 @@ async def test_typed_write_is_not_sent_again(
     assert rows[0].payload["result_status"] == "error"
     assert rows[0].payload["session_relogin"] is True
     assert rows[0].payload["session_resent"] is False
+    assert rows[0].payload["result_unknown"] is True
     assert rows[0].payload["session_relogin_status"] == 403
 
 
@@ -505,7 +524,8 @@ async def test_approved_call_is_not_sent_again(
         safety_level="caution",
     )
 
-    _assert_not_resent(result, connector)
+    # One drop before the send (fresh login), one after the refusal.
+    _assert_not_resent(result, connector, invalidations=2)
 
 
 @pytest.mark.asyncio
@@ -539,6 +559,133 @@ async def test_server_error_never_asks_the_hook(
     assert connector.invalidations == 0
 
 
+def _assert_401_not_resent(
+    result: Any, connector: _NoHook403Connector, *, invalidations: int = 1
+) -> None:
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["cause"] == "session_ended_401_not_resent"
+    assert "may or may not have been made" in result.extras["remediation"]
+    assert connector.calls == 1
+    assert connector.invalidations == invalidations
+
+
+@pytest.mark.asyncio
+async def test_401_on_a_safe_read_is_repeated_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(_Status401Connector, stub_embedding_service, session)
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 2
+    assert connector.invalidations == 1
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_relogin"] is True
+    assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["result_unknown"] is False
+    assert rows[0].payload["session_relogin_status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_401_on_an_ingested_write_with_one_request_is_repeated_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="POST",
+        safety_level="caution",
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_401_on_a_typed_write_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        source_kind="typed",
+        handler_ref=_TYPED_REF,
+        safety_level="caution",
+    )
+
+    _assert_401_not_resent(result, connector)
+    assert isinstance(connector, _TypedWriteConnector)
+    assert connector.writes == 1
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_relogin"] is True
+    assert rows[0].payload["session_resent"] is False
+    assert rows[0].payload["result_unknown"] is True
+    assert rows[0].payload["session_relogin_status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_401_on_a_multi_step_operation_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    class _Composite401(_Status401Connector):
+        impl_id = "vcfops-composite-401"
+
+    result, connector = await _run(
+        _Composite401,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        source_kind="composite",
+        handler_ref=_COMPOSITE_REF,
+        safety_level="caution",
+    )
+
+    _assert_401_not_resent(result, connector)
+    assert isinstance(connector, _TypedWriteConnector)
+    assert connector.writes == 1
+
+
+@pytest.mark.asyncio
+async def test_401_on_an_approved_call_is_not_sent_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        approved=True,
+        method="POST",
+        safety_level="caution",
+    )
+
+    _assert_401_not_resent(result, connector, invalidations=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [_Status401Connector, _HookRecoversConnector])
+async def test_safe_read_in_an_approved_run_is_repeated_once(
+    cls: type[_NoHook403Connector], stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A ``safe`` read changes nothing, so a run after an approval may repeat it."""
+    result, connector = await _run(
+        cls, stub_embedding_service, session, approved=True, safety_level="safe"
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 2
+    assert connector.invalidations == 1
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_resent"] is True
+    assert rows[0].payload["result_unknown"] is False
+
+
 @pytest.mark.parametrize("resent", [True, False])
 def test_session_relogin_span(resent: bool) -> None:
     scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
@@ -553,3 +700,299 @@ def test_session_relogin_span(resent: bool) -> None:
     assert attributes["rejected_status"] == 403
     assert attributes["resent"] is resent
     assert attributes["session_relogin"] is True
+
+
+# ---------------------------------------------------------------------------
+# An approved change starts with a fresh login; a refusal after the send is
+# an outcome MEHO cannot judge.
+# ---------------------------------------------------------------------------
+
+_CHILD_OPS = ("POST:/api/v2/child-a", "POST:/api/v2/child-b")
+
+
+class _SendsOkConnector(_TypedWriteConnector):
+    """Every call is accepted: the send itself works."""
+
+    impl_id = "vcfops-sends-ok"
+    failing_calls: ClassVar[int | None] = 0
+
+
+class _SendsOkCompositeConnector(_SendsOkConnector):
+    impl_id = "vcfops-sends-ok-composite"
+
+
+class _SignInRefusedConnector(_SendsOkConnector):
+    """The first call raises the refused sign-in, so nothing was sent."""
+
+    impl_id = "vcfops-sign-in-refused"
+
+    def _next(self) -> dict[str, Any]:
+        self.calls += 1
+        raise ConnectorAuthError(
+            "login refused",
+            status_code=401,
+            cause="session_establish_401",
+            target_name="lab-target",
+        )
+
+
+async def _two_child_writes(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: _SendsOkConnector,
+) -> dict[str, Any]:
+    """A multi-step operation: two write steps, each its own dispatch."""
+    for child_op in _CHILD_OPS:
+        child = await dispatch(
+            operator=operator,
+            connector_id=f"{connector.impl_id}-9",
+            op_id=child_op,
+            target=target,
+            params={},
+        )
+        assert child.status == "ok", child.error
+    return {"ok": True}
+
+
+_TWO_CHILD_REF = f"{__name__}._two_child_writes"
+
+
+@pytest.mark.asyncio
+async def test_approved_ingested_change_logs_in_fresh_and_is_sent_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _SendsOkConnector,
+        stub_embedding_service,
+        session,
+        approved=True,
+        method="POST",
+        safety_level="caution",
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.invalidations == 1
+    assert connector.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_approved_typed_change_logs_in_fresh_and_is_sent_once(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _SendsOkConnector,
+        stub_embedding_service,
+        session,
+        approved=True,
+        source_kind="typed",
+        handler_ref=_TYPED_REF,
+        safety_level="caution",
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.invalidations == 1
+    assert connector.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_approved_multi_step_operation_drops_the_login_once_for_all_steps(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    cls = _SendsOkCompositeConnector
+    for child_op in _CHILD_OPS:
+        await _insert_descriptor(
+            session,
+            cls.impl_id,
+            stub_embedding_service.encode_one.return_value,
+            source_kind="typed",
+            handler_ref=_TYPED_REF,
+            safety_level="caution",
+            op_id=child_op,
+        )
+
+    result, connector = await _run(
+        cls,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        approved=True,
+        source_kind="composite",
+        handler_ref=_TWO_CHILD_REF,
+        safety_level="caution",
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 2  # both steps were sent
+    assert connector.invalidations == 1  # one fresh login, not one per step
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approved", "safety_level"),
+    [(True, "safe"), (False, "caution")],
+    ids=["approved-read", "change-that-did-not-wait"],
+)
+async def test_read_and_unapproved_change_keep_the_stored_login(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    approved: bool,
+    safety_level: str,
+) -> None:
+    result, connector = await _run(
+        _SendsOkConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        approved=approved,
+        method="POST" if safety_level != "safe" else "GET",
+        safety_level=safety_level,
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.invalidations == 0
+    assert connector.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_approved_change_refused_after_the_send_is_an_unknown_outcome(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _Status401Connector,
+        stub_embedding_service,
+        session,
+        approved=True,
+        source_kind="typed",
+        handler_ref=_TYPED_REF,
+        safety_level="caution",
+    )
+
+    assert connector.calls == 1  # sent once, never again
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert result.extras["retry"] is False
+    state = result_state_of_envelope(result.model_dump(mode="json"))
+    assert state is ApprovalResultState.UNCERTAIN
+    text = f"{result.error} {result.extras['remediation']}"
+    assert "may or may not have been made" in text
+    assert "A person must check the target first" in text
+    assert "Then make a new request" in text
+    assert "re-run" not in text.lower()
+    assert "rerun" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_refused_sign_in_before_the_send_stays_a_plain_failure(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _SignInRefusedConnector,
+        stub_embedding_service,
+        session,
+        approved=True,
+        source_kind="typed",
+        handler_ref=_TYPED_REF,
+        safety_level="caution",
+    )
+
+    assert connector.calls == 1
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert "execution_outcome" not in result.extras
+    assert "retry" not in result.extras
+    state = result_state_of_envelope(result.model_dump(mode="json"))
+    assert state is ApprovalResultState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_failing_drop_hook_does_not_stop_the_send(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    class _DropFails(_SendsOkConnector):
+        impl_id = "vcfops-drop-fails"
+
+        async def invalidate_session(self, target: Any, *, rejected: Any = None) -> None:
+            raise RuntimeError("cannot drop")
+
+    result, connector = await _run(
+        _DropFails,
+        stub_embedding_service,
+        session,
+        approved=True,
+        method="POST",
+        safety_level="caution",
+    )
+
+    assert result.status == "ok", result.error
+    assert connector.calls == 1
+
+
+_RETRY_WORDS = ("retry", "try again", "call again")
+
+
+def _asks_for_a_retry(text: str) -> bool:
+    lowered = text.lower().replace("did not try again", "")
+    return any(word in lowered for word in _RETRY_WORDS)
+
+
+def test_unknown_outcome_after_401_without_a_session_hook_asks_for_no_retry() -> None:
+    """A change answered with 401 by a connector without a session hook."""
+    target = _FakeTarget(name="lab-target", host="vcfops.example.test")
+    target.secret_ref = "kv/lab-target"
+
+    result = result_connector_auth_failed(
+        "POST:/api/v1/things", _make_http_status_error(), target, 1.0, changes_target=True
+    )
+
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert result.extras["retry"] is False
+    for text in (result.error or "", result.extras["remediation"]):
+        assert not _asks_for_a_retry(text), text
+        assert "A person must check the target first" in text
+        assert "Then make a new request" in text
+    assert "meho vault kv put" in result.extras["remediation"]
+
+
+@pytest.mark.parametrize(
+    "remediation",
+    [
+        "Check the account on the product, then retry.",
+        "Try again. If it fails again, check the account on the product.",
+        "Fix the role, then call again.",
+    ],
+)
+def test_unknown_outcome_drops_the_retry_advice_of_the_connector(remediation: str) -> None:
+    exc = ConnectorAuthError(
+        "refused",
+        status_code=401,
+        cause="session_dispatch_401",
+        target_name="lab-target",
+        remediation=remediation,
+        stage="call",
+    )
+
+    result = result_connector_auth_failed(
+        "POST:/api/v1/things", exc, _FakeTarget(), 1.0, changes_target=True
+    )
+
+    assert result.extras["execution_outcome"] == "uncertain"
+    for text in (result.error or "", result.extras["remediation"]):
+        assert not _asks_for_a_retry(text), text
+        assert "A person must check the target first" in text
+
+
+def test_refused_login_before_the_send_keeps_its_retry_advice() -> None:
+    exc = ConnectorAuthError(
+        "login refused",
+        status_code=401,
+        cause="session_establish_401",
+        target_name="lab-target",
+        remediation="Check the account on the product, then retry.",
+    )
+
+    result = result_connector_auth_failed(
+        "POST:/api/v1/things", exc, _FakeTarget(), 1.0, changes_target=True
+    )
+
+    assert "execution_outcome" not in result.extras
+    assert result.extras["remediation"] == "Check the account on the product, then retry."

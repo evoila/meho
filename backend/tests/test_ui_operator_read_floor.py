@@ -71,7 +71,6 @@ _SUB = "op-floor-check"
 #: ``(console method, console path, REST method, REST path)``. The REST twin
 #: serves the same data and needs the ``operator`` role.
 _OPERATOR_FLOOR_PAGES: tuple[tuple[str, str, str, str], ...] = (
-    ("GET", "/ui/first-start", "POST", "/api/v1/targets/{name}/probe"),
     ("GET", "/ui/event-sources", "GET", "/api/v1/event-sources"),
     ("GET", "/ui/conventions", "GET", "/api/v1/conventions"),
     ("GET", "/ui/conventions/{slug}", "GET", "/api/v1/conventions/{slug}"),
@@ -134,6 +133,8 @@ _READ_ONLY_PAGES: dict[str, tuple[str, str] | None] = {
     "/ui/approvals/list": ("GET", "/api/v1/approvals"),
     "/ui/approvals/in-order": ("GET", "/api/v1/approvals"),
     "/ui/approvals/{request_id}": ("GET", "/api/v1/approvals/{request_id}"),
+    # The script page checks the approvals access itself, like its REST twin.
+    "/ui/approvals/{request_id}/script": ("GET", "/api/v1/approvals/{request_id}/script"),
     "/ui/approvals/{request_id}/run": ("GET", "/api/v1/approvals/{request_id}"),
     "/ui/approvals/{request_id}/row": ("GET", "/api/v1/approvals/{request_id}"),
     # The "the run has ended" notice: only runs the caller started (#5110).

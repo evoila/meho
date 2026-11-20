@@ -145,8 +145,10 @@ stays small. `build_keycloak_router` includes the write router, so the whole
 Both ops register `requires_approval=True`
 (`connectors/keycloak/ops_write_schemas.py`). The client-scope op is
 `caution`. The protocol-mapper op is `dangerous`: it wires the `tenant_id` /
-`tenant_role` claims the backplane row-scopes on, so a MEHO-SA-Operator or a
-tenant admin must approve it.
+`tenant_role` claims the backplane row-scopes on. Both ops are changes of
+rights (`connectors/keycloak/rights_changes.py`), so another admin (a
+tenant admin or a platform admin) must approve them, never the person who
+asked.
 
 Each write is reached only from an explicit, unmissable confirm modal (the
 `GET` render) that names the op's safety level and the requires-approval
@@ -281,8 +283,8 @@ login quick. How to set the two values on a running realm:
 - No protocol-mapper *read* verb exists — mappers are read via
   `keycloak.client.get` (they ride the `ClientRepresentation`); the scope ↔
   client relation view is read-only assembly over T1's reads.
-- Single managed realm per target (the connector resolves the realm from
-  the target's `managed_realm`); no realm selector.
+- Single managed realm per target (the connector reads the realm from
+  the target's `managed_realm`, which the target must name); no realm selector.
 - The role-assign picker collects free-text realm role names, not a
   dropdown. The connector has `keycloak.role.list`, but the console does
   not call it. Current realm roles are shown for context via

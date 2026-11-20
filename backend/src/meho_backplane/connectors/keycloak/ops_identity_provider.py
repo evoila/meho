@@ -43,7 +43,7 @@ from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -126,15 +126,13 @@ async def _redirect_flows(
         steps = await get_admin_list_strict(
             connector,
             target,
-            fill_path(
-                _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(alias)}
-            ),
+            fill_path(_AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": alias}),
             operator=operator,
         )
         for config_id in _active_redirect_configs(steps):
             config = await connector._get_admin_json(
                 target,
-                fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)}),
+                fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": config_id}),
                 operator=operator,
             )
             settings = config.get("config")
@@ -165,9 +163,8 @@ async def keycloak_identity_provider_list(
     """List the managed realm's identity providers, with no secret."""
     del params  # declared empty
     realm = resolve_realm_config(target).managed_realm
-    realm_segment = quote_segment(realm)
-    providers, complete = await _all_providers(self, operator, target, realm_segment)
-    redirects = await _redirect_flows(self, operator, target, realm_segment)
+    providers, complete = await _all_providers(self, operator, target, realm)
+    redirects = await _redirect_flows(self, operator, target, realm)
     rows = []
     for row in providers:
         if not isinstance(row, dict):

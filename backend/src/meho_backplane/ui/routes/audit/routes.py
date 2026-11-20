@@ -110,6 +110,7 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
+from meho_backplane.audit_query.approval_payload import approval_payload_view
 from meho_backplane.auth.client_identity import via_label
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
@@ -136,8 +137,13 @@ from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     is_aggregate_only,
     resolve_op_id,
 )
-from meho_backplane.ui.routes.work_ref_form import filter_work_ref
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_audit_router"]
 
@@ -452,7 +458,13 @@ async def _build_drawer_context(
     request_payload = (
         {}
         if aggregate_only
-        else {k: v for k, v in row.payload.items() if k not in INTERNAL_PAYLOAD_KEYS}
+        else {
+            k: v
+            for k, v in approval_payload_view(
+                method=row.method, operator_sub=row.operator_sub, payload=row.payload
+            ).items()
+            if k not in INTERNAL_PAYLOAD_KEYS
+        }
     )
     references = await resolve_audit_references(
         db_session, row, op_id=op_id, op_class=op_class, is_admin=is_admin
@@ -648,6 +660,7 @@ async def _build_results_context(
     agent_session_id: uuid.UUID | None = None,
     event_class: str = "",
     include_counts: bool = True,
+    work_ref_error: str | None = None,
 ) -> dict[str, object]:
     """Assemble the context shared by the full page + the results fragment.
 
@@ -664,7 +677,8 @@ async def _build_results_context(
     ``event_class`` filters on one class (#3733); an unknown value is an
     inline filter error, never a 500. ``include_counts`` adds the per-class
     counters (#3747) for the same filters; the "Load more" append skips
-    them because it renders rows only.
+    them because it renders rows only. ``work_ref_error`` (a refused ticket
+    id) is an inline filter error too, and the caller answers 422.
     """
     is_admin = await is_ui_tenant_admin(session)
     context: dict[str, object] = {
@@ -689,6 +703,9 @@ async def _build_results_context(
         "class_counts": [],
         "class_counts_since": None,
     }
+    if work_ref_error is not None:
+        context["filter_error"] = work_ref_error
+        return context
     if event_class and event_class not in _EVENT_CLASS_LABELS:
         context["filter_error"] = f"Unknown event class '{event_class}'."
         return context
@@ -793,6 +810,7 @@ async def _results_handler(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown audit results partial '{partial}'.",
         )
+    checked_work_ref, work_ref_error = _check_work_ref(work_ref)
     context = await _build_results_context(
         session,
         target=target,
@@ -802,18 +820,37 @@ async def _results_handler(
         result_status=result_status,
         since=since,
         until=until,
-        work_ref=filter_work_ref(work_ref) or "",
+        work_ref=checked_work_ref,
         cursor=cursor,
         agent_session_id=agent_session_id,
         event_class=event_class,
         include_counts=partial != _RESULTS_PARTIAL_ROWS,
+        work_ref_error=work_ref_error,
     )
     template = (
         "audit/_results_rows_oob.html"
-        if partial == _RESULTS_PARTIAL_ROWS
+        if partial == _RESULTS_PARTIAL_ROWS and work_ref_error is None
         else "audit/_results.html"
     )
-    return get_templates().TemplateResponse(request, template, context)
+    response = get_templates().TemplateResponse(request, template, context)
+    if work_ref_error is not None and partial == _RESULTS_PARTIAL_ROWS:
+        # The "Load more" button appends into the rows list; the refused
+        # answer is the whole results block, so it replaces that block instead.
+        mark_work_ref_refused(response, retarget="#audit-results", reswap="innerHTML")
+    elif work_ref_error is not None:
+        mark_work_ref_refused(response)
+    return response
+
+
+def _check_work_ref(raw: str) -> tuple[str, str | None]:
+    """The ticket id search value to use, and the refusal text when it is refused.
+
+    A refused value is kept as typed, so the form shows it again.
+    """
+    try:
+        return filter_work_ref(raw) or "", None
+    except WorkRefError as exc:
+        return raw, refused_filter_text(exc)
 
 
 async def _page_handler(
@@ -852,6 +889,7 @@ async def _page_handler(
     lands on that one session's rows -- the over-cap fallback's whole point
     -- rather than the unfiltered tenant-wide list.
     """
+    checked_work_ref, work_ref_error = _check_work_ref(work_ref)
     context = await _build_results_context(
         session,
         target=target,
@@ -861,10 +899,11 @@ async def _page_handler(
         result_status=result_status,
         since=since,
         until=until,
-        work_ref=filter_work_ref(work_ref) or "",
+        work_ref=checked_work_ref,
         cursor=None,
         agent_session_id=agent_session_id,
         event_class=event_class,
+        work_ref_error=work_ref_error,
     )
     csrf_token = mint_csrf_token(str(session.session_id))
     context["page_title"] = "Audit"
@@ -882,6 +921,8 @@ async def _page_handler(
         samesite="strict",
         path="/ui",
     )
+    if work_ref_error is not None:
+        mark_work_ref_refused(response)
     return response
 
 

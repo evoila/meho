@@ -115,7 +115,7 @@ async def keycloak_target() -> AsyncIterator[Any]:
                 secret_ref="tenants/team-a/kc-admin",
                 auth_model="shared_service_account",
                 vpn_required=False,
-                extras={},
+                extras={"managed_realm": "example"},
                 fingerprint={"version": "26.0.5"},
                 notes="seeded by test_approval_failed_run_record",
             )
@@ -158,6 +158,7 @@ def _approve(request_id: uuid.UUID, *, users_status: int) -> tuple[dict[str, Any
             fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.TENANT_ADMIN.value,
+            platform_admin=True,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:
@@ -323,6 +324,7 @@ def _approve_in_background(request_id: uuid.UUID, *, users_status: int) -> dict[
             fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.TENANT_ADMIN.value,
+            platform_admin=True,
             tenant_id=str(_TENANT_ID),
         )
         headers = {"Authorization": f"Bearer {token}"}

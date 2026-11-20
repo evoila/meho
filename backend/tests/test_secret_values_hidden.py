@@ -80,6 +80,7 @@ from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.redaction import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 from tests._result_store_helpers import MemoryResultStore
 
 _HIDDEN = SECRET_VALUE_PLACEHOLDER
@@ -923,6 +924,7 @@ async def test_reveal_by_a_service_principal_waits_for_approval_on_a_read(
     """
     await _register("vault.kv.read", _planted_secret_handler, stub_embedding_service)
     service = _operator(PrincipalKind.SERVICE, sub="svc-reader")
+    await give_known_person(service)
 
     parked = await _read(service, reveal=True)
 

@@ -4,6 +4,7 @@
 **Shipped:** the token tenant list in 0.39.0; the `Meho-Tenant` header, `meho tenants use` and the MCP tenant setting in 0.40.0; the tenant picker in the web console in 0.44.0. Guide: [One person in several tenants](../../docs-site/guides/several-tenants.md).
 **Issue:** [#3978](https://github.com/evoila/meho/issues/3978) — switch tenants without logging out, and a role for people who work across all tenants
 **Builds on:** [login-role-groups.md](login-role-groups.md) (the five groups, [#3959](https://github.com/evoila/meho/issues/3959)), the approval rules of [#3325](https://github.com/evoila/meho/issues/3325)
+**Changed by:** [the four default roles](2026-11-18-four-default-roles.md) (not built yet). An extra tenant will get three role groups. A Platform Admin who acts as an Admin approves their own change. An Admin changes tenant groups alone.
 
 ## In short
 

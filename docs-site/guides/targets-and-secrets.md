@@ -34,9 +34,17 @@ which is why this is the first guide.
 
 Create, edit and delete on REST are for people only. A service login
 gets `403 human_principal_required`, also with the **tenant_admin**
-role. It registers a target with the `targets.register` operation and
-removes one with `targets.remove` (connector `targets-registry-1.x`).
-MEHO checks both against the approval rules.
+role. It registers a target with the `targets.register` operation,
+changes one with `targets.update` and removes one with `targets.remove`
+(connector `targets-registry-1.x`). MEHO checks them against the
+approval rules.
+
+**The CLI and REST wait for approval.** A change made with your login
+token (`meho targets add`, `update`, `delete`, `import`, or a script on
+REST) waits until a person approves it. The command prints the approval
+id and exits 0; approving the request makes the change. Find it with
+`meho approvals list`, or in the console under approvals. A change you
+make in the operator console runs at once.
 
 **Register targets on the operator surfaces above.** Registration is an
 operator-trust decision. For agents, the default MCP tools only read
@@ -110,6 +118,105 @@ Mapping rules the importer applies:
   target. Update the pin with `--update`.
 
 You can leave `secret_ref` out entirely — see the next section.
+
+### Add a whole VMware Cloud Foundation stack
+
+VMware Cloud Foundation (VCF) is not one system. It is many systems
+that run side by side. Each part has its own address and its own login,
+so **each part is its own target**. Add one target for each part you
+want MEHO to operate.
+
+The `product` value of a target is the first part of the connector id
+(the name before the first dash that is followed by a digit). For
+example `vmware-rest-9.0` gives `vmware`, and `sddc-rest-9.0` gives
+`sddc`. This table lists the value for each VCF part. The connector ids
+are in the [connector reference](../reference/connectors.md#evoilas-enterprise-pack).
+
+| VCF part | `product` value | Connector ids |
+| --- | --- | --- |
+| vCenter | `vmware` | `vmware-rest-9.0`, `vmware-rest-8.0` |
+| NSX Manager | `nsx` | `nsx-rest-9.0`, `nsx-rest-4.2` |
+| SDDC Manager | `sddc` | `sddc-rest-9.0`, `sddc-vcf5-5.0` |
+| VCF Installer and Cloud Builder | `installer` | `installer-rest-9.1`, `installer-cb-5.0` |
+| VCF fleet management | `fleet` | `fleet-lcm-9.0`, `fleet-rest-9.0` |
+| VCF Operations | `vrops` | `vrops-rest-9.0`, `vrops-vrops8-8.0` |
+| VCF Operations for logs | `vrli` | `vrli-rest-9.0`, `vrli-vrli8-8.0` |
+| VCF Operations orchestrator | `vro` | `vro-rest-9.0` |
+| VCF Automation | `vcfa` | `vcfa-rest-9.0`, `vcfa-vra8-8.0` |
+| VCF Identity Broker | `idb` | `idb-rest-9.0`, `idb-wsa-3.3` |
+
+The connectors for VCF come with evoila's enterprise pack. Without the
+pack, MEHO refuses these `product` values with 422 `unknown_product`.
+That answer lists the `valid_products` of your backplane. The
+same list is in `meho connector list`. Use the value from that list if
+it ever differs from this table.
+
+A stack with the main parts looks like this. The names and the
+addresses (`192.0.2.0/24`) are examples. Where a target has no
+`secret_ref`, the server derives one secret path for each target (see
+[Stage the secret](#stage-the-secret)).
+
+```yaml
+targets:
+  - name: vcenter-lab
+    product: vmware
+    host: 192.0.2.21
+    tls_server_name: vcenter-lab.example.com
+
+  - name: nsx-lab
+    product: nsx
+    host: 192.0.2.22
+    tls_server_name: nsx-lab.example.com
+
+  - name: sddc-lab
+    product: sddc
+    host: 192.0.2.23
+    tls_server_name: sddc-lab.example.com
+
+  - name: vcfops-lab
+    product: vrops
+    host: 192.0.2.24
+    tls_server_name: vcfops-lab.example.com
+
+  - name: vcfa-lab
+    product: vcfa
+    host: 192.0.2.25
+    fqdn: vcfa-lab.example.com      # the appliance picks the organisation from this name
+    tls_server_name: vcfa-lab.example.com
+    extras:
+      domain: example-org           # the tenant organisation to log in to
+      provider_username: provider-svc
+      provider_secret_ref: tenants/<tenant-id>/vcfa-lab-provider
+```
+
+Add the other parts (`fleet`, `vrli`, `vro`, `idb`, `installer`) the same
+way: a `name`, the `product` value from the table, and a `host`. Add
+`tls_ca_pin` or `tls_server_name` as for any target. Then
+[import and probe](#import-and-verify) each one. A probe that is green
+for a part shows that MEHO reaches it and identified its product and version.
+
+#### What VCF Automation reads
+
+VCF Automation has two login planes on one appliance: the provider plane
+and the tenant plane. The connector reads these values.
+
+| Where | Name | What it does |
+| --- | --- | --- |
+| Target `fqdn` | `fqdn` | The appliance picks the organisation from the `Host` name. When you reach it by IP, set `fqdn` to its FQDN. |
+| Target `extras` | `domain` | The tenant organisation to log in to. It is a target setting, **not** a field in the secret. |
+| Target `extras` | `provider_username` | Optional. The user name for the provider plane, when the provider plane needs another login than the tenant plane. |
+| Target `extras` | `provider_secret_ref` | Optional. The `secret_ref` of a second secret that holds the login of the provider user. It follows the same rules as `secret_ref` for your credential backend. |
+| Secret | `username`, `password` | The tenant login. |
+| Secret | `refresh_token` | Optional. A VCF Automation API token. For a VCF Automation 9.1 target whose appliance does not serve the usual login, add it to the secret of the target. |
+
+Set these with `meho targets update`, for example
+`meho targets update vcfa-lab --extra domain=example-org`. `--extra` on
+`update` replaces the whole `extras` map, so pass every key you want to
+keep.
+
+The exact rules for each product, such as which login the provider plane
+uses when you set no `provider_username`, are in the setup guide that
+comes with the enterprise pack.
 
 ### The record schema
 
@@ -248,6 +355,39 @@ target in such a project fails every dispatch with
 `connector_error: GcpSecretManagerReadError` until the project is
 listed. The same list applies to `gsm:` refs in operation parameters.
 
+### Share one secret between targets, or not
+
+MEHO lets two targets name the same `secret_ref`. Use one secret for
+several targets only when one account is right for all of them. This is
+what it means:
+
+- **Rights.** Every call on every one of these targets runs with the
+  rights of that one account. A read-only target and a target that
+  changes things need two accounts, so give them two secrets.
+- **Approvals.** The approval rules depend on the operation, not on the
+  secret. A shared secret does not weaken them, and it does not make a
+  change wait less. It does mean that an approved change on one target
+  runs with an account that the other targets also use.
+- **Audit.** MEHO writes one audit row for each call. The row names the
+  target and the person (or agent) who made the call, also when targets
+  share a secret. The vendor sees only the one account, so the vendor's
+  own log cannot tell the targets apart. Use one secret for each target
+  when you need that in the vendor's log.
+- **Logins.** Some vendors allow one session for each user. For many
+  connectors, two targets of one tenant that use the same secret and the
+  same login address share one login and one token, so they do not end
+  each other's session. Targets with different secrets log in on their
+  own.
+- **Rotation.** When you change the shared secret, change it once. Then
+  send `meho targets update <name> --secret-ref <same-ref>` for each
+  target, to make MEHO read it again (see
+  [Change a secret](#change-a-secret)).
+
+For a VCF stack, a simple rule works: one secret for each target, named
+after the target. Share a secret only for targets of the same product
+that need the same rights, for example several vCenter targets that
+use one read-only account.
+
 ### Targets that need no credential
 
 Some products need no login, for example a Prometheus that you reach
@@ -267,6 +407,42 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 `--extra` on `update` replaces the whole `extras` map, so pass every key
 you want to keep. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
+
+### Keycloak targets need a managed realm
+
+A Keycloak target must name the realm MEHO manages, in
+`extras.managed_realm`. MEHO has no built-in realm. Without it, MEHO
+refuses to create or update the target, and refuses every operation on
+it.
+
+```bash
+meho targets add lab-sso --product keycloak --host sso.example.com \
+  --extra managed_realm=example
+```
+
+In YAML, put it under `extras:` (`managed_realm: example`). The optional
+`extras.admin_realm` is the realm the target logs in to; it is `master`
+when you leave it out.
+
+- A realm is one plain name: no `/`, `\`, `?`, `#` or `%`, no spaces at
+  the start or the end, not only dots, and at most 255 characters. MEHO
+  does not trim a value; it refuses it.
+- MEHO allows a managed realm that is the admin realm, or the realm MEHO
+  itself signs in with, but it warns you. When the warning shows depends
+  on how you make the change:
+  - You make it in the console, or with `meho targets add` or `update`
+    after a person's login: the warning shows at once, after the save.
+  - A request made with a token waits for a person to approve it (an AI
+    agent's call, or a call with an API token). The warning is on the
+    approval card, so the approver sees it before approving. It is in the
+    result again after the approval.
+  - A settings file import writes at once. Its preview and its result
+    both list the warning, with the path of the target entry.
+  - Each later write on that target also shows the warning on its
+    approval card.
+- `meho doctor` lists the Keycloak targets MEHO refuses. A platform
+  admin sees the targets of every tenant. You can fix one with
+  `meho targets update`, or in the console edit form ("Managed realm").
 
 ## Change a secret
 
@@ -297,17 +473,34 @@ meho targets import targets.yaml --dry-run
 
 # 2. Apply. Default mode aborts before any write if a name already exists:
 meho targets import targets.yaml
-#   Applied: 2 created, 0 updated.
+#   Applied: 0 created, 0 updated, 2 waiting for approval.
+#   Each target is created when a person approves its request.
 
 # 3. Iterate later with --update: PATCHes existing names, creates new ones.
 #    The PATCH is sparse — fields your YAML omits are left untouched.
 meho targets import targets.yaml --update
 ```
 
-Then probe. The probe invokes the connector matched to the target's
-`product`, live, and persists the resulting fingerprint:
+Each row of the file makes its own approval request, because the CLI
+calls with a token. A file with 50 rows makes 50 requests. For a large
+file, use one of these:
+
+- Import the file in the operator console. A person in the console
+  writes at once.
+- Give the import a change ticket. Then a person goes through all its
+  rows with one command. It shows each row and asks for a yes.
+
+  ```bash
+  meho --work-ref gh:acme/ops#42 targets import targets.yaml
+  meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order
+  ```
+
+Then probe. A target exists only after a person approved its request, so
+approve the rows first. The probe invokes the connector matched to the
+target's `product`, live, and persists the resulting fingerprint:
 
 ```bash
+meho approvals approve <approval-id-of-the-row>
 meho targets probe lab-rke2
 ```
 
@@ -349,8 +542,15 @@ ports.
 | NSX | HTTPS 443 to NSX Manager | The built-in `Auditor` role. | `Network Admin`, or `Enterprise Admin` for the whole estate. |
 | SDDC Manager | HTTPS 443 | The `VIEWER` role. | `OPERATOR`, or `ADMIN` for lifecycle tasks. |
 | VCF Operations | HTTPS 443 | The `ReadOnly` role. | A role that may edit the object a change touches. |
-| VCF Automation | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
-| Operations for logs | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
+
+These products of the enterprise pack have no row here: VCF Automation,
+VCF Operations for logs, VCF Installer and Cloud Builder, VCF fleet
+management, VCF Operations orchestrator, VCF Identity Broker, VMware Cloud Director, HCX, Site Recovery Manager,
+vSphere Replication, Aria Automation Config (Salt) and Holodeck. The
+port and the role of each one are in the setup guide of its connector,
+which comes with the enterprise pack. The role names are the vendor's
+own, so they can change with the product version. To get the pack, contact evoila (see the
+[connector reference](../reference/connectors.md#evoilas-enterprise-pack)).
 
 Use a separate login for reads and for changes where you can. MEHO also
 asks a person to approve a risky change before it runs

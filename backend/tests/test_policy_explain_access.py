@@ -207,7 +207,7 @@ async def test_only_an_admin_sees_the_policy_entries(
         }
         assert _paths(body) == []
     operator_body = operator.json()
-    assert operator_body["approvers"] == {"groups": ["MEHO-Admins"], "rule": None}
+    assert operator_body["approvers"] == {"groups": ["MEHO-Admins"], "rule": None, "floor": None}
     assert operator_body["evaluator"]["rules"], operator_body
 
 
@@ -318,11 +318,12 @@ async def test_a_request_shows_the_groups_the_approve_check_uses(
         body = _ask(client, _token(key), request_id=request_id).json()
     approvers = body["request"]["approvers"]
     if routing:
-        assert approvers == {"groups": ["MEHO-Admins"], "rule": "tenant:routing[0]"}
+        assert approvers == {"groups": ["MEHO-Admins"], "rule": "tenant:routing[0]", "floor": None}
     else:
         assert approvers == {
-            "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
+            "groups": ["MEHO-Operators", "MEHO-Admins"],
             "rule": "default",
+            "floor": None,
         }
 
 
@@ -351,6 +352,21 @@ async def test_a_stored_routing_that_is_not_valid_is_409(
         detail = resp.json()["detail"]
         assert detail.startswith("The stored routing is not valid"), detail
         assert "`routing` must be a list" in detail
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_an_install_routing_that_is_not_valid_is_409(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id = await _waiting_request(embedding)
+    _switches(monkeypatch, "POLICY_APPROVER_ROUTING")
+    await _store_policy(_BAD_ROUTING, None)
+    key = make_rsa_keypair("kid-explacc-request-badroute")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _ask(client, _token(key), request_id=request_id)
+    assert resp.status_code == 409, resp.text
+    assert "`routing` must be a list" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

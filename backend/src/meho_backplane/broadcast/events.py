@@ -84,11 +84,15 @@ from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
+    "HIDDEN_PARAM_MARKER",
     "BroadcastEvent",
     "classify_op",
+    "has_snmp_word",
     "holds_hidden_param_values",
     "is_secret_name_value_pair",
+    "is_secret_pair_name",
     "is_secret_param_name",
+    "is_snmp_community_key",
     "redact_payload",
     "resolve_op_class",
     "resolve_operation_op_class",
@@ -144,6 +148,10 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # The handoff export returns a one-time handoff token: not the value,
         # but it can fetch the value once. Aggregate-only keeps it off the feed.
         "secret.handoff.export",
+        # ``vault.kv.generate`` makes a new password and stores it in KV. The
+        # answer holds only the place, but the call makes a credential, so it
+        # waits for a person on every call like the other ops of this list.
+        "vault.kv.generate",
     }
 )
 
@@ -1015,6 +1023,9 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
+        ("pass", "phrase"),
+        ("pass", "phrases"),
+        ("shared", "secret"),
     }
 )
 
@@ -1037,10 +1048,62 @@ _SECRET_NAME_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     }
 )
 
+#: Adjacent token pairs that name a device or protocol key: an SNMP
+#: authentication or privacy key, an SNMP community, a TACACS+ or RADIUS
+#: shared key, an HMAC or signing key. Like the pairs above they mark a
+#: secret when they end the name (``auth_key``, ``snmpAuthKey``), not when
+#: more words follow (``auth_key_id``). A last word ``ref`` does not count
+#: as more words here: ``auth_key_ref`` is hidden too.
+_SECRET_KEY_FINAL_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("authentication", "key"),
+        ("privacy", "key"),
+        ("store", "key"),
+        ("application", "key"),
+        ("snmp", "community"),
+        ("community", "string"),
+        ("community", "strings"),
+        ("auth", "key"),
+        ("priv", "key"),
+        ("tacacs", "key"),
+        ("radius", "key"),
+        ("hmac", "key"),
+        ("signing", "key"),
+    }
+)
+
+#: Names that end in a key word but are plain identifiers, never secrets,
+#: written as snake_case. A name here is not hidden, whatever the rules
+#: above say. The check runs first, so a later rule cannot hide one by
+#: accident.
+_PLAIN_KEY_NAMES: Final[frozenset[str]] = frozenset(
+    {"primary_key", "partition_key", "sort_key", "key_id", "public_key"}
+)
+
+#: Each pair written as one word, for a name in capitals (``AUTHKEY``,
+#: ``LICENSEKEY``): the camelCase split has no boundary to find there.
+#: A final-position pair counts as the last word only.
+_SECRET_NAME_PAIRS_AS_WORD: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_NAME_TOKEN_PAIRS
+)
+_SECRET_NAME_FINAL_PAIRS_AS_WORD: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_NAME_FINAL_TOKEN_PAIRS
+)
+_SECRET_KEY_FINAL_PAIRS_AS_WORD: Final[frozenset[str]] = frozenset(
+    first + second for first, second in _SECRET_KEY_FINAL_TOKEN_PAIRS
+)
+
+#: The last word of a reference (``auth_key_ref``): see
+#: :data:`_SECRET_KEY_FINAL_TOKEN_PAIRS`.
+_REFERENCE_WORD: Final[str] = "ref"
+
 #: Replacement value for a secret-named param. Mirrors the Tier-1
 #: engine's ``[REDACTED:<pattern>]`` shape so feed consumers see one
 #: consistent redaction vocabulary.
 _REDACTED_PARAM: Final[str] = "[REDACTED:param_name]"
+
+#: The marker that replaces a hidden param value in a stored request.
+HIDDEN_PARAM_MARKER: Final[str] = _REDACTED_PARAM
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
@@ -1056,9 +1119,10 @@ def _is_secret_param_name(name: str) -> bool:
     agree on what "secret-bearing" means.
     """
     flat = name.replace("-", "_").replace(".", "_")
-    return _tokens_are_secret(_CAMEL_BOUNDARY.sub("_", flat).lower()) or _tokens_are_secret(
-        flat.lower()
-    )
+    split = _CAMEL_BOUNDARY.sub("_", flat).lower()
+    if split in _PLAIN_KEY_NAMES:
+        return False
+    return _tokens_are_secret(split) or _tokens_are_secret(flat.lower())
 
 
 def _tokens_are_secret(normalised: str) -> bool:
@@ -1071,6 +1135,15 @@ def _tokens_are_secret(normalised: str) -> bool:
     if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
         return True
     if tuple(tokens[-2:]) in _SECRET_NAME_FINAL_TOKEN_PAIRS:
+        return True
+    if tokens[-1] in _SECRET_NAME_FINAL_PAIRS_AS_WORD:
+        return True
+    key_tokens = tokens[:-1] if len(tokens) > 1 and tokens[-1] == _REFERENCE_WORD else tokens
+    if tuple(key_tokens[-2:]) in _SECRET_KEY_FINAL_TOKEN_PAIRS:
+        return True
+    if key_tokens[-1] in _SECRET_KEY_FINAL_PAIRS_AS_WORD:
+        return True
+    if any(token in _SECRET_NAME_PAIRS_AS_WORD for token in tokens):
         return True
     return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
 
@@ -1090,7 +1163,7 @@ def is_secret_param_name(name: str) -> bool:
 #: names than the exact rule, never fewer, so a final-only pair counts
 #: anywhere there.
 _SECRET_NAME_TOKEN_PAIRS_LOOSE: Final[frozenset[tuple[str, str]]] = (
-    _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS
+    _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS | _SECRET_KEY_FINAL_TOKEN_PAIRS
 )
 
 
@@ -1114,8 +1187,49 @@ def is_secret_name_value_pair(
         "value" in node
         and isinstance(name, str)
         and name not in plain_names
-        and _is_secret_param_name(name)
+        and is_secret_pair_name(name)
     )
+
+
+def is_secret_pair_name(name: str) -> bool:
+    """True when a name/value pair named *name* holds a secret value.
+
+    The name rule, and also a bare ``community``: a vendor that lists its
+    settings as name/value pairs gives the pair no SNMP sibling to check,
+    and a setting named ``community`` there is the SNMP community string.
+    The text scrub asks this for the pairs it finds in text.
+    """
+    return _is_secret_param_name(name) or name.lower() == "community"
+
+
+def has_snmp_word(name: Any) -> bool:
+    """True when the field name *name* has a word that starts with ``snmp``.
+
+    ``snmp``, ``snmp_version``, ``snmpv3_user``, ``SnmpPort`` and
+    ``snmpCommunities`` all count.
+    """
+    if not isinstance(name, str):
+        return False
+    words = _CAMEL_BOUNDARY.sub("_", name).lower().replace("-", "_").replace(".", "_")
+    return any(word.startswith("snmp") for word in words.split("_"))
+
+
+def is_snmp_community_key(node: Mapping[Any, Any], key: Any, *, in_snmp: bool = False) -> bool:
+    """True when *key* is a bare ``community`` in an SNMP place.
+
+    An SNMP community string is a shared password, but ``community`` alone
+    is also a plain word elsewhere (a social group). So it is hidden only
+    in an SNMP place: when a sibling name in *node* has an SNMP word
+    (:func:`has_snmp_word`: ``snmp_version``, ``SnmpPort``), or when
+    *in_snmp* is true. A walk sets *in_snmp* for everything under a key
+    with an SNMP word: ``{"snmp": {"community": ...}}``, and each object
+    of ``{"snmpCommunities": [{"community": ...}]}``.
+    ``snmp_community`` needs no place: the name rule hides it. Every walk
+    that hides secret-named values asks this next to the name rule.
+    """
+    if not (isinstance(key, str) and key.lower() == "community"):
+        return False
+    return in_snmp or any(has_snmp_word(other) for other in node)
 
 
 #: Each adjacent pair written as one word, for a name whose case is lost.
@@ -1154,7 +1268,11 @@ def is_secret_param_name_lowercased(name: str) -> bool:
 
 
 def _scrub_secret_named_keys(
-    node: Any, *, hide_numbers: bool = False, plain_names: frozenset[str] = frozenset()
+    node: Any,
+    *,
+    hide_numbers: bool = False,
+    plain_names: frozenset[str] = frozenset(),
+    in_snmp: bool = False,
 ) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 
@@ -1180,6 +1298,8 @@ def _scrub_secret_named_keys(
     every depth, although its name is secret-shaped: an operation declared
     that the field holds no secret (a date, a count, a policy, a file's
     mode; :func:`meho_backplane.operations.register_plain_fields`).
+    *in_snmp* says *node* sits under a key with an SNMP word, so a bare
+    ``community`` in it is hidden (:func:`is_snmp_community_key`).
     """
     if isinstance(node, Mapping):
         found = False
@@ -1190,13 +1310,20 @@ def _scrub_secret_named_keys(
             if name in plain_names:
                 scrubbed[name] = value
                 continue
-            secret_named = _is_secret_param_name(name) or (hide_pair_value and name == "value")
+            secret_named = (
+                _is_secret_param_name(name)
+                or is_snmp_community_key(node, name, in_snmp=in_snmp)
+                or (hide_pair_value and name == "value")
+            )
             if secret_named and _is_secret_value(value, hide_numbers):
                 scrubbed[name] = _REDACTED_PARAM
                 found = True
                 continue
             child, child_found = _scrub_secret_named_keys(
-                value, hide_numbers=hide_numbers, plain_names=plain_names
+                value,
+                hide_numbers=hide_numbers,
+                plain_names=plain_names,
+                in_snmp=in_snmp or has_snmp_word(name),
             )
             scrubbed[name] = child
             found = found or child_found
@@ -1206,7 +1333,7 @@ def _scrub_secret_named_keys(
         found = False
         for item in node:
             child, child_found = _scrub_secret_named_keys(
-                item, hide_numbers=hide_numbers, plain_names=plain_names
+                item, hide_numbers=hide_numbers, plain_names=plain_names, in_snmp=in_snmp
             )
             items.append(child)
             found = found or child_found

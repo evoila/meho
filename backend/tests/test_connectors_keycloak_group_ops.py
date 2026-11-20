@@ -55,6 +55,11 @@ from meho_backplane.operations._preview import PreviewContext, build_proposed_ef
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "keycloak-group-e2e"
@@ -375,6 +380,13 @@ async def test_group_update_attributes_replace_drops_existing(
 # ---------------------------------------------------------------------------
 
 
+def _mount_user(mock: respx.MockRouter) -> None:
+    """The user as Keycloak stores it: every user write reads it first."""
+    mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(
+        200, json={"id": _USER_UUID, "username": "operator-a"}
+    )
+
+
 @pytest.mark.asyncio
 async def test_member_add_resolves_username_and_puts(
     keycloak_group_e2e: KeycloakConnector,
@@ -382,6 +394,7 @@ async def test_member_add_resolves_username_and_puts(
     """member.add resolves username → UUID, checks membership, then PUTs the join."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        _mount_user(mock)
         mock.get(f"/admin/realms/{_REALM}/users").respond(
             200, json=[{"id": _USER_UUID, "username": "operator-a"}]
         )
@@ -408,6 +421,7 @@ async def test_member_add_already_member_is_unchanged(
     """member.add on an existing member returns unchanged and issues no PUT."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        _mount_user(mock)
         mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups").respond(
             200, json=[{"id": _GROUP_UUID, "name": "role-tenant"}]
         )
@@ -432,6 +446,7 @@ async def test_member_remove_deletes_when_member(
     """member.remove DELETEs the membership when the user is a member."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        _mount_user(mock)
         mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups").respond(
             200, json=[{"id": _GROUP_UUID, "name": "role-tenant"}]
         )
@@ -456,6 +471,7 @@ async def test_member_remove_non_member_is_unchanged(
     """member.remove on a non-member returns unchanged and issues no DELETE."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        _mount_user(mock)
         mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups").respond(200, json=[])
         del_route = mock.delete(
             f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups/{_GROUP_UUID}"
@@ -560,7 +576,10 @@ async def test_group_member_add_preview_shows_action_and_targets() -> None:
     assert preview["resource"] == "group_membership"
     assert preview["action"] == "add"
     assert preview["group_id"] == _GROUP_UUID
-    assert preview["username"] == "operator-a"
+    # The user cannot be read here, so the sent name is not shown as the user's name.
+    assert "username" not in preview
+    assert preview["requested_username"] == "operator-a"
+    assert preview["user_available"] is False
 
 
 # ---------------------------------------------------------------------------

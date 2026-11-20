@@ -41,7 +41,11 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.handlers import _tool_result_is_error
 from meho_backplane.mcp.registry import ToolDefinition
-from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.delivery_budget import (
+    measure_delivered_wire_bytes,
+    sent_wire_bytes,
+)
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -213,15 +217,47 @@ def test_declaring_tool_result_carries_matching_structured_content(
     )
     assert result["structuredContent"] == json.loads(result["content"][0]["text"])
 
-    # #3641: the delivery budget measures exactly these two blocks as they
-    # sit in the response body. Both encoded blocks are found verbatim in the
-    # raw bytes, and the measurement is their summed length (no factor).
+    # #3641: the real size count is exactly these two blocks as they sit in
+    # the response body. Both encoded blocks are found verbatim in the raw
+    # bytes, and the count is their summed length (no factor). The ceilings
+    # count the text with spaces, so their count is never smaller.
     text_block = _body_encode(result["content"][0]["text"])
     structured_block = _body_encode(result["structuredContent"])
     assert text_block in response.content
     assert structured_block in response.content
-    measured = measure_delivered_wire_bytes(result["structuredContent"])
-    assert measured == len(text_block) + len(structured_block)
+    sent = len(text_block) + len(structured_block)
+    assert sent_wire_bytes(result["structuredContent"]) == sent
+    assert measure_delivered_wire_bytes(result["structuredContent"]) > sent
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_short_texts_session_lists_no_output_schema_and_gets_no_structured_content(
+    client_with_operator: Any,  # noqa: F811 — pytest indirect fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the short texts on, ``tools/list`` and ``tools/call`` agree (#4714).
+
+    The listing has no ``outputSchema``, so the result has no
+    ``structuredContent``: the client never sees a declared schema without
+    a structured result. The text block still has the whole JSON result.
+    """
+    monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true")
+    get_settings.cache_clear()
+    client, _op = client_with_operator
+    listed = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()
+    assert not [t["name"] for t in listed["result"]["tools"] if "outputSchema" in t]
+
+    assert "outputSchema" in mcp_registry._TOOLS["list_targets"][0].to_wire()
+    response = _tools_call(client, "list_targets", {}, req_id=2)
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is False
+    assert "structuredContent" not in result
+    assert isinstance(json.loads(result["content"][0]["text"]), dict)
 
 
 def _body_encode(value: Any) -> bytes:

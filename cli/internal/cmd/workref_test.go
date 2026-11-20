@@ -199,8 +199,7 @@ func TestWorkRefMalformedRejectedBeforeAnyRequest(t *testing.T) {
 		{"blank flag", []string{"--work-ref", "   "}, "", flagErr},
 		{"flag with a line break", []string{"--work-ref", "OPS-123\nX-Other: 1"}, "", flagErr},
 		{"env with a line break", nil, "OPS-123\nX-Other: 1", envErr},
-		{"env with a trailing line break", nil, "OPS-123\n", envErr},
-		{"env with a trailing carriage return", nil, "OPS-123\r\n", envErr},
+		{"env with a carriage return inside", nil, "OPS-123\r\nX-Other: 1", envErr},
 		{"blank env", nil, "   ", envErr},
 	}
 	for _, tc := range cases {

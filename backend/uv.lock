@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.14"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -9,6 +9,9 @@ resolution-markers = [
 [options]
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
+
+[options.exclude-newer-package]
+meho-ui = false
 
 [manifest]
 constraints = [{ name = "httpcore2", specifier = ">=2.10.0" }]
@@ -1618,6 +1621,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "kubernetes-asyncio" },
     { name = "markdown-it-py", extra = ["linkify"] },
+    { name = "meho-ui" },
     { name = "msgspec" },
     { name = "openapi-spec-validator" },
     { name = "packaging" },
@@ -1691,6 +1695,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "kubernetes-asyncio", specifier = ">=36.1.0,<37" },
     { name = "markdown-it-py", extras = ["linkify"], specifier = ">=4.2.0" },
+    { name = "meho-ui", specifier = ">=0.4.0" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "openapi-spec-validator", specifier = ">=0.9.0" },
     { name = "packaging", specifier = ">=26.3" },
@@ -1740,8 +1745,16 @@ docs = [
 
 [[package]]
 name = "meho-connector-kit"
-version = "1.4"
+version = "1.5"
 source = { editable = "connector-kit" }
+
+[[package]]
+name = "meho-ui"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/44/6cf8a90a3e5fe8073e11205cbd8214313065464858081318a45006f3fd69/meho_ui-0.4.0-py3-none-any.whl", hash = "sha256:b008a5d5be3763b61a60880f3b65e27ea0c8bb7168aa361a7d9614cc5b00e5ac", size = 192073, upload-time = "2026-11-18T11:01:42.187Z" },
+]
 
 [[package]]
 name = "mergedeep"

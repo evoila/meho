@@ -50,7 +50,8 @@ Filter coverage
   per-session replay query
   (:func:`~meho_backplane.audit_query.replay.replay_session`).
 * ``work_ref`` is a real column (work_ref I1-T1 #1655, migration ``0039``).
-  The filter narrows to ``audit_log.work_ref = :work_ref`` — exact match (an
+  The filter narrows to ``audit_log.work_ref IN (cleaned id, text as typed)``
+  (:func:`~meho_backplane.work_ref.work_ref_filter_values`; an
   opaque change-ticket reference such as ``"gh:evoila/meho#1"`` is an
   identifier, not a search term, so the predicate is deterministic equality
   per #1177, not ``ILIKE``); the column is also surfaced on every returned
@@ -95,6 +96,7 @@ from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, T
 from meho_backplane.operations.audit_row_safe import FULL_ROW_LOST, TEXT_CHANGED
 from meho_backplane.work_ref import work_ref_filter_values
 
+from .approval_payload import approval_payload_view
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
 
@@ -448,7 +450,11 @@ def _build_audit_entry(
     BroadcastEvent observed on the SSE feed for the same ``audit_id``
     agree on the trio.
     """
-    payload = dict(row.payload) if row.payload else {}
+    # An approval row in the older form shows the person who acted as
+    # ``principal_sub`` and the requester as ``requester_sub``.
+    payload = approval_payload_view(
+        method=row.method, operator_sub=row.operator_sub, payload=row.payload or {}
+    )
 
     op_id_raw = payload.get("op_id")
     op_id = (

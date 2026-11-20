@@ -23,7 +23,9 @@ tenant's file, and two entries that give one operation different
 categories at the same level. The ``routing`` entries are checked by
 :func:`meho_backplane.policy.routing.routing_mistakes`: a group kind that
 may approve none of the changes an entry routes, and a change that nobody
-may approve. The ``bindings`` are checked by
+may approve. A tenant's ``routing`` entry that is wider than the install's
+is refused by
+:func:`meho_backplane.policy.routing_floor.tenant_floor_mistakes`. The ``bindings`` are checked by
 :func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
 install's file, no runner, no agent or service with a kind that may
 approve, and no unknown category.
@@ -59,7 +61,9 @@ from meho_backplane.policy.classification import (
     install_floor_texts,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.document import read_kind
 from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
+from meho_backplane.policy.routing_floor import tenant_floor_mistakes
 
 __all__ = ["MAX_MISTAKES", "KnownOp", "check_document", "load_known_ops"]
 
@@ -248,7 +252,7 @@ def _first_route(
             continue
         if match.get("risk") is not None and match["risk"] != level:
             continue
-        return index, {str(kind) for kind in raw.get("approvers") or []}
+        return index, {read_kind(str(kind)) for kind in raw.get("approvers") or []}
     return None
 
 
@@ -299,6 +303,8 @@ def check_document(
     mistakes = _taxonomy_mistakes(document, scope=scope, taxonomy=taxonomy)
     mistakes.extend(_entry_value_mistakes(raw_entries, taxonomy))
     mistakes.extend(routing_mistakes(list(document.get("routing") or []), taxonomy))
+    if scope == "tenant":
+        mistakes.extend(tenant_floor_mistakes(document, install_document))
     mistakes.extend(binding_mistakes(document, scope=scope, taxonomy=taxonomy))
     if mistakes:
         return _capped(mistakes)

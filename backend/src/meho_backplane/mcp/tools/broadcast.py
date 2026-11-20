@@ -94,6 +94,7 @@ from meho_backplane.broadcast import (
     AnnounceRateLimitError,
     InvalidArchiveCursorError,
     PlannedOpClass,
+    announcement_text_problem,
     build_trusted_announcement,
     encode_watch_checkpoint,
     enforce_announce_rate_limit,
@@ -263,7 +264,9 @@ register_mcp_tool(
                         "op_class": {
                             "type": "string",
                             "enum": list(OP_CLASS_ENUM),
-                            "description": ("Exact-match filter on event op_class."),
+                            "description": (
+                                "No announcement has an op_class, so any value returns no events."
+                            ),
                         },
                         "principal": {
                             "type": "string",
@@ -277,9 +280,8 @@ register_mcp_tool(
                             "maxLength": 256,
                             "description": (
                                 "Exact-match filter on target attribution. "
-                                "Matches a BroadcastEvent's target_name or "
-                                "an announcement's single 'target' OR any "
-                                "entry in its 'targets' list."
+                                "Matches an announcement's single 'target' "
+                                "OR any entry in its 'targets' list."
                             ),
                         },
                         "actor_sub": {
@@ -287,23 +289,20 @@ register_mcp_tool(
                             "minLength": 1,
                             "maxLength": 256,
                             "description": (
-                                "Exact-match filter on the RFC 8693 actor "
-                                "(the delegated agent that acted). Answers "
-                                "'what has this agent been doing' -- distinct "
-                                "from 'principal', which matches the human "
-                                "subject the agent acted for."
+                                "No announcement matches this filter, so "
+                                "any value returns no events."
                             ),
                         },
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It matches the "
+                                "'work_ref' an announcement declared."
                             ),
                         },
                         "active_only": {
@@ -319,7 +318,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "limit": {
@@ -448,6 +449,17 @@ def _parse_announce_claims(arguments: dict[str, Any]) -> _AnnounceClaims:
         claim_id=_parse_uuid_arg("claim_id", arguments.get("claim_id")),
         idempotency_key=_parse_idempotency_key(arguments.get("idempotency_key")),
     )
+
+
+def _check_announce_text(
+    activity: str, target: str | None, targets: list[str], scope: str | None
+) -> None:
+    """Refuse control characters in the announcement text fields; -32602."""
+    problem = announcement_text_problem(
+        activity=activity, target=target, targets=targets, scope=scope
+    )
+    if problem is not None:
+        raise McpInvalidParamsError(problem)
 
 
 async def _publish_agent_announcement_impl(
@@ -625,6 +637,7 @@ async def _handler_announce(
     # a malformed request from a looping caller still gets a clean
     # ``-32602`` rather than being masked by the rate-limit gate below.
     claims = _parse_announce_claims(arguments)
+    _check_announce_text(activity, target, claims.targets, scope)
     # Per-principal flood control BEFORE the publish (G6.5-T6 #2546): the
     # tenant stream is count-trimmed (``BROADCAST_MAXLEN`` = 10000), so a
     # looping principal could otherwise evict the whole tenant's
@@ -938,7 +951,9 @@ register_mcp_tool(
                         "op_class": {
                             "type": "string",
                             "enum": list(OP_CLASS_ENUM),
-                            "description": ("Exact-match filter on event op_class."),
+                            "description": (
+                                "No announcement has an op_class, so any value returns no events."
+                            ),
                         },
                         "principal": {
                             "type": "string",
@@ -952,9 +967,8 @@ register_mcp_tool(
                             "maxLength": 256,
                             "description": (
                                 "Exact-match filter on target attribution. "
-                                "Matches a BroadcastEvent's target_name or "
-                                "an announcement's single 'target' OR any "
-                                "entry in its 'targets' list."
+                                "Matches an announcement's single 'target' "
+                                "OR any entry in its 'targets' list."
                             ),
                         },
                         "actor_sub": {
@@ -962,23 +976,20 @@ register_mcp_tool(
                             "minLength": 1,
                             "maxLength": 256,
                             "description": (
-                                "Exact-match filter on the RFC 8693 actor "
-                                "(the delegated agent that acted). Answers "
-                                "'what has this agent been doing' -- distinct "
-                                "from 'principal', which matches the human "
-                                "subject the agent acted for."
+                                "No announcement matches this filter, so "
+                                "any value returns no events."
                             ),
                         },
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
                             "description": (
-                                "Exact-match filter on an external "
-                                "change-ticket reference (e.g. "
-                                "'gh:evoila/meho#123'), grouping every event "
-                                "tied to one ticket -- an announcement's "
-                                "declared 'work_ref' OR an audit-driven "
-                                "operation's projected lineage 'work_ref'."
+                                "Filter by the whole ticket id (for example "
+                                "'gh:evoila/meho#123'). White space at both "
+                                "ends is ignored. A value with control or "
+                                "invisible characters, or longer than 256 "
+                                "characters, is refused. It matches the "
+                                "'work_ref' an announcement declared."
                             ),
                         },
                         "active_only": {
@@ -994,7 +1005,9 @@ register_mcp_tool(
                     "description": (
                         "Filter narrows the result; all sub-keys "
                         "optional. Each non-null sub-key is exact-match "
-                        "(except 'active_only', a boolean mode)."
+                        "(except 'active_only', a boolean mode, and "
+                        "'work_ref', which ignores white space at both "
+                        "ends and refuses an invalid value)."
                     ),
                 },
                 "timeout_ms": {

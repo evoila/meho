@@ -19,9 +19,15 @@
 The three writes (``POST``, ``PATCH``, ``DELETE``) are for people only.
 A service or runner login with ``tenant_admin`` gets 403
 ``human_principal_required``; an agent login, capped at ``operator``, gets
-403 ``insufficient_role``. A machine login registers and removes targets
-with the ``targets.register`` and ``targets.remove`` operations, which go
-through the approval check (:mod:`meho_backplane.connectors.targets.ops`).
+403 ``insufficient_role``. A machine login registers, changes and removes
+targets with the ``targets.register``, ``targets.update`` and
+``targets.remove`` operations, which go through the approval check
+(:mod:`meho_backplane.connectors.targets.ops`).
+
+A person's write runs at once only in the web interface. A person's call
+made with a token (the ``meho`` CLI, scripts) goes to the same typed
+operation through the dispatcher and waits for approval: the route answers
+202 with the approval request id (:mod:`meho_backplane.api.v1._wait_for_approval`).
 
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
@@ -149,13 +155,19 @@ from typing import Any, Final, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import object_session
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.api.v1._wait_for_approval import (
+    AWAITING_APPROVAL_RESPONSES,
+    dispatch_rest_write,
+    runs_at_once,
+)
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.gsm_creds import (
@@ -176,7 +188,11 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref, tenant_secret_ref
-from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import (
+    effective_tenant_scope_template,
+    is_plain_kv_path,
+    rendered_tenant_prefix,
+)
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
@@ -184,10 +200,13 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
 from meho_backplane.operations._errors_target_secret import target_secret_error_detail
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     forget_target_in_connectors,
     get_or_create_connector_instance,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
+from meho_backplane.targets.required_extras import check_keycloak_managed_realm
 from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
@@ -198,6 +217,7 @@ from meho_backplane.targets.schemas import (
     TargetCreate,
     TargetListResponse,
     TargetUpdate,
+    TargetWriteResult,
     project_target_to_summary,
 )
 from meho_backplane.targets.secret_field_map import (
@@ -641,6 +661,17 @@ def _bind_ca_pin_audit(
     )
 
 
+def _enforce_merged_tls_trust_exclusion(t: TargetORM, updates: dict[str, Any]) -> None:
+    """Run :func:`_enforce_tls_trust_exclusion` on the stored row with the sent fields.
+
+    *updates* holds only the sent fields (``exclude_unset``), so a field not
+    sent keeps the value of *t*.
+    """
+    _enforce_tls_trust_exclusion(
+        updates.get("tls_ca_pin", t.tls_ca_pin), updates.get("verify_tls", t.verify_tls)
+    )
+
+
 def _enforce_tls_trust_exclusion(ca_pin: str | None, verify_tls: bool) -> None:
     """Reject the contradictory ``tls_ca_pin`` + ``verify_tls=false`` combo.
 
@@ -919,6 +950,26 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
         )
 
 
+def _require_keycloak_managed_realm(product: str, extras: Any, name: str) -> None:
+    """Reject a Keycloak target that names no managed realm, with a 422.
+
+    Runs on create and on update, on the target as it will be after the
+    write. See :mod:`meho_backplane.targets.required_extras`.
+    """
+    try:
+        check_keycloak_managed_realm(product, extras, name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
+def _with_warnings(target: Target) -> TargetWriteResult:
+    """Add the warnings of a risky but allowed setting to a create or update answer."""
+    warnings = keycloak_realm_warnings(target.product, target.extras)
+    return TargetWriteResult.model_validate({**target.model_dump(), "warnings": warnings})
+
+
 def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
     """Validate a PATCH's ``product`` field; return the effective product.
 
@@ -1036,11 +1087,11 @@ def _build_secret_ref_outside_tenant_scope_detail(
 def _tenant_prefix_or_empty(operator: Operator) -> str:
     """Render *operator*'s tenant prefix, normalised; ``""`` when the prefix check is off.
 
-    An empty ``VAULT_KV_TENANT_SCOPE_PREFIX`` (mid-migration deploy) has no
-    subtree to enforce, so only the plain-path rule applies, as at
-    dispatch time.
+    The prefix check is off when ``VAULT_KV_TENANT_SCOPE_PREFIX`` is empty
+    and the tenant has no Vault login role of its own; then only the
+    plain-path rule applies, as at dispatch time.
     """
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    template = effective_tenant_scope_template(operator)
     if not template:
         return ""
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
@@ -1149,17 +1200,15 @@ def _enforce_secret_ref_tenant_scope(
       relative to the mount, and the dispatch-time read addresses the
       default ``secret`` mount
       (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
-    * the operator's prefix is rendered from
-      :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-      (:func:`_tenant_prefix_or_empty`);
+    * the operator's prefix comes from :func:`_tenant_prefix_or_empty`;
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
     * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
       refused with any prefix setting, also an empty one
       (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
-    * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
-      mid-migration state) turns off only the prefix match: any plain
-      ref passes.
+    * an **empty** ``VAULT_KV_TENANT_SCOPE_PREFIX`` turns off only the
+      prefix match, and only for a tenant without its own Vault login role
+      (no entry in ``VAULT_OIDC_ROLE_BY_TENANT``): any plain ref passes.
 
     Only an *explicitly supplied* ``secret_ref`` is checked. The
     server-derived default
@@ -1319,6 +1368,10 @@ async def discover_targets(
         # resolve_target raises HTTPException(404/409) directly and
         # binds target_id into contextvars for the audit row.
         seed = await resolve_target(session, operator.tenant_id, seed_target)
+        # A connector may log in to the seed below. When a person changed the
+        # seed since this process last saw it, drop the logins kept for its
+        # old values first, the same as a dispatch does.
+        await forget_target_if_changed(seed)
 
     # Enumerate every connector implementation registered for the
     # product. The v2 registry keys on (product, version, impl_id) and
@@ -1480,6 +1533,23 @@ async def probe_target(
     ``targets.probe`` operation calls too.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
+    if not is_human_principal(operator):
+        # Imported here: the targets connector package imports this module.
+        from meho_backplane.connectors.targets.probe import (
+            TARGETS_PROBE_OP_ID,
+            probe_policy_refusal,
+        )
+
+        refusal = await probe_policy_refusal(operator, t)
+        if refusal is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "denied",
+                    "op_id": TARGETS_PROBE_OP_ID,
+                    "message": f"{refusal}. Nothing was probed or stored.",
+                },
+            )
     try:
         fp = await probe_and_store_fingerprint(session, t, operator=operator)
     except (TargetSecretNotFoundError, TargetSecretForbiddenError) as secret_exc:
@@ -1601,6 +1671,7 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     product = _canonicalise_and_validate_product(body.product)
+    _require_keycloak_managed_realm(product, body.extras, body.name)
     _validate_preferred_impl_id(body.preferred_impl_id, product)
     enforce_vault_login_extras_platform_admin(
         operator, before=None, after=body.extras, target_name=body.name
@@ -1608,12 +1679,11 @@ def _validate_create_body_fields(body: TargetCreate, operator: Operator) -> str:
     return product
 
 
-@router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
-) -> Target:
+) -> TargetWriteResult:
     """Create a new target in the requesting tenant.
 
     Returns 409 when a target with the same ``name`` already exists in
@@ -1699,7 +1769,7 @@ async def create_target(
     )
     if t.flight_recorder_capture is not None:  # #3272: audit a seeded override
         _audit_flight_recorder_capture_write(t, tenant_id=operator.tenant_id, before=None)
-    return _to_full(t)
+    return _with_warnings(_to_full(t))
 
 
 #: PATCH fields that change how MEHO reaches or logs in to a target. Sending
@@ -1831,6 +1901,7 @@ def _validate_update_body_fields(
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
     effective_product = _apply_product_patch(updates, t.product)
+    _require_keycloak_managed_realm(effective_product, updates.get("extras", t.extras), t.name)
     _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
@@ -1845,13 +1916,12 @@ def _validate_update_body_fields(
         )
 
 
-@router.patch("/{name}", response_model=Target)
 async def update_target(
     name: str,
     body: TargetUpdate,
     operator: Operator = _require_admin_person_dep,
     session: AsyncSession = Depends(get_session),
-) -> Target:
+) -> TargetWriteResult:
     """Partially update a target.
 
     Only fields present in the request body are modified (Pydantic
@@ -1873,7 +1943,7 @@ async def update_target(
     :func:`apply_target_update`.
     """
     t = await resolve_route_target(session, operator.tenant_id, name)
-    return await apply_target_update(t, body, operator, session)
+    return _with_warnings(await apply_target_update(t, body, operator, session))
 
 
 async def apply_target_update(
@@ -1909,9 +1979,7 @@ async def apply_target_update(
     # null-vs-absent gate (``exclude_unset``), the same one the TLS fields use.
     fr_capture_sent = "flight_recorder_capture" in updates
     fr_capture_before = t.flight_recorder_capture
-    effective_ca_pin = updates["tls_ca_pin"] if ca_pin_sent else ca_pin_before
-    effective_verify_tls = updates["verify_tls"] if verify_tls_sent else verify_tls_before
-    _enforce_tls_trust_exclusion(effective_ca_pin, effective_verify_tls)
+    _enforce_merged_tls_trust_exclusion(t, updates)
     # Structured-422 write validators (product / impl-id / secret_ref) —
     # all raise before the ``setattr`` loop so a rejected PATCH mutates
     # nothing. See :func:`_validate_update_body_fields`.
@@ -1965,65 +2033,6 @@ async def apply_target_update(
     return _to_full(t)
 
 
-@router.delete(
-    "/{name}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    response_class=Response,
-    responses={
-        # 409 ``target_has_references`` -- declared explicitly so
-        # FastAPI's autogen OpenAPI surfaces the cascade-conflict shape
-        # to SDK clients. The route handler below raises ``HTTPException(
-        # 409, detail={"kind": "target_has_references", ...})`` when the
-        # target is wired into the topology graph and ``?force=true`` is
-        # not set. Without this declaration the spec only lists 204 + 422
-        # and clients have no schema-driven signal for the recoverable
-        # cascade-conflict (the operator's first-line "retry with
-        # ?force=true" remediation). Mirrors the
-        # ``GET /api/v1/topology/history/{name}`` convention from
-        # ``api/v1/topology.py`` -- structured ``detail`` shape with a
-        # snake_case ``kind`` discriminator and an inline content schema
-        # so the regen'd Go client lands a typed JSON409 wrapper.
-        409: {
-            "description": (
-                "Target is referenced by ``graph_node`` rows; "
-                "retry with ``?force=true`` to soft-delete anyway "
-                "(``graph_node.target_id`` is ``ON DELETE SET NULL`` so "
-                "the topology rows survive). See "
-                "``docs/codebase/error-message-shape.md`` for the "
-                "convention."
-            ),
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "detail": {
-                                "type": "object",
-                                "properties": {
-                                    "kind": {
-                                        "type": "string",
-                                        "enum": ["target_has_references"],
-                                    },
-                                    "graph_node_refs": {
-                                        "type": "integer",
-                                        "minimum": 1,
-                                    },
-                                    "message": {"type": "string"},
-                                },
-                                "required": [
-                                    "kind",
-                                    "graph_node_refs",
-                                    "message",
-                                ],
-                            },
-                        },
-                        "required": ["detail"],
-                    },
-                },
-            },
-        },
-    },
-)
 async def delete_target(
     name: str,
     force: bool = Query(default=False),
@@ -2087,6 +2096,26 @@ async def count_graph_node_refs(session: AsyncSession, target_id: uuid.UUID) -> 
     return int((await session.execute(count_stmt)).scalar_one())
 
 
+def _raise_target_has_references(t: TargetORM, graph_node_ref_count: int) -> NoReturn:
+    """Raise the 409 ``target_has_references`` of a delete without ``force``."""
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "kind": "target_has_references",
+            "graph_node_refs": graph_node_ref_count,
+            "message": (
+                f"target {t.name!r} is referenced by "
+                f"{graph_node_ref_count} graph_node row(s); "
+                f"retry with ?force=true to delete anyway "
+                f"(graph_node.target_id is ON DELETE SET NULL "
+                f"so the topology rows survive). "
+                f"See docs/codebase/error-message-shape.md for "
+                f"the convention."
+            ),
+        },
+    )
+
+
 async def soft_delete_target(
     session: AsyncSession,
     t: TargetORM,
@@ -2109,22 +2138,7 @@ async def soft_delete_target(
     graph_node_ref_count = await count_graph_node_refs(session, t.id)
 
     if graph_node_ref_count > 0 and not force:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "kind": "target_has_references",
-                "graph_node_refs": graph_node_ref_count,
-                "message": (
-                    f"target {t.name!r} is referenced by "
-                    f"{graph_node_ref_count} graph_node row(s); "
-                    f"retry with ?force=true to delete anyway "
-                    f"(graph_node.target_id is ON DELETE SET NULL "
-                    f"so the topology rows survive). "
-                    f"See docs/codebase/error-message-shape.md for "
-                    f"the convention."
-                ),
-            },
-        )
+        _raise_target_has_references(t, graph_node_ref_count)
 
     t.deleted_at = datetime.now(UTC)
     await session.flush()
@@ -2137,3 +2151,199 @@ async def soft_delete_target(
         force=force,
     )
     return graph_node_ref_count
+
+
+# ---------------------------------------------------------------------------
+# The REST write routes. A person in the web interface runs a write at once;
+# every call made with a token waits for approval, like ``call_operation``
+# (``api/v1/_wait_for_approval.py``). The console and the typed operations
+# call the functions above in process, so this check does not apply to them.
+# ---------------------------------------------------------------------------
+
+
+async def _raise_if_name_taken(session: AsyncSession, tenant_id: uuid.UUID, name: str) -> None:
+    """Answer 409 now when a live target of the tenant has *name*.
+
+    The same 409 as :func:`create_target`, so a token call does not wait for
+    approval only to fail after it. The unique index still guards the write.
+    """
+    taken = await session.scalar(
+        select(TargetORM.id).where(
+            TargetORM.tenant_id == tenant_id,
+            TargetORM.name == name,
+            TargetORM.deleted_at.is_(None),
+        )
+    )
+    if taken is not None:
+        raise HTTPException(status_code=409, detail=f"target {name!r} already exists in tenant")
+
+
+async def _dispatch_targets_write(
+    operator: Operator, op_id: str, params: dict[str, Any]
+) -> JSONResponse:
+    """Send a token call to the matching ``targets.*`` typed operation."""
+    # Imported here: connectors.targets.ops imports this module.
+    from meho_backplane.connectors.targets.ops import TARGETS_REGISTRY_CONNECTOR_ID
+
+    return await dispatch_rest_write(
+        operator, connector_id=TARGETS_REGISTRY_CONNECTOR_ID, op_id=op_id, params=params
+    )
+
+
+@router.post(
+    "",
+    response_model=TargetWriteResult,
+    status_code=201,
+    operation_id="create_target_api_v1_targets_post",
+    summary="Create Target",
+    responses=AWAITING_APPROVAL_RESPONSES,
+)
+async def create_target_route(
+    body: TargetCreate,
+    operator: Operator = _require_admin_person_dep,
+    session: AsyncSession = Depends(get_session),
+) -> TargetWriteResult | JSONResponse:
+    """Create a new target in the requesting tenant (``tenant_admin``, a person).
+
+    A person in the web interface creates it at once (201). A call made
+    with a token is checked first (product, ``preferred_impl_id``,
+    ``secret_ref`` scope, Vault login keys) and then waits for approval as
+    ``targets.register`` (202 with the approval request id). Returns 409
+    when the name already exists in the tenant.
+    """
+    if runs_at_once(operator):
+        return await create_target(body=body, operator=operator, session=session)
+    _validate_create_body_fields(body, operator)
+    _resolve_create_secret_ref(body, operator)
+    await _raise_if_name_taken(session, operator.tenant_id, body.name)
+    return await _dispatch_targets_write(
+        operator, "targets.register", body.model_dump(mode="json", exclude_unset=True)
+    )
+
+
+@router.patch(
+    "/{name}",
+    response_model=TargetWriteResult,
+    operation_id="update_target_api_v1_targets__name__patch",
+    summary="Update Target",
+    responses=AWAITING_APPROVAL_RESPONSES,
+)
+async def update_target_route(
+    name: str,
+    body: TargetUpdate,
+    operator: Operator = _require_admin_person_dep,
+    session: AsyncSession = Depends(get_session),
+) -> TargetWriteResult | JSONResponse:
+    """Change a target (``tenant_admin``, a person). Only the sent fields change.
+
+    The path value is a name, an alias or an id. A person in the web
+    interface changes the target at once (200). A call made with a token is
+    checked first (a body with no field answers 422) and then waits for
+    approval as ``targets.update``, with the id of the target, so the
+    approved change goes to this target even when a name or alias changes
+    later (202 with the approval request id).
+    """
+    if runs_at_once(operator):
+        return await update_target(name=name, body=body, operator=operator, session=session)
+    updates = body.model_dump(mode="json", exclude_unset=True)
+    if not updates:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "no_fields",
+                "message": "send at least one field to change; nothing was changed",
+            },
+        )
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    _enforce_merged_tls_trust_exclusion(t, updates)
+    _validate_update_body_fields(dict(updates), t, operator)
+    return await _dispatch_targets_write(
+        operator, "targets.update", {"target_id": str(t.id), **updates}
+    )
+
+
+@router.delete(
+    "/{name}",
+    operation_id="delete_target_api_v1_targets__name__delete",
+    summary="Delete Target",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={
+        **AWAITING_APPROVAL_RESPONSES,
+        # 409 ``target_has_references`` -- declared explicitly so
+        # FastAPI's autogen OpenAPI surfaces the cascade-conflict shape
+        # to SDK clients. The route handler below raises ``HTTPException(
+        # 409, detail={"kind": "target_has_references", ...})`` when the
+        # target is wired into the topology graph and ``?force=true`` is
+        # not set. Without this declaration the spec only lists 204 + 422
+        # and clients have no schema-driven signal for the recoverable
+        # cascade-conflict (the operator's first-line "retry with
+        # ?force=true" remediation). Mirrors the
+        # ``GET /api/v1/topology/history/{name}`` convention from
+        # ``api/v1/topology.py`` -- structured ``detail`` shape with a
+        # snake_case ``kind`` discriminator and an inline content schema
+        # so the regen'd Go client lands a typed JSON409 wrapper.
+        409: {
+            "description": (
+                "Target is referenced by ``graph_node`` rows; "
+                "retry with ``?force=true`` to soft-delete anyway "
+                "(``graph_node.target_id`` is ``ON DELETE SET NULL`` so "
+                "the topology rows survive). See "
+                "``docs/codebase/error-message-shape.md`` for the "
+                "convention."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["target_has_references"],
+                                    },
+                                    "graph_node_refs": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                                "required": [
+                                    "kind",
+                                    "graph_node_refs",
+                                    "message",
+                                ],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
+async def delete_target_route(
+    name: str,
+    force: bool = Query(default=False),
+    operator: Operator = _require_admin_person_dep,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Soft-delete a target (``tenant_admin``, a person).
+
+    The path value is a name, an alias or an id. A person in the web
+    interface deletes it at once (204). A call made with a token waits for
+    approval as ``targets.remove``, with the id of the target (202 with the
+    approval request id). Both answer 409 ``target_has_references`` first
+    when topology rows point at the target and ``force`` is not set.
+    """
+    if runs_at_once(operator):
+        return await delete_target(name=name, force=force, operator=operator, session=session)
+    t = await resolve_route_target(session, operator.tenant_id, name)
+    refs = await count_graph_node_refs(session, t.id)
+    if refs > 0 and not force:
+        _raise_target_has_references(t, refs)
+    return await _dispatch_targets_write(
+        operator, "targets.remove", {"target_id": str(t.id), "force": force}
+    )

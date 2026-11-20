@@ -177,6 +177,45 @@ JSON-shaped (so it can grow without a migration):
   per-op RBAC still apply); `[]` forbids every connector. A `call_operation`
   to a connector outside the list is rejected with a `ModelRetry` — a
   structured, agent-reasonable error the model can recover from, not a crash.
+  The dispatcher picks the connector that runs a call from the target, so
+  the list is checked against the target too: with a list, every tool call
+  binds it (`operations/_target_connector_limit.py::connector_limit`), and
+  `dispatch` and `preview_dispatch` refuse a target whose connector is not
+  in the list, or that resolves no single connector, with
+  `connector_not_allowed`. This covers operations from an API file,
+  connector methods (also a method on a base class two connectors share),
+  module-level functions, and the steps of a multi-step operation. The
+  refusal comes right after the target check and before the
+  `target_connector_mismatch` check and the policy gate: one audit row, no
+  approval request, nothing sent. Because it comes first, its answer is the
+  one a caller with a list gets, and it names only the connectors in the
+  list, never the one the target picked. An `unknown_op` answer names only
+  other connectors in the list, and the tool's own refusal of a
+  `connector_id` outside the list does not repeat that id. A call that waits for approval stores
+  the list on its request (`approval_request.allowed_connectors`, migration
+  `0175`). `_dispatch_resume_with_bound_context` binds it again for the run,
+  so a person who approves after the agent stopped waiting runs the call and
+  its steps with the same list. Test:
+  `tests/test_agent_target_connector_limit.py`.
+  The list also limits what the agent reads back
+  (`tests/test_agent_connector_list_reads.py`):
+  - Every result stored while the list is bound keeps it
+    (`connector_scope` on the stored record). `result_query` and the
+    inventory load of an assessment operation find only a result stored
+    under a list inside the reader's own. Any other result, for example
+    one the person who started the run stored, is "not found".
+  - The fetch of an approved secret reveal
+    (`mcp/tools/_call_operation_reveal.py`) is refused with
+    `connector_not_allowed` when the request's connector, or the connector
+    of its stored target, is not in the list, or MEHO finds no target with
+    the stored id. One `approval.reveal` audit row, nothing runs. A hosted run
+    does not offer this input today; the check holds wherever the list is
+    bound.
+  - With `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST=true`
+    (`Settings.agent_topology_off_with_connector_list`, off by default),
+    `query_topology` is not registered for a spec with a list (disabled
+    reason `outside_connector_list`): the topology links objects of every
+    connector. With the setting off, the spec gets it when it names it.
   This keeps the "connector-ops ∩ identity permissions" intersection honest
   without putting vendor identifiers in tool names (postulate 5). Per-op RBAC
   + tenant scoping + audit + sanitization still fire unchanged inside
@@ -475,12 +514,12 @@ hosted tool also needs its role floor, and the docs tools need the tenant's
 | `search_operations` | yes | Default. |
 | `call_operation` | yes | Default. Same dispatch: policy, grants, approval and audit. |
 | `preview_operation` | yes | Default. |
-| `result_query` | yes | Default. |
+| `result_query` | yes | Default. With a `connectors` list, reads only results stored under the list. |
 | `list_targets` | yes | Default. |
 | `meho_broadcast_announce` | yes | Default, named `broadcast_announce`. |
 | `meho_broadcast_recent` | yes | Default, named `broadcast_recent`. |
 | `meho_broadcast_watch` | yes | Default, named `broadcast_watch`. |
-| `query_topology` | yes | Opt-in. |
+| `query_topology` | yes | Opt-in. Not for a spec with a `connectors` list when `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` is on. |
 | `search_memory` | yes | Opt-in. |
 | `search_knowledge` | yes | Opt-in. |
 | `add_to_memory` | yes | Opt-in. Writes with the agent's limits: only a `tenant_admin` writes `tenant` scope, and a direct run narrows a `tenant_admin` caller to `operator`. |
@@ -548,9 +587,19 @@ it):
 | `work_ref` | MEHO sets the run's change reference itself, from the trigger that started the run. The model must not replace it on the audit rows. The same rule holds for `work_ref` on `broadcast_announce`. |
 | `async`, `run_id`, `wait_seconds` | The hosted tool waits until each call ends, also while the call waits for an approval. A background call and its status check are not needed. |
 
-`list_operation_groups` and `search_operations` leave out nothing. The
-hosted `call_operation` text is the MCP text without the part about `async`,
+`list_operation_groups` and `search_operations` leave out nothing. Their
+`include_raw` input and its description line follow the `SEARCH_TYPED_FIRST`
+switch, as in `tools/list` (#4712). So the toolset builds the three tools
+for each run, not once at start. The hosted `call_operation` text is the MCP text without the part about `async`,
 plus one sentence that says each call waits until it ends.
+
+With the setting off, the hand-written `list_operation_groups` and
+`search_operations` follow the `SEARCH_TYPED_FIRST` switch too. While it is
+on, they get the `include_raw` input and the same description line
+(`with_include_raw_input` in `agent/toolset_operations.py`). The shared
+handlers then hide raw operations, and the note in the answer names
+`include_raw`, so the hosted run must be able to send it. While the switch
+is off, the catalog is the same as before.
 
 Two checks run before each handler:
 
@@ -729,8 +778,7 @@ caller may also be another agent (an `agent`-kind token). Then the caller's
 own grants and the hosted agent's grants both apply, and the stricter wins:
 a caller deny grant refuses the call even when the hosted agent would only
 wait for approval. A call that must wait for approval follows the normal approval rules (the
-person who asked cannot approve their own request, unless they are in MEHO-SA-Operators or
-MEHO-Admins, or the deploy allows it). See
+person who asked cannot approve their own request, unless they are in MEHO-Admins, or the deploy allows it). See
 `agent-permission-model.md`.
 
 MEHO does not swap the person's token for the agent's on a direct run. That

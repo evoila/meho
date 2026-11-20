@@ -463,7 +463,9 @@ async def test_secret_move_parks_without_approval(
 
     assert result.status == "awaiting_approval", result.error
     assert fake.secrets.kv.v2.put_calls == []
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read; the park looks up only whether the sink
+    # secret exists, for the approval card.
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
 
 
 # ---------------------------------------------------------------------------

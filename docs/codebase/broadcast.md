@@ -58,6 +58,21 @@ was closed as not planned).
    error after streaming began is one `event: feed_error` frame. A
    heartbeat comment follows 30 seconds without output.
 
+   **A stream ends when its login ends.** `/api/v1/feed` ends the
+   stream at the token's `exp` plus the JWT leeway, and after
+   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. This end
+   also stops an archive read that is still running (a slow Valkey or
+   database call), and a read error after the end sends no
+   `feed_error` frame.
+   `/ui/broadcast/stream` checks its session again (the same check as
+   `require_ui_operator`) at most every
+   `UI_SESSION_READ_REVALIDATION_SECONDS`, before a frame, a heartbeat
+   or a wait; a signed-out, revoked or expired session, or a lost
+   role, ends it. The client reconnects with a fresh login and
+   `Last-Event-Id`, so it misses no announcement: `meho status --watch`
+   and `meho broadcast watch` renew the token once on a 401, and the
+   browser's `EventSource` reconnects by itself.
+
    **Row identifier semantics.** Every reader returns `event_id` (the
    announcement's UUID, equal to the `agent_announcement` row's PK).
    Readers de-duplicate by `event_id`.
@@ -306,6 +321,9 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
     → resolve_agent_admission(operator)  (auth/agent_admission.py, #3736)
       → not a trusted agent → AgentIdentityRequiredError
            → MCP -32602, error.data.code = "agent_identity_required" (REST 403)
+    → announcement_text_problem(activity, target, targets, scope)  (broadcast/agent_events.py)
+      → a C0 or C1 control character or DEL (also a line break or a tab)
+           → MCP -32602 / REST 422, "<field>: must not contain control characters"
     → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
       → (skipped when broadcast_announce_rate_per_minute == 0)
       → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}

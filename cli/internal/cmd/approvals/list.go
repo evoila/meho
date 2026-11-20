@@ -45,7 +45,7 @@ func newListCmd() *cobra.Command {
 			"wait for a decision. Use --status all to see requests in " +
 			"every state, or --status approved|rejected|expired for " +
 			"one state. --filter-work-ref filters to the requests " +
-			"authorised by an external change ticket (exact match, " +
+			"authorised by an external change ticket (whole id; white space at the ends is ignored, " +
 			"e.g. gh:evoila/meho#1). --order oldest|newest picks the " +
 			"sort; the default is newest first, or oldest first when " +
 			"--filter-work-ref is set, so the steps of one change ticket read " +
@@ -64,11 +64,11 @@ func newListCmd() *cobra.Command {
 			"The APPROVE column says whether you may approve each " +
 			"pending request. MEHO works this out with the same checks " +
 			"as the approve: yes; yes:own_change (your own change, " +
-			"which a MEHO-SA-Operator or a MEHO-Admin may approve: a " +
+			"which a MEHO-Admin may approve: a " +
 			"self-approval); " +
 			"no:own_change; no:wrong_group (another person's dangerous " +
-			"or destructive change needs a MEHO-SA-Operator or a " +
-			"MEHO-Admin); no:role_too_low; no:rights_change (a change " +
+			"or destructive change needs a MEHO-Admin" +
+			"); no:role_too_low; no:rights_change (a change " +
 			"of rights: another admin must approve); no:no_approval_access; " +
 			"no:not_a_person; no:not_routed (approver routing sends the " +
 			"change to other login groups). A request that is not pending shows -. " +
@@ -95,7 +95,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&outcomeUnknown, "outcome-unknown", false,
 		"list approved changes whose outcome MEHO does not know, for you to check")
 	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
-		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
+		"filter by ticket id (whole id; white space at the ends is ignored)")
 	cmd.Flags().StringVar(&order, "order", "",
 		"sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)")
 	// 0 means "not set": the flag is then left off the request and the

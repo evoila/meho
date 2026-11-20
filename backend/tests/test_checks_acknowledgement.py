@@ -491,7 +491,8 @@ async def test_acknowledge_other_tenant_is_404(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_read_only_approver_can_acknowledge(client: TestClient) -> None:
+async def test_the_approver_claim_does_not_let_a_reader_acknowledge(client: TestClient) -> None:
+    """MEHO does not read the ``approver`` claim: the login reads like a Reader."""
     sensor_id = await _seed_sensor()
     key = make_rsa_keypair("kid-ack-approver")
     with respx.mock as r:
@@ -501,9 +502,8 @@ async def test_a_read_only_approver_can_acknowledge(client: TestClient) -> None:
             json={"expires_at": _future(), "reason": "fix_planned", "note": "x"},
             headers=_headers(key, sub="appr-bob", role=TenantRole.READ_ONLY, approver=True),
         )
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["created_by_sub"] == "appr-bob"
-    assert len(await _acks(sensor_id)) == 1
+    assert resp.status_code == 403, resp.text
+    assert await _acks(sensor_id) == []
 
 
 @pytest.mark.asyncio

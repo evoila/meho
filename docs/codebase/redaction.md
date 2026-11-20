@@ -257,16 +257,90 @@ The name rule is the shared `broadcast.events.is_secret_param_name`
 broadcast scrub and the approval echo use. The full word list:
 
 - anywhere in the name: `password`, `passwords`, `passwd`, `pwd`,
-  `passphrase`, `passphrases`, `apikey`, `kubeconfig`;
+  `passphrase`, `passphrases` (also written `pass_phrase`), `apikey`,
+  `kubeconfig`;
 - at the end of the name: `secret`, `secrets`, `token`, `credential`,
   `credentials`, `psk` (the pre-shared key of a VPN session);
 - the pairs `api_key`, `access_key`, `private_key`, `encryption_key`,
   `license_key`, `licence_key`, `license_keys`, `licence_keys`,
-  `product_key`, `secret_id`, `secret_value`, `secret_data` anywhere in
-  the name;
+  `product_key`, `secret_id`, `secret_value`, `secret_data`, `pass_phrase`
+  anywhere in the name;
 - the pairs `secret_key`, `shared_key`, `preshared_key`,
   `connection_string`, `connection_strings` only at the end of the name
   (`secret_key_ref` is the name of a Kubernetes Secret and stays plain).
+  `pre_shared_key` ends in `shared_key`, and `license_key` counts
+  anywhere;
+- the device and protocol key pairs `authentication_key` and
+  `privacy_key` (the SNMP keys), `auth_key`, `priv_key`,
+  `community_string`, `community_strings`, `tacacs_key`, `radius_key`,
+  `hmac_key`, `signing_key`, `store_key`, `application_key`,
+  `snmp_community` at the end of the name, or right before a last word
+  `ref` (`auth_key_ref` is hidden; `auth_key_id` and
+  `authentication_key_id` stay plain). The list is
+  `_SECRET_KEY_FINAL_TOKEN_PAIRS`;
+- the pair `shared_secret` anywhere in the name (`shared_secret_ref`);
+- a name in capitals has no word boundary (`AUTHKEY`, `LICENSEKEY`), so a
+  pair written as one word counts too: a final pair as the last word, any
+  other pair as any word;
+- a bare `community` field in an SNMP place
+  (`broadcast.events.is_snmp_community_key`): next to a sibling field
+  whose name has an `snmp` word (`snmp_version`, `snmpPort`), or anywhere
+  under a key with an `snmp` word (`{"snmp": {"community": ...}}`,
+  `{"snmpCommunities": [{"community": ...}]}`). Every walk over data
+  asks it next to the name rule and carries the SNMP place down. The text
+  step sees no parent or sibling, so it hides `snmp_community` but not a
+  bare `community` key;
+- the `value` of a name/value pair named `community`
+  (`[{"name": "community", "value": ...}]`), in data and in text
+  (`broadcast.events.is_secret_pair_name`): such a list gives the pair no
+  SNMP sibling, and a setting named `community` there is the SNMP
+  community;
+- never hidden, whatever the rules say: `primary_key`, `partition_key`,
+  `sort_key`, `key_id`, `public_key` (plain identifiers that end in a key
+  word; the list is `_PLAIN_KEY_NAMES`).
+
+A name whose last word is `ref` has no rule of its own. It follows the
+rules above, so it is hidden when the rest of the name is a secret name
+(`password_ref`, `apiKeyRef`, `private_key_ref`) and stays when it is not
+(`secret_ref`). This change only hides more: every name that the rule
+hid before is still hidden.
+
+The rule is one table test, `test_secret_name_new_fields.py`: each secret
+name in four spellings and with an SNMP prefix, each name that ends in
+`ref` and is hidden (`_SECRET_REF_NAMES`) in four spellings, each plain
+name in four spellings, checked in every place below and in the Keycloak
+scrub. A new name is one new row.
+
+The same rule serves the places that had a list of their own:
+
+- The Keycloak approval previews and its trace
+  (`connectors/keycloak/redaction.py`, `redact_preview_fields` and
+  `redact_trace_fields`) hide the Keycloak field names and every name the
+  shared rule marks (a flag or a number stays).
+  One name is shown on purpose: `passwordPolicy`, the text of the realm's
+  password rules (for example `length(8) and digits(1)`). It holds no
+  password, and the approver needs to read it. `redact_preview_fields`
+  hides it like any other name. Then the realm create card and the realm
+  update card put it back with one shared helper
+  (`connectors/keycloak/ops_write_realm_smtp.py::show_password_policy`):
+  only a text value at the top level of the realm, and only after the
+  value-shape pass checked it for secret-shaped text. A `passwordPolicy`
+  deeper in the realm (for example in an identity provider config) stays
+  hidden. The group, account, SMTP and rights cards do not carry it and
+  still hide it. The trace hides it too.
+- The Keycloak read results (`redact_secret_fields`) hide only the Keycloak
+  field names. The dispatcher hides the shared names in the normal answer
+  and keeps their values, so `reveal_secret: true` still returns them.
+- The secret query names of a link (`redaction/url_secret.py::is_secret_query_name`)
+  are its own last words plus every name the shared rule marks.
+- The pfSense config read (`connectors/pfsense/redaction_names.py`)
+  checks the shared rule first, then its own lists for pfSense element
+  names. It keeps its own lists because pfSense writes many secrets
+  under names that no other place uses (`ipsecpsk`, `ldap_bindpw`).
+- The secret check of an uploaded session file
+  (`session_store/secret_check.py`) sends a file to quarantine when a
+  JSON field, a name/value pair or a quoted pair in text has a name the
+  shared rule marks, and also for its own words in `name=value` text.
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number
@@ -477,7 +551,25 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     numbers included; booleans and `None` stay. The name rule is
     `is_secret_param_name` ("One name rule for secret fields" above); the
     `value` of a name/value pair whose `name` is a secret name is hidden
-    too. The
+    too. The default view also hides secret-named fields inside text
+    values: a JSON or YAML file in a string, such as a ConfigMap entry or
+    the last-applied note of kubectl (`redaction/secret_text.py`: the
+    quoted-pair text step, then a YAML read that replaces each secret value
+    in place; a YAML file inside a JSON note is read too). The YAML read
+    uses the same rules as the key-name walk: a bare `community` in an SNMP
+    place, and the `value` of a secret-named pair also when it is a list
+    or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one
+    line and keeps its anchor, so the text still reads as YAML. An alias
+    of an anchor inside a hidden value also becomes the marker. An alias
+    that a merge key uses (`<<: *name`, or each alias of a merge list
+    `<<: [*name]`) becomes an empty map `{}` when it names a hidden value
+    or a value inside one. A map an alias names in an SNMP place is
+    checked with the SNMP rule there. A text nested deeper than the
+    levels the pass reads, or too deep to parse, is hidden whole when it
+    may hold a secret name. The dispatcher builds this view in a
+    worker thread, like the redaction pass of a script, so a large text
+    value does not hold up other requests. The audit copy
+    then holds a fingerprint of the whole text. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.
 - **Plain fields** (`register_plain_fields(op_id, names)`, exported by

@@ -61,7 +61,7 @@ DBOS rebase swaps only the loop module.
     a CR id) the trigger works under. Set at create time (triggers have
     no UPDATE path); inherited end-to-end by every dispatched run — see
     "work_ref inheritance" under Dispatch. Indexed
-    `(tenant_id, work_ref)` for the list `--filter-work-ref` exact-match filter.
+    `(tenant_id, work_ref)` for the list `--filter-work-ref` filter (whole ticket id).
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
   via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher
@@ -505,6 +505,17 @@ resolution lowers `SCHEDULER_TICK_INTERVAL_SECONDS` per deployment (floor
 1 s, e.g. via the chart's `extraEnv`); worst-case latency drops to the chosen
 interval at the cost of one extra scan query per elapsed tick.
 
+## A scheduled run's requests and the people behind them
+
+A scheduled or event run asks as the agent (`principal_sub=<agent-sub>`).
+The person who made any schedule of the agent's definitions, active or not,
+counts as a person behind its requests, and so does the person who made an
+event source when one of those schedules waits for events
+(`scheduled_trigger.created_by_sub`, `event_source.created_by_sub`). The run
+does not store which schedule started it, so MEHO counts them all. A
+schedule is a way to run changes on a timer; it is never a way to approve
+your own change. See [The people behind a request](approvals.md#the-people-behind-a-request).
+
 ## Known issues / limitations
 
 - **One-off resolution is "to the second"** — `next_fire_at <= now`
@@ -609,7 +620,9 @@ The dispatcher is the **event drain's subscription matcher**
 [events.md](events.md)). For each drained `event_outbox` row it fires
 every active `kind=event` trigger in that tenant whose `event_filter`
 the event `payload` contains (`payload @> event_filter`), through the
-same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. The
+same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. An
+external (webhook) event fires only a trigger whose filter names its
+event source by slug or id. The
 fired run's work_ref is `event:{event_id}:{trigger_id}`, which dedupes a
 redelivered event so it never double-fires.
 

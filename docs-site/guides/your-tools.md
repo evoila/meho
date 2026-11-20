@@ -70,6 +70,42 @@ The web console has no button here. To sign out a browser, use the card
 
 You can sign out only your own tools.
 
+## An admin signs out a tool for someone else
+
+A tenant admin can sign out one tool of another person, for example
+when a laptop with Claude Desktop is lost. There is no console page for
+this. Use the command line:
+
+```bash
+meho admin tools sign-out --user <username or user id> --tool claude-desktop
+```
+
+- `--user` is the person's username or Keycloak user id in the realm
+  MEHO uses for sign-in. MEHO finds only people of your tenant.
+- `--tool` is `cli`, `claude-code`, `claude-desktop` or `other-mcp`. The
+  web console cannot be signed out this way.
+- You need the `tenant_admin` role. The call waits until a person
+  approves it, in the console or with `meho approvals approve`. Every
+  tenant admin may approve their own request, so no second person is
+  needed.
+- While `MCP_CLIENT_PER_TOOL_KIND` is off, MEHO refuses the call at once
+  and makes no approval request.
+- The approval shows the person by user id. MEHO signs out that user id,
+  even if the username points at someone else by then.
+- The person's other tools keep working.
+- The sign-out ends the tool's login in the whole sign-in realm, not only
+  in your tenant. A person who is in two tenants also loses that tool's
+  login for the other tenant.
+- The same limits hold as for your own sign-out: the tool's last access
+  token works for a few more minutes, and the tool can sign in again.
+  To stop the person, disable their account in Keycloak.
+- The audit entry `auth.tool_sign_out` names the admin who ran the call
+  (`operator_sub`: the admin who approved it), the admin who asked
+  (`requested_by`), the person (`user_id`, `username`) and the login
+  client. When you approve your own request, `operator_sub` and
+  `requested_by` are both you. If the call fails, the command shows the
+  error, and no "signed out" entry is written.
+
 ## Before you start
 
 The card shows only when your MEHO admin has given each AI tool its own

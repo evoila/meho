@@ -103,7 +103,7 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
-- `--add-tenant` — also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name
+- `--add-tenant` — also make the three groups `MEHO-<name>-<Role>` of one more tenant with this short name
 - `--add-tenant-id` — the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, else a new one, printed at the end)
 - `--admin-user-email` — optional email for the new admin user
 - `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
@@ -118,14 +118,37 @@ meho admin keycloak bootstrap-clients [flags]
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
 - `--mcp-client-id` — public client_id for the MCP browser-flow client
 - `--mcp-offline-session-idle` — how many seconds an unused MCP login stays valid: sets the `client.offline.session.idle.timeout` attribute on the MCP browser-flow client. Default 48h. Without it the realm's Offline Session Idle applies (30 days by default)
+- `--mcp-profile` — also make a login client `meho-mcp-profile-<name>` for this MCP tool profile (repeat for more). Every token of that client carries the claim `mcp_profile: <name>`, and MEHO takes it only at `/mcp?profile=<name>`
 - `--mcp-redirect-uri` — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
-- `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
-- `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
-- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
+- `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the three role groups are still created
+- `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the three MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
+- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the three MEHO role groups
+- `--web-approve-client-id` — the console's approval sign-in client_id (matches the backplane's UI_KEYCLOAK_APPROVE_CLIENT_ID); when the realm has it, it is bound to the approval sign-in flow
 - `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
+
+### `meho admin tools`
+
+Admin work on the tool logins of people in your tenant
+
+```
+meho admin tools
+```
+
+#### `meho admin tools sign-out`
+
+Sign out one tool of a person; their other tools keep working
+
+```
+meho admin tools sign-out [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--tool` — the tool kind: cli, claude-code, claude-desktop or other-mcp (required)
+- `--user` — the person: Keycloak user id or exact username (required)
 
 ## `meho agent`
 
@@ -374,7 +397,7 @@ meho agent run-list [flags]
 
 - `--agent-name` — filter by agent definition name (exact match); an unknown name returns an empty list
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit the raw []AgentRunSummaryResponse JSON instead of the table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--offset` — rows to skip for paging into the result set (default 0)
@@ -479,7 +502,7 @@ meho approvals list [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference, exact match
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
@@ -590,6 +613,7 @@ meho approvals show <id> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON instead of the human-readable view
+- `--script-page` — print this page (from 1) of the script of a linux.script.run request
 
 ### `meho approvals withdraw`
 
@@ -838,7 +862,7 @@ meho audit count [flags]
 
 - `--audit-id` — count only this audit-id (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — count only the rows of one change-ticket reference
+- `--filter-work-ref` — count only the rows of one ticket id (whole id; white space at the ends is ignored)
 - `--json` — print the backplane's answer as it came instead of the summary
 - `--op-class` — count only one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — count only one op-id (glob with * wildcards)
@@ -874,7 +898,7 @@ meho audit query [flags]
 - `--audit-id` — exact audit-id lookup (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
-- `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored) — "show every write authorised by ticket X"
 - `--full-row-lost` — only the short rows: the database refused the full row, so MEHO stored the row without the target's answer and the error text
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
@@ -1267,7 +1291,7 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
-- `--filter-work-ref` — exact work-reference filter
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
@@ -3907,6 +3931,9 @@ meho operation groups <connector_id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cursor` — the next_cursor of the previous page, to list the next page
+- `--group` — list only this group (matters only while the backplane switch GROUP_LISTING_OPERATIONS is on)
+- `--include-raw` — also count raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 
 ### `meho operation preview`
@@ -3964,6 +3991,7 @@ meho operation search <connector_id> [query] [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--group` — narrow the search to one group_key within the connector
+- `--include-raw` — also show raw operations made from the vendor API description (matters only while the backplane switch SEARCH_TYPED_FIRST is on)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits
@@ -4466,7 +4494,7 @@ meho runbook runs [flags]
 
 - `--assignee` — filter by assignee subject (tenant_admin only; operators see own regardless)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw RunbookListRunsResponse JSON instead of the human table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--status` — filter by run state: in_progress, completed, or abandoned
@@ -4583,7 +4611,7 @@ meho scheduler create [flags]
 - `--agent-definition` — UUID of the agent definition to fire
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cron-expr` — 5-field cron expression (required when --kind=cron)
-- `--event-filter` — event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-)
+- `--event-filter` — event-match filter JSON object (required when --kind=event; inline JSON, @<path>, or @-); for webhook events it must name the event source (source.slug or source.id)
 - `--fire-at` — ISO 8601 fire time (required when --kind=one_off)
 - `--identity-sub` — identity sub the scheduler impersonates at fire time (default '__scheduler__')
 - `--in-flight-policy` — killed-mid-flight policy: fail_into_audit | resume (default fail_into_audit)
@@ -4608,7 +4636,7 @@ meho scheduler list [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--filter-work-ref` — filter by external change-ticket reference
+- `--filter-work-ref` — filter by ticket id (whole id; white space at the ends is ignored)
 - `--json` — emit raw ListResponse JSON instead of the human table
 - `--kind` — filter by trigger kind: cron | one_off | event
 - `--limit` — max triggers per page (1..500, server default 100 when omitted)
@@ -4876,7 +4904,7 @@ meho secret read <mount> <path> | read --approval <id> [flags]
 
 ## `meho sensor`
 
-Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)
+Manage deterministic-check sensors (list / create / edit / pause / resume / run / delete / results / ack)
 
 ```
 meho sensor
@@ -4884,7 +4912,7 @@ meho sensor
 
 ### `meho sensor ack`
 
-Acknowledge a sensor finding until a set time, with a reason (operator or approver)
+Acknowledge a sensor finding until a set time, with a reason (operator role)
 
 ```
 meho sensor ack <sensor_id> [flags]
@@ -5013,6 +5041,18 @@ meho sensor resume <sensor_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw Sensor JSON instead of the human summary
 - `--tenant` — target tenant UUID (platform_admin cross-tenant change)
+
+### `meho sensor run`
+
+Run one sensor once now (tenant_admin)
+
+```
+meho sensor run <sensor_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit a structured JSON result instead of plain text
+- `--tenant` — target tenant UUID (platform_admin cross-tenant run)
 
 ## `meho service-principals`
 
@@ -5215,7 +5255,7 @@ meho status [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
-- `--first-start` — show the first-start checks (DNS name, certificate, clock, reachability of the systems) as a red/green list; needs no login
+- `--first-start` — show the first-start checks (DNS name, certificate, clock, network, reachability of the systems) as a red/green list; needs a login as a tenant admin or a platform admin
 - `--json` — emit a single JSON document on stdout instead of the human summary
 - `--op-class` — filter --watch events by op_class (read, write, credential_read, audit_query)
 - `--principal` — filter --watch events by principal_sub (JWT subject claim)

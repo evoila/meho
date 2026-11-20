@@ -5,13 +5,13 @@
 
 The ``routing`` section of the policy file maps a category, a connector or
 a risk level to login group kinds (``Readers``, ``Operators``,
-``SA-Operators``, ``Admins``, ``Approvers``):
+``Admins``):
 
 .. code-block:: yaml
 
     routing:
       - match: {category: network}
-        approvers: [SA-Operators, Admins]
+        approvers: [Operators, Admins]
 
 When a request starts to wait, :func:`approver_set_for` works out the
 group kinds that may approve it and the request stores them
@@ -22,13 +22,35 @@ binding, the role floor, the rules on own changes.
 
 The rules:
 
-* The tenant's entries come first, then the install's. The first entry
-  whose ``match`` fits wins. All fields of a ``match`` must fit.
-* Routing only narrows. The stored kinds are the entry's kinds that may
-  approve the change today (:func:`today_kinds`). A file never lets a
-  group approve what it may not approve today.
+* The install's routing is a floor. The first install entry whose
+  ``match`` fits counts first, then the first tenant entry that fits. All
+  fields of a ``match`` must fit. A person must be in the kinds of both,
+  so a tenant entry can only narrow the install's entry, never widen it
+  (:mod:`meho_backplane.policy.routing_floor`).
+* An install entry matches on the category the install's policy alone
+  gives the change (``install_category``), a tenant entry on the category
+  the classification gives it. So a tenant that moves an operation to
+  another category for its own rules does not take it away from the
+  install's routing.
+* The install's category is not known (the empty text) when the install's
+  classification entries give the change two categories, and on a request
+  that started to wait before MEHO stored it. Then no group may approve
+  the change when an install entry that matches on a category could fit
+  it (``approver_rule`` ``"category_not_stored"``).
+* Routing only narrows. The stored kinds are the kinds of the fitting
+  entries that may approve the change today (:func:`today_kinds`). A file
+  never lets a group approve what it may not approve today.
+* ``approver_rule`` names every entry that fits, the install's first, for
+  example ``install:routing[0], tenant:routing[1]``.
 * No entry fits: today's rule. Everyone who may approve today may approve
   (``approver_rule`` ``"default"``).
+* A file may still name the old kinds ``SA-Operators`` and ``Approvers``.
+  An old kind matches only the members of that old login group, by the
+  group in the token (:attr:`~meho_backplane.auth.operator.Operator.old_group`),
+  never the whole new role. It is narrower than the kind it is read as
+  (:func:`narrow`): ``SA-Operators`` may approve only what an Operator may
+  approve, and ``Approvers`` (read as Readers) never approves. A request
+  keeps the kinds it was stored with, read by the same rule.
 * A change of rights is not routed. Only another admin approves it, as
   today.
 * The stored value holds group kinds, never people. The requester is not
@@ -54,20 +76,24 @@ from meho_backplane.auth.operator import Operator, RoleGroup, TenantRole
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION
 from meho_backplane.policy.classification import RISK_LEVELS, Taxonomy
-from meho_backplane.policy.document import GROUP_KINDS
+from meho_backplane.policy.document import ACCEPTED_KINDS, read_kind
 from meho_backplane.policy.evaluate import approver_groups
 from meho_backplane.policy.store import _documents
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "CATEGORY_NOT_STORED",
     "DEFAULT_RULE",
     "ROUTING_INVALID_RULE",
     "ApproverSet",
     "RouteEntry",
     "approver_set_for",
     "category_routing_warnings",
+    "covers",
     "group_names",
+    "in_kinds",
     "kind_of",
+    "narrow",
     "route",
     "routes_from_documents",
     "routing_enabled",
@@ -82,6 +108,11 @@ __all__ = [
 #: ``approver_rule`` when no routing entry fits: today's rule.
 DEFAULT_RULE: Final[str] = "default"
 
+#: ``approver_rule`` when the install's category of the change is not known
+#: (the empty text) and an install entry that matches on a category could
+#: fit it: no group may approve the change.
+CATEGORY_NOT_STORED: Final[str] = "category_not_stored"
+
 #: ``approver_rule`` on the audit row of a park refused because the stored
 #: routing is not valid.
 ROUTING_INVALID_RULE: Final[str] = "invalid"
@@ -94,13 +125,17 @@ def routing_enabled() -> bool:
 
 @dataclass(frozen=True)
 class RouteEntry:
-    """One ``routing`` entry, with where it came from (``ref``)."""
+    """One ``routing`` entry, with where it came from (``ref``).
+
+    ``install`` is true for an entry of the install's policy: the floor.
+    """
 
     ref: str
     approvers: tuple[str, ...]
     category: str | None = None
     connector: str | None = None
     risk: str | None = None
+    install: bool = False
 
     def matches(self, *, category: str | None, connector_id: str, level: str | None) -> bool:
         """True when every field of the entry's ``match`` fits the change."""
@@ -113,23 +148,65 @@ class RouteEntry:
 
 @dataclass(frozen=True)
 class ApproverSet:
-    """The group kinds that may approve a change, and the rule that set them."""
+    """The group kinds that may approve a change, and the rule that set them.
+
+    ``floor`` is the install's entry that fits, or ``None``.
+    """
 
     kinds: tuple[str, ...]
     rule: str
+    floor: str | None = None
 
 
 def _ordered(kinds: Sequence[str] | set[str] | frozenset[str]) -> tuple[str, ...]:
-    """*kinds* in the order of :data:`GROUP_KINDS`, without unknown names."""
-    return tuple(kind for kind in GROUP_KINDS if kind in kinds)
+    """*kinds* in the order of :data:`ACCEPTED_KINDS`, without unknown names.
+
+    An old kind (``SA-Operators``, ``Approvers``) stays as it is.
+    """
+    return tuple(kind for kind in ACCEPTED_KINDS if kind in kinds)
+
+
+def covers(kinds: Sequence[str], kind: str) -> bool:
+    """True when every member of *kind* is in one of *kinds*.
+
+    *kind* itself, or for an old kind the kind it is read as: every member
+    of ``SA-Operators`` is an Operator. A new kind is never covered by an
+    old one.
+    """
+    return kind in kinds or read_kind(kind) in kinds
+
+
+def narrow(first: Sequence[str], second: Sequence[str]) -> tuple[str, ...]:
+    """The kinds whose members are in both *first* and *second*.
+
+    ``[Operators, Admins]`` and ``[SA-Operators, Admins]`` give
+    ``[SA-Operators, Admins]``: the old kind is the narrower one.
+    """
+    both = {kind for kind in (*first, *second) if covers(first, kind) and covers(second, kind)}
+    return _ordered(both)
+
+
+def in_kinds(operator: Operator, kinds: Sequence[str]) -> bool:
+    """True when *operator* is a member of one of *kinds*.
+
+    A new kind matches by :func:`kind_of`. An old kind matches only a
+    person whose token names that old login group for the current tenant
+    (:attr:`~meho_backplane.auth.operator.Operator.old_group`), and whose
+    kind is the kind the old one is read as.
+    """
+    kind = kind_of(operator)
+    if kind in kinds:
+        return True
+    old = operator.old_group
+    return old is not None and old.value in kinds and read_kind(old.value) == kind
 
 
 def today_kinds(level: str | None, op_id: str) -> tuple[str, ...]:
     """The group kinds that may approve another person's change today.
 
     The same rule as :func:`~meho_backplane.policy.evaluate.approver_groups`:
-    a ``dangerous`` or ``destructive`` change only SA-Operators and Admins;
-    a lower one also Operators and Approvers; an operation with the
+    a ``dangerous`` or ``destructive`` change only Admins;
+    a lower one also Operators; an operation with the
     ``tenant_admin`` role floor only Admins. Readers never approve.
     """
     groups = approver_groups(level or "", op_id)
@@ -140,22 +217,31 @@ def kind_of(operator: Operator) -> str:
     """The login group kind of *operator* in its current tenant.
 
     Admins have the ``tenant_admin`` role (also a platform admin who works
-    in a tenant without a role group there). SA-Operators are operators
-    who may approve their own changes. Approvers are ``read_only`` with the
-    approver flag.
+    in a tenant without a role group there). Operators have the ``operator``
+    role, or the ``approver`` flag: such a person approves what an
+    Operator approves. No role gives the flag today; roles that customers
+    define come later. Everyone else is a Reader.
     """
     if operator.tenant_role == TenantRole.TENANT_ADMIN:
         return RoleGroup.ADMINS.value
-    if operator.tenant_role == TenantRole.OPERATOR:
-        return (RoleGroup.SA_OPERATORS if operator.self_approver else RoleGroup.OPERATORS).value
-    return (RoleGroup.APPROVERS if operator.approver else RoleGroup.READERS).value
+    if operator.tenant_role == TenantRole.OPERATOR or operator.approver:
+        return RoleGroup.OPERATORS.value
+    return RoleGroup.READERS.value
 
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _routes(document: Mapping[str, Any] | None, scope: str) -> list[RouteEntry]:
+def _routes(
+    document: Mapping[str, Any] | None, scope: str, *, install: bool | None = None
+) -> list[RouteEntry]:
+    """The ``routing`` entries of *document*; *scope* starts each ``ref``.
+
+    *install* marks the entries as the install's (the floor). By default
+    they are when *scope* is ``install``.
+    """
+    is_install = scope == "install" if install is None else install
     raw_routes = (document or {}).get("routing") or []
     if not isinstance(raw_routes, list):
         raise ValueError(f"{scope}: `routing` must be a list.")
@@ -173,6 +259,7 @@ def _routes(document: Mapping[str, Any] | None, scope: str) -> list[RouteEntry]:
                 category=_text(match.get("category")),
                 connector=_text(match.get("connector")),
                 risk=_text(match.get("risk")),
+                install=is_install,
             )
         )
     return entries
@@ -181,7 +268,7 @@ def _routes(document: Mapping[str, Any] | None, scope: str) -> list[RouteEntry]:
 def routes_from_documents(
     install: Mapping[str, Any] | None, tenant: Mapping[str, Any] | None
 ) -> list[RouteEntry]:
-    """The routing entries for a tenant: its own first, then the install's.
+    """The routing entries for a tenant: its own, then the install's (the floor).
 
     Raises :class:`ValueError` when a stored document holds a bad entry.
     The import refuses such a file, so this means the stored row was
@@ -194,22 +281,47 @@ def route(
     entries: Sequence[RouteEntry],
     *,
     category: str | None,
+    install_category: str | None,
     connector_id: str,
     level: str | None,
     op_id: str,
 ) -> ApproverSet:
     """Return the group kinds that may approve the change, and the rule.
 
-    The first entry that fits wins; its kinds are cut to the kinds that
-    may approve the change today. No entry fits: today's kinds.
+    The first install entry that fits counts, then the first tenant entry
+    that fits. The kinds are the kinds of both entries that may approve
+    the change today: a tenant entry only narrows the install's. An
+    install entry matches on *install_category*, a tenant entry on
+    *category*. No entry fits: today's kinds. An *install_category* of
+    the empty text is not known: when an install entry that matches on a
+    category could fit, no kind may approve (:data:`CATEGORY_NOT_STORED`).
     """
-    allowed = today_kinds(level, op_id)
-    for entry in entries:
-        if entry.matches(category=category, connector_id=connector_id, level=level):
-            return ApproverSet(
-                kinds=tuple(k for k in allowed if k in entry.approvers), rule=entry.ref
-            )
-    return ApproverSet(kinds=allowed, rule=DEFAULT_RULE)
+    if install_category == "" and any(
+        e.install
+        and e.category is not None
+        and e.matches(category=e.category, connector_id=connector_id, level=level)
+        for e in entries
+    ):
+        return ApproverSet(kinds=(), rule=CATEGORY_NOT_STORED)
+    kinds = today_kinds(level, op_id)
+    fitting: list[RouteEntry] = []
+    for install, fit_category in ((True, install_category), (False, category)):
+        entry = next(
+            (
+                e
+                for e in entries
+                if e.install is install
+                and e.matches(category=fit_category, connector_id=connector_id, level=level)
+            ),
+            None,
+        )
+        if entry is not None:
+            fitting.append(entry)
+            kinds = narrow(kinds, entry.approvers)
+    if not fitting:
+        return ApproverSet(kinds=kinds, rule=DEFAULT_RULE)
+    floor = fitting[0].ref if fitting[0].install else None
+    return ApproverSet(kinds=kinds, rule=", ".join(e.ref for e in fitting), floor=floor)
 
 
 async def approver_set_for(
@@ -220,6 +332,7 @@ async def approver_set_for(
     op_id: str,
     level: str | None,
     category: str | None,
+    install_category: str | None,
 ) -> ApproverSet:
     """Load the stored policies of *tenant_id* and route the change."""
     install, tenant = await _documents(session, tenant_id)
@@ -227,11 +340,22 @@ async def approver_set_for(
         install.document if install is not None else None,
         tenant.document if tenant is not None else None,
     )
-    return route(entries, category=category, connector_id=connector_id, level=level, op_id=op_id)
+    return route(
+        entries,
+        category=category,
+        install_category=install_category,
+        connector_id=connector_id,
+        level=level,
+        op_id=op_id,
+    )
 
 
 async def stamp_approver_set(
-    session: AsyncSession, request: ApprovalRequest, *, category: str | None
+    session: AsyncSession,
+    request: ApprovalRequest,
+    *,
+    category: str | None,
+    install_category: str | None,
 ) -> None:
     """Store on *request* the group kinds that may approve it, and the rule.
 
@@ -240,7 +364,9 @@ async def stamp_approver_set(
     dispatcher stamped on ``proposed_effect``. *category* is the one the
     classification gave the looked-up row (``policy_category``, set while
     the ``POLICY_CLASSIFICATION`` switch is on); a request without a
-    category matches only entries without one.
+    category matches only entries without one. *install_category* is the
+    category the install's policy alone gives it
+    (``policy_install_category``); the install's entries match on it.
     """
     if not routing_enabled() or request.rights_change:
         return
@@ -252,9 +378,12 @@ async def stamp_approver_set(
         op_id=request.op_id,
         level=_text(effect.get("safety_level")),
         category=category,
+        install_category=install_category,
     )
     request.approver_roles = list(found.kinds)
     request.approver_rule = found.rule
+    request.approver_category = category
+    request.approver_install_category = install_category
 
 
 def stored_kinds(value: Any) -> tuple[str, ...] | None:
@@ -271,7 +400,7 @@ def stored_kinds(value: Any) -> tuple[str, ...] | None:
 
 
 def group_names(kinds: Sequence[str]) -> str:
-    """``MEHO-SA-Operators or MEHO-Admins``: the kinds as group names."""
+    """``MEHO-Operators or MEHO-Admins``: the kinds as group names."""
     names = [f"MEHO-{kind}" for kind in kinds]
     if len(names) <= 1:
         return "".join(names)
@@ -313,12 +442,11 @@ def routing_refusal(
             f"No group may approve this change (routing rule `{rule}`), so it waits until "
             "it expires."
         )
-    kind = kind_of(operator)
-    if kind in kinds:
+    if in_kinds(operator, kinds):
         return None
     return (
         f"Only {group_names(kinds)} may approve this change (routing rule `{rule}`). "
-        f"You are in MEHO-{kind}."
+        f"You are in MEHO-{kind_of(operator)}."
     )
 
 
@@ -355,7 +483,7 @@ def _approve_mistakes(index: int, raw: Mapping[str, Any]) -> list[str]:
     mistakes = [
         f"`routing[{index}]` asks `{kind}`, but `{kind}` has no `approve` rule for these changes."
         for kind in approvers
-        if not any(kind in today_kinds(level, "") for level in levels)
+        if not any(covers(today_kinds(level, ""), kind) for level in levels)
     ]
     where = (
         f"in category {match['category']}"
@@ -366,7 +494,7 @@ def _approve_mistakes(index: int, raw: Mapping[str, Any]) -> list[str]:
         f"A {level} change {where} can wait, but no role may approve it. It would wait "
         "until it expires."
         for level in levels
-        if not set(approvers) & set(today_kinds(level, ""))
+        if not any(covers(today_kinds(level, ""), kind) for kind in approvers)
     )
     return mistakes
 

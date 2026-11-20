@@ -58,10 +58,11 @@ marker, ``***``) stays, so its label is kept.
 
 Used by the dispatch error path (``operations/_errors.py`` and
 ``operations/_vendor_text.py``) and by the flight-recorder trace scrub
-(``flight_recorder/_content.py``). The normal result path does not use it:
-there ``operations/_secret_values.py`` hides a field like ``password`` in
-every answer, with the fields an operation declared as plain left in place
-(``docs/codebase/redaction.md``).
+(``flight_recorder/_content.py``). The normal result path uses only the text
+step, through :mod:`.secret_text`: there ``operations/_secret_values.py``
+hides a field like ``password`` in every answer, with the fields an
+operation declared as plain left in place, and then hides the secret-named
+fields inside each text value (``docs/codebase/redaction.md``).
 """
 
 from __future__ import annotations
@@ -162,6 +163,24 @@ def _is_secret_name(name: str) -> bool:
     from meho_backplane.broadcast.events import is_secret_param_name
 
     return is_secret_param_name(name)
+
+
+def _is_secret_pair_name(name: str) -> bool:
+    from meho_backplane.broadcast.events import is_secret_pair_name
+
+    return is_secret_pair_name(name)
+
+
+def _is_snmp_community(node: Mapping[Any, Any], key: Any, *, in_snmp: bool) -> bool:
+    from meho_backplane.broadcast.events import is_snmp_community_key
+
+    return is_snmp_community_key(node, key, in_snmp=in_snmp)
+
+
+def _has_snmp_word(name: Any) -> bool:
+    from meho_backplane.broadcast.events import has_snmp_word
+
+    return has_snmp_word(name)
 
 
 def _is_secret_pair(node: Mapping[Any, Any]) -> bool:
@@ -338,7 +357,7 @@ def _pair_name(text: str, match: re.Match[str], opener: str, *, escaped: bool) -
     if end == -1:
         return None
     name = _decode_name(text[match.end() : end], escaped=escaped)
-    return name if _is_secret_name(name) else None
+    return name if _is_secret_pair_name(name) else None
 
 
 def _pair_value_field(
@@ -454,7 +473,13 @@ def scrub_secret_fields(node: Any, *, hide_numbers: bool = False) -> Any:
     With *hide_numbers* a number there is replaced too; booleans and
     ``None`` stay. Every other string goes through
     :func:`scrub_secret_fields_in_text`. Other values stay as they are.
+    A bare ``community`` is hidden in an SNMP place
+    (:func:`~meho_backplane.broadcast.events.is_snmp_community_key`).
     """
+    return _scrub(node, hide_numbers=hide_numbers, in_snmp=False)
+
+
+def _scrub(node: Any, *, hide_numbers: bool, in_snmp: bool) -> Any:
     if isinstance(node, str):
         return scrub_secret_fields_in_text(node)
     if isinstance(node, Mapping):
@@ -462,14 +487,20 @@ def scrub_secret_fields(node: Any, *, hide_numbers: bool = False) -> Any:
         return {
             key: (
                 SECRET_FIELD_MARKER
-                if (_is_secret_name(str(key)) or (hide_pair_value and key == "value"))
+                if (
+                    _is_secret_name(str(key))
+                    or _is_snmp_community(node, key, in_snmp=in_snmp)
+                    or (hide_pair_value and key == "value")
+                )
                 and _can_hold_secret(value, hide_numbers)
-                else scrub_secret_fields(value, hide_numbers=hide_numbers)
+                else _scrub(
+                    value, hide_numbers=hide_numbers, in_snmp=in_snmp or _has_snmp_word(key)
+                )
             )
             for key, value in node.items()
         }
     if isinstance(node, Sequence) and not isinstance(node, (bytes, bytearray)):
-        return [scrub_secret_fields(item, hide_numbers=hide_numbers) for item in node]
+        return [_scrub(item, hide_numbers=hide_numbers, in_snmp=in_snmp) for item in node]
     return node
 
 

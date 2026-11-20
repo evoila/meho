@@ -870,11 +870,16 @@ What the dispatcher does on `True`:
 - It repeats the call once only when that cannot send a change twice: the
   operation's risk level is `safe`, or it is an ingested operation with one
   request. A typed write, a multi-step operation and a call that runs after
-  a person's approval are not sent again. The caller then gets
-  `connector_auth_failed` that says the change may or may not have been made.
+  a person's approval are not sent again, unless they are `safe`. The caller then gets
+  `connector_auth_failed` that says the change may or may not have been made,
+  stored as an unknown outcome (`execution_outcome: uncertain`).
+- Before MEHO sends an approved change, it calls `invalidate_session(target)`
+  once, so the change starts with a fresh login. The hook must accept the
+  target alone; `rejected` is optional.
 - The audit row of the call has `session_relogin` (true whenever MEHO dropped
   the kept login), `session_resent` (true only when MEHO sent the operation
-  again) and `session_relogin_status`.
+  again), `result_unknown` (true when MEHO did not send it again: the change
+  may or may not have been made) and `session_relogin_status`.
 - A method that answers something other than `True` or `False`, or that
   raises, counts as "no". MEHO writes one warning log line for it.
 - It never repeats twice. If the sign-in is refused, the caller gets

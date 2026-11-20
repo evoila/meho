@@ -160,6 +160,10 @@ More rules:
   connectors in the list. When the agent asks for a connector that is not in
   the list, MEHO refuses the call and tells the agent which connectors it
   may use.
+  `result_query` reads only results that were stored under the list.
+  With the setting `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` on, an agent
+  with a `connectors` list does not get `query_topology`; the setting is
+  off by default.
 
 ### The tool names
 
@@ -291,6 +295,26 @@ meho agent edit pod-reader --disabled   # switch it off
 meho agent edit pod-reader --enabled    # switch it on again
 ```
 
+To let the definition run as another agent, pass `--identity-ref`. When
+that agent has no grant yet, MEHO asks for its first grants, as at
+create. Pass `--grants` with it:
+
+```bash
+meho agent edit pod-reader --identity-ref agent:<other-agent> --grants none
+```
+
+When the agent already has grants, MEHO needs no `--grants`. Then
+`meho agent create` and `meho agent edit` print the agent's grants that
+are live, so you see what it may do:
+
+```text
+This agent already has these grants; no starting grant is needed.
+live grants of agent:<other-agent>:
+  op=* target=every target verdict=auto-execute ends=never
+```
+
+The console forms show the same list next to the starting grant choices.
+
 ## Step 5 — Set permissions (grants)
 
 Every operation has a **safety level**: `safe`, `caution`, `dangerous`,
@@ -396,7 +420,8 @@ else. This example assumes the switch is `on`.
 
 3. Create the definition as in [Step 4](#step-4-create-the-definition),
    with `--identity-ref agent:report-reader`. It needs no `--grants`:
-   the agent already has grants.
+   the agent already has grants. The output lists them under "This agent
+   already has these grants; no starting grant is needed."
 
 4. What happens when the agent calls operations:
 
@@ -608,6 +633,10 @@ meho agent run-list --status running          # runs that are still going
 meho agent run-cancel <run-id>                # stop a run
 meho agent run-events pod-reader --input "..." # start a run and watch each step live
 ```
+
+You can stop a run that you started. A tenant admin can stop any run of
+the tenant, and so can a platform admin. An agent or service login can stop
+only its own runs.
 
 ### A run as the agent, with its grants
 

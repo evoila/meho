@@ -216,7 +216,7 @@ def test_standing_grant_then_run_approval_clear_a_service_wait() -> None:
     "asked",
     [
         _asked("dangerous", caller_address=True),
-        _asked("dangerous", op_class=frozenset({"credential_read"})),
+        _asked("dangerous", op_class=frozenset({"credential"})),
         _asked("dangerous", op_class=frozenset({"classified_always_wait"})),
         _asked("dangerous", op_class=frozenset({"per_call_approval"})),
     ],
@@ -266,11 +266,8 @@ def test_hosted_run_of_an_agent_caller_uses_both_grants() -> None:
 
 def test_approvers_only_for_a_wait() -> None:
     assert evaluate(_asker(), _asked("safe"), Lookups()).approvers == ()
-    assert evaluate(_asker(), _asked("dangerous"), Lookups()).approvers == (
-        "MEHO-SA-Operators",
-        "MEHO-Admins",
-    )
-    assert approver_groups("caution", "x.op")[0] == "MEHO-Operators"
+    assert evaluate(_asker(), _asked("dangerous"), Lookups()).approvers == ("MEHO-Admins",)
+    assert approver_groups("caution", "x.op") == ("MEHO-Operators", "MEHO-Admins")
     assert approver_groups("caution", _FLOOR_OP) == ("MEHO-Admins",)
 
 

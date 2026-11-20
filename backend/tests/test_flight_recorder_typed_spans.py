@@ -492,6 +492,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "spaces-records",
         "targets-registry",
         "tempo-api",
+        "tools-admin",
         "topology-graph",
         "vault",
         "windns-ssh",

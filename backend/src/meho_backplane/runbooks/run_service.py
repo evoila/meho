@@ -123,6 +123,7 @@ import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.machine_logins import is_machine_login
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -856,6 +857,9 @@ class RunbookRunService:
             self._refuse_if_terminal(run)
             now = datetime.now(UTC)
             run.assigned_to = request.new_assignee
+            if not await is_machine_login(session, tenant_id, operator_sub):
+                # A machine handover keeps the person who last handed the run over.
+                run.reassigned_by = operator_sub
             await session.commit()
 
         structlog.get_logger().info(
@@ -1351,7 +1355,11 @@ class RunbookRunService:
         }
 
         call_result = await self._linked_call_result(
-            caller, approval_request_id, call_arguments=call_arguments
+            caller,
+            approval_request_id,
+            call_arguments=call_arguments,
+            run_id=run.run_id,
+            step_id=current_step.id,
         )
         if call_result is None:
             call_result = await self._dispatch_check_call(
@@ -1379,8 +1387,14 @@ class RunbookRunService:
         approval_request_id: uuid.UUID | None,
         *,
         call_arguments: dict[str, Any],
+        run_id: uuid.UUID,
+        step_id: str,
     ) -> dict[str, Any] | None:
         """Return the result of the approved call the check waited for.
+
+        The read writes an ``approval.result`` audit row. *run_id* and
+        *step_id* are bound while it is read, so the row names the run and
+        the step.
 
         Returns ``None`` when the check must run its call (no linked
         request, or :func:`read_linked_approval` says so). Raises
@@ -1390,12 +1404,18 @@ class RunbookRunService:
         """
         if approval_request_id is None:
             return None
-        linked = await read_linked_approval(
-            caller,
-            approval_request_id,
-            op_id=call_arguments["op_id"],
-            connector_id=call_arguments["connector_id"],
-        )
+        run_token = run_id_var.set(run_id)
+        step_token = step_id_var.set(step_id)
+        try:
+            linked = await read_linked_approval(
+                caller,
+                approval_request_id,
+                op_id=call_arguments["op_id"],
+                connector_id=call_arguments["connector_id"],
+            )
+        finally:
+            step_id_var.reset(step_token)
+            run_id_var.reset(run_token)
         if linked is None:
             return None
         if linked.result is None:

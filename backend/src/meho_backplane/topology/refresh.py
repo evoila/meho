@@ -75,6 +75,7 @@ from meho_backplane.db.models import (
     GraphNode,
 )
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     get_or_create_connector_instance,
 )
 from meho_backplane.topology.history import (
@@ -1263,6 +1264,8 @@ async def refresh_target_topology(
 
     connector_cls = resolve_connector(target)
     connector: Connector = get_or_create_connector_instance(connector_cls)
+    # A kept login must follow a change of the target, here as in a dispatch.
+    await forget_target_if_changed(target)
     hints: TopologyHints = await _invoke_discover_topology(connector, target, operator)
 
     # #2093 — discriminate the two all-zero-count no-op classes. A

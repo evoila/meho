@@ -89,13 +89,16 @@ from meho_backplane.agents.identity_ref import (
 from meho_backplane.agents.identity_ref import (
     validate_identity_ref as _validate_identity_ref,
 )
+from meho_backplane.agents.live_grants import load_live_grants
 from meho_backplane.agents.mapping import apply_changes, build_definition_row
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
+    AgentDefinitionSaved,
     AgentDefinitionUpdate,
     validate_name,
 )
+from meho_backplane.auth.machine_logins import is_machine_login
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentDefinition
@@ -110,6 +113,7 @@ __all__ = [
     # ``_validate_identity_ref`` below is the alias internal call sites use.
     "AgentIdentityRefInvalidError",
     "StartingGrantsError",
+    "with_live_grants",
 ]
 
 
@@ -119,6 +123,20 @@ __all__ = [
 #: a tenant that grows past it doesn't accidentally stream the whole
 #: table back to a casual ``meho agent list``.
 DEFAULT_LIST_LIMIT: int = 100
+
+
+async def with_live_grants(
+    tenant_id: uuid.UUID, entry: AgentDefinitionRead
+) -> AgentDefinitionSaved:
+    """Return *entry* with the live grants of its agent (the create and edit answers).
+
+    Read after the save, so the list also holds the grants a starting
+    grant pick just wrote.
+    """
+    live = await load_live_grants(tenant_id, entry.identity_ref)
+    return AgentDefinitionSaved(
+        **entry.model_dump(), live_grants=live.grants, live_grants_truncated=live.truncated
+    )
 
 
 class AgentDefinitionExistsError(Exception):
@@ -350,6 +368,11 @@ class AgentDefinitionService:
         check that the principal is still live at invocation time is
         G11.3's responsibility, not this validator's.
 
+        *updated_by_sub* becomes ``updated_by_sub`` of the row, the person who
+        last changed the definition. An edit by a login that MEHO knows as a
+        machine login keeps the person who was there
+        (:mod:`meho_backplane.auth.machine_logins`).
+
         A new ``identity_ref`` that names another agent with no live grant
         needs a starting grant pick while ``AGENT_GRANT_REQUIRED`` is not
         ``off``, the same rule as :meth:`create` (#6389). A pick that adds
@@ -387,6 +410,11 @@ class AgentDefinitionService:
                         outcome="Nothing was changed.",
                     )
             apply_changes(row, changes)
+            if updated_by_sub is not None and not await is_machine_login(
+                session, tenant_id, updated_by_sub
+            ):
+                # A machine edit keeps the person who last changed the definition.
+                row.updated_by_sub = updated_by_sub
             await session.flush()
             if grant_scopes and new_identity_ref is not None:
                 if updated_by_sub is None:

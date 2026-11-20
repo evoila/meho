@@ -31,7 +31,12 @@ person's other tools keep working.
   too (status 502): it says what ended before the failure, if anything,
   and which error stopped it. Before each row, a log line says the same,
   so the event is not lost when the row cannot be written. Then
-  :class:`ToolSignOutAuditError` reaches the caller.
+  :class:`ToolSignOutAuditError` reaches the caller. A tenant admin can
+  also sign out a tool of another person (``tools.sign_out``,
+  :mod:`meho_backplane.connectors.tools`):
+  then the row's ``operator_sub`` is the admin who ran the call (the
+  approver), and its payload names the admin who asked (``requested_by``)
+  and the person (``user_id``, ``username``).
 
 The tool's last access token keeps working until it expires: the access
 token lifetime of the realm (about five and a half minutes on MEHO's
@@ -63,6 +68,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminError,
     KeycloakConsentNotFoundError,
 )
+from meho_backplane.auth.realm_users import RealmUser
 from meho_backplane.db.models import AUDIT_LOG_CLIENT_AZP, AuditEventClass, AuditLog
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.request_usage.collector import current_request_id
@@ -267,11 +273,15 @@ async def sign_out_tool(
     tenant_id: uuid.UUID,
     kind: ToolKind,
     settings: Settings,
+    for_user: RealmUser | None = None,
+    requested_by: str | None = None,
 ) -> ToolLoginsEnded:
     """End the logins of *operator_sub* for *kind* and write the audit row.
 
-    *operator_sub* is the Keycloak user id of the person. The Keycloak
-    calls run first, then the audit row is written:
+    *operator_sub* is the Keycloak user id of the person. With *for_user*,
+    *operator_sub* is the admin who acts, and the logins of *for_user* end;
+    the audit row names both, and *requested_by*: the admin who asked.
+    The Keycloak calls run first, then the audit row is written:
 
     * at least one login ended: a row with status 200. Its ``outcome`` is
       ``signed_out``, or ``partly_signed_out`` when a login shared with
@@ -288,7 +298,11 @@ async def sign_out_tool(
     started = time.monotonic()
     try:
         async with KeycloakAdminClient.from_settings(settings) as kc:
-            ended = await end_tool_logins(kc, user_id=operator_sub, client_id=kind.client_id)
+            ended = await end_tool_logins(
+                kc,
+                user_id=for_user.id if for_user else operator_sub,
+                client_id=kind.client_id,
+            )
     except KeycloakConsentNotFoundError:
         raise
     except KeycloakAdminError as exc:
@@ -302,6 +316,8 @@ async def sign_out_tool(
             started=started,
             outcome="partly_signed_out" if partial is not None else "failed",
             error=type(cause).__name__,
+            for_user=for_user,
+            requested_by=requested_by,
         )
         raise
     if not ended.ended_any:
@@ -313,6 +329,8 @@ async def sign_out_tool(
         ended=ended,
         started=started,
         outcome="partly_signed_out" if ended.shared_with else "signed_out",
+        for_user=for_user,
+        requested_by=requested_by,
     )
     return replace(ended, audit_id=audit_id)
 
@@ -326,6 +344,8 @@ async def _write_sign_out_row(
     started: float,
     outcome: str,
     error: str | None = None,
+    for_user: RealmUser | None = None,
+    requested_by: str | None = None,
 ) -> uuid.UUID:
     """Write one ``auth.tool_sign_out`` row: status 200, or 502 with *error*.
 
@@ -342,11 +362,17 @@ async def _write_sign_out_row(
     }
     if error is not None:
         payload["error"] = error
+    if for_user is not None:
+        payload["user_id"] = for_user.id
+        payload["username"] = for_user.username
+    if requested_by is not None:
+        payload["requested_by"] = requested_by
     _log.info(
         "tool_sign_out",
         operator_sub=operator_sub,
         tenant_id=str(tenant_id),
-        **payload,
+        for_user_id=for_user.id if for_user else None,
+        **{k: v for k, v in payload.items() if k not in ("user_id", "username")},
     )
     try:
         return await write_internal_audit_row(

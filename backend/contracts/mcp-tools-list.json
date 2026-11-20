@@ -611,6 +611,17 @@
               "null"
             ]
           },
+          "group": {
+            "maxLength": 256,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_raw": {
+            "default": false,
+            "type": "boolean"
+          },
           "limit": {
             "default": 100,
             "maximum": 500,
@@ -646,6 +657,45 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "operations": {
+                  "items": {
+                    "properties": {
+                      "op_id": {
+                        "type": "string"
+                      },
+                      "requires_approval": {
+                        "type": "boolean"
+                      },
+                      "safety_level": {
+                        "enum": [
+                          "safe",
+                          "caution",
+                          "dangerous",
+                          "destructive"
+                        ],
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "op_id",
+                      "summary",
+                      "safety_level",
+                      "requires_approval"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "operations_more": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
                 "partial": {
                   "type": "boolean"
                 },
@@ -670,6 +720,32 @@
               "string",
               "null"
             ]
+          },
+          "note": {
+            "type": "string"
+          },
+          "raw_operations": {
+            "properties": {
+              "hidden_groups": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "included": {
+                "type": "boolean"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "included",
+              "hidden_groups",
+              "note"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -3020,6 +3096,12 @@
           "extras": {
             "type": "object"
           },
+          "flight_recorder_capture": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "fqdn": {
             "type": [
               "string",
@@ -3061,6 +3143,15 @@
             "maxLength": 100,
             "minLength": 1,
             "type": "string"
+          },
+          "secret_field_map": {
+            "additionalProperties": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxProperties": 50,
+            "type": "object"
           },
           "secret_ref": {
             "type": [
@@ -3133,6 +3224,12 @@
               },
               "tenant_id": {
                 "type": "string"
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -3323,6 +3420,12 @@
                   "string",
                   "null"
                 ]
+              },
+              "warnings": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -5439,6 +5542,10 @@
               "null"
             ]
           },
+          "include_raw": {
+            "default": false,
+            "type": "boolean"
+          },
           "include_scores": {
             "default": false,
             "type": "boolean"
@@ -5522,6 +5629,12 @@
                     "op_id": {
                       "type": "string"
                     },
+                    "required_params": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
                     "requires_approval": {
                       "type": "boolean"
                     },
@@ -5539,6 +5652,9 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "target_required": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -5571,6 +5687,29 @@
               },
               "query_duration_ms": {
                 "type": "number"
+              },
+              "raw_operations": {
+                "properties": {
+                  "hidden_matches": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "included": {
+                    "type": "boolean"
+                  },
+                  "note": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "included",
+                  "hidden_matches",
+                  "note"
+                ],
+                "type": "object"
               }
             },
             "required": [

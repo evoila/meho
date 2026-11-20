@@ -468,6 +468,16 @@ class HardenTests(unittest.TestCase):
         # The scan runs in the process sudo started, so its PATH changes too.
         self.assertEqual(f"{self.vm.stubs}:{self.vm.tools}\n", (self.vm.fake / "scan_path").read_text())
 
+    def test_a_root_login_shell_gets_no_snap_bin_from_snapd(self) -> None:
+        # snapd's profile file adds /snap/bin to every login shell.
+        self.vm.host_file("/etc/profile.d/apps-bin-path.sh", 'export PATH="$PATH:/snap/bin"\n')
+        self.vm.host_file("/etc/profile.d/other.sh", "\n")
+
+        self.assert_succeeds(self.vm.run())
+
+        self.assertFalse(self.vm.host_path("/etc/profile.d/apps-bin-path.sh").exists())
+        self.assertTrue(self.vm.host_path("/etc/profile.d/other.sh").exists())
+
     def test_a_sudo_file_visudo_refuses_never_goes_in(self) -> None:
         self.vm.answer("visudo_rc", "1")
 

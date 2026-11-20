@@ -470,7 +470,7 @@
         "approvalAllowSelfApproval": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "Self-approval audited break-glass switch (#1401, #2669), rendered unconditionally into the `APPROVAL_ALLOW_SELF_APPROVAL` env var (`parse_bool_env` in `backend/src/meho_backplane/settings.py` reads it). Constrained to `\"true\"` / `\"false\"` so a typo fails at install rather than being silently coerced. Default `\"false\"` (fail-closed) enforces the four-eyes rule: the operator who requested a parked `requires_approval` write may not approve their own request (requester != approver). Set `\"true\"` ONLY for a genuine, audited emergency — it lifts the guard posture-wide and re-opens the single-account request+grant hole for every op, so it is NOT the single-operator answer (that is an agent-requester: park the write under a scheduled agent run whose distinct subject clears the gate with no flag). Deliberately absent from `config.required` — the safe default carries every install. Even under break-glass a self-approval is forensically visible: a decision audit row (requester == approver), a WARNING `approval_self_approval_break_glass` log, and `GET /ready` → `features.approval_queue.effective_posture: single_operator_break_glass`. See the operator guide (docs-site \"Do real work → Approvals and break-glass\") and `docs/codebase/approvals.md`."
+          "description": "Self-approval audited break-glass switch, rendered unconditionally into the `APPROVAL_ALLOW_SELF_APPROVAL` env var (`parse_bool_env` in `backend/src/meho_backplane/settings.py` reads it). Constrained to `\"true\"` / `\"false\"` so a typo fails at install rather than being silently coerced. Default `\"false\"` (fail-closed) enforces the four-eyes rule: the operator who requested a parked `requires_approval` write may not approve their own request (requester != approver). Set `\"true\"` ONLY for a genuine, audited emergency — it lifts the guard posture-wide and re-opens the single-account request+grant hole for every op, so it is NOT the single-operator answer (that is the MEHO-Admins group: its members approve their own changes on purpose in the web interface). Deliberately absent from `config.required` — the safe default carries every install. Even under break-glass a self-approval is forensically visible: a decision audit row (requester == approver), a WARNING `approval_self_approval_break_glass` log, and `GET /ready` → `features.approval_queue.effective_posture: single_operator_break_glass`. See the operator guide (docs-site \"Do real work → Approvals and break-glass\") and `docs/codebase/approvals.md`."
         },
         "approvalAllowDelegatedDecision": {
           "type": "string",
@@ -521,10 +521,24 @@
           "enum": ["true", "false"],
           "description": "Check a new knowledge entry for similar entries first; when some exist, nothing is written and the writer gets the list. Rendered into `KB_SIMILAR_CHECK`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/kb.md`."
         },
+        "fileRefParams": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Show the operation parameters that wait behind this switch, and accept them. Rendered into `FILE_REF_PARAMS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
         "mcpShortToolTexts": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "Send a short text for the biggest tools on the default MCP tool list. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+          "description": "Send a short text for the biggest tools on the default MCP tool list, and no output schemas. The inputs they accept stay the same. Rendered into `MCP_SHORT_TOOL_TEXTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpProfileConnectorLists": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "The profiles of `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use only the connectors of that profile. Rendered into `MCP_PROFILE_CONNECTOR_LISTS`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/mcp.md`."
+        },
+        "mcpConnectorProfiles": {
+          "type": "string",
+          "description": "Extra MCP tool profiles as one JSON object, each with a base tool list and a connector list. Rendered into `MCP_CONNECTOR_PROFILES`. Empty means none; a bad value stops the start. Read only when `mcpProfileConnectorLists` is `\"true\"`. See `docs/codebase/mcp.md`."
         },
         "mcpClientPerToolKind": {
           "type": "string",
@@ -1088,8 +1102,8 @@
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
         "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
-        "tenantName": { "type": "string", "description": "The first tenant's short name. The five role groups carry it in `meho_tenant`." },
-        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one." },
+        "tenantName": { "type": "string", "description": "The first tenant's short name. The three role groups carry it in `meho_tenant`." },
+        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the three groups `MEHO-<name>-<Role>` for each one." },
         "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
         "image": { "type": "object" },
         "waitForDatabase": { "type": "object" },
@@ -1113,10 +1127,10 @@
         "firstLogin": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
+          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): one Admin login, with a temporary password in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
           "properties": {
-            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
-            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the second person, who can approve (MEHO-SA-Operators)." },
+            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the one Admin login (MEHO-Admins and MEHO-Platform-Admins, with platform_admin)." },
+            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "Not used. The install makes one Admin login. An old values file that sets this key still installs; the key is ignored." },
             "consoleAdminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the console admin: a user of realm master with every role of the master client meho-realm except impersonation, so it administers realm meho in the Keycloak admin console. Its temporary password is in <release>-core-console-admin; it sets up an authenticator code at the first login." }
           }
         },
@@ -1734,6 +1748,26 @@
           "minLength": 1,
           "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
           "description": "Namespace label value selecting the ingress controller. Must match RFC 1123 label syntax."
+        },
+        "ingressControllerEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Labels of the ingress controller Pods in ingressControllerNamespace. Empty: no rule."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The Pod port of the HTTPS entry point of the ingress controller (Traefik: 8443)."
+            }
+          },
+          "description": "An egress rule to the ingress controller Pods, so the backplane can reach its own console address (the first-start certificate check). Rendered only when podLabels is not empty."
         },
         "postgresCIDR": {
           "type": "string",

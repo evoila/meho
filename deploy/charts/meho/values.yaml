@@ -656,9 +656,9 @@ config:
   # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
   # single-operator answer — enabling it posture-wide re-opens, for every
   # op, the single-account request+grant hole the guard closes. The
-  # endorsed single-operator posture is an **agent-requester** (park the
-  # write under a scheduled agent run whose distinct subject clears the
-  # gate with no flag). Even under break-glass the self-approval is
+  # endorsed single-operator posture is the **MEHO-Admins** group:
+  # its members approve their own changes on purpose, with a click in the
+  # web interface. Even under break-glass the self-approval is
   # forensically visible: it writes a decision audit row (requester ==
   # approver), emits a WARNING `approval_self_approval_break_glass` log,
   # and flips `GET /ready` → `features.approval_queue.effective_posture`
@@ -733,10 +733,25 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `fileRefParams` is rendered into `FILE_REF_PARAMS`. When `"true"`,
+  # the operation parameters that wait behind this switch show to agents
+  # and people and are accepted. See `docs/codebase/mcp.md`.
+  fileRefParams: "false"
   # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
   # `"true"`, the biggest tools on the default MCP tool list send a short
-  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  # text, and no tool sends an output schema. The inputs they accept stay
+  # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- `mcpProfileConnectorLists` is rendered into
+  # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of
+  # `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use
+  # only the connectors of that profile. See `docs/codebase/mcp.md`.
+  mcpProfileConnectorLists: "false"
+  # -- `mcpConnectorProfiles` is rendered into `MCP_CONNECTOR_PROFILES`: the
+  # extra MCP tool profiles as one JSON object, for example
+  # `{"k8s": {"tools": "investigate", "connectors": ["kubernetes"]}}`. Empty
+  # means none. A bad value stops the start. See `docs/codebase/mcp.md`.
+  mcpConnectorProfiles: ""
   # -- `mcpClientPerToolKind` is rendered into `MCP_CLIENT_PER_TOOL_KIND`.
   # When `"true"`, Claude Code and Claude Desktop sign in with their own
   # login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client
@@ -1076,8 +1091,8 @@ gsm:
   # and the SA-direct Phase-1 path runs unchanged.
   #
   # A per-operator-WIF install must also decide how *background* dispatch
-  # (sensor evaluations, scheduled topology refreshes, runbook verify
-  # dispatch — no calling operator, so no JWT to federate) gets an
+  # (sensor evaluations, scheduled topology refreshes — no calling
+  # operator, so no JWT to federate) gets an
   # identity: either an ambient pod identity (GKE Workload Identity), or
   # the `checkRunner` service principal below. Neither ⇒ credentialed
   # Sensors cannot evaluate. Connector `probe()` / `fingerprint()` are not
@@ -1580,13 +1595,12 @@ coreKeycloak:
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
   # -- The first tenant's short name (lowercase letters, digits, dashes).
-  # The five role groups carry it in the `meho_tenant` attribute.
+  # The role groups carry it in the `meho_tenant` attribute.
   tenantName: main
   # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
-  # keep). The bootstrap Job makes five groups for each one:
-  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
-  # `-Approvers`. Empty by default: a site with one tenant needs nothing
-  # here. Putting people in these groups waits for a second person's
+  # keep). The bootstrap Job makes three groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators` and `-Admins`. Empty by default: a
+  # site with one tenant needs nothing here. Putting people in these groups waits for a second person's
   # approval when done through MEHO.
   tenants: []
   ingress:
@@ -1599,15 +1613,17 @@ coreKeycloak:
     # `client_id` and `client_secret`). Empty = the install makes
     # `<release>-core-keycloak-bootstrap`.
     bootstrap: ""
-  # The two people the install makes at the first start (the realm stage of
-  # the bootstrap Job, docs/codebase/core-bootstrap.md). Their temporary
-  # passwords are in `<release>-core-first-login`; Keycloak asks for a new
+  # The one person the install makes at the first start (the realm stage of
+  # the bootstrap Job, docs/codebase/core-bootstrap.md). Its temporary
+  # password is in `<release>-core-first-login`; Keycloak asks for a new
   # password at the first login. A change here after the first install has
-  # no effect: the Secret and the users already exist.
+  # no effect: the Secret and the user already exist.
   firstLogin:
-    # -- User name of the first admin (in MEHO-Admins, with platform_admin).
+    # -- User name of the one Admin login (in MEHO-Admins and
+    # MEHO-Platform-Admins, with platform_admin).
     adminUsername: admin
-    # -- User name of the second person, who can approve (MEHO-SA-Operators).
+    # -- Not used. MEHO ignores this value: the install makes only one Admin
+    # login. The key stays so that an existing values file still works.
     approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of
@@ -2041,6 +2057,20 @@ networkPolicy:
   # -- Namespace label value selecting the ingress controller. RKE2 ships with
   # `ingress-nginx`; override per-cluster.
   ingressControllerNamespace: ingress-nginx
+  # -- Let the backplane reach its own console address (`ingress.host`).
+  # The first-start `certificate` check opens a TLS connection to it. A
+  # NetworkPolicy is checked after a host port or a Service sends the
+  # connection on to the ingress controller Pod, so the rule names those
+  # Pods (in `ingressControllerNamespace`) and their HTTPS port, not the
+  # address. Empty `podLabels` (the default): no rule. A separate key and
+  # not an `extraEgress` entry, because a later values file that sets
+  # `extraEgress` replaces the whole list. Install form 2 sets it for
+  # RKE2's Traefik in `values-single-node.yaml`.
+  ingressControllerEgress:
+    # -- Labels of the ingress controller Pods.
+    podLabels: {}
+    # -- The Pod port of the HTTPS entry point (Traefik: 8443).
+    port: 8443
   # -- PostgreSQL egress CIDR. Required and pattern-validated by the schema
   # only when `networkPolicy.enabled: true` (the default); when disabled the
   # template skips the NetworkPolicy resource and this field may be left blank.

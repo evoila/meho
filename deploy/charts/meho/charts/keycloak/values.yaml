@@ -38,15 +38,14 @@ hostname: ""
 firstTenantId: ""
 
 # -- The first tenant's short name: lowercase letters, digits and dashes.
-# The five role groups carry it in the `meho_tenant` attribute
+# The three role groups carry it in the `meho_tenant` attribute
 # (`<tenant-uuid>:<name>:<Role>`), which the `meho-tenants` mapper copies
 # into the `meho_tenants` claim. See
 # docs/decisions/2026-10-28-several-tenants-per-person.md.
 tenantName: main
 
-# -- More tenants. The parent chart's bootstrap Job makes five groups for
-# each one: `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins`
-# and `-Approvers`. They carry only `meho_tenant`, so an older MEHO refuses
+# -- More tenants. The parent chart's bootstrap Job makes three groups for
+# each one: `MEHO-<name>-Readers`, `-Operators` and `-Admins`. They carry only `meho_tenant`, so an older MEHO refuses
 # a person who is only in these groups. Each entry is `{name, id}`: `name`
 # is a short name like `tenantName`, `id` a UUID you pick and keep. Empty
 # by default: a site with one tenant needs nothing here. The subchart only
@@ -157,8 +156,8 @@ existingSecrets:
   # `<release>-core-keycloak-bootstrap`. The secrets Job reads the same key.
   bootstrap: ""
 
-# -- User names of the users the install makes at the first start: the
-# first admin and a second person who can approve (temporary passwords in
+# -- User names of the users the install makes at the first start: the one
+# Admin login (temporary password in
 # `<release>-core-first-login`), and the console admin, a user of realm
 # `master` who administers realm `meho` (every role of the master client
 # `meho-realm` except `impersonation`; temporary password in `<release>-core-console-admin`). The parent chart's
@@ -166,7 +165,6 @@ existingSecrets:
 # these values; set them under the parent's `coreKeycloak:` block.
 firstLogin:
   adminUsername: admin
-  approverUsername: approver
   consoleAdminUsername: console-admin
 
 # -- A login for automated install proofs (a service client `meho-ci` and a

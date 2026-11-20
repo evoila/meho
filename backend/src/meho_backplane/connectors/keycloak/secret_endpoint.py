@@ -139,6 +139,7 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
 from meho_backplane.connectors.keycloak.ops_user_login_guard import (
     SECRET_SINK_ACTION,
     park_refusal_for_login_user,
@@ -408,6 +409,11 @@ class KeycloakCredentialSecretEndpoint:
         )
 
     async def write_secret(self, operator: Operator, material: SecretMaterial) -> None:
+        """Set the addressed user's password; one such write at a time per login realm."""
+        async with meho_access_scope():
+            await self._write_password(operator, material)
+
+    async def _write_password(self, operator: Operator, material: SecretMaterial) -> None:
         """Set the addressed user's password from *material* server-side.
 
         Resolves the target (tenant-scoped, by name) and the user's UUID,

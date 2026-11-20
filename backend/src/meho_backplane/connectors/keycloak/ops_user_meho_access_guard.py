@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Keep Keycloak user writes from taking away MEHO's own access.
+"""Keep Keycloak writes from taking away MEHO's own access.
 
 In MEHO's own login realm (:func:`is_meho_login_realm`), MEHO refuses a
 user write when it hits one of these users:
@@ -12,60 +12,59 @@ user write when it hits one of these users:
    (:data:`SERVICE_LOGIN_WRITES`).
 2. **The last active platform admin.** A write that disables, deletes or
    locks out a platform admin (:data:`LOCK_OUT_WRITES`), or removes them
-   from a group that gives platform admin rights
-   (``keycloak.group.member.remove``), is refused when no other active
-   platform admin is left. MEHO counts the others when the check runs.
+   from a group (``keycloak.group.member.remove``), is refused when after
+   the write no other active platform admin is left. The group writes
+   ``keycloak.group.delete`` and ``keycloak.group.update_attributes``
+   follow the same rule
+   (:mod:`~meho_backplane.connectors.keycloak.ops_group_meho_access_guard`).
 3. **The account of the person or login that asks.** The lock-out writes
    (:data:`LOCK_OUT_WRITES`) are refused on that account. When an approved
    request runs, the account of the person who runs it counts too.
 
 The check runs before the request waits for approval and again when the
 call runs. So no approval and no standing grant lets such a write through:
-a call that a grant runs at once still meets the run-time check.
+a call that a grant runs at once still meets the run-time check. When the
+call runs, MEHO holds a lock for the login realm from the count until the
+write is done (:mod:`~meho_backplane.connectors.keycloak.ops_meho_access_lock`),
+so two such writes at the same moment cannot both pass.
+
+Who counts as a platform admin follows MEHO's login: the user's own
+``platform_admin`` value, else the value of the user's groups, where a
+group's own value wins over its parent's
+(:mod:`~meho_backplane.connectors.keycloak.ops_meho_admin_count`). The name
+of a group gives no rights. "Active" means the user is enabled and is not a
+client's service-account user.
 
 On any doubt MEHO refuses: when it cannot read Keycloak, cannot count the
-platform admins, or cannot tell which realm its own login uses. Platform
-admin rights that come from a realm role (``JWT_PLATFORM_ADMIN_ROLE_NAME``)
-cannot be counted, so with that setting a lock-out write on a platform
-admin is always refused.
+platform admins, cannot take the lock, or cannot tell which realm its own
+login uses. Platform admin rights that come from a realm role
+(``JWT_PLATFORM_ADMIN_ROLE_NAME``) cannot be counted, so with that setting
+such a write on a platform admin is always refused.
 
-Who counts as a platform admin (the same rules as MEHO's login):
-
-* the user's own ``platform_admin`` attribute is ``true``;
-* the user is in a group that gives platform admin rights: the platform
-  admin group or a group under it, or a group whose own or parent's
-  ``platform_admin`` attribute is ``true``
-  (:mod:`~meho_backplane.connectors.keycloak.ops_write_grant_platform`);
-* with ``JWT_PLATFORM_ADMIN_ROLE_NAME`` set, the user has that realm role.
-
-"Active" means the user is enabled and is not a client's service-account
-user. When MEHO counts the other platform admins, it reads each member of
-the groups that give platform admin rights. It counts a member only when
-that member is an enabled person and their own ``platform_admin`` attribute
-is not set to another value than ``true``: the login takes the user's own
-value over the value of the group.
-
-A row that Keycloak sends in an odd shape (not an object, no id, no user
-name, no ``enabled`` value) also counts as doubt: MEHO refuses.
-
-Each refusal is a :exc:`MehoAccessRefusedError`. Its message names no user,
-so the same text is the reason before approval and the error of the run.
+Each refusal is a :exc:`MehoAccessRefusedError`. Its message says what was
+refused and why, and names no user, so the same text is the reason before
+approval and the error of the run. It gives no advice to change rights.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak._paths import (
-    _GROUP_CHILDREN_PATH,
-    _GROUP_MEMBERS_PATH,
-    _GROUPS_PATH,
-    _USER_GROUPS_PATH,
+    _GROUP_REALM_COMPOSITE_PATH,
     _USER_PATH,
     _USER_ROLE_MAPPINGS_REALM_PATH,
     fill_path,
+)
+from meho_backplane.connectors.keycloak.ops_meho_access_lock import hold_meho_access_lock
+from meho_backplane.connectors.keycloak.ops_meho_admin_count import (
+    CannotCountError,
+    Change,
+    Counter,
+    is_person,
+    row_id,
 )
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     SERVICE_ACCOUNT_PREFIX,
@@ -84,11 +83,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LOCK_OUT_WRITES",
+    "NO_APPROVAL",
     "SERVICE_LOGIN_WRITES",
     "MehoAccessRefusedError",
+    "RealmRoleError",
+    "has_platform_role",
     "is_meho_login_realm",
     "meho_access_park_reason",
     "meho_service_login_names",
+    "refuse_last_admin_loss",
     "refuse_meho_access_loss",
 ]
 
@@ -119,18 +122,16 @@ SERVICE_LOGIN_WRITES: Final[dict[str, str]] = {
 _SIGN_IN_FIELDS: Final = ("username", "email")
 
 #: The whole count gives up after this many seconds.
-_COUNT_TIMEOUT_S: Final = 10.0
-#: Rows read per page.
-_PAGE_SIZE: Final = 100
-#: The most pages read for one list before the count is "not known".
-_MAX_PAGES: Final = 20
-#: The most groups read in the whole group tree before the count is "not known".
-_MAX_GROUPS: Final = 1000
-
+_COUNT_TIMEOUT_S: Final = 30.0
 _SERVICE_LOGIN: Final = "meho_service_login"
 _LAST_PLATFORM_ADMIN: Final = "last_platform_admin"
 _OWN_ACCOUNT: Final = "own_account"
 _NOT_CHECKED: Final = "meho_access_not_checked"
+
+#: The start of every refusal text.
+_REFUSED: Final = "this write was refused"
+#: The end of a refusal text for a write that no approval lets through.
+NO_APPROVAL: Final = "No approval and no grant allows this write."
 
 
 class MehoAccessRefusedError(KeycloakDeleteRefusedError):
@@ -144,22 +145,6 @@ class MehoAccessRefusedError(KeycloakDeleteRefusedError):
     def __init__(self, op_id: str, code: str, reason: str) -> None:
         super().__init__(op_id, code, reason)
         self.reason = f"{op_id}: {reason}"
-
-
-@dataclass(frozen=True)
-class _Reader:
-    """The target and the caller that read a group."""
-
-    target: Any
-    operator: Operator
-
-
-class _CannotCountError(Exception):
-    """MEHO cannot tell whether the write leaves another platform admin."""
-
-
-class _RealmRoleError(_CannotCountError):
-    """Platform admin rights come from a realm role, which MEHO cannot count."""
 
 
 def _text(value: Any) -> str | None:
@@ -230,116 +215,48 @@ def _is_own_account(user: dict[str, Any], operator: Operator) -> bool:
     return bool(user_id and user_id in ids) or bool(username and username in names)
 
 
-def _is_person(user: dict[str, Any]) -> bool:
-    """Whether *user* is an enabled person; raises when Keycloak sent an incomplete user."""
-    username = _text(user.get("username"))
-    enabled = user.get("enabled")
-    if username is None or not isinstance(enabled, bool):
-        raise _CannotCountError("a user without a user name or an enabled value")
-    return enabled and not username.casefold().startswith(SERVICE_ACCOUNT_PREFIX)
+class RealmRoleError(CannotCountError):
+    """Platform admin rights come from a realm role, which MEHO cannot count."""
 
 
-def _row_id(row: dict[str, Any]) -> str:
-    row_id = _text(row.get("id"))
-    if row_id is None:
-        raise _CannotCountError("a row without an id")
-    return row_id
-
-
-async def _read_list(
-    connector: KeycloakConnector,
-    operator: Operator,
-    target: KeycloakTargetLike,
-    path: str,
-    **params: str,
-) -> list[dict[str, Any]]:
-    """Every row of a list, page by page; a failed or odd read raises."""
-    rows: list[dict[str, Any]] = []
-    for _ in range(_MAX_PAGES):
-        page = await connector._get_admin_list(
-            target,
-            path,
-            operator=operator,
-            params={**params, "first": str(len(rows)), "max": str(_PAGE_SIZE)},
-            strict=True,
-        )
-        if not all(isinstance(row, dict) for row in page):
-            raise _CannotCountError(f"GET {path} sent a row that is not an object")
-        rows.extend(page)
-        if len(page) < _PAGE_SIZE:
-            return rows
-    raise _CannotCountError(f"GET {path} has too many pages")
-
-
-async def _platform_groups(
-    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
+async def _composite_role_names(
+    connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, path: str
 ) -> set[str]:
-    """The ids of every group, at any level, that gives platform admin rights."""
-    # Imported late: this module imports the user lookup, which imports this module.
-    from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
-        group_marks_platform_admin,
-    )
-
-    found: set[str] = set()
-    seen = 0
-    todo: list[tuple[str, bool]] = [(fill_path(_GROUPS_PATH, {"realm": realm}), False)]
-    while todo:
-        path, parent_gives = todo.pop()
-        for group in await _read_list(
-            connector, operator, target, path, briefRepresentation="false"
-        ):
-            seen += 1
-            if seen > _MAX_GROUPS:
-                raise _CannotCountError("the realm has too many groups")
-            group_id = _row_id(group)
-            gives = parent_gives or group_marks_platform_admin(group)
-            if gives:
-                found.add(group_id)
-            if group.get("subGroupCount", 1) != 0:
-                children = fill_path(_GROUP_CHILDREN_PATH, {"realm": realm, "group-id": group_id})
-                todo.append((children, gives))
-    return found
+    rows = await connector._get_admin_list(target, path, operator=operator, strict=True)
+    names = {_text(row.get("name")) if isinstance(row, dict) else None for row in rows}
+    if None in names:
+        raise CannotCountError("a role without a name")
+    return {name for name in names if name is not None}
 
 
-async def _other_platform_admins(
+async def has_platform_role(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     realm: str,
-    groups: set[str],
-    user_id: str,
+    *,
+    roles: set[str],
+    user_id: str | None = None,
+    group_id: str | None = None,
 ) -> bool:
-    """Whether a platform admin other than *user_id* is in one of *groups*.
+    """Whether the user or group has one of *roles*: direct, from a group, or in another role."""
+    if user_id is not None:
+        path = fill_path(_USER_ROLE_MAPPINGS_REALM_PATH, {"realm": realm, "user-id": user_id})
+        path = f"{path}/composite"
+    else:
+        path = fill_path(_GROUP_REALM_COMPOSITE_PATH, {"realm": realm, "group-id": group_id})
+    return bool(await _composite_role_names(connector, operator, target, path) & roles)
 
-    Reads each member again, so the count uses the member's own attributes.
-    """
+
+def platform_roles() -> set[str]:
+    """The realm role names that give platform admin rights; raises when not known."""
     # Imported late: this module imports the user lookup, which imports this module.
-    from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
-        user_flag_withholds_platform_admin,
-    )
+    from meho_backplane.connectors.keycloak.ops_write_effective_roles import platform_role_names
 
-    checked = {user_id.casefold()}
-    for group_id in sorted(groups):
-        path = fill_path(_GROUP_MEMBERS_PATH, {"realm": realm, "group-id": group_id})
-        rows = await _read_list(connector, operator, target, path, briefRepresentation="true")
-        # Every row must have an id, also the rows after the first platform admin found.
-        for member_id in [_row_id(row) for row in rows]:
-            if member_id.casefold() in checked:
-                continue
-            checked.add(member_id.casefold())
-            user_path = fill_path(_USER_PATH, {"realm": realm, "user-id": member_id})
-            other = await get_or_none(connector, target, user_path, operator)
-            if other is None:
-                continue
-            if not _is_person(other):
-                continue
-            try:
-                withheld = user_flag_withholds_platform_admin(other)
-            except ValueError as exc:
-                raise _CannotCountError(str(exc)) from exc
-            if not withheld:
-                return True
-    return False
+    roles = platform_role_names()
+    if roles is None:
+        raise CannotCountError("MEHO cannot read its settings")
+    return roles
 
 
 async def _removed_group_id(
@@ -356,25 +273,6 @@ async def _removed_group_id(
     )
 
 
-async def _has_realm_role(
-    connector: KeycloakConnector,
-    operator: Operator,
-    target: KeycloakTargetLike,
-    realm: str,
-    user_id: str,
-    roles: set[str],
-) -> bool:
-    """Whether the user has one of *roles*: direct, from a group, or as part of another role."""
-    path = fill_path(_USER_ROLE_MAPPINGS_REALM_PATH, {"realm": realm, "user-id": user_id})
-    rows = await connector._get_admin_list(
-        target, f"{path}/composite", operator=operator, strict=True
-    )
-    names = {_text(row.get("name")) if isinstance(row, dict) else None for row in rows}
-    if None in names:
-        raise _CannotCountError("a role without a name")
-    return bool(names & roles)
-
-
 async def _loses_last_platform_admin(
     connector: KeycloakConnector,
     operator: Operator,
@@ -386,53 +284,66 @@ async def _loses_last_platform_admin(
     params: dict[str, Any],
 ) -> bool:
     """Whether the write takes the last active platform admin away; raises when not known."""
-    # Imported late: these modules import the user lookup, which imports this module.
-    from meho_backplane.connectors.keycloak.ops_write_effective_roles import platform_role_names
-    from meho_backplane.connectors.keycloak.ops_write_grant_platform import (
-        group_gives_platform_admin,
-        user_flag_marks_platform_admin,
-    )
-
-    user_id = _row_id(user)
-    if not _is_person(user):
+    user_id = row_id(user)
+    if not is_person(user):
         return False
-    removed: str | None = None
+    roles = platform_roles()
     if op_id == _MEMBER_REMOVE_OP:
         removed = await _removed_group_id(connector, operator, target, params)
-        gives = await group_gives_platform_admin(
-            connector, _Reader(target=target, operator=operator), removed
-        )
-        if gives is None:
-            raise _CannotCountError("MEHO cannot read the group")
-        if not gives:
-            return False
-    roles = platform_role_names()
-    if roles is None:
-        raise _CannotCountError("MEHO cannot read its settings")
-    groups = await _platform_groups(connector, operator, target, realm)
-    user_groups_path = fill_path(_USER_GROUPS_PATH, {"realm": realm, "user-id": user_id})
-    user_groups = {
-        _row_id(row)
-        for row in await _read_list(
-            connector, operator, target, user_groups_path, briefRepresentation="true"
-        )
-    }
-    flag = user_flag_marks_platform_admin(user)
-    has_role = bool(roles) and await _has_realm_role(
-        connector, operator, target, realm, user_id, roles
+        change = Change(user_left=(user_id, removed))
+    else:
+        change = Change(user_gone=user_id)
+    counter = Counter(connector, operator, target, realm, change)
+    before = await counter.rights(user, after=False)
+    has_role = bool(roles) and await has_platform_role(
+        connector, operator, target, realm, roles=roles, user_id=user_id
     )
-    if not (flag or has_role or user_groups & groups):
+    if not (before.possible or has_role):
         return False
     if roles:
         # A realm role can give the rights in ways MEHO cannot count.
-        raise _RealmRoleError("platform admin rights come from a realm role")
-    if removed is not None and (flag or (user_groups - {removed}) & groups):
+        raise RealmRoleError("platform admin rights come from a realm role")
+    if (await counter.rights(user, after=True)).sure:
         return False
-    return not await _other_platform_admins(connector, operator, target, realm, groups, user_id)
+    return not await counter.sure_admin_after()
 
 
 def _refused(op_id: str, code: str, reason: str) -> MehoAccessRefusedError:
     return MehoAccessRefusedError(op_id, code, reason)
+
+
+async def refuse_last_admin_loss(
+    op_id: str, realm: str, last_reason: str, count: Callable[[], Awaitable[bool]]
+) -> None:
+    """Take the realm's lock, run *count*, and refuse when it is true or cannot be known."""
+    try:
+        await hold_meho_access_lock(realm)
+    except Exception as exc:
+        raise _refused(
+            op_id,
+            _NOT_CHECKED,
+            f"{_REFUSED}: MEHO could not make sure that no other write of this kind runs "
+            f"at the same time ({type(exc).__name__}). Nothing was changed.",
+        ) from exc
+    try:
+        async with asyncio.timeout(_COUNT_TIMEOUT_S):
+            last = await count()
+    except RealmRoleError as exc:
+        raise _refused(
+            op_id,
+            _NOT_CHECKED,
+            f"{_REFUSED}: platform admin rights come from a realm role here, so MEHO "
+            "cannot count the platform admins. Nothing was changed.",
+        ) from exc
+    except Exception as exc:
+        raise _refused(
+            op_id,
+            _NOT_CHECKED,
+            f"{_REFUSED}: a Keycloak read failed, so MEHO could not check that this write "
+            f"leaves another platform admin ({type(exc).__name__}). Nothing was changed.",
+        ) from exc
+    if last:
+        raise _refused(op_id, _LAST_PLATFORM_ADMIN, last_reason)
 
 
 async def refuse_meho_access_loss(
@@ -458,52 +369,34 @@ async def refuse_meho_access_loss(
         raise _refused(
             op_id,
             _SERVICE_LOGIN,
-            f"this user is a login that MEHO itself uses; {service_action} can stop MEHO "
-            "from working. Nothing was changed. No approval and no grant allows this write. "
-            "To replace this login, set up the new login in MEHO's settings first; a Keycloak "
-            "administrator then changes the old one in the Keycloak admin console.",
+            f"{_REFUSED}: this user is a login that MEHO itself uses, and {service_action} "
+            f"can stop MEHO from working. Nothing was changed. {NO_APPROVAL}",
         )
     action = LOCK_OUT_WRITES.get(op_id)
     if action is not None and _is_own_account(user, operator):
         raise _refused(
             op_id,
             _OWN_ACCOUNT,
-            f"this user is the account that asked for this write or runs it; {action} can "
-            "lock that account out of MEHO. Nothing was changed. Ask another admin to send "
-            "the request.",
+            f"{_REFUSED}: this user is the account that asked for this write or runs it, "
+            f"and {action} can lock that account out of MEHO. Nothing was changed. "
+            f"{NO_APPROVAL}",
         )
     if action is None and op_id != _MEMBER_REMOVE_OP:
         return
     words = action or "removing it from this group"
-    try:
-        async with asyncio.timeout(_COUNT_TIMEOUT_S):
-            last = await _loses_last_platform_admin(
-                connector, operator, target, realm, user, op_id=op_id, params=params
-            )
-    except _RealmRoleError as exc:
-        raise _refused(
-            op_id,
-            _NOT_CHECKED,
-            "platform admin rights come from a realm role here, so MEHO cannot count "
-            "the platform admins. Nothing was changed. A Keycloak administrator makes "
-            "this change in the Keycloak admin console.",
-        ) from exc
-    except Exception as exc:
-        raise _refused(
-            op_id,
-            _NOT_CHECKED,
-            "MEHO could not read Keycloak to check that this write leaves another "
-            f"platform admin ({type(exc).__name__}). Nothing was changed. Send the "
-            "request again when MEHO can read Keycloak.",
-        ) from exc
-    if last:
-        raise _refused(
-            op_id,
-            _LAST_PLATFORM_ADMIN,
-            f"this user is the last active platform admin of MEHO; {words} leaves MEHO "
-            "with no platform admin. Nothing was changed. First give a second person "
-            "platform admin rights, then send the request again.",
+
+    async def _count() -> bool:
+        return await _loses_last_platform_admin(
+            connector, operator, target, realm, user, op_id=op_id, params=params
         )
+
+    await refuse_last_admin_loss(
+        op_id,
+        realm,
+        f"{_REFUSED}: this user is the last active platform admin of MEHO, and {words} "
+        f"leaves MEHO with no platform admin. Nothing was changed. {NO_APPROVAL}",
+        _count,
+    )
 
 
 async def _park_user(

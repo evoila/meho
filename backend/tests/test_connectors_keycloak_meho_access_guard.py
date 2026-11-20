@@ -24,6 +24,8 @@ Nothing is written to Keycloak when MEHO refuses.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -156,7 +158,7 @@ class _Realm:
                 "name": "MEHO-Platform-Admins",
                 "path": "/MEHO-Platform-Admins",
                 "subGroupCount": 0,
-                "attributes": {},
+                "attributes": {"platform_admin": ["true"]},
             },
             _TEAM_GROUP: {
                 "id": _TEAM_GROUP,
@@ -168,6 +170,8 @@ class _Realm:
         }
         self.members: dict[str, list[str]] = {_PLATFORM_GROUP: [], _TEAM_GROUP: []}
         self.groups_fail = False
+        self.slow = False
+        self.members_fail = False
         #: Rows sent after the real ones, to send rows in an odd shape.
         self.extra_members: dict[str, list[Any]] = {}
         self.extra_user_groups: list[Any] = []
@@ -182,6 +186,9 @@ class _Realm:
         mock.get(f"{base}/users").mock(side_effect=self._find)
         mock.get(f"{base}/groups").mock(side_effect=self._top_groups)
         mock.route(url__regex=rf".*{base}/groups/[^/]+(\?.*)?$").mock(side_effect=self._group)
+        mock.get(url__regex=rf".*{base}/groups/[^/]+/children(\?.*)?$").mock(
+            side_effect=self._children
+        )
         mock.get(url__regex=rf".*{base}/groups/[^/]+/members(\?.*)?$").mock(
             side_effect=self._members
         )
@@ -206,6 +213,10 @@ class _Realm:
 
     def _user(self, request: httpx.Request) -> httpx.Response:
         user = self.users.get(request.url.path.rsplit("/", 1)[1])
+        if request.method == "PUT" and user is not None:
+            body = json.loads(request.content or b"{}")
+            if isinstance(body.get("enabled"), bool):
+                user["enabled"] = body["enabled"]
         if request.method != "GET":
             return httpx.Response(204)
         return httpx.Response(200, json=user) if user is not None else httpx.Response(404)
@@ -220,8 +231,29 @@ class _Realm:
             return httpx.Response(200, json=[{"id": "made-up-credential", "type": "password"}])
         return httpx.Response(200, json=[])
 
-    def _top_groups(self, _request: httpx.Request) -> httpx.Response:
-        return self._fail() or httpx.Response(200, json=list(self.groups.values()))
+    def _top_groups(self, request: httpx.Request) -> httpx.Response:
+        rows = [g for g in self.groups.values() if not g.get("parentId")]
+        return self._fail() or _page(request, rows)
+
+    def _children(self, request: httpx.Request) -> httpx.Response:
+        parent = request.url.path.split("/")[-2]
+        rows = [g for g in self.groups.values() if g.get("parentId") == parent]
+        return self._fail() or _page(request, rows)
+
+    def group(self, group_id: str, name: str, value: str | None, parent: str | None = None) -> None:
+        """Add a group; *value* is its own ``platform_admin`` value, or ``None`` for none."""
+        path = f"{self.groups[parent]['path']}/{name}" if parent else f"/{name}"
+        self.groups[group_id] = {
+            "id": group_id,
+            "name": name,
+            "path": path,
+            "subGroupCount": 0,
+            "attributes": {} if value is None else {"platform_admin": [value]},
+        }
+        if parent:
+            self.groups[group_id]["parentId"] = parent
+            self.groups[parent]["subGroupCount"] += 1
+        self.members[group_id] = []
 
     def _group(self, request: httpx.Request) -> httpx.Response:
         group = self.groups.get(request.url.path.rsplit("/", 1)[1])
@@ -230,17 +262,29 @@ class _Realm:
             return failed
         return httpx.Response(200, json=group) if group is not None else httpx.Response(404)
 
-    def _members(self, request: httpx.Request) -> httpx.Response:
+    async def _members(self, request: httpx.Request) -> httpx.Response:
+        if self.slow:
+            # Lets another call run between the count and the write.
+            await asyncio.sleep(0.05)
         group_id = request.url.path.split("/")[-2]
         rows: list[Any] = [self.users[uid] for uid in self.members.get(group_id, [])]
         rows += self.extra_members.get(group_id, [])
-        return self._fail() or httpx.Response(200, json=rows)
+        if self.members_fail:
+            return httpx.Response(500)
+        return self._fail() or _page(request, rows)
 
     def _user_groups(self, request: httpx.Request) -> httpx.Response:
         user_id = request.url.path.split("/")[-2]
         rows: list[Any] = [self.groups[g] for g, ids in self.members.items() if user_id in ids]
         rows += self.extra_user_groups
-        return self._fail() or httpx.Response(200, json=rows)
+        return self._fail() or _page(request, rows)
+
+
+def _page(request: httpx.Request, rows: list[Any]) -> httpx.Response:
+    """One page of *rows*, as Keycloak sends it for ``first`` and ``max``."""
+    first = int(request.url.params.get("first", "0"))
+    size = int(request.url.params.get("max", str(len(rows) or 1)))
+    return httpx.Response(200, json=rows[first : first + size])
 
 
 def _realm(mock: respx.MockRouter, realm: str = _LOGIN_REALM) -> _Realm:
@@ -275,7 +319,7 @@ async def _call(
         "target": _LOGIN_REALM_TARGET,
         "params": params,
     }
-    if op_id == "keycloak.user.delete":
+    if op_id in {"keycloak.user.delete", "keycloak.group.delete"}:
         preview = await preview_operation(caller, args)
         if preview.get("preview_hash"):
             args["preview_hash"] = preview["preview_hash"]
@@ -320,10 +364,16 @@ def _refused_after_wait(op_id: str, result: dict[str, Any], code: str) -> None:
     _refused_on_run(result, code)
 
 
+#: Words of advice to change rights or to go around the check; no refusal text has them.
+_ADVICE = ("give a second person", "ask another", "admin console", "first give", "then send")
+
+
 def _refused_before_approval(call: dict[str, Any], words: str) -> None:
     assert call["status"] == "denied", call
     assert call["extras"]["error_code"] == "refused_before_approval", call
     assert words in call["error"], call["error"]
+    assert "this write was refused:" in call["error"], call["error"]
+    assert not [w for w in _ADVICE if w in call["error"].casefold()], call["error"]
 
 
 async def _approve_and_run(call: dict[str, Any], approver: Operator | None = None) -> Any:
@@ -418,7 +468,7 @@ async def test_the_last_platform_admin_is_refused_before_approval(
         call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
         written = _writes(mock)
     _refused_before_approval(call, "the last active platform admin")
-    assert "First give a second person platform admin rights" in call["error"]
+    assert "No approval and no grant allows this write" in call["error"]
     assert _ADMIN not in call["error"]
     assert await _stored_requests() == []
     assert written == []
@@ -553,7 +603,7 @@ async def test_the_requesters_own_account_is_refused_before_approval(
         _realm(mock)
         call = await _call(op_id, _params(op_id, _REQUESTER_UUID, extra))
         written = _writes(mock)
-    _refused_before_approval(call, "Ask another admin to send the request")
+    _refused_before_approval(call, "the account that asked for this write")
     assert await _stored_requests() == []
     assert written == []
 
@@ -642,7 +692,7 @@ def _bot() -> Operator:
     [
         (_SERVICE_UUID, "a login that MEHO itself uses"),
         (_ADMIN_UUID, "the last active platform admin"),
-        (_BOT_UUID, "Ask another admin to send the request"),
+        (_BOT_UUID, "the account that asked for this write"),
     ],
     ids=["service-login", "last-platform-admin", "own-account"],
 )
@@ -694,7 +744,7 @@ async def test_a_failed_keycloak_read_is_refused(
         call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
         result = await _run(op_id, _params(op_id, _ADMIN_UUID, extra))
         written = _writes(mock)
-    _refused_before_approval(call, "MEHO could not read Keycloak to check")
+    _refused_before_approval(call, "a Keycloak read failed")
     _refused_on_run(result, "meho_access_not_checked")
     assert written == []
 
@@ -741,7 +791,7 @@ async def test_a_row_in_an_odd_shape_is_refused(
         call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
         result = await _run(op_id, _params(op_id, _ADMIN_UUID, extra))
         written = _writes(mock)
-    _refused_before_approval(call, "MEHO could not read Keycloak to check")
+    _refused_before_approval(call, "a Keycloak read failed")
     _refused_on_run(result, "meho_access_not_checked")
     assert written == []
 

@@ -357,6 +357,7 @@ async def keycloak_realm_update(
         raise ValueError(f"keycloak.realm.update: {inline_smtp_password_reason()}")
     realms = resolve_realm_config(target)
     realm_name = realm_param(params, "realm", "keycloak.realm.update") or realms.managed_realm
+    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
     representation = dict(params["representation"])
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
     current = await self._get_admin_json(target, path, operator=operator)
@@ -368,7 +369,6 @@ async def keycloak_realm_update(
         representation["smtpServer"] = with_smtp_password(
             representation.get("smtpServer"), password
         )
-    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
     check = await read_merge_write(
         self,
         operator,

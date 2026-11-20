@@ -1052,20 +1052,14 @@ lines (indented JSON, an error message) and keeps the line breaks.
   wrote use them too: `meho status --watch` (every text field of a feed
   line, and the "unparseable event" line), `meho broadcast watch` (each
   line without `--json`), `meho kb show`, `kb list`, `kb search`,
-  `meho conventions show`, `list`, `history`, `meho memory list`, the
-  `meho memory recall` hit table, `meho runbook show-template`, and
-  `meho runbook start` and `next` (the template slug, the step id, title
-  and body, the op_id, the verify prompt and the "Run complete" lines).
-  A body goes through `SafeLines`, so its line breaks stay; a tab in a
-  body shows as `\x09`.
+  `meho conventions show`, `list`, `history`, `meho list`, `meho recall`
+  (the body of one entry and the hit table), `meho runbook
+  show-template`, and `meho runbook start` and `next` (the template
+  slug, the step id, title and body, the op_id, the verify prompt and
+  the "Run complete" lines). A body goes through `SafeLines`, so its
+  line breaks stay; a tab in a body shows as `\x09`.
 - `meho docs ask` uses its own helpers (`sanitizeText`, `sanitizeBlock`
   in `cmd/docs/ask.go`) for the answer and the sources.
-- Not escaped yet: the file paths of `meho sessions get`, the wiki hits
-  of `meho kb search`, `meho agent run`, `agent list`, `agent run-list`,
-  `agent run-status` and `agent run-events`, `meho runbook
-  list-templates` and `runbook runs`, `meho memory promote`, `meho docs
-  read` and `docs search`, and an error that a command returns as a
-  plain Go error, which cobra prints itself.
 - `output.RenderError` passes the human error line through `SafeLines`,
   so a server body in an error message is shown the same way. The
   `--json` paths are unchanged: JSON encoding already escapes control
@@ -1082,14 +1076,8 @@ lines (indented JSON, an error message) and keeps the line breaks.
   to its width. The `server_text_escape_test.go` file of each package
   lists these renderers and checks that ESC and BEL show as `\x1b` and
   `\x07`.
-- Not escaped yet (text from a target or an API description): the
-  success output of `meho operation call` and of every vendor command;
-  the `operation search` table of the vendor commands (vmware, nsx,
-  sddc-manager, vcf-automation, vcf-fleet, vcf-logs, vcf-operations,
-  harbor, hetzner-robot); `meho approvals result`; `meho operation
-  result-query` and `subops`; `meho targets probe`, `list`, `discover`
-  and `import`; `meho connector review`, `list` and `catalog`;
-  `meho topology`; `meho vcf-automation about`.
+- Every other command prints text from a server, a target or an API
+  description as it is.
 
 ### Sensitive-data discipline
 

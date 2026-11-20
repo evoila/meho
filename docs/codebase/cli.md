@@ -1051,8 +1051,9 @@ lines (indented JSON, an error message) and keeps the line breaks.
 - The commands that print text an agent or another member of the tenant
   wrote use them too: `meho status --watch` (every text field of a feed
   line, and the "unparseable event" line), `meho broadcast watch` (each
-  line without `--json`), `meho kb show`, `kb list`, `kb search`,
-  `meho conventions show`, `list`, `history`, `meho list`, `meho recall`
+  line without `--json`), `meho kb show`, `kb list`, the hit table of
+  `kb search` (its wiki hits print as they are), `meho conventions show`,
+  `list`, `history`, `meho list`, `meho recall`
   (the body of one entry and the hit table), `meho runbook
   show-template`, and `meho runbook start` and `next` (the template
   slug, the step id, title and body, the op_id, the verify prompt and
@@ -1076,8 +1077,8 @@ lines (indented JSON, an error message) and keeps the line breaks.
   to its width. The `server_text_escape_test.go` file of each package
   lists these renderers and checks that ESC and BEL show as `\x1b` and
   `\x07`.
-- Every other command prints text from a server, a target or an API
-  description as it is.
+- Commands not named here may print text from a server, a target or an
+  API description as it is.
 
 ### Sensitive-data discipline
 

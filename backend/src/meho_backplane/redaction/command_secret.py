@@ -29,6 +29,9 @@ option name and the words around it stay readable:
   it, so the ``api_key`` rule does not hide the next fields or the closing
   quote of a JSON string too. A next field stays only when its name holds
   no secret (``;Database=``); the value of every other one is hidden too.
+  Where the reading of the next fields stops (``;;``, a part that is not a
+  field, a value that is never closed), the rest up to white space or a
+  quote is hidden too.
   Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``, ``APP_KEY=x``);
@@ -585,16 +588,29 @@ class _ClosingMarks:
         return None if odd_end[i + 1] < 0 else odd_end[i + 1]
 
 
+def _closed_value_end(text: str, start: int, marks: _ClosingMarks) -> int | None:
+    """Index after the closing mark of the quoted value at *start*, or ``None``.
+
+    ``None`` when the value is never closed, or closed more than
+    ``_MAX_VALUE_LINES`` lines further down.
+    """
+    end = marks.end(start)
+    if end is None:
+        return None
+    if text.find("\n", start, end) == -1 or marks.lines_between(start, end) <= _MAX_VALUE_LINES:
+        return end
+    return None
+
+
 def _quoted_connection_value(text: str, start: int, marks: _ClosingMarks) -> tuple[int, int]:
     """Span of a quoted connection string value, through its closing mark.
 
-    A value that is never closed, or closed more than ``_MAX_VALUE_LINES``
-    lines further down, ends at the end of its line.
+    A value that is not closed (``_closed_value_end``) ends at the end of its line.
     """
-    end = marks.end(start)
-    line_end = text.find("\n", start, len(text) if end is None else end)
-    if end is not None and (line_end == -1 or marks.lines_between(start, end) <= _MAX_VALUE_LINES):
+    end = _closed_value_end(text, start, marks)
+    if end is not None:
         return start, end
+    line_end = text.find("\n", start)
     return start, len(text) if line_end < 0 else line_end
 
 
@@ -693,17 +709,52 @@ def _blanks_end(text: str, pos: int, window: int) -> int:
     return pos if blanks is None else blanks.end()
 
 
+_REST_END: Final = re.compile(r"""[\s'"]""")
+
+
+def _rest_span(text: str, pos: int, limit: int) -> tuple[int, int] | None:
+    """The part at *pos* that the next field reader did not read, or ``None``.
+
+    It runs to white space, a quote or *limit* (the closing quote of a JSON
+    string), as far as the ``api_key`` rule hides a value. A lone ``;`` is
+    not hidden.
+    """
+    found = _REST_END.search(text, pos, limit)
+    end = limit if found is None else found.start()
+    rest = text[pos:end]
+    if not rest.strip(";") or not _is_hidden(rest):
+        return None
+    return pos, end
+
+
 def _next_field_spans(
-    text: str, pos: int, window: int, marks: _ClosingMarks
+    text: str, pos: int, window: int, limit: int, marks: _ClosingMarks
 ) -> list[tuple[int, int]]:
-    """The values of the next fields after *pos* whose names are not on the plain list."""
+    """The values of the next fields after *pos* whose names are not on the plain list.
+
+    Where the reading stops before the connection string ends (``;;``, a
+    part that is not a field, or the end of *window*), the rest up to white
+    space or a quote is hidden too. A value that is not closed before *limit*
+    is hidden with its field name to the end of its line or *limit*.
+    """
     spans: list[tuple[int, int]] = []
-    while (field := _NEXT_FIELD.match(text, _blanks_end(text, pos, window), window)) is not None:
+    while True:
+        at = _blanks_end(text, pos, window)
+        field = _NEXT_FIELD.match(text, at, window)
+        if field is None:
+            break
         start = field.end()
         while start < window and text[start] in " \t":
             start += 1
         if start < window and text[start] in _CLOSING:
-            span = _quoted_connection_value(text, start, marks)
+            end = _closed_value_end(text, start, marks)
+            if end is None or end > limit:
+                # A value that is not closed before *limit*: the field and the
+                # rest of its line, up to *limit*.
+                line_end = _quoted_connection_value(text, start, marks)[1]
+                spans.append((field.start() + 1, min(line_end, limit)))
+                return spans
+            span = (start, end)
         else:
             stop = _VALUE_STOP.search(text, start, window)
             stop_at = window if stop is None else stop.start()
@@ -714,7 +765,8 @@ def _next_field_spans(
             named = _FIELD_END.match(text, _blanks_end(text, span[1], window)) is not None
             spans.append((field.start() + 1, span[1]) if named else span)
         pos = max(span[1], field.end())
-    return spans
+    rest = _rest_span(text, at, limit)
+    return spans if rest is None else [*spans, rest]
 
 
 def _with_label(
@@ -722,6 +774,7 @@ def _with_label(
     match: re.Match[str],
     span: tuple[int, int],
     window: int,
+    limit: int,
     marks: _ClosingMarks,
 ) -> list[tuple[int, int]]:
     """*span*, with the label in front of it when a ``;`` ends the value.
@@ -739,7 +792,7 @@ def _with_label(
         text, _blanks_end(text, span[1], window)
     ):
         return [span]
-    return [(match.start(), span[1]), *_next_field_spans(text, span[1], window, marks)]
+    return [(match.start(), span[1]), *_next_field_spans(text, span[1], window, limit, marks)]
 
 
 def _connection_span(
@@ -749,13 +802,12 @@ def _connection_span(
     if start >= len(text) or text[start] in ";\n":
         return []
     close = quotes.end(match.start())
+    limit = len(text) if close is None else close
     if text[start] in _CLOSING:
         span = _quoted_connection_value(text, start, marks)
-        end_of_fields = max(
-            span[1], min(len(text) if close is None else close, span[1] + _VALUE_MAX)
-        )
-        return _with_label(text, match, span, end_of_fields, marks)
-    window = min(len(text) if close is None else close, start + _VALUE_MAX)
+        end_of_fields = max(span[1], min(limit, span[1] + _VALUE_MAX))
+        return _with_label(text, match, span, end_of_fields, max(span[1], limit), marks)
+    window = min(limit, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
     stop_at = window if stop is None else stop.start()
     if _is_working_folder(text, match, start, stop_at):
@@ -775,8 +827,8 @@ def _connection_span(
     end = start + len(text[start:stop_at].rstrip())
     if not _is_hidden(text[start:end]):
         return []
-    end_of_fields = min(len(text) if close is None else close, end + _VALUE_MAX)
-    return _with_label(text, match, (start, end), end_of_fields, marks)
+    end_of_fields = min(limit, end + _VALUE_MAX)
+    return _with_label(text, match, (start, end), end_of_fields, limit, marks)
 
 
 def _connection_spans(text: str) -> list[tuple[int, int]]:

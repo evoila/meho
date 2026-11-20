@@ -606,6 +606,43 @@ def _shown(text: str) -> str:
     return _ANY_PLACEHOLDER.sub(" ", text)
 
 
+_FIELD_SECRET: Final = "tk-41"
+#: Where the reader of the next fields stops before the connection string ends.
+_STOPS: Final[list[str]] = [
+    ";Database=d;;",  # a double semicolon
+    ";Database=d;1x=v;",  # a name that does not start with a letter
+    ";Data$base=d;",  # a name with other characters
+    ";" + "N" * 70 + "=v;",  # a name longer than 64 characters
+    ";Database=d;plain;",  # a part with no ``=``
+    ";Database={d;",  # a ``{`` value that is never closed
+    ";Database=" + "d" * 1100 + ";",  # a field more than 1,024 characters further on
+]
+_STOPPED: Final[list[str]] = [
+    f"{label}example-password{stop}{name}={_FIELD_SECRET}"
+    for label in (_PWD_IS, _PASSWORD_IS)
+    for stop in _STOPS
+    for name in ("AccountKey", "SharedAccessKey", "Token")
+]
+
+
+@pytest.mark.parametrize(
+    "text", [*_STOPPED, *(json.dumps({"msg": line, "ok": 1}) for line in _STOPPED)]
+)
+def test_the_rest_after_a_stop_of_the_field_reader_stays_hidden(text: str) -> None:
+    """After a stop, the answer and the trace show no word that main hides."""
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    for policy in (get_default_policy(), _CONTENT_POLICY):
+        on_main = redact(text, _without_command_rule(policy)).redacted
+        now = redact(text, policy).redacted
+        assert _FIELD_SECRET not in on_main
+        assert _FIELD_SECRET not in now
+        shown = _shown(_NEXT_FIELDS.sub(_MARK, now))
+        before = _shown(on_main)
+        more = {w for w in _WORD.findall(shown) if w not in before and not _LABEL.fullmatch(w)}
+        assert more == set()
+
+
 def test_the_rule_only_hides_more() -> None:
     """No word that the policy without this rule hides is shown with it.
 

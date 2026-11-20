@@ -43,6 +43,7 @@ from meho_backplane.operations.approval_queue import (
     result_state_of_envelope,
 )
 from meho_backplane.operations.grant_approval import is_rights_change, platform_admin_reason
+from meho_backplane.operations.people_behind import entries_of, people_behind_line
 from meho_backplane.policy.routing import routing_enabled, who_can_approve
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
@@ -178,14 +179,11 @@ def project_request_to_view(
     strings here so the templates never touch the ORM row (which carries
     lazy-load + secret-bearing fields).
 
-    The ``requester`` / ``reviewer`` keys carry the display-name resolution
-    (#3300): a :class:`~meho_backplane.ui.references.SubjectRef` pairing the
-    ``sub`` with the name captured on the row at write time, so the
-    ``_subject`` macro renders the human name **alongside** the GUID
-    (fail-open to the GUID when no name was recorded). ``reviewer`` is
-    ``None`` for an undecided request. The raw ``principal_sub`` /
-    ``reviewed_by`` keys stay projected so the ``sub`` remains directly
-    reachable and pre-existing consumers are unaffected.
+    ``requester`` / ``reviewer`` are :class:`~meho_backplane.ui.references.SubjectRef`
+    values: the name **alongside** the ``sub``, or the ``sub``
+    alone. ``reviewer`` is ``None`` for an undecided request.
+    ``people_behind`` / ``people_behind_line``: see
+    :func:`_project_people_behind`.
 
     The internal ``params`` / ``params_hash`` columns are **never**
     projected: they are the swap-defence + re-dispatch input the approvals
@@ -204,12 +202,9 @@ def project_request_to_view(
     values of the answer. Approving runs nothing: the operation runs once,
     when the requester gets the values.
 
-    ``withdrawn_at`` / ``withdraw_reason`` (#4987) say when and why the
-    sender withdrew the request; both are ``None`` on any other row.
-
-    ``result_state`` and ``outcome`` (#3543) say whether an approved request
-    ran and how it ended. Both are ``None`` for a request that is not
-    approved; ``outcome`` is also ``None`` before the run starts.
+    ``withdrawn_at`` / ``withdraw_reason``: when and why the sender
+    withdrew the request. ``result_state`` and ``outcome``: whether
+    an approved request ran and how it ended (``None`` before that).
 
     ``chain`` (#3596) is ``{"work_ref", "step", "total"}`` when the request
     is step ``step`` of ``total`` pending requests under one change ticket,
@@ -240,6 +235,7 @@ def project_request_to_view(
         "principal_sub": row.principal_sub,
         "principal_act": row.principal_act,
         "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
+        **_project_people_behind(row),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "reveal_secret": bool(row.reveal_secret),
@@ -353,6 +349,22 @@ def _project_outcome_check(row: ApprovalRequest) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def _project_people_behind(row: ApprovalRequest) -> dict[str, Any]:
+    """The people behind the machine login that asked.
+
+    ``people_behind`` is the list for the request modal, and
+    ``people_behind_line`` the line for the request card. Both are ``None``
+    for a person's request. An empty list when MEHO knows nobody behind the
+    login: the modal and the card then say "not known".
+    """
+    line = people_behind_line(row.principal_kind, row.people_behind)
+    people = [
+        {"why_text": entry.why_text, "person": subject_ref(entry.sub, entry.name)}
+        for entry in entries_of(row.people_behind)
+    ]
+    return {"people_behind": people if line is not None else None, "people_behind_line": line}
 
 
 def _project_chain(chain: ChainPosition | None) -> dict[str, Any] | None:

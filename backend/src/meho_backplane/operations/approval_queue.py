@@ -103,7 +103,7 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
@@ -182,6 +182,12 @@ from meho_backplane.operations.grant_approval import (
     grant_changed_since_request,
     is_rights_change,
 )
+from meho_backplane.operations.people_behind import (
+    find_people_behind,
+    is_person_behind,
+    people_behind_unknown,
+    whys_of,
+)
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
@@ -229,6 +235,7 @@ __all__ = [
     "RightsChangeApprovalError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
+    "UnknownRequesterApprovalError",
     "WithdrawForbiddenError",
     "approval_expired_reason",
     "approval_release_changed",
@@ -245,7 +252,9 @@ __all__ = [
     "find_remote_write_approval",
     "get_decision_delegation",
     "get_request",
+    "is_admin_approver",
     "is_high_risk_level",
+    "is_self_approval",
     "list_pending",
     "may_approve_high_risk",
     "parse_delegation",
@@ -511,10 +520,12 @@ class SelfApprovalForbiddenError(ApprovalError):
         approver_kinds: Sequence[str],
         high_risk: bool = False,
         web_click_allowed: bool = False,
+        behind: bool = False,
     ) -> None:
         self.request_id = request_id
         self.principal_sub = principal_sub
         self.high_risk = high_risk
+        self.behind = behind
         if web_click_allowed:
             # #3980: the change waits only because it came with a token.
             who_can = (
@@ -529,10 +540,17 @@ class SelfApprovalForbiddenError(ApprovalError):
         else:
             who_can = "No group may approve this change, so it waits until it expires."
         #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = (
-            "You cannot approve your own change. Only members of the "
-            f"MEHO-Admins group may approve their own changes. {who_can}"
-        )
+        if behind:
+            self.reason_text = (
+                "You cannot approve this change. You set up, changed or started the "
+                "agent, add-on or runner that asked for it, so it counts as your own "
+                f"change. {who_can}"
+            )
+        else:
+            self.reason_text = (
+                "You cannot approve your own change. Only members of the "
+                f"MEHO-Admins group may approve their own changes. {who_can}"
+            )
         super().__init__(
             f"operator {principal_sub!r} may not approve approval_request "
             f"{request_id}: {self.reason_text}"
@@ -614,6 +632,31 @@ class ApprovalRoutingError(ApprovalGroupForbiddenError):
     def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, reason: str) -> None:
         super().__init__(
             request_id, operator_sub=operator_sub, role=role, safety_level="", reason=reason
+        )
+
+
+class UnknownRequesterApprovalError(ApprovalGroupForbiddenError):
+    """MEHO knows nobody behind the login that asked; only an admin may approve.
+
+    Raised by :func:`approve_request` when an agent, service or runner login
+    made the request, MEHO found no person behind it at park time
+    (:func:`~meho_backplane.operations.people_behind.people_behind_unknown`),
+    and the approver is not an admin. Subclasses
+    :class:`ApprovalGroupForbiddenError`, so every approve route answers 403
+    with :attr:`reason_text`.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str) -> None:
+        super().__init__(
+            request_id,
+            operator_sub=operator_sub,
+            role=role,
+            safety_level="",
+            reason=(
+                "You cannot approve this change. MEHO does not know who set up the "
+                "login that asked for it, so only an Admin may approve it. "
+                "Ask an Admin to approve it on the Approvals page of the web interface."
+            ),
         )
 
 
@@ -1537,6 +1580,9 @@ class ResumeRequester(NamedTuple):
     #: The requester record on the card (``permission_preflight["requester"]``),
     #: so a re-park keeps it (#6314). ``None`` when the card has none.
     subject: dict[str, Any] | None = None
+    #: The people behind the requester (:mod:`~meho_backplane.operations.people_behind`),
+    #: so a re-park keeps the list of the first request. ``None`` for a person.
+    people_behind: list[dict[str, Any]] | None = None
 
 
 #: Where the card keeps the requester record (#3898, #6314).
@@ -1733,10 +1779,19 @@ async def create_pending_request(
         principal_act = requester.act
         principal_name = requester.name
         principal_kind = requester.kind
+        people_behind = requester.people_behind
     else:
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
         principal_kind = operator.principal_kind.value
+        people_behind = await find_people_behind(
+            session,
+            tenant_id=operator.tenant_id,
+            sub=operator.sub,
+            client_id=operator.client_id,
+            kind=principal_kind,
+            runner_id=operator.runner_id,
+        )
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -1780,6 +1835,7 @@ async def create_pending_request(
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
         principal_name=principal_name,
         principal_kind=principal_kind,
+        people_behind=people_behind,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -2182,13 +2238,14 @@ async def approve_request(
     request.decided_at = now
     await session.flush()
 
-    self_approved = operator.sub == request.principal_sub
+    self_approved = is_self_approval(operator.sub, request)
     extra: dict[str, Any] = {
         "decision": "approved",
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
         **grant_audit_fields(request, operator),
+        **_behind_audit_fields(operator.sub, request),
     }
     if reason:
         extra["reason"] = reason
@@ -3159,6 +3216,7 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
         request.principal_kind,
         client if isinstance(client, dict) else None,
         subject if isinstance(subject, dict) else None,
+        request.people_behind,
     )
 
 
@@ -3865,9 +3923,12 @@ def _check_self_approval(
 ) -> ApprovalRule | None:
     """Check a self-approval; return its rule, or ``None`` when it is not one.
 
-    A self-approval is ``operator.sub == request.principal_sub``. The
-    comparison is on the stable ``sub`` claim, so a renamed display name
-    can never turn into a self-approval. Then, in order:
+    A self-approval is ``operator.sub == request.principal_sub``, or
+    *operator* is one of the people behind the agent, service or runner
+    login that asked (``request.people_behind``,
+    :mod:`~meho_backplane.operations.people_behind`). The comparison is on
+    the stable ``sub`` claim, so a renamed display name can never turn into
+    a self-approval. Then, in order:
 
     1. A MEHO-Admin (:attr:`Operator.may_self_approve`)
        may approve their own change at every risk level. On the
@@ -3893,7 +3954,8 @@ def _check_self_approval(
     may approve (:mod:`~meho_backplane.operations.approval_rights`): that
     read approves nothing, so it logs no break-glass warning.
     """
-    if operator.sub != request.principal_sub:
+    behind = operator.sub != request.principal_sub
+    if behind and not is_person_behind(operator.sub, request.people_behind):
         return None
     if operator.may_self_approve:
         return ApprovalRule.SA_OPERATOR_SELF_APPROVAL
@@ -3923,6 +3985,7 @@ def _check_self_approval(
         approver_kinds=_approver_kinds(request),
         high_risk=high_risk,
         web_click_allowed=token_wait,
+        behind=behind,
     )
 
 
@@ -3943,6 +4006,45 @@ def _approver_kinds(request: ApprovalRequest) -> tuple[str, ...]:
     return narrow(kinds, stored)
 
 
+def is_self_approval(sub: str, request: ApprovalRequest) -> bool:
+    """True when *sub* approving *request* counts as an own change.
+
+    *sub* is the requester, or one of the people behind the agent, service
+    or runner login that asked (``request.people_behind``).
+    """
+    return sub == request.principal_sub or is_person_behind(sub, request.people_behind)
+
+
+def _behind_audit_fields(sub: str, request: ApprovalRequest) -> dict[str, Any]:
+    """``approver_behind_requester`` and its reasons, when *sub* is behind the requester."""
+    whys = whys_of(sub, request.people_behind)
+    if not whys:
+        return {}
+    return {"approver_behind_requester": True, "approver_behind_why": whys}
+
+
+def is_admin_approver(operator: Operator) -> bool:
+    """True when *operator* is a person who is an admin in the chosen tenant."""
+    is_admin = operator.tenant_role == TenantRole.TENANT_ADMIN or operator.platform_admin
+    return is_admin and operator.tenant_chosen and is_human_principal(operator)
+
+
+def _check_requester_known(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`UnknownRequesterApprovalError` when only an admin may approve *request*.
+
+    That is the case when an agent, service or runner login asked and MEHO
+    found no person behind it. An unknown origin never gets less control
+    than a known one.
+    """
+    if not people_behind_unknown(request.principal_kind, request.people_behind):
+        return
+    if is_admin_approver(operator):
+        return
+    raise UnknownRequesterApprovalError(
+        request.id, operator_sub=operator.sub, role=operator.tenant_role.value
+    )
+
+
 def _check_approver_group(
     operator: Operator, request: ApprovalRequest, *, log_break_glass: bool = True
 ) -> ApprovalRule:
@@ -3958,7 +4060,10 @@ def _check_approver_group(
       No self-approval rule below can allow it.
     * A change of a login's or group's rights:
       :func:`~meho_backplane.operations.grant_approval.check_grant_approval`.
-    * Own change: :func:`_check_self_approval`.
+    * A request of a machine login with nobody known behind it: only an
+      admin (:func:`_check_requester_known`).
+    * Own change, also as one of the people behind the login that asked:
+      :func:`_check_self_approval`.
     * Another person's ``dangerous`` or ``destructive`` change: only a
       tenant admin may approve it, as the decision
       record ``docs/decisions/approval-groups-and-self-approval.md`` says.
@@ -3972,6 +4077,7 @@ def _check_approver_group(
     """
     check_rights_change_approval(operator, request)
     check_grant_approval(operator, request)
+    _check_requester_known(operator, request)
     self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule
@@ -4460,7 +4566,8 @@ async def record_approval_step_event(
     }
     if decision == "approved":
         payload["reviewed_by"] = request.reviewed_by
-        payload["self_approved"] = request.reviewed_by == request.principal_sub
+        reviewer = request.reviewed_by
+        payload["self_approved"] = reviewer is not None and is_self_approval(reviewer, request)
         rule = getattr(request, "_approval_rule", None)
         if rule is not None:
             payload["approval_rule"] = str(rule)

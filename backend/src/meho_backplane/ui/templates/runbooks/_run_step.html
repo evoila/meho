@@ -196,10 +196,10 @@
             class="flex flex-wrap items-center gap-2"
           >
             <input type="hidden" name="verify_type" value="confirm" />
-            <label class="form-control">
+            <label>
               <select
                 name="answer"
-                class="select select-bordered select-sm"
+                class="select select-sm"
                 aria-label="Verify answer"
               >
                 <option value="yes" selected>Verified — yes, advance</option>
@@ -237,10 +237,10 @@
           <input type="hidden" name="verify_type" value="{{ verify.type }}" />
           <input type="hidden" name="retry" value="1" />
           {% if verify.type == "confirm" %}
-            <label class="form-control">
+            <label>
               <select
                 name="answer"
-                class="select select-bordered select-sm"
+                class="select select-sm"
                 aria-label="Verify answer"
               >
                 <option value="yes" selected>Verified — yes, advance</option>
@@ -297,14 +297,14 @@
           hx-on::after-request="if(event.detail.successful) document.getElementById('runbook-run-abort-modal').close()"
           class="space-y-3"
         >
-          <label class="form-control">
-            <div class="label"><span class="label-text">Reason</span></div>
+          <label>
+            <div class="label"><span>Reason</span></div>
             <textarea
               name="reason"
               required
               minlength="1"
               rows="3"
-              class="textarea textarea-bordered"
+              class="textarea"
               placeholder="Why is this run being aborted?"
               aria-label="Abort reason"
             ></textarea>
@@ -342,14 +342,14 @@
             hx-on::after-request="if(event.detail.successful) document.getElementById('runbook-run-reassign-modal').close()"
             class="space-y-3"
           >
-            <label class="form-control">
-              <div class="label"><span class="label-text">New assignee</span></div>
+            <label>
+              <div class="label"><span>New assignee</span></div>
               <input
                 type="text"
                 name="new_assignee"
                 required
                 minlength="1"
-                class="input input-bordered"
+                class="input"
                 placeholder="operator subject id"
                 aria-label="New assignee subject"
                 autocomplete="off"

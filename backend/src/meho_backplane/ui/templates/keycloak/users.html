@@ -57,11 +57,11 @@
     hx-target="body"
     hx-push-url="true"
   >
-    <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Keycloak target</span>
+    <label>
+      <span class="mb-1 text-xs opacity-70">Keycloak target</span>
       <select
         name="target"
-        class="select select-bordered select-sm w-full font-mono"
+        class="select select-sm w-full font-mono"
         aria-label="Keycloak target"
         hx-get="/ui/keycloak/users"
         hx-target="body"
@@ -77,14 +77,14 @@
         {% endfor %}
       </select>
     </label>
-    <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Username filter</span>
+    <label>
+      <span class="mb-1 text-xs opacity-70">Username filter</span>
       <input
         type="text"
         name="username"
         maxlength="512"
         value="{{ username_filter }}"
-        class="input input-bordered input-sm w-full font-mono"
+        class="input input-sm w-full font-mono"
         placeholder="operator-a"
         aria-label="Username filter"
         autocomplete="off"

@@ -110,19 +110,19 @@
           is the multipart default for clients without JS. -#}
       <input type="hidden" name="dry_run" value="false" />
 
-      <label class="form-control">
-        <span class="label-text text-xs opacity-70">Paste edges document (YAML or JSON)</span>
+      <label>
+        <span class="text-xs opacity-70">Paste edges document (YAML or JSON)</span>
         <textarea
           name="rows_text"
           rows="8"
-          class="textarea textarea-bordered textarea-sm font-mono"
+          class="textarea textarea-sm font-mono"
           aria-label="Bulk edges document"
           placeholder="edges:&#10;  - from: svc-a&#10;    kind: depends-on&#10;    to: { name: db-1, kind: vm }"
         >{{ submitted_rows | default('') }}</textarea>
       </label>
 
-      <label class="form-control">
-        <span class="label-text text-xs opacity-70">…or upload a file (takes precedence)</span>
+      <label>
+        <span class="text-xs opacity-70">…or upload a file (takes precedence)</span>
         <input
           type="file"
           name="upload"

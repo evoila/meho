@@ -111,7 +111,7 @@
               maxlength="128"
               required
               value="{{ op_id_prefill }}"
-              class="input input-bordered input-sm font-mono w-full"
+              class="input input-sm font-mono w-full"
               placeholder="vault.kv.* or k8s.configmap.info"
               aria-describedby="broadcast-override-pattern-hint"
             />
@@ -126,7 +126,7 @@
               <span class="text-sm font-medium">Scope</span>
               <select
                 name="scope_field"
-                class="select select-bordered select-sm w-full"
+                class="select select-sm w-full"
                 data-action="scope-select"
               >
                 <option value="">Op-wide (no scope)</option>
@@ -146,7 +146,7 @@
                 type="text"
                 name="scope_value"
                 maxlength="128"
-                class="input input-bordered input-sm w-full"
+                class="input input-sm w-full"
                 placeholder="e.g. kube-system"
               />
             </label>
@@ -156,7 +156,7 @@
             <span class="text-sm font-medium">Detail level</span>
             <select
               name="detail"
-              class="select select-bordered select-sm w-full"
+              class="select select-sm w-full"
               required
             >
               {% for option in detail_options %}

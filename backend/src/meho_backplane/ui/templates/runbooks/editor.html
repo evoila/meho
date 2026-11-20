@@ -152,7 +152,7 @@
         {% if mode == "new" %}
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Slug</span>
-          <input type="text" name="slug" class="input input-bordered input-sm font-mono w-full"
+          <input type="text" name="slug" class="input input-sm font-mono w-full"
                  x-model="slug" pattern="[a-z]([a-z0-9.\-]*[a-z0-9])?"
                  placeholder="rotate-cluster-cert" autocomplete="off" required
                  aria-label="Template slug" />
@@ -166,21 +166,21 @@
 
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Title</span>
-          <input type="text" name="title" class="input input-bordered input-sm w-full"
+          <input type="text" name="title" class="input input-sm w-full"
                  x-model="title" placeholder="Rotate the cluster certificate"
                  autocomplete="off" required aria-label="Template title" />
         </label>
 
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Description</span>
-          <textarea name="description" class="textarea textarea-bordered textarea-sm w-full" rows="2"
+          <textarea name="description" class="textarea textarea-sm w-full" rows="2"
                     x-model="description" placeholder="What this runbook does and when to run it."
                     required aria-label="Template description"></textarea>
         </label>
 
         <label class="flex flex-col gap-1 max-w-md">
           <span class="text-sm font-medium">Target kind <span class="opacity-60 font-normal">(optional)</span></span>
-          <input type="text" name="target_kind" class="input input-bordered input-sm font-mono w-full"
+          <input type="text" name="target_kind" class="input input-sm font-mono w-full"
                  x-model="targetKind" placeholder="k8s-node" autocomplete="off"
                  aria-label="Template target kind" />
         </label>

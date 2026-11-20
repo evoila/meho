@@ -32,7 +32,7 @@
   <form method="get" class="flex flex-wrap items-end gap-3" aria-label="Filter grants">
     <label class="block space-y-1">
       <span class="text-sm font-medium">Principal sub</span>
-      <input type="search" name="principal" value="{{ principal }}" maxlength="512" class="input input-bordered w-full font-mono" placeholder="Exact JWT sub" />
+      <input type="search" name="principal" value="{{ principal }}" maxlength="512" class="input w-full font-mono" placeholder="Exact JWT sub" />
     </label>
     <label class="flex cursor-pointer items-center gap-2 pb-3 text-sm">
       <input class="checkbox checkbox-sm" type="checkbox" name="include_expired" value="true" {% if include_expired %}checked{% endif %} />

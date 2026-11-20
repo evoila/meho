@@ -75,13 +75,13 @@
           role="search"
           aria-label="Search the docs corpus"
         >
-          <label class="form-control w-full sm:w-64">
+          <label class="w-full sm:w-64">
             <div class="label">
-              <span class="label-text">Collection</span>
+              <span>Collection</span>
             </div>
             <select
               name="collection"
-              class="select select-bordered w-full"
+              class="select w-full"
               aria-label="Doc collection to search"
               required
             >
@@ -103,16 +103,16 @@
               {% endfor %}
             </select>
           </label>
-          <label class="form-control w-full flex-1">
+          <label class="w-full flex-1">
             <div class="label">
-              <span class="label-text">Query</span>
+              <span>Query</span>
             </div>
             <input
               type="search"
               name="q"
               value="{{ query }}"
               placeholder="Ask the corpus&hellip;"
-              class="input input-bordered w-full"
+              class="input w-full"
               autofocus
               aria-label="Docs corpus query"
               autocomplete="off"
@@ -128,9 +128,9 @@
              submitted with the query; the backend defaults to "search" for any
              unrecognised value. ``aria-label`` on the fieldset names the choice
              for assistive tech. #}
-          <fieldset class="form-control" aria-label="Result mode">
+          <fieldset aria-label="Result mode">
             <div class="label">
-              <span class="label-text">Mode</span>
+              <span>Mode</span>
             </div>
             <div class="join" role="radiogroup" aria-label="Result mode">
               <label class="btn btn-sm join-item gap-1 has-[:checked]:btn-primary">

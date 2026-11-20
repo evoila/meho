@@ -246,7 +246,7 @@ func printListTable(w io.Writer, r *api.MemoryListResponse) {
 			truncate(string(e.Scope), 14),
 			truncate(e.Slug, 32),
 			truncate(formatTimePtr(e.ExpiresAt), 32),
-			truncate(snippetOf(e.Body), 60),
+			output.SafeText(truncate(snippetOf(e.Body), 60)),
 		)
 	}
 }

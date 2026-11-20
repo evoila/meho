@@ -153,9 +153,9 @@ def own_values(rep: dict[str, Any]) -> Own:
     if not isinstance(attributes, dict):
         raise CannotCountError("attributes that are not an object")
     # Imported late: the grant module imports the user lookup, which imports the guard.
-    from meho_backplane.connectors.keycloak.ops_write_grant_platform import platform_flag_names
+    from meho_backplane.connectors.keycloak.ops_write_grant_platform import platform_claim_names
 
-    names = platform_flag_names()
+    names = platform_claim_names()
     return Own(
         _value(
             attributes,

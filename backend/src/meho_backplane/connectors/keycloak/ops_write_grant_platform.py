@@ -50,7 +50,9 @@ __all__ = [
     "PARENT_CAP",
     "attributes_set_platform_admin",
     "group_gives_platform_admin",
-    "platform_flag_names",
+    "has_platform_flag",
+    "platform_claim_names",
+    "under_platform_group",
 ]
 
 _PLATFORM_GROUP: Final[str] = ADMIN_GROUPS[1].casefold()
@@ -64,8 +66,8 @@ def _text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def platform_flag_names() -> frozenset[str]:
-    """The attribute names that carry the platform admin flag, in lower case."""
+def platform_claim_names() -> frozenset[str]:
+    """The attribute and claim names that carry the platform admin flag, in lower case."""
     return frozenset({"platform_admin", get_settings().jwt_platform_admin_claim_name.casefold()})
 
 
@@ -82,7 +84,7 @@ def attributes_set_platform_admin(attributes: Any) -> bool:
     """True when the new *attributes* of a request set the platform admin flag, to any value."""
     if not isinstance(attributes, dict):
         return False
-    names = platform_flag_names()
+    names = platform_claim_names()
     return any(_names_flag(key, names) for key in attributes)
 
 
@@ -93,7 +95,13 @@ def _flag_is_true(rep: dict[str, Any], names: frozenset[str]) -> bool:
     return any(_names_flag(k, names) and _is_true(v) for k, v in attributes.items())
 
 
-def _in_platform_group(rep: dict[str, Any]) -> bool:
+def has_platform_flag(rep: dict[str, Any]) -> bool:
+    """True when the user or group *rep* has the platform admin attribute set to ``true``."""
+    return _flag_is_true(rep, platform_claim_names())
+
+
+def under_platform_group(rep: dict[str, Any]) -> bool:
+    """True when the group *rep* is the platform admin group or is under it, by name or path."""
     name = _text(rep.get("name"))
     path = (_text(rep.get("path")) or "").casefold()
     return (
@@ -134,19 +142,22 @@ async def _maps_platform_role(
 
 
 async def group_gives_platform_admin(
-    connector: KeycloakConnector, ctx: PreviewContext, group_id: str
+    connector: KeycloakConnector, ctx: PreviewContext, group_id: str, *, realm: str | None = None
 ) -> bool | None:
-    """Whether a login in the group gets platform admin rights; ``None`` when unknown."""
+    """Whether a login in the group gets platform admin rights; ``None`` when unknown.
+
+    *realm* is the realm of the group; ``None`` means the target's managed realm.
+    """
     try:
-        realm = resolve_realm_config(ctx.target).managed_realm
-        names = platform_flag_names()
+        realm = realm or resolve_realm_config(ctx.target).managed_realm
+        names = platform_claim_names()
         roles = platform_role_names()
         if roles is None:
             return None
         group = await _read_group(connector, ctx, realm, group_id)
         if group is None:
             return None
-        if _in_platform_group(group):
+        if under_platform_group(group):
             return True
         seen = {group_id}
         current: dict[str, Any] | None = group

@@ -1308,7 +1308,31 @@ The group rule (`_check_approver_group`, used by `approve_request` and
 - in the login realm, when the approver is not a platform admin and the
   change can give platform admin rights (a group or role that gives them;
   see "How MEHO decides that a group change gives platform admin rights"
+  and "Every Keycloak write in the login realm needs a platform admin"
   in [connectors-keycloak.md](connectors-keycloak.md)).
+
+`register_grant_op` takes `applies`, a check of the params: only a request
+that passes it counts (`secret.move` with a Keycloak side). Such an op does
+not count in `is_rights_change_op`. With `per_call=False` an op is checked
+here too, but it gets no per-call mark and does not count in
+`is_rights_change_op`: it is a change of rights only in the login realm
+(the Keycloak writes that only take away). Such an op can register a check
+by its params (`register_grant_cover_check`, `operations/grant_cover_check.py`):
+when the check says so, the policy gate looks up no standing grant and no
+run approval for the call, and the shadow policy evaluator does the same.
+A card can name the login of a change whose params name none: the `grant`
+fact `for_login` (`FOR_LOGIN`, set by a `secret.move` that sets a password
+in the login realm). Then that login never approves it, and an unknown
+login cannot be approved. `register_harmless_keys_rule`
+records an op whose card carries `harmless_keys_only`
+(`HARMLESS_KEYS_ONLY`); `grant_changed_since_request` refuses the run of
+such a request when the approved card does not have it
+(`GRANT_REASON_OLD_CARD`), in every realm. The Keycloak rule that uses it
+is in "Every Keycloak write in the login realm needs a platform admin" in
+[connectors-keycloak.md](connectors-keycloak.md). `platform_admin_reason(request)` gives
+the reason a platform admin must approve (from `platform_admin_reason` in
+the `grant` block), or `None`; the refusal text and the console card show
+it.
 
 A request without the `grant` block, or with a group MEHO could not read,
 gets the strict rule. The decision audit row carries `grant_user_id`,
@@ -2917,9 +2941,17 @@ The per-op preview is opt-in via a builder registry in
   `meho_approvals_get` and `meho_approvals_list` read the stored request
   through `proposed_effect_for_agent`: with the switch off, an op behind
   a builder switch shows the generic params echo of its stored params,
-  and an op with person-only keys shows its preview without them. So the
-  caller gets the same answer there as from `preview_operation`. The REST
+  and an op with person-only keys shows its preview without them.
+  `register_agent_preview_filter(op_id, filter)` gives a caller the
+  stored preview as the filter returns it, for fields deeper than the
+  top-level keys; it runs after the person-only keys are gone, so an op
+  can have both. So the caller gets the same answer there as from
+  `preview_operation`. The REST
   approvals API and the console show the stored card.
+- `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
+  every preview the builder of `op_id` returns, whatever module
+  registered the builder and when. A step that raises makes the preview
+  unavailable, the same as a builder that raises.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as

@@ -485,7 +485,7 @@ async def test_read_surfaces_show_reason_and_advice(monkeypatch: pytest.MonkeyPa
     message = EXPIRED_REASON_MESSAGES[ApprovalExpiredReason.RELEASE_CHANGED]
     assert "Ask again" in message
 
-    rest = _view(row)
+    rest = _view(row, operator=_operator(tenant))
     assert rest.expired_reason is ApprovalExpiredReason.RELEASE_CHANGED
     assert rest.expired_message == message
     assert rest.release_id == _OLD_SHA
@@ -507,6 +507,6 @@ async def test_read_surfaces_have_no_reason_for_pending(monkeypatch: pytest.Monk
     request_id = await _park(tenant)
     row = await _row(request_id)
 
-    assert _view(row).expired_reason is None
+    assert _view(row, operator=_operator(tenant)).expired_reason is None
     assert _row_to_dict(row)["expired_message"] is None
     assert project_request_to_view(row)["expired_reason"] is None

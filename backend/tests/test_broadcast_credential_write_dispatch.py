@@ -90,7 +90,8 @@ def _make_operator() -> Operator:
         raw_jwt="header.payload.signature",
         tenant_id=_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
-        principal_kind=PrincipalKind.AGENT,
+        # A person: an agent's credential write waits for a person.
+        principal_kind=PrincipalKind.USER,
     )
 
 

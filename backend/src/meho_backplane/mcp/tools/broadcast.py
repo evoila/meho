@@ -263,7 +263,9 @@ register_mcp_tool(
                         "op_class": {
                             "type": "string",
                             "enum": list(OP_CLASS_ENUM),
-                            "description": ("Exact-match filter on event op_class."),
+                            "description": (
+                                "No announcement has an op_class, so any value returns no events."
+                            ),
                         },
                         "principal": {
                             "type": "string",
@@ -277,9 +279,8 @@ register_mcp_tool(
                             "maxLength": 256,
                             "description": (
                                 "Exact-match filter on target attribution. "
-                                "Matches a BroadcastEvent's target_name or "
-                                "an announcement's single 'target' OR any "
-                                "entry in its 'targets' list."
+                                "Matches an announcement's single 'target' "
+                                "OR any entry in its 'targets' list."
                             ),
                         },
                         "actor_sub": {
@@ -287,11 +288,8 @@ register_mcp_tool(
                             "minLength": 1,
                             "maxLength": 256,
                             "description": (
-                                "Exact-match filter on the RFC 8693 actor "
-                                "(the delegated agent that acted). Answers "
-                                "'what has this agent been doing' -- distinct "
-                                "from 'principal', which matches the human "
-                                "subject the agent acted for."
+                                "No announcement matches this filter, so "
+                                "any value returns no events."
                             ),
                         },
                         "work_ref": {
@@ -302,11 +300,8 @@ register_mcp_tool(
                                 "'gh:evoila/meho#123'). White space at both "
                                 "ends is ignored. A value with control or "
                                 "invisible characters, or longer than 256 "
-                                "characters, is refused. It groups every "
-                                "event tied to one ticket -- an "
-                                "announcement's declared 'work_ref' OR an "
-                                "audit-driven operation's projected lineage "
-                                "'work_ref'."
+                                "characters, is refused. It matches the "
+                                "'work_ref' an announcement declared."
                             ),
                         },
                         "active_only": {
@@ -943,7 +938,9 @@ register_mcp_tool(
                         "op_class": {
                             "type": "string",
                             "enum": list(OP_CLASS_ENUM),
-                            "description": ("Exact-match filter on event op_class."),
+                            "description": (
+                                "No announcement has an op_class, so any value returns no events."
+                            ),
                         },
                         "principal": {
                             "type": "string",
@@ -957,9 +954,8 @@ register_mcp_tool(
                             "maxLength": 256,
                             "description": (
                                 "Exact-match filter on target attribution. "
-                                "Matches a BroadcastEvent's target_name or "
-                                "an announcement's single 'target' OR any "
-                                "entry in its 'targets' list."
+                                "Matches an announcement's single 'target' "
+                                "OR any entry in its 'targets' list."
                             ),
                         },
                         "actor_sub": {
@@ -967,11 +963,8 @@ register_mcp_tool(
                             "minLength": 1,
                             "maxLength": 256,
                             "description": (
-                                "Exact-match filter on the RFC 8693 actor "
-                                "(the delegated agent that acted). Answers "
-                                "'what has this agent been doing' -- distinct "
-                                "from 'principal', which matches the human "
-                                "subject the agent acted for."
+                                "No announcement matches this filter, so "
+                                "any value returns no events."
                             ),
                         },
                         "work_ref": {
@@ -982,11 +975,8 @@ register_mcp_tool(
                                 "'gh:evoila/meho#123'). White space at both "
                                 "ends is ignored. A value with control or "
                                 "invisible characters, or longer than 256 "
-                                "characters, is refused. It groups every "
-                                "event tied to one ticket -- an "
-                                "announcement's declared 'work_ref' OR an "
-                                "audit-driven operation's projected lineage "
-                                "'work_ref'."
+                                "characters, is refused. It matches the "
+                                "'work_ref' an announcement declared."
                             ),
                         },
                         "active_only": {

@@ -1336,8 +1336,11 @@ value of `spec.set` becomes one (keys kept). Chart values often hold
 passwords. A chart made with `kubectl apply` also carries its whole
 manifest, values included, in the last-applied annotation, so every
 annotation value of a `HelmChart` becomes a placeholder too (keys kept),
-as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
-recorder (next paragraph) records the answer only in this masked form.
+as on a Secret. A `kind: HelmChartConfig` object (it overrides the values
+of a packaged chart) and the kind-less items of a `HelmChartConfigList`
+are masked the same way. `k8s.meho.release.info` reads such objects, and
+the flight recorder (next paragraph) records the answer only in this
+masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
@@ -1350,7 +1353,21 @@ and annotations carry placeholders, never the values text. For a list
 read, each item first gets its `kind` from the list envelope
 (`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
 "Built-in kinds" above), because the API server leaves `kind` off list
-items. The dedicated way
+items. For every kind, `custom_resource_row` also hides the values under
+secret-shaped key names in `spec` and `status` (numbers included) and the
+secret-named fields inside their text values, before it builds
+`spec_excerpt`, `status_excerpt` and `fields`. It hides a secret-named
+field inside an annotation value before it cuts the value. On a
+`reveal_secret: true` call by a person, an excerpt or an annotation value
+that is not cut keeps the raw values: the dispatcher hides them in the
+default view and the audit copy and gives them back on the reveal. In
+`fields` a raw value stays only where the dispatcher hides it under its
+path (`_revealed_fields`). A value cut out of its object loses the names
+around it (the `name` of an env entry, the SNMP setting next to a
+`community`), so the dispatcher cannot hide it there; such a value comes
+from the hidden object. A cut excerpt stays hidden, also on a reveal. Both operations
+build their rows in a worker thread, so a large text value does not hold
+up other calls. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 

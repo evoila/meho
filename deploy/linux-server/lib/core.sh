@@ -4,8 +4,8 @@
 #
 # Steps 4 to 6 of install.sh (form-2 design, section 5): install the MEHO
 # core with the download's Helm, write the two one-time files, install the
-# meho command, write the CA of the console and the install record, and read
-# the first-start list. This file is sourced, not run.
+# meho command, write the CA of the console and the install record, and name
+# where to read the first-start list. This file is sourced, not run.
 #
 # No secret touches a command line, the output or a log here. The values of
 # a Secret go from kubectl straight into a file that only root can read.
@@ -19,8 +19,6 @@ readonly FIRST_LOGIN_TEMPLATE='{{range $key, $value := .data}}{{$key}}={{base64d
 readonly UNSEAL_KEY_TEMPLATE='{{base64decode .data.key}}{{"\n"}}'
 # Only the CA of the console's TLS Secret. The template never reads tls.key.
 readonly CONSOLE_CA_TEMPLATE='{{index .data "ca.crt" | base64decode}}'
-# The exit code of "meho status --first-start" when a line of the list is red.
-readonly FIRST_START_RED_EXIT=6
 
 # Set by read_download_version.
 MEHO_VERSION=""
@@ -28,10 +26,6 @@ MEHO_IMAGE_TAG=""
 CHART_VERSION=""
 RKE2_VERSION=""
 CHART_FILE=""
-
-# Set by read_first_start_list: green, red or unread, and the lines of the list.
-FIRST_START_STATE=unread
-FIRST_START_LINES=""
 
 # version_value <VERSION file> <key>: one value of the download's VERSION file.
 version_value() {
@@ -201,8 +195,8 @@ install_cli() {
 }
 
 # write_console_ca: the CA that signed the console certificate goes to a file
-# that the admin gives to browsers and laptops, and that the first-start list
-# uses. Every run writes it again from the TLS Secret, so it follows a new
+# that the admin gives to browsers and laptops, so that they trust the
+# console. Every run writes it again from the TLS Secret, so it follows a new
 # certificate. A Secret without a CA certificate leaves no file and a warning:
 # a file from an earlier run could name a CA the console no longer uses.
 write_console_ca() {
@@ -210,43 +204,11 @@ write_console_ca() {
     if ! write_secret_file "$HELM_RELEASE-core-tls" "$CONSOLE_CA_TEMPLATE" "$MEHO_CONSOLE_CA_FILE" ||
         ! grep -q -e '-----BEGIN CERTIFICATE-----' "$file"; then
         rm -f "$file"
-        warn "The Secret $HELM_RELEASE-core-tls holds no CA certificate, so no file was written for it. The first-start list then trusts only the CA store of this machine."
+        warn "The Secret $HELM_RELEASE-core-tls holds no CA certificate, so no file was written for it."
         return 0
     fi
     chmod 0644 "$file"
     ok "wrote the CA of the console certificate to $MEHO_CONSOLE_CA_FILE"
-}
-
-# read_first_start_list <hostname>: the first-start list (#4042), read by the
-# meho command through the console address, as a person reads it. The command
-# trusts the console CA through SSL_CERT_FILE, which Go reads in place of the
-# system's CA file. A red line, or a list that cannot be read, does not fail
-# the install: the list names what to fix on the site, and the console page
-# /ui/first-start shows it again after the first login.
-read_first_start_list() {
-    local hostname=$1 ca_file="${HOST_ROOT}${MEHO_CONSOLE_CA_FILE}" list errors error="" rc=0
-    local -a environment=()
-    if [[ -f $ca_file ]]; then
-        environment=("SSL_CERT_FILE=$ca_file")
-    fi
-    list=$(mktemp)
-    errors=$(mktemp)
-    env "${environment[@]}" "${HOST_ROOT}${MEHO_CLI_PATH}" status --first-start \
-        --backplane "https://$hostname" >"$list" 2>"$errors" || rc=$?
-    FIRST_START_LINES=$(<"$list")
-    IFS= read -r error <"$errors" || true
-    rm -f "$list" "$errors"
-    if ((rc == 0)); then
-        FIRST_START_STATE=green
-        ok "the first-start list is green"
-    elif ((rc == FIRST_START_RED_EXIT)); then
-        FIRST_START_STATE=red
-        warn "The first-start list has a red line. Each red line says what to fix. A red line does not stop the install."
-    else
-        FIRST_START_STATE=unread
-        FIRST_START_LINES=""
-        warn "The first-start list could not be read: ${error:-the meho command ended with exit code $rc}. After the first login, open https://$hostname/ui/first-start."
-    fi
 }
 
 # print_console_ca_line: the line of the result that names the console CA.
@@ -256,20 +218,11 @@ print_console_ca_line() {
     fi
 }
 
-# print_first_start_list <hostname>: the state of the first-start list and its
-# lines, as the last part of the result.
+# print_first_start_list <hostname>: where to read the first-start list, as
+# the last line of the result. MEHO shows the list only after a login, so
+# the install does not read it.
 print_first_start_list() {
-    local line
-    case $FIRST_START_STATE in
-        green) printf '  First-start list:      green\n' ;;
-        red) printf '  First-start list:      a red line; each red line says what to fix\n' ;;
-        *) printf '  First-start list:      not read; after the first login, open https://%s/ui/first-start\n' "$1" ;;
-    esac
-    if [[ -n $FIRST_START_LINES ]]; then
-        while IFS= read -r line; do
-            printf '    %s\n' "$line"
-        done <<<"$FIRST_START_LINES"
-    fi
+    printf '  First-start list:      after the first login, open https://%s/ui/first-start, or run "meho login https://%s" and then "meho status --first-start"\n' "$1" "$1"
 }
 
 # render_install_record <date> <hostname> <public address> <tenant id>

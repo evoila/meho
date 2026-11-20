@@ -58,10 +58,11 @@ marker, ``***``) stays, so its label is kept.
 
 Used by the dispatch error path (``operations/_errors.py`` and
 ``operations/_vendor_text.py``) and by the flight-recorder trace scrub
-(``flight_recorder/_content.py``). The normal result path does not use it:
-there ``operations/_secret_values.py`` hides a field like ``password`` in
-every answer, with the fields an operation declared as plain left in place
-(``docs/codebase/redaction.md``).
+(``flight_recorder/_content.py``). The normal result path uses only the text
+step, through :mod:`.secret_text`: there ``operations/_secret_values.py``
+hides a field like ``password`` in every answer, with the fields an
+operation declared as plain left in place, and then hides the secret-named
+fields inside each text value (``docs/codebase/redaction.md``).
 """
 
 from __future__ import annotations

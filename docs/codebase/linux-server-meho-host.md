@@ -887,8 +887,8 @@ packages later.
   certificate` (#4738) writes the same Secret. A change of
   `ingress.tls.secretName` needs a change of `CONSOLE_TLS_SECRET`.
 - **`certificate` prints the check line, not the first-start list.** The
-  first-start list (`meho status --first-start`, which `install.sh` shows
-  at its end) fetches the certificate through the console address. Traefik
+  first-start list (`meho status --first-start`, read after a login)
+  fetches the certificate through the console address. Traefik
   shows the new Secret only within a minute, so right after the patch the
   list could still see the old certificate. The check line applies the
   same rule to the Secret that `certificate` just wrote.

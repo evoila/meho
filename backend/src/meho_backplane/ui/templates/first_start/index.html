@@ -2,8 +2,8 @@
   SPDX-License-Identifier: Apache-2.0
   Copyright (c) 2026 evoila Group
 
-  First-start checks page. The same list as ``GET /first-start``: one line
-  per check, green, red, warning or skipped, and a red line says what to fix.
+  First-start checks page. The same list as ``GET /api/v1/first-start``: one
+  line per check, green, red, warning or skipped, and a red line says what to fix.
 -#}
 {% extends "base.html" %}
 
@@ -15,7 +15,7 @@
     <h1 class="text-xl font-semibold">First-start checks</h1>
     <p class="text-sm opacity-70">
       MEHO checks the DNS name, the certificate, the network, the clock and the systems in
-      the settings. Reload the page to run the checks again.
+      the settings. Reload the page to run the checks again; a list is kept for a few seconds.
     </p>
   </header>
   <ul class="space-y-3" data-field="first-start-list">

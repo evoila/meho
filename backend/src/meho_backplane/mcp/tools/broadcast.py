@@ -302,11 +302,8 @@ register_mcp_tool(
                                 "'gh:evoila/meho#123'). White space at both "
                                 "ends is ignored. A value with control or "
                                 "invisible characters, or longer than 256 "
-                                "characters, is refused. It groups every "
-                                "event tied to one ticket -- an "
-                                "announcement's declared 'work_ref' OR an "
-                                "audit-driven operation's projected lineage "
-                                "'work_ref'."
+                                "characters, is refused. It matches the "
+                                "'work_ref' an announcement declared."
                             ),
                         },
                         "active_only": {

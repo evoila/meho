@@ -11,13 +11,13 @@ first people log in.
 
     Two kinds of step get different approvers:
 
-    - **Create a group** (Step 2): a MEHO-SA-Operator or a MEHO-Admin
-      may approve their own. Anyone else needs a second person: a
-      MEHO-SA-Operator or an admin.
+    - **Create a group** (Step 2): a MEHO-Admin
+      may approve their own. Anyone else needs a second person: an
+      admin.
     - **Create a user** (Step 4) and **add a person to a group**
       (Step 5): these are changes of rights. Another admin (a tenant
       admin or a platform admin) must approve them, never the person who
-      asked. A MEHO-SA-Operator who is not an admin cannot approve them.
+      asked. An Operator cannot approve them.
       See [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
     For Steps 4 and 5, an admin who is not the person who asked approves
@@ -27,11 +27,10 @@ first people log in.
 
     For the group step, pick one of these before you start:
 
-    - **You are a MEHO-SA-Operator or a MEHO-Admin** in your current
+    - **You are a MEHO-Admin** in your current
       tenant, and you approve it yourself, on purpose, in the web
       interface.
-    - **A second person** in your current tenant (a MEHO-SA-Operator or
-      an admin) approves it.
+    - **A second person** in your current tenant (an admin) approves it.
 
     The group operations stay at the dangerous risk level (decision
     record:
@@ -382,6 +381,6 @@ meho approvals approve <approval-id>
 | Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity. | Step 6 for that person. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. |
-| `approve` answers `self_approval_forbidden` | You asked for the group step and tried to approve it yourself, and you are not a MEHO-SA-Operator or a MEHO-Admin. | Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface. |
+| `approve` answers `self_approval_forbidden` | You asked for the group step and tried to approve it yourself, and you are not a MEHO-Admin. | Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface. |
 | `approve` answers `rights_change_required` ("This is a change of rights. Another admin must approve it.") | Steps 4 and 5 are changes of rights. You asked for the change and tried to approve it yourself, or you are not an admin in this tenant. Nobody approves their own change of rights. | An admin who is not the person who asked approves. |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

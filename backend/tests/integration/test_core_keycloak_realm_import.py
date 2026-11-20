@@ -260,7 +260,7 @@ async def test_reader_gets_tenant_and_role_from_the_group(
     assert operator.approver is False
 
 
-async def test_approver_gets_the_approver_flag(
+async def test_approvers_group_is_read_as_readers(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     operator = await _login(
@@ -268,7 +268,7 @@ async def test_approver_gets_the_approver_flag(
     )
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is TenantRole.READ_ONLY
-    assert operator.approver is True
+    assert operator.approver is False
 
 
 def _token_claims(access_token: str) -> dict[str, Any]:

@@ -18,9 +18,12 @@ The floors come from the code, never from a file. They are:
 * **Token calls.** A call made with a token (a person's token, an agent,
   a runner) runs at once only when it is ``safe``. A ``caution``,
   ``dangerous`` or ``destructive`` call waits.
+* **Credentials.** A call of an agent or a service login that reads,
+  writes or makes a credential waits for a person, also at level
+  ``safe``, whatever its grants say.
 * **No grant.** Some calls wait for a person every time: no standing grant
-  and no run approval clears them. These are an operation that shows a
-  secret, one that connects to an address the caller gives, one marked
+  and no run approval clears them. These are an operation that reads,
+  writes or makes a credential, one that connects to an address the caller gives, one marked
   for per-call approval, and one a classification makes always wait.
   :func:`grant_may_clear` and :func:`run_approval_may_clear` say this.
 
@@ -52,7 +55,7 @@ KNOWN_NON_SAFE: Final[frozenset[str]] = frozenset({"caution", "dangerous", "dest
 
 #: Operation marks (:attr:`Asked.op_class`) that no grant and no run approval clears.
 NO_GRANT_MARKS: Final[frozenset[str]] = frozenset(
-    {"credential_read", "per_call_approval", "classified_always_wait"}
+    {"credential", "per_call_approval", "classified_always_wait"}
 )
 
 
@@ -97,6 +100,14 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 "destructive_waits",
                 "a destructive call always waits for a person",
                 sandbox_delete_grant_clears=asker.kind == "service",
+            )
+        )
+    if asker.kind in ("agent", "service") and "credential_waits" in asked.op_class:
+        hits.append(
+            FloorHit(
+                "wait",
+                "credential_waits",
+                "the operation reads, writes or makes a credential, so a person approves each call",
             )
         )
     if _token_call(asker) and asked.risk in KNOWN_NON_SAFE:

@@ -38,7 +38,7 @@ from tests.test_ui_approvals import (
     _seed_tenant,
 )
 
-_WHO = "Members of MEHO-SA-Operators or MEHO-Admins."
+_WHO = "Members of MEHO-Admins."
 
 
 @pytest.fixture
@@ -76,14 +76,14 @@ def _get(url: str, operator: Operator, *, htmx: bool = False) -> tuple[int, str]
     return response.status_code, response.text
 
 
-def _sa_operator() -> Operator:
-    return _operator(tenant_id=_TENANT_A).model_copy(update={"self_approver": True})
+def _admin() -> Operator:
+    return _operator(tenant_id=_TENANT_A, role=TenantRole.TENANT_ADMIN)
 
 
 @pytest.mark.usefixtures("_routing_on")
 def test_the_window_says_who_may_approve_and_refuses_another_group() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _routed("demo.network.change", ["SA-Operators", "Admins"])
+    rid = _routed("demo.network.change", ["Admins"])
 
     code, body = _get(f"/ui/approvals/{rid}", _operator(tenant_id=_TENANT_A))
 
@@ -91,15 +91,15 @@ def test_the_window_says_who_may_approve_and_refuses_another_group() -> None:
     assert "data-approval-who-can-approve" in body
     assert _WHO in body
     assert 'data-approve-reason="not_routed"' in body
-    assert "Only MEHO-SA-Operators or MEHO-Admins may approve this change" in body
+    assert "Only MEHO-Admins may approve this change" in body
 
 
 @pytest.mark.usefixtures("_routing_on")
 def test_a_person_in_the_stored_kinds_may_approve_in_the_window() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _routed("demo.network.change", ["SA-Operators", "Admins"])
+    rid = _routed("demo.network.change", ["Admins"])
 
-    code, body = _get(f"/ui/approvals/{rid}", _sa_operator())
+    code, body = _get(f"/ui/approvals/{rid}", _admin())
 
     assert code == 200, body
     assert 'data-approve-right="yes"' in body
@@ -107,7 +107,7 @@ def test_a_person_in_the_stored_kinds_may_approve_in_the_window() -> None:
 
 def test_with_the_switch_off_the_window_shows_no_routing() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _routed("demo.network.change", ["SA-Operators", "Admins"])
+    rid = _routed("demo.network.change", ["Admins"])
 
     code, body = _get(f"/ui/approvals/{rid}", _operator(tenant_id=_TENANT_A))
 
@@ -119,7 +119,7 @@ def test_with_the_switch_off_the_window_shows_no_routing() -> None:
 @pytest.mark.usefixtures("_routing_on")
 def test_the_bell_list_says_who_may_approve() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    _routed("demo.network.change", ["SA-Operators", "Admins"])
+    _routed("demo.network.change", ["Admins"])
 
     code, body = _get("/ui/approvals", _operator(tenant_id=_TENANT_A), htmx=True)
 
@@ -130,8 +130,8 @@ def test_the_bell_list_says_who_may_approve() -> None:
 @pytest.mark.usefixtures("_routing_on")
 def test_the_for_you_tab_lists_only_what_the_person_may_approve() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    _routed("demo.network.change", ["SA-Operators", "Admins"])
-    _routed("demo.compute.change", ["Operators", "SA-Operators", "Admins", "Approvers"])
+    _routed("demo.network.change", ["Admins"])
+    _routed("demo.compute.change", ["Operators", "Admins"])
 
     code, body = _get("/ui/approvals/list?tab=for_you", _operator(tenant_id=_TENANT_A), htmx=True)
 
@@ -173,7 +173,7 @@ def test_with_the_switch_off_there_is_no_for_you_tab() -> None:
 @pytest.mark.usefixtures("_routing_on")
 def test_the_bell_counts_only_what_the_person_may_approve() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    _routed("demo.network.change", ["SA-Operators", "Admins"])
+    _routed("demo.network.change", ["Admins"])
     _routed("demo.compute.change", ["Operators"])
 
     code, body = _get("/ui/approvals/badge", _operator(tenant_id=_TENANT_A))
@@ -205,7 +205,7 @@ def test_the_bell_counts_a_request_for_the_person_behind_fifty_newer_ones() -> N
         async with get_sessionmaker()() as session, session.begin():
             for op_id, kinds in (
                 ("demo.compute.change", ["Operators"]),
-                ("demo.network.change", ["SA-Operators", "Admins"]),
+                ("demo.network.change", ["Admins"]),
             ):
                 await session.execute(
                     update(ApprovalRequest)
@@ -225,7 +225,7 @@ def test_the_bell_counts_a_request_for_the_person_behind_fifty_newer_ones() -> N
 
 def test_with_the_switch_off_the_bell_counts_every_pending_request() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
-    _routed("demo.network.change", ["SA-Operators", "Admins"])
+    _routed("demo.network.change", ["Admins"])
     _routed("demo.compute.change", ["Operators"])
 
     code, body = _get(

@@ -12,8 +12,8 @@
   calls, and for every registered operation under a live standing grant and
   a live run approval that list them all. Neither clears an operation that
   :func:`never_covered_reason` names.
-* A request that lists such an operation is accepted. Its answer, and the
-  answers of show and approve, name the entry in ``entries_that_wait``.
+* A request that lists such an operation is refused. Show and approve of
+  a request made before this rule name the entry in ``entries_that_wait``.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from meho_backplane.db.models import (
 from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import lookup_descriptor
-from meho_backplane.operations._validate import CREDENTIAL_READ_WAIT_NOTE, policy_gate
+from meho_backplane.operations._validate import CREDENTIAL_WAIT_NOTE, policy_gate
 from meho_backplane.operations.credential_read import (
     has_credential_read_floor,
     raise_descriptor_for_reveal,
@@ -47,9 +47,13 @@ from meho_backplane.operations.credential_read import (
 from meho_backplane.operations.role_floors import requester_check_denial
 from meho_backplane.operations.run_approval_gate import _never_covered
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
-from meho_backplane.operations.run_approvals import RunApprovalService
+from meho_backplane.operations.run_approvals import (
+    RunApprovalService,
+    RunApprovalValidationError,
+)
 from meho_backplane.operations.service_grants import (
-    credential_read_grant_reason,
+    credential_grant_reason,
+    credential_refusal,
     never_covered_reason,
 )
 from meho_backplane.operations.typed_register import (
@@ -113,7 +117,7 @@ async def _register_all() -> list[EndpointDescriptor]:
 
 
 def _reads_a_credential(row: EndpointDescriptor) -> bool:
-    return credential_read_grant_reason(row.op_id, row.op_class) is not None
+    return credential_grant_reason(row.op_id, row.op_class) is not None
 
 
 async def _approved_before_upgrade(
@@ -203,7 +207,7 @@ async def test_a_run_approval_covers_no_registered_credential_read() -> None:
         if has_credential_read_floor(row.op_id, reveal_secret=reveal, stored_op_class=row.op_class):
             assert verdict is PermissionVerdict.NEEDS_APPROVAL, (row.op_id, reveal)
         if verdict is PermissionVerdict.NEEDS_APPROVAL:
-            assert reason.endswith(CREDENTIAL_READ_WAIT_NOTE), (row.op_id, reveal, reason)
+            assert reason.endswith(CREDENTIAL_WAIT_NOTE), (row.op_id, reveal, reason)
     assert await _use_rows(approval_id) == []
     assert (await _gate(next(r for r in reads if r.op_id == _K8S_READ), _RUN))[0] is (
         PermissionVerdict.NEEDS_APPROVAL
@@ -277,12 +281,12 @@ async def test_a_stored_credential_read_class_also_waits() -> None:
             )
         )
     row = EndpointDescriptor(product="example", version="1.0", impl_id="example-rest", op_id=op_id)
-    assert credential_read_grant_reason(op_id) is None
+    assert credential_grant_reason(op_id) is None
     approval_id = await _approved_before_upgrade([row])
 
     verdict, reason = await _gate(row, _RUN)
     assert verdict is PermissionVerdict.NEEDS_APPROVAL
-    assert reason.endswith(CREDENTIAL_READ_WAIT_NOTE)
+    assert reason.endswith(CREDENTIAL_WAIT_NOTE)
     assert await _use_rows(approval_id) == []
 
     read = await RunApprovalService().get(_TENANT, approval_id)
@@ -290,45 +294,86 @@ async def test_a_stored_credential_read_class_also_waits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_request_that_lists_a_credential_read_is_accepted_and_says_it_waits() -> None:
+@pytest.mark.parametrize("op_id", [_K8S_READ, "vault.kv.read", "vault.kv.list"])
+async def test_a_request_that_lists_a_credential_read_is_refused(op_id: str) -> None:
     rows = await _register_all()
-    secret_read = next(row for row in rows if row.op_id == _K8S_READ)
+    secret_read = next(row for row in rows if row.op_id == op_id)
     write = _a_covered_write(rows)
-    service = RunApprovalService()
 
-    read = await service.request(
-        _operator(),
-        RunApprovalCreate(
-            work_ref=_RUN,
-            entries=[
-                RunApprovalEntry(connector_id=connector_id_of(write), op_id=write.op_id),
-                RunApprovalEntry(connector_id=connector_id_of(secret_read), op_id=_K8S_READ),
-            ],
-            reason="read one secret into a reference",
-        ),
-    )
-    assert read.status == "pending"
-    notes = read.entries_that_wait or []
-    assert [(n.entry, n.connector_id, n.op_id) for n in notes] == [
-        (1, connector_id_of(secret_read), _K8S_READ)
-    ]
-    assert notes[0].reason == (
-        f"op '{_K8S_READ}' reads a credential. A run approval never covers it: "
-        "each call waits for a person"
-    )
+    with pytest.raises(RunApprovalValidationError) as refused:
+        await RunApprovalService().request(
+            _operator(),
+            RunApprovalCreate(
+                work_ref=_RUN,
+                entries=[
+                    RunApprovalEntry(connector_id=connector_id_of(write), op_id=write.op_id),
+                    RunApprovalEntry(connector_id=connector_id_of(secret_read), op_id=op_id),
+                ],
+                reason="read one secret into a reference",
+            ),
+        )
+    assert refused.value.message == f"entries[1]: {credential_refusal(op_id)}"
 
-    shown = await service.get(_TENANT, read.id)
-    assert shown.entries_that_wait == notes
-    approver = _operator("person-approver", PrincipalKind.USER, approver=True, self_approver=True)
-    approved = await service.approve(approver, read.id)
-    assert approved.status == "approved"
-    assert approved.entries_that_wait == notes
-    (listed,) = await service.list_(_TENANT)
-    assert listed.entries_that_wait is None
+
+async def _pending_before_upgrade(rows: list[EndpointDescriptor]) -> uuid.UUID:
+    """A pending request that lists *rows*, written straight to the table."""
+    approval_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            RunApproval(
+                id=approval_id,
+                tenant_id=_TENANT,
+                principal_sub=_PRINCIPAL,
+                work_ref=_RUN,
+                entries=[{"connector_id": connector_id_of(r), "op_id": r.op_id} for r in rows],
+                reason="test: asked before the upgrade",
+                requested_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+    return approval_id
 
 
 @pytest.mark.asyncio
-async def test_a_request_without_a_credential_read_has_no_entry_that_waits() -> None:
+async def test_show_and_approve_name_a_credential_entry_of_an_older_request() -> None:
+    rows = await _register_all()
+    by_id = {row.op_id: row for row in rows}
+    listed = [
+        _a_covered_write(rows),
+        by_id[_K8S_READ],
+        by_id["vault.kv.read"],
+        by_id["vault.kv.list"],
+        by_id["vault.token.create"],
+    ]
+    service = RunApprovalService()
+    approval_id = await _pending_before_upgrade(listed)
+
+    shown = await service.get(_TENANT, approval_id)
+    notes = shown.entries_that_wait or []
+    assert [(n.entry, n.op_id) for n in notes] == [
+        (1, _K8S_READ),
+        (2, "vault.kv.read"),
+        (4, "vault.token.create"),
+    ]
+    assert notes[0].reason == (
+        f"op '{_K8S_READ}' reads, writes or makes a credential. A run approval never "
+        "covers it: each call waits for a person"
+    )
+    assert notes[1].reason == (
+        "op 'vault.kv.read' reads a credential. A run approval never covers it: "
+        "each call with reveal_secret waits for a person"
+    )
+    approver = _operator("person-approver", PrincipalKind.USER, approver=True, self_approver=True)
+    approved = await service.approve(approver, approval_id)
+    assert approved.status == "approved"
+    assert approved.entries_that_wait == notes
+    (in_list,) = await service.list_(_TENANT)
+    assert in_list.entries_that_wait is None
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_a_credential_entry_has_no_entry_that_waits() -> None:
     rows = await _register_all()
     write = _a_covered_write(rows)
     read = await RunApprovalService().request(
@@ -340,44 +385,6 @@ async def test_a_request_without_a_credential_read_has_no_entry_that_waits() -> 
         ),
     )
     assert read.entries_that_wait == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("op_id", ["k8s.secret.compare_to_ref", "vault.kv.list"])
-async def test_a_credential_read_that_returns_no_secret_value_has_no_entry_that_waits(
-    op_id: str,
-) -> None:
-    rows = await _register_all()
-    row = next(row for row in rows if row.op_id == op_id)
-    read = await RunApprovalService().request(
-        _operator(),
-        RunApprovalCreate(
-            work_ref=_RUN,
-            entries=[RunApprovalEntry(connector_id=connector_id_of(row), op_id=op_id)],
-            reason="compare or list without a secret value",
-        ),
-    )
-    assert read.entries_that_wait == []
-
-
-@pytest.mark.asyncio
-async def test_a_vault_kv_read_entry_says_only_calls_with_reveal_secret_wait() -> None:
-    rows = await _register_all()
-    row = next(row for row in rows if row.op_id == "vault.kv.read")
-    read = await RunApprovalService().request(
-        _operator(),
-        RunApprovalCreate(
-            work_ref=_RUN,
-            entries=[RunApprovalEntry(connector_id=connector_id_of(row), op_id="vault.kv.read")],
-            reason="read one secret",
-        ),
-    )
-    notes = read.entries_that_wait or []
-    assert [(n.entry, n.op_id) for n in notes] == [(0, "vault.kv.read")]
-    assert notes[0].reason == (
-        "op 'vault.kv.read' reads a credential. A run approval never covers it: "
-        "each call with reveal_secret waits for a person"
-    )
 
 
 def _ingested_row(op_id: str, **fields: object) -> EndpointDescriptor:
@@ -539,7 +546,7 @@ async def test_no_grant_and_no_run_approval_clears_an_operation_that_is_never_co
                 assert "by run approval" not in (reason or ""), (row.op_id, reason)
     finally:
         work_ref_var.reset(token)
-    assert {"credential_read", "caller_address", "delete_shaped"} <= kinds_seen
+    assert {"credential", "caller_address", "delete_shaped"} <= kinds_seen
     expected_denied = {"tools.sign_out"}
     if classification:
         expected_denied |= {"policy.apply", "policy.classify"}
@@ -645,7 +652,7 @@ async def test_the_wait_of_a_listed_credential_read_says_why_in_its_audit_row() 
         (request_row,) = (
             await session.scalars(select(AuditLog).where(AuditLog.path == "approval.request"))
         ).all()
-    assert request_row.payload["wait_reason"].endswith(CREDENTIAL_READ_WAIT_NOTE)
+    assert request_row.payload["wait_reason"].endswith(CREDENTIAL_WAIT_NOTE)
 
 
 async def _never_runs(**_: object) -> dict[str, object]:

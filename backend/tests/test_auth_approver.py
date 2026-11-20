@@ -1,22 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the approve-only ``approver`` capability flag on Operator (#3243).
-
-Coverage matrix (mirrors ``test_auth_platform_admin.py`` — the sibling
-orthogonal-capability primitive):
+"""Tests for the ``approver`` flag on Operator and the ``approver`` claim.
 
 * :class:`~meho_backplane.auth.operator.Operator` defaults ``approver`` to
   ``False``.
-* A JWT carrying ``approver=true`` (JSON boolean) produces an
-  :class:`Operator` with ``approver is True``; ``false`` → ``False``.
-* String shapes ``"true"`` / ``"false"`` (a realm whose mapper emits the
-  claim as a string) are honoured.
-* A JWT whose ``approver`` claim is absent → ``False`` (graceful,
-  fail-closed — every pre-existing token).
-* A malformed ``approver`` value (a number) → ``False`` with a
-  structured-log warning (no exception).
-* A custom ``JWT_APPROVER_CLAIM_NAME`` env-var shifts the lookup.
+* MEHO does not read the ``approver`` claim of the token: every value, and
+  a custom ``JWT_APPROVER_CLAIM_NAME``, gives ``False``. Only a login group
+  whose grant gives the flag sets it.
 """
 
 from __future__ import annotations
@@ -154,71 +145,19 @@ def test_operator_default_approver_is_false() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Boolean claim extraction
+# The claim gives no right
 # ---------------------------------------------------------------------------
 
 
-def test_approver_true_extracted() -> None:
-    """``approver=true`` (JSON boolean) → ``True``."""
-    assert _resolve(_make_key("kid-true"), approver=True) is True
+@pytest.mark.parametrize("value", [True, "true", "TRUE", False, "false", 7, None])
+def test_the_approver_claim_never_sets_the_flag(value: Any) -> None:
+    """MEHO does not read the ``approver`` claim: every value gives ``False``."""
+    assert _resolve(_make_key("kid-claim"), approver=value) is False
 
 
-def test_approver_false_extracted() -> None:
-    """``approver=false`` (JSON boolean) → ``False``."""
-    assert _resolve(_make_key("kid-false"), approver=False) is False
-
-
-def test_approver_string_true_extracted() -> None:
-    """A realm emitting the claim as the string ``"true"`` → ``True``."""
-    assert _resolve(_make_key("kid-strue"), approver="true") is True
-
-
-def test_approver_string_false_extracted() -> None:
-    """The string ``"false"`` → ``False``."""
-    assert _resolve(_make_key("kid-sfalse"), approver="false") is False
-
-
-# ---------------------------------------------------------------------------
-# Graceful / fail-closed paths
-# ---------------------------------------------------------------------------
-
-
-def test_absent_claim_defaults_to_false() -> None:
-    """Tokens without ``approver`` → ``False`` (non-breaking, fail-closed)."""
-    assert _resolve(_make_key("kid-absent")) is False
-
-
-def test_malformed_claim_value_defaults_to_false(
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """A non-boolean ``approver`` value → ``False`` + warning log.
-
-    structlog routes through ``PrintLoggerFactory`` (stdout) in tests, so
-    the warning surfaces in ``capfd`` rather than ``caplog``.
-    """
-    value = _resolve(_make_key("kid-malformed"), approver=7)
-    assert value is False
-    out, _ = capfd.readouterr()
-    assert "malformed_approver_claim" in out, (
-        f"Expected 'malformed_approver_claim' in structlog stdout; got: {out!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Custom claim name via env var
-# ---------------------------------------------------------------------------
-
-
-def test_custom_claim_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``JWT_APPROVER_CLAIM_NAME`` renames the claim the extractor reads."""
+def test_a_custom_claim_name_does_not_set_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``JWT_APPROVER_CLAIM_NAME`` names no claim that MEHO reads."""
     monkeypatch.setenv("JWT_APPROVER_CLAIM_NAME", "can_approve")
     get_settings.cache_clear()
     clear_jwks_cache()
-    assert (
-        _resolve(
-            _make_key("kid-custom"),
-            approver=True,
-            claim_name="can_approve",
-        )
-        is True
-    )
+    assert _resolve(_make_key("kid-custom"), approver=True, claim_name="can_approve") is False

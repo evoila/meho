@@ -130,12 +130,13 @@ Detail payloads land in ``extras``. Codes:
 * ``target_connector_mismatch`` -- a typed/composite op whose handler is
   a connector method, called on a target whose connector does not have
   that method (a linux op on an rke2 target). Refused right after the
-  target check, before the policy gate and any wait for approval, with
-  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
+  connector list check, before the policy gate and any wait for approval,
+  with one audit row (:mod:`~meho_backplane.operations._target_connector_match`).
 * ``connector_not_allowed`` -- a hosted agent with a connector list called
   an op on a target whose connector is not in the list, or that resolves
-  no single connector. Refused right after the mismatch check, before the
-  policy gate, with one audit row and no approval request
+  no single connector. Refused right after the target check and before the
+  mismatch check, so the answer names only connectors in the list. One
+  audit row, no approval request
   (:mod:`~meho_backplane.operations._target_connector_limit`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
@@ -487,6 +488,7 @@ from meho_backplane.operations.composite import (
     DispatchChild,
     approved_run_var,
     composite_depth_var,
+    credential_step_waits_after_approval,
     get_dispatch_child,
 )
 from meho_backplane.operations.composite_steps import (
@@ -518,6 +520,7 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.service_grants import credential_call_waits
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
@@ -4210,20 +4213,10 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
-    # #5948: a connector-bound op whose handler the target's connector does
-    # not have (a linux op on an rke2 target) cannot run. Refused here, before
-    # the policy gate and any wait for approval, with its own audit row.
-    mismatch = await refuse_target_connector_mismatch(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params_hash=params_hash,
-        started=started,
-    )
-    if mismatch is not None:
-        return mismatch
     # A hosted agent with a connector list may use only targets whose
-    # connector is in the list. Refused here too, before the policy gate.
+    # connector is in the list. Refused here, before the policy gate. This
+    # check comes first, so its answer (which names only the listed
+    # connectors) is the one a caller with a list gets.
     not_allowed = await refuse_target_connector_not_allowed(
         operator=operator,
         descriptor=descriptor,
@@ -4233,6 +4226,18 @@ async def _dispatch_now(
     )
     if not_allowed is not None:
         return not_allowed
+    # A connector-bound op whose handler the target's connector does not
+    # have (a linux op on an rke2 target) cannot run. Refused here too,
+    # before the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
     # A target whose known version is outside the range of the connector
     # picked for it (through the fallback entry) is refused the same way.
     outside = await refuse_version_outside_range(
@@ -4441,10 +4446,11 @@ async def _dispatch_now(
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval. A credential
-            # read that a resume sends again is refused whenever it would wait,
-            # also when it is destructive or needs its own approval: an
-            # approval request for it alone cannot finish the waiting run.
+            # ``requires_approval`` step, or one that reads, writes or makes
+            # a credential, keeps its own approval. A credential read that a
+            # resume sends again is refused whenever it would wait, also when
+            # it is destructive or needs its own approval: an approval request
+            # for it alone cannot finish the waiting run.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
@@ -4457,10 +4463,28 @@ async def _dispatch_now(
                         "credential; the run after an approval sends it again only when "
                         "its policy lets it go ahead with no person"
                     )
-                elif descriptor.safety_level != "destructive" and not descriptor.requires_approval:
+                elif (
+                    descriptor.safety_level != "destructive"
+                    and not descriptor.requires_approval
+                    and not credential_call_waits(
+                        descriptor.op_id, getattr(descriptor, "op_class", None)
+                    )
+                ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                     mark_child_cleared_by_person(op_id)
                     verdict = PermissionVerdict.AUTO_EXECUTE
+            # A child call that reads, writes or makes a credential waits for
+            # its own approval in a run that goes on after an approval, also
+            # when the approving person's own rights would let it run.
+            if (
+                verdict is PermissionVerdict.AUTO_EXECUTE
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and credential_step_waits_after_approval(
+                    descriptor.op_id, getattr(descriptor, "op_class", None)
+                )
+            ):
+                _log.info("composite_credential_child_waits_after_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):

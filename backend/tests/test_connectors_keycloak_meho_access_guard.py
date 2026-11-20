@@ -44,6 +44,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ServicePrincipalGrant
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.approval_queue import (
+    ApprovalGroupForbiddenError,
     ApprovalRoleFloorError,
     approve_request,
     resume_dispatch_after_approval,
@@ -499,6 +500,41 @@ async def test_with_a_second_platform_admin_the_write_waits_for_approval(
         api.add(_user(_SECOND_ADMIN_UUID, "second-platform-admin"), _PLATFORM_GROUP)
         call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
     assert call["status"] == "awaiting_approval", call
+
+
+#: The writes whose run the mocked Keycloak can finish (a delete is read back, a
+#: password is read from Vault).
+_RUNS = [(op, extra) for op, extra in _LAST_ADMIN if not op.endswith((".delete", "password"))]
+
+
+@pytest.mark.parametrize(
+    ("op_id", "extra"), _RUNS, ids=[op.removeprefix("keycloak.") for op, _ in _RUNS]
+)
+async def test_with_a_second_platform_admin_another_admin_approves_the_write(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    extra: dict[str, Any],
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        api.add(_user(_SECOND_ADMIN_UUID, "second-platform-admin"), _PLATFORM_GROUP)
+        call = await _call(op_id, _params(op_id, _ADMIN_UUID, extra))
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        # An operator cannot approve it.
+        async with get_sessionmaker()() as session:
+            with pytest.raises((ApprovalGroupForbiddenError, ApprovalRoleFloorError)):
+                await approve_request(
+                    session,
+                    request_id,
+                    operator=_operator("made-up-operator", TenantRole.OPERATOR),
+                    params=None,
+                )
+        assert _writes(mock) == []
+        resumed = await _approve_and_run(call)
+        written = _writes(mock)
+    assert resumed.status == "ok", resumed
+    assert written, written
 
 
 @pytest.mark.parametrize(("op_id", "extra"), _LAST_ADMIN, ids=_LAST_ADMIN_IDS)

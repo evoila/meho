@@ -98,6 +98,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BLAST_RADIUS_KEY",
+    "PERSON_ONLY_EFFECT_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "PreviewContext",
@@ -118,6 +119,7 @@ __all__ = [
     "register_person_only_preview_keys",
     "register_preview_builder",
     "register_preview_builder_switch",
+    "without_person_only_effect_keys",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -502,6 +504,18 @@ def register_agent_preview_filter(
     _AGENT_PREVIEW_FILTERS[op_id] = preview_filter
 
 
+#: Top-level keys of a stored ``proposed_effect`` that only a person reads:
+#: the line of the approval card that says why a credential call waits.
+PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait"})
+
+
+def without_person_only_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
+    """*effect* without :data:`PERSON_ONLY_EFFECT_KEYS`; *effect* itself when it has none."""
+    if PERSON_ONLY_EFFECT_KEYS.isdisjoint(effect):
+        return effect
+    return {key: value for key, value in effect.items() if key not in PERSON_ONLY_EFFECT_KEYS}
+
+
 def proposed_effect_for_agent(
     op_id: str,
     effect: dict[str, Any] | None,
@@ -523,10 +537,12 @@ def proposed_effect_for_agent(
     * the preview as the op's filter gives it back
       (:func:`register_agent_preview_filter`).
 
-    Every other ``proposed_effect`` comes back unchanged.
+    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) are
+    never in it. Every other ``proposed_effect`` comes back unchanged.
     """
     if not isinstance(effect, dict):
         return effect
+    effect = without_person_only_effect_keys(effect)
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
     if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
         shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}

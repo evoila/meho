@@ -15,6 +15,7 @@ the rules of ``k8s.apply``.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -24,17 +25,25 @@ import yaml
 
 from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.agents.grants import GrantValidationError as AgentGrantValidationError
+from meho_backplane.api.v1.approvals import _proposed_effect_for
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.kubernetes import op_classes as k8s_op_classes
 from meho_backplane.connectors.kubernetes.op_classes import (
     MAX_CHECKED_OBJECTS,
     manifest_holds_credential,
 )
-from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, PermissionVerdict
+from meho_backplane.mcp.tools.approvals import _row_to_dict
 from meho_backplane.operations import dispatcher
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import lookup_descriptor
-from meho_backplane.operations._validate import CREDENTIAL_WAIT_NOTE, policy_gate
+from meho_backplane.operations._validate import (
+    CREDENTIAL_WAIT_NOTE,
+    compute_params_hash,
+    policy_gate,
+)
+from meho_backplane.operations.approval_queue import create_pending_request, get_request
 from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.operations.governed_subops import classify_subop_grantability
 from meho_backplane.operations.op_policy import _with_floors, effective_policy
@@ -557,3 +566,81 @@ async def test_the_approval_card_says_why_the_call_waits(
     )
     assert effect is not None
     assert (effect.get("credential_wait") == CREDENTIAL_CARD_LINE) is line
+
+
+def _person() -> Operator:
+    return Operator(
+        sub="op:reviewer",
+        name="Reviewer",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+
+
+async def _stored_request(op_id: str, params: dict[str, Any]) -> ApprovalRequest:
+    """A waiting request of *op_id* with the card the dispatcher builds for it."""
+    descriptor = EndpointDescriptor(
+        product="example",
+        version="1.x",
+        impl_id="example",
+        op_id=op_id,
+        source_kind="typed",
+        safety_level="dangerous",
+        requires_approval=True,
+        parameter_schema={},
+    )
+    raise_descriptor_for_params(descriptor, params)
+    effect = await dispatcher._build_proposed_effect(
+        op_id=op_id,
+        connector_id="example-1.x",
+        descriptor=descriptor,
+        operator=_service(),
+        target=None,
+        params=params,
+    )
+    assert effect is not None
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=_service(),
+            connector_id="example-1.x",
+            op_id=op_id,
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            proposed_effect=effect,
+        )
+        await s.commit()
+        return await get_request(s, tenant_id=_TENANT, request_id=request.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("k8s.exec", {"pod": "web", "namespace": "apps", "command": ["id"]}),
+        ("k8s.apply", {"manifest": _SECRET}),
+        # A credential write that waited for a person before this rule too.
+        ("k8s.secret.create", {"name": "db-login", "namespace": "apps"}),
+    ],
+    ids=["exec", "apply-secret", "secret-create"],
+)
+async def test_the_card_line_is_for_a_person_only(op_id: str, params: dict[str, Any]) -> None:
+    row = await _stored_request(op_id, params)
+    stored = dict(row.proposed_effect)
+    assert stored["credential_wait"] == CREDENTIAL_CARD_LINE
+    without_line = {key: value for key, value in stored.items() if key != "credential_wait"}
+
+    agent_views = [
+        _row_to_dict(row)["proposed_effect"],
+        _proposed_effect_for(_service(), row),
+        _proposed_effect_for(_agent(), row),
+    ]
+
+    for view in agent_views:
+        assert "credential_wait" not in view
+        assert json.dumps(view) == json.dumps(without_line)
+    assert _proposed_effect_for(_person(), row) == stored

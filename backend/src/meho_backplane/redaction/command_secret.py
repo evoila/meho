@@ -118,11 +118,14 @@ def _closes_value(text: str, opening: int, after: int) -> bool:
     return text.find("\n", opening, after) == -1
 
 
-def _value_end(text: str, start: int, size: int | None = None) -> int:
+def _value_end(text: str, start: int, size: int | None = None, *, in_string: bool = False) -> int:
     """Index where the shell word that starts at *start* ends (``start`` when empty).
 
     *size* is where the reading stops, as the closing quote of a command
     that is quoted inside a longer command (``sh -c "mysql -px"``).
+    *in_string* is true when the word stands inside a double-quoted string
+    (a JSON string or a quoted command). Only there does ``\\"`` end the
+    word; in plain text it is an escaped quote and part of the word.
     """
     size = len(text) if size is None else size
     pos = start
@@ -135,7 +138,7 @@ def _value_end(text: str, start: int, size: int | None = None) -> int:
         if char == "\\":
             run = _BACKSLASHES.match(text, pos, size)
             run_end = size if run is None else run.end()
-            if run_end < size and text[run_end] == '"':
+            if in_string and run_end < size and text[run_end] == '"':
                 # ``\"`` closes a JSON string inside a JSON string.
                 return pos
             # Pairs are plain backslashes; an odd one takes the next character.
@@ -165,15 +168,19 @@ def _is_hidden(value: str) -> bool:
     return bool(value) and _ALREADY_HIDDEN.fullmatch(value) is None
 
 
-def _value_span(text: str, start: int, size: int | None = None) -> tuple[int, int] | None:
+def _value_span(
+    text: str, start: int, size: int | None = None, *, in_string: bool = False
+) -> tuple[int, int] | None:
     """The span of the shell word at *start*, or ``None`` when it holds no secret."""
-    end = _value_end(text, start, size)
+    end = _value_end(text, start, size, in_string=in_string)
     return (start, end) if _is_hidden(text[start:end]) else None
 
 
-def _after(text: str, start: int, mark: str, size: int | None = None) -> tuple[int, int] | None:
+def _after(
+    text: str, start: int, mark: str, size: int | None = None, *, in_string: bool = False
+) -> tuple[int, int] | None:
     """The part of the shell word at *start* behind the first *mark* (``user:value``)."""
-    end = _value_end(text, start, size)
+    end = _value_end(text, start, size, in_string=in_string)
     word = text[start:end]
     at = word.find(mark)
     if at == -1:
@@ -271,6 +278,11 @@ _PAGING_WORDS: Final = frozenset(
 )
 
 
+def _in_double_quotes(text: str, close: int | None) -> bool:
+    """True when the closing quote that :class:`_OuterQuotes` found is a double quote."""
+    return close is not None and text[close] == '"'
+
+
 def _name_words(name: str) -> list[str]:
     return [word for word in _NAME_SPLIT.split(_CAMEL.sub("_", name).lower()) if word]
 
@@ -297,7 +309,8 @@ def _long_option_spans(text: str) -> list[tuple[int, int]]:
             continue
         if match["sep"] != "=" and text.startswith("--", match.end()):
             continue
-        span = _value_span(text, match.end(), quotes.end(match.start()))
+        close = quotes.end(match.start())
+        span = _value_span(text, match.end(), close, in_string=_in_double_quotes(text, close))
         if span is not None:
             spans.append(span)
             pos = span[1]
@@ -354,27 +367,32 @@ def _value_start(
     return None
 
 
-def _read(text: str, begin: int | None, mark: str | None, size: int) -> tuple[int, int] | None:
+def _read(
+    text: str, begin: int | None, mark: str | None, size: int, in_string: bool
+) -> tuple[int, int] | None:
     """The secret span of the value at *begin*: all of it, or what follows *mark*."""
     if begin is None:
         return None
-    return _value_span(text, begin, size) if mark is None else _after(text, begin, mark, size)
+    if mark is None:
+        return _value_span(text, begin, size, in_string=in_string)
+    return _after(text, begin, mark, size, in_string=in_string)
 
 
 def _option_span(
-    text: str, tools: set[str], word: str, span: tuple[int, int], size: int
+    text: str, tools: set[str], word: str, span: tuple[int, int], size: int, in_string: bool
 ) -> tuple[int, int] | None:
     """The secret value of one short option of the tools of this command."""
     start, end = span
 
     def value(flags: tuple[str, ...], mark: str | None = None) -> tuple[int, int] | None:
-        return _read(text, _value_start(text, word, start, end, size, flags), mark, size)
+        begin = _value_start(text, word, start, end, size, flags)
+        return _read(text, begin, mark, size, in_string)
 
     if "sshpass" in tools and word.startswith("-p"):
         tools.discard("sshpass")
         return value(("-p",))
     if "mysql" in tools and word.startswith("-p") and len(word) > 2 and word != "-pthread":
-        return _read(text, start + 2, None, size)
+        return _read(text, start + 2, None, size, in_string)
     if tools & _UPPER_P_TOOLS and word.startswith("-P"):
         return value(("-P",))
     if "ldap" in tools and word.startswith("-w"):
@@ -387,7 +405,7 @@ def _option_span(
 
 
 def _segment_spans(
-    text: str, first: int, tool: str, size: int
+    text: str, first: int, tool: str, size: int, in_string: bool
 ) -> tuple[list[tuple[int, int]], int]:
     """Read one command from the tool that ends at *first*; return spans and the end."""
     spans: list[tuple[int, int]] = []
@@ -400,7 +418,7 @@ def _segment_spans(
         if pos >= size or text[pos] in "\n;|&":
             break
         # A whole shell word, so a ``;`` or a space inside quotes does not end it.
-        start, end = pos, _value_end(text, pos, size)
+        start, end = pos, _value_end(text, pos, size, in_string=in_string)
         if end == start:
             # ``< > ( )`` is a word of its own.
             end += 1
@@ -409,7 +427,7 @@ def _segment_spans(
         if skip_next:
             skip_next = False
             continue
-        span = _option_span(text, tools, token, (start, end), size)
+        span = _option_span(text, tools, token, (start, end), size, in_string)
         if span is not None:
             spans.append(span)
             pos = max(pos, span[1])
@@ -445,10 +463,11 @@ def _tool_spans(text: str) -> list[tuple[int, int]]:
         tool = _tool_name(match.group(0)) or ""
         close = quotes.end(match.start())
         first, size = match.end(), len(text) if close is None else close
+        in_string = _in_double_quotes(text, close)
         if close is not None and _is_quoted_executable(text, match, close):
             # The arguments follow the closing quote of the tool name.
-            first, size = close + 1, len(text)
-        found, pos = _segment_spans(text, first, tool, size)
+            first, size, in_string = close + 1, len(text), False
+        found, pos = _segment_spans(text, first, tool, size, in_string)
         spans.extend(found)
         pos = max(pos, match.end())
     return spans
@@ -497,7 +516,8 @@ def _environment_spans(text: str) -> list[tuple[int, int]]:
         pos = match.end()
         if not _is_secret_environment_name(match):
             continue
-        span = _value_span(text, match.end(), quotes.end(match.start()))
+        close = quotes.end(match.start())
+        span = _value_span(text, match.end(), close, in_string=_in_double_quotes(text, close))
         if span is not None:
             spans.append(span)
             pos = span[1]

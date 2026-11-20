@@ -553,11 +553,33 @@ _QUOTED_LOGINS: Final[list[tuple[str, str]]] = [
     ('smbclient //h/share -U "bo\\"b%' + PW + '" -c ls', PW),
     ('smbclient //h/share -U "bob%' + _ESCAPED[2] + '" -c ls', _ESCAPED[2]),
 ]
+#: A password with an escaped double quote in the middle, at the start and
+#: at the end. In plain text ``\\"`` is part of the shell word.
+_WITH_QUOTE: Final = ('ab\\"cd', '\\"abcd', 'abcd\\"')
+#: The forms, each with ``{}`` where the value stands.
+_QUOTE_FORMS: Final = (
+    "run --password {} next",
+    "run --password={} next",
+    "sshpass -p {} ssh h",
+    "mysql -p{} db",
+    "sqlcmd -S h -P {} -Q x",
+    "ldapsearch -w {} -b x",
+    "curl -u admin:{} https://h/x",  # gitleaks:allow
+    "smbclient //h/share -U bob%{} -c ls",
+    "DB_PASS={} app",
+)
+_ESCAPED_QUOTES: Final[list[tuple[str, str]]] = [
+    (form.format(value), value) for form in _QUOTE_FORMS for value in _WITH_QUOTE
+]
 #: A JSON log line with a mask of bullets after ``--token``, written as JSON escapes.
 _MASK_IN_JSON: Final = json.dumps({"msg": "run --token \u2022\u2022\u2022\u2022 x"})
 #: Lines of :data:`_SECRETS_OF` that are read in plain text only. In a JSON
 #: string a quoted value starts with an escaped quote, and that ends the value.
-_PLAIN_TEXT_ONLY: Final = {_MASK_IN_JSON, *(line for line, _secret in _QUOTED_LOGINS)}
+_PLAIN_TEXT_ONLY: Final = {
+    _MASK_IN_JSON,
+    *(line for line, _secret in _QUOTED_LOGINS),
+    *(line for line, _secret in _ESCAPED_QUOTES),
+}
 #: (line, its secret values). Each value is hidden whole, and nothing else
 #: changes against main: a mark that was in the text before is read as on
 #: main, a value hidden already stays (also a mask written as JSON escapes),
@@ -577,6 +599,7 @@ _SECRETS_OF: Final[list[tuple[str, tuple[str, ...]]]] = [
     (f"cd /tmp; {_PASSWORD_IS.lower()}{PW} --user admin", (PW,)),
     (_MASK_IN_JSON, ()),
     *((line, (secret,)) for line, secret in _QUOTED_LOGINS),
+    *((line, (secret,)) for line, secret in _ESCAPED_QUOTES),
     ("run --password=ab12cd next", ("ab12cd",)),
     ("DB_PASSWORD=ab12cd next", ("ab12cd",)),
     ("run --password=ab12cd; echo ok", ()),

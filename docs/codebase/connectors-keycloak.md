@@ -1216,8 +1216,8 @@ check is `ops_user_meho_access_guard.py` for user writes and
   user. A person with the rights only from their own user value is not
   found this way, so such a person is not counted as another platform
   admin. For a group write, MEHO first reads the group and the groups
-  under it; when no group there loses the value `true`, it reads nothing
-  more.
+  under it; when no group there loses the value `true` or gets the value
+  `false`, it reads nothing more.
 - **On doubt MEHO refuses.** A failed or odd Keycloak read (also a row
   that is not an object, a group or member without an id, a user without
   a user name or an `enabled` value, a value that is both `true` and not

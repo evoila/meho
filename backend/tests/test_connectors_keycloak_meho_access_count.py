@@ -14,7 +14,8 @@ Uses the mocked Keycloak of ``test_connectors_keycloak_meho_access_guard.py``
   group gives no rights;
 * ``keycloak.group.delete`` and ``keycloak.group.update_attributes`` are
   refused before approval and when they run, when they take the rights of
-  the last active platform admin; a failed read refuses them too;
+  the last active platform admin, also when a group without a value gets
+  the value ``false``; a failed read refuses them too;
 * in a realm with more than 1,000 groups the count reads every page, and a
   person who is no platform admin needs no read of the whole group tree;
 * a standing grant on ``keycloak.group.member.remove`` does not let the last
@@ -245,6 +246,41 @@ async def test_a_group_write_that_keeps_the_value_is_not_counted(
         deleted = await _call("keycloak.group.delete", {"id": _TEAM_GROUP})
     assert call["status"] == "awaiting_approval", call
     assert deleted["status"] == "awaiting_approval", deleted
+
+
+@pytest.mark.parametrize("in_child", [False, True], ids=["group", "child-group"])
+async def test_a_new_value_false_on_a_group_of_the_last_platform_admin_is_refused(
+    kc: KeycloakConnector,  # noqa: F811
+    in_child: bool,
+) -> None:
+    params = {"id": _TEAM_GROUP, "attributes": {"platform_admin": ["false"]}}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        if in_child:
+            api.group(_CHILD_GROUP, "team-child", None, parent=_TEAM_GROUP)
+        api.add(api.users[_ADMIN_UUID], _CHILD_GROUP if in_child else _TEAM_GROUP)
+        call = await _call("keycloak.group.update_attributes", params)
+        result = await _run("keycloak.group.update_attributes", params)
+        written = _writes(mock)
+    _refused_before_approval(call, "the last active platform admin")
+    _refused_on_run(result, "last_platform_admin")
+    assert await _stored_requests() == []
+    assert written == []
+
+
+async def test_a_new_value_false_waits_when_another_platform_admin_keeps_the_rights(
+    kc: KeycloakConnector,  # noqa: F811
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        api.add(api.users[_ADMIN_UUID], _TEAM_GROUP)
+        api.group(_OTHER_ADMIN_GROUP, "other-admins", "true")
+        api.add(_user(_SECOND_ADMIN_UUID, "second-platform-admin"), _OTHER_ADMIN_GROUP)
+        call = await _call(
+            "keycloak.group.update_attributes",
+            {"id": _TEAM_GROUP, "attributes": {"platform_admin": ["false"]}},
+        )
+    assert call["status"] == "awaiting_approval", call
 
 
 async def test_deleting_a_parent_group_takes_the_rights_of_its_child_groups(

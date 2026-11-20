@@ -9,8 +9,9 @@ In MEHO's own login realm, ``keycloak.group.delete`` and
 MEHO refuses the write when both hold:
 
 * the write takes the platform admin value ``true`` away from the group or
-  from a group under it, and a person in such a group can have platform
-  admin rights now and is not sure to have them after the write;
+  from a group under it, or gives such a group the value ``false``, and a
+  person in such a group can have platform admin rights now and is not sure
+  to have them after the write;
 * after the write, no other active person is sure to have platform admin
   rights (:mod:`~meho_backplane.connectors.keycloak.ops_meho_admin_count`).
 
@@ -74,6 +75,15 @@ async def _change(counter: Counter, group_id: str, op_id: str, params: dict[str,
     return Change(group_value=(group_id, own_value({"attributes": merged})))
 
 
+def _can_take_rights(before: bool | None, after: bool | None) -> bool:
+    """Whether a change of a group's value can take the rights of a member.
+
+    A value ``true`` that goes away takes them. A new value ``false`` takes
+    the sure rights of a member who has the value ``true`` from another group.
+    """
+    return (before is True and after is not True) or (after is False and before is not False)
+
+
 async def _loses_last_platform_admin(
     connector: KeycloakConnector,
     operator: Operator,
@@ -101,8 +111,9 @@ async def _loses_last_platform_admin(
     risky = [
         group
         for group in subtree
-        if await counter.value(group, after=False) is True
-        and await counter.value(group, after=True) is not True
+        if _can_take_rights(
+            await counter.value(group, after=False), await counter.value(group, after=True)
+        )
     ]
     if not risky:
         return False

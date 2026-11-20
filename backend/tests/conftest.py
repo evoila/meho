@@ -92,21 +92,24 @@ SECRET_LEAK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"Bearer\s+[A-Za-z0-9_\-\.=]{20,}"),
     # ``password=`` / ``password:`` style key-value pairs. Catches the
     # accidental ``logger.info("login attempt", password=value)`` shape.
-    re.compile(r"\bpassword\s*[=:]", re.IGNORECASE),
+    # The four name patterns accept the name only when the hide mark
+    # ``[REDACTED:`` follows the ``=`` or ``:`` directly: then the value
+    # is hidden. Any other value still fails the sweep.
+    re.compile(r"\bpassword\s*[=:](?!\[REDACTED:)", re.IGNORECASE),
     # ``secret=`` / ``secret:`` style key-value pairs. Same shape.
     # The word boundary on the left avoids matching ``federation_health_secret``
     # event-name substrings; the regex insists on ``secret`` followed by
     # ``=`` or ``:`` with optional whitespace.
-    re.compile(r"\bsecret\s*[=:]", re.IGNORECASE),
+    re.compile(r"\bsecret\s*[=:](?!\[REDACTED:)", re.IGNORECASE),
     # ``token=`` / ``token:`` style key-value pairs. Watches for
     # accidental ``client_token=hvs.*`` log emissions from the Vault
     # forward-auth path. Word-bounded to avoid tripping on
     # ``missing_token`` / ``invalid_token`` / ``client_token_revoked``
     # event-name strings (which contain ``token`` but never followed by
     # ``=`` or ``:`` in our log shape).
-    re.compile(r"\btoken\s*[=:]", re.IGNORECASE),
+    re.compile(r"\btoken\s*[=:](?!\[REDACTED:)", re.IGNORECASE),
     # ``api_key`` / ``api-key`` / ``apikey`` followed by an assignment.
-    re.compile(r"\bapi[_-]?key\s*[=:]", re.IGNORECASE),
+    re.compile(r"\bapi[_-]?key\s*[=:](?!\[REDACTED:)", re.IGNORECASE),
     # The full ``Authorization: Bearer <anything>`` shape — catches
     # request-header values rendered into a log dict literal.
     re.compile(r"Authorization\s*:\s*Bearer\s+\S+", re.IGNORECASE),

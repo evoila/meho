@@ -53,6 +53,7 @@ import re
 from typing import Final, Protocol
 
 from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
+from meho_backplane.redaction.command_secret import COMMAND_SECRET
 from meho_backplane.redaction.url_secret import URL_SECRET
 
 __all__ = [
@@ -340,6 +341,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "ceph_key": _CEPH_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "url_secret": URL_SECRET,
+    "command_line_secret": COMMAND_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,

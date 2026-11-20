@@ -3933,13 +3933,8 @@ sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span 
 </tr>
 <tr>
 <td><code>--admin-user &lt;name&gt;</code></td>
-<td>The user name of the first admin.</td>
+<td>The user name of the one Admin login.</td>
 <td><code>admin</code></td>
-</tr>
-<tr>
-<td><code>--approver-user &lt;name&gt;</code></td>
-<td>The user name of the approver (in <code>MEHO-SA-Operators</code>), whom MEHO reads as an Operator: they approve the admin's <code>safe</code> and <code>caution</code> changes, but not a change of rights.</td>
-<td><code>approver</code></td>
 </tr>
 <tr>
 <td><code>--cluster-cidr &lt;cidr&gt;</code></td>
@@ -4041,19 +4036,15 @@ this:</p>
 lines under the last line. Before v0.47.0, the result has no <code>Console CA</code>
 line, and the last line says <code>First-start list: not in this version yet</code>.</p>
 <h2 id="step-4-first-login">Step 4: First login<a class="headerlink" href="#step-4-first-login" title="Permanent link">&para;</a></h2>
-<p>The install made two users with temporary passwords: the first admin
-(in <code>MEHO-Admins</code>) and an approver (in <code>MEHO-SA-Operators</code>). The approver is not an admin. MEHO reads the old group <code>MEHO-SA-Operators</code> as
-Operators, so the approver can approve the admin's <code>safe</code> and <code>caution</code>
-changes. The admin approves their own <code>dangerous</code> and <code>destructive</code>
-changes. A change of rights needs a second admin. See
-<a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.</p>
+<p>The install made one Admin login with a temporary password. It is in
+<code>MEHO-Admins</code> and <code>MEHO-Platform-Admins</code>.</p>
 <ol>
 <li>
 <p>On the server, read the file with the passwords:</p>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>cat<span class="w"> </span>/var/lib/meho/first-login-passwords
 </code></pre></div>
-<p>It has four lines, each as <code>name=value</code>: <code>admin_username</code>,
-<code>admin_password</code>, <code>approver_username</code> and <code>approver_password</code>.</p>
+<p>It has two lines, each as <code>name=value</code>: <code>admin_username</code> and
+<code>admin_password</code>.</p>
 </li>
 <li>
 <p>From a computer on the management network, open the console address,
@@ -4068,8 +4059,6 @@ changes. A change of rights needs a second admin. See
    asks you to set a new password and to set up an authenticator app for
    one-time codes. Then it shows recovery codes. Keep them in your key
    store.</li>
-<li>Give the approver's user name and temporary password to the second
-   person in a safe way. That person logs in the same way.</li>
 <li>
 <p>Copy the unseal key to your key store, for example your password
    manager or a safe:</p>
@@ -4296,7 +4285,7 @@ the console of the machine works. Over SSH, the command asks first when
 the new range does not hold your own address.</p>
 <h3 id="a-person-lost-the-one-time-code-app">A person lost the one-time code app<a class="headerlink" href="#a-person-lost-the-one-time-code-app" title="Permanent link">&para;</a></h3>
 <p>Use this only in an emergency: when a person of a local account (the
-first admin or the second person) lost the phone with the one-time code
+first admin) lost the phone with the one-time code
 app and also the recovery codes, so they cannot log in any more.</p>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>reset-second-factor<span class="w"> </span>&lt;user&gt;
 </code></pre></div>

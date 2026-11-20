@@ -4019,6 +4019,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A new install makes one Admin login, which is also the platform admin, and no <code>approver</code> login. New realms and new extra tenants get three role groups: Readers, Operators and Admins. The Linux install has no <code>--approver-user</code> option. When install.sh runs again on a host that has an <code>approver_user</code> entry in its install record, it ignores the entry, writes the install record and the Helm values file again without it, and leaves the login in Keycloak as it is. The Helm value <code>coreKeycloak.firstLogin.approverUsername</code> is still accepted and is ignored. Existing logins and groups stay.</td>
+<td><strong>Nothing to do.</strong> A script that passes <code>--approver-user</code> to install.sh must drop the option.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>An agent login and a service login now see only the stored call traces (flight recorder) of their own calls, on <code>GET /api/v1/audit/{audit_id}/trace</code> and <code>GET /api/v1/audit/traces</code>. This holds for a paired add-on, because it logs in as a service login. It also holds for a client-credentials login whose token has no <code>principal_kind</code> claim: MEHO treats such a login as a service login. People still see every trace of their tenant.</td>
 <td>If a paired add-on or another client-credentials login must read the traces of calls that a person or another login made, give that work to a person login. A trace that such a login may not read answers <code>trace_present=false</code> on the single read, and is left out of the list on the search.</td>
 </tr>

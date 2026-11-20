@@ -3829,13 +3829,13 @@ first, then match the row:</p>
 </tr>
 <tr>
 <td><code>missing_tenant_claim</code> / <code>missing_tenant_role_claim</code></td>
-<td>The person is in none of the five MEHO groups, or the <code>tenant-id</code> / <code>tenant-role</code> mapper is absent, so the backplane cannot place the caller in a tenant.</td>
-<td>Put the person in one group (<a href="../../install/keycloak-realm/#step-5-create-the-five-groups">Keycloak realm setup § groups</a>, or <a href="../../guides/tenant-bootstrap/">Add a tenant</a> for a new tenant), or add the tenant mappers (<strong>W2</strong>, <a href="../../install/keycloak-realm/#step-3-add-the-protocol-mappers">§ mappers</a>).</td>
+<td>The person is in none of the MEHO role groups, or the <code>tenant-id</code> / <code>tenant-role</code> mapper is absent, so the backplane cannot place the caller in a tenant.</td>
+<td>Put the person in one group (<a href="../../install/keycloak-realm/#step-5-create-the-three-groups">Keycloak realm setup § groups</a>, or <a href="../../guides/tenant-bootstrap/">Add a tenant</a> for a new tenant), or add the tenant mappers (<strong>W2</strong>, <a href="../../install/keycloak-realm/#step-3-add-the-protocol-mappers">§ mappers</a>).</td>
 </tr>
 <tr>
 <td><code>multiple_role_groups: …</code></td>
-<td>The person is in two or more of the five MEHO groups. Keycloak then copies the role from whichever group it finds first, so the role would be unpredictable. The message names the groups it found.</td>
-<td>Keep the person in exactly one group (<a href="../../install/keycloak-realm/#step-5-create-the-five-groups">Keycloak realm setup § groups</a>), then log out and back in. A site that renamed the groups sets <code>JWT_ROLE_GROUPS</code> on the backplane to the new names (comma-separated). Upper and lower case do not count.</td>
+<td>The person is in two or more of the MEHO role groups. Keycloak then copies the role from whichever group it finds first, so the role would be unpredictable. The message names the groups it found.</td>
+<td>Keep the person in exactly one group (<a href="../../install/keycloak-realm/#step-5-create-the-three-groups">Keycloak realm setup § groups</a>), then log out and back in. A site that renamed the groups sets <code>JWT_ROLE_GROUPS</code> on the backplane to the new names (comma-separated). Upper and lower case do not count.</td>
 </tr>
 <tr>
 <td><code>multiple_role_groups: … of the same tenant …</code></td>
@@ -3930,7 +3930,7 @@ appear.</p>
 <p><strong>Wall.</strong> The token's <code>tenant_role</code> claim is below the rank a tool
 requires (<code>read_only &lt; operator &lt; tenant_admin</code>), or the claim is
 missing entirely.</p>
-<p><strong>Fix.</strong> Confirm the person is in one of the five MEHO groups and the
+<p><strong>Fix.</strong> Confirm the person is in one of the MEHO role groups and the
 <code>tenant-role</code> mapper is on the client; walk back through the realm
 setup (<a href="../../install/keycloak-realm/">Keycloak realm setup</a>).</p>
 <h2 id="the-whole-toolset-is-rejected-claude-desktop">The whole toolset is rejected (Claude Desktop)<a class="headerlink" href="#the-whole-toolset-is-rejected-claude-desktop" title="Permanent link">&para;</a></h2>

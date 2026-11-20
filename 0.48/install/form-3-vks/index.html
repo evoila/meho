@@ -1265,10 +1265,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#step-6-the-first-two-users-meho-login-meho-status" class="md-nav__link">
+  <a href="#step-6-the-first-user-meho-login-meho-status" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Step 6: The first two users, meho login, meho status
+        Step 6: The first user, meho login, meho status
       
     </span>
   </a>
@@ -3722,10 +3722,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#step-6-the-first-two-users-meho-login-meho-status" class="md-nav__link">
+  <a href="#step-6-the-first-user-meho-login-meho-status" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Step 6: The first two users, meho login, meho status
+        Step 6: The first user, meho login, meho status
       
     </span>
   </a>
@@ -4155,7 +4155,7 @@ installer may not create one.</p>
 </tr>
 <tr>
 <td>123 s</td>
-<td>A third Job makes the first two users in Keycloak.</td>
+<td>A third Job makes the first user in Keycloak.</td>
 </tr>
 <tr>
 <td>137 s</td>
@@ -4215,21 +4215,15 @@ bash<span class="w"> </span>install-verify.sh<span class="w"> </span>--host<span
 <div class="highlight"><pre><span></span><code>install-verify.sh: 6 passed, 0 failed, 0 warned
 [ok]   MEHO is up
 </code></pre></div>
-<h2 id="step-6-the-first-two-users-meho-login-meho-status">Step 6: The first two users, <code>meho login</code>, <code>meho status</code><a class="headerlink" href="#step-6-the-first-two-users-meho-login-meho-status" title="Permanent link">&para;</a></h2>
-<p>The install made two users with temporary passwords: the first admin
-(<code>admin</code>, in <code>MEHO-Admins</code>) and an approver (<code>approver</code>, in
-<code>MEHO-SA-Operators</code>). The approver is not an admin. MEHO reads the old group <code>MEHO-SA-Operators</code> as
-Operators, so the approver can approve the admin's <code>safe</code> and <code>caution</code>
-changes. The admin approves their own <code>dangerous</code> and <code>destructive</code>
-changes. A change of rights needs a second admin. See
-<a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.
-Write the two logins into a file that only you can read:</p>
+<h2 id="step-6-the-first-user-meho-login-meho-status">Step 6: The first user, <code>meho login</code>, <code>meho status</code><a class="headerlink" href="#step-6-the-first-user-meho-login-meho-status" title="Permanent link">&para;</a></h2>
+<p>The install made one Admin login with a temporary password (<code>admin</code>, in
+<code>MEHO-Admins</code> and <code>MEHO-Platform-Admins</code>).
+Write the login into a file that only you can read:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
 kubectl<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span>meho-core-first-login<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-o<span class="w"> </span>go-template<span class="o">=</span><span class="s1">'{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}'</span><span class="w"> </span>&gt;<span class="w"> </span>first-login.txt
 </code></pre></div>
-<p><code>first-login.txt</code> has four lines: <code>admin_password</code>, <code>admin_username</code>,
-<code>approver_password</code> and <code>approver_username</code>.</p>
+<p><code>first-login.txt</code> has two lines: <code>admin_password</code> and <code>admin_username</code>.</p>
 <p>Log in with the command line:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
 </code></pre></div>
@@ -4260,9 +4254,7 @@ keyring of your system.</p>
   Features: all configured
   Connector packages: none
 </code></pre></div>
-<p>Then open <code>https://meho.example.com/ui/</code> in a private browser window and
-log in once as <code>approver</code>. Keycloak asks for a new password there too.
-Keep both new passwords in your key store, and delete the file:</p>
+<p>Keep the new password in your key store, and delete the file:</p>
 <div class="highlight"><pre><span></span><code>shred<span class="w"> </span>-u<span class="w"> </span>first-login.txt
 </code></pre></div>
 <h2 id="step-7-the-openbao-unseal-key">Step 7: The OpenBao unseal key<a class="headerlink" href="#step-7-the-openbao-unseal-key" title="Permanent link">&para;</a></h2>

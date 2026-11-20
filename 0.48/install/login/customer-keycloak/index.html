@@ -3346,7 +3346,7 @@ front of it. To use your Keycloak in place of the built-in one
 <tbody>
 <tr>
 <td>Your people and your user directory</td>
-<td>The five MEHO groups</td>
+<td>The three MEHO role groups</td>
 </tr>
 <tr>
 <td>Passwords, MFA, login checks</td>
@@ -3367,7 +3367,7 @@ page <a href="../../company-login-authentik/">Company login with authentik</a>
 explains the same values in more detail.</p>
 <p><strong>Before you start:</strong></p>
 <ul>
-<li>The realm is set up and the five MEHO groups exist. See
+<li>The realm is set up and the MEHO role groups exist. See
   <a href="../">Company login</a>.</li>
 <li>You are an admin in your Keycloak.</li>
 <li>You know the address of your MEHO, for example
@@ -3477,16 +3477,8 @@ for example:</p>
 <td><code>MEHO-Operators</code></td>
 </tr>
 <tr>
-<td><code>meho-sa-operators</code></td>
-<td><code>MEHO-SA-Operators</code></td>
-</tr>
-<tr>
 <td><code>meho-admins</code></td>
 <td><code>MEHO-Admins</code></td>
-</tr>
-<tr>
-<td><code>meho-approvers</code></td>
-<td><code>MEHO-Approvers</code></td>
 </tr>
 </tbody>
 </table>
@@ -3521,9 +3513,7 @@ values:</p>
 <span class="w">    </span><span class="nt">groupMap</span><span class="p">:</span><span class="w">                         </span><span class="c1"># your group -&gt; MEHO group</span>
 <span class="w">      </span><span class="nt">meho-readers</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Readers</span>
 <span class="w">      </span><span class="nt">meho-operators</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Operators</span>
-<span class="w">      </span><span class="nt">meho-sa-operators</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-SA-Operators</span>
 <span class="w">      </span><span class="nt">meho-admins</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Admins</span>
-<span class="w">      </span><span class="nt">meho-approvers</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Approvers</span>
 <span class="w">    </span><span class="nt">autoRedirect</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">               </span><span class="c1"># true later: go straight to your Keycloak</span>
 </code></pre></div>
 <ul>

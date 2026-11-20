@@ -1326,15 +1326,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#step-6-the-first-two-users-meho-login-meho-status" class="md-nav__link">
+  <a href="#step-6-the-first-user-meho-login-meho-status" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Step 6: The first two users, meho login, meho status
+        Step 6: The first user, meho login, meho status
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Step 6: The first two users, meho login, meho status">
+    <nav class="md-nav" aria-label="Step 6: The first user, meho login, meho status">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1349,10 +1349,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#62-log-in-as-approver-in-the-web-console" class="md-nav__link">
+  <a href="#62-log-in-as-admin-in-the-web-console" class="md-nav__link">
     <span class="md-ellipsis">
       
-        6.2 Log in as approver in the web console
+        6.2 Log in as admin in the web console
       
     </span>
   </a>
@@ -3866,15 +3866,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#step-6-the-first-two-users-meho-login-meho-status" class="md-nav__link">
+  <a href="#step-6-the-first-user-meho-login-meho-status" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Step 6: The first two users, meho login, meho status
+        Step 6: The first user, meho login, meho status
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Step 6: The first two users, meho login, meho status">
+    <nav class="md-nav" aria-label="Step 6: The first user, meho login, meho status">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -3889,10 +3889,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#62-log-in-as-approver-in-the-web-console" class="md-nav__link">
+  <a href="#62-log-in-as-admin-in-the-web-console" class="md-nav__link">
     <span class="md-ellipsis">
       
-        6.2 Log in as approver in the web console
+        6.2 Log in as admin in the web console
       
     </span>
   </a>
@@ -4430,7 +4430,7 @@ and the installer may not create one.</p>
    activity) and MEHO start. A second Job sets up OpenBao.</li>
 <li>MEHO's database migrations end, and MEHO starts.</li>
 <li>Keycloak loads the realm <code>meho</code> and gets ready.</li>
-<li>A third Job makes the first two users in Keycloak.</li>
+<li>A third Job makes the first user in Keycloak.</li>
 </ol>
 <p>When Helm ends, you should see <code>STATUS: deployed</code> and <code>REVISION: 1</code>,
 then the install notes. The first start of MEHO can take up to 15
@@ -4529,50 +4529,17 @@ bash<span class="w"> </span>install-verify.sh<span class="w"> </span>--host<span
 <p>The <code>echo</code> prints a number well over 500. If it prints <code>4</code>, the token is
 <code>null</code>. Then you should see <code>7 passed, 0 failed</code>, with the line
 <code>GET /api/v1/health (authenticated) returns 200</code>.</p>
-<h2 id="step-6-the-first-two-users-meho-login-meho-status">Step 6: The first two users, <code>meho login</code>, <code>meho status</code><a class="headerlink" href="#step-6-the-first-two-users-meho-login-meho-status" title="Permanent link">&para;</a></h2>
-<p>The install made two users with temporary passwords: the first admin
-(<code>admin</code>, in <code>MEHO-Admins</code>) and an approver (<code>approver</code>, in
-<code>MEHO-SA-Operators</code>). The approver is not an admin. MEHO reads the old group <code>MEHO-SA-Operators</code> as
-Operators, so the approver can approve the admin's <code>safe</code> and <code>caution</code>
-changes. The admin approves their own <code>dangerous</code> and <code>destructive</code>
-changes. A change of rights needs a second admin. See
-<a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.
-Write the two logins into a file that only you can read:</p>
+<h2 id="step-6-the-first-user-meho-login-meho-status">Step 6: The first user, <code>meho login</code>, <code>meho status</code><a class="headerlink" href="#step-6-the-first-user-meho-login-meho-status" title="Permanent link">&para;</a></h2>
+<p>The install made one Admin login with a temporary password (<code>admin</code>, in
+<code>MEHO-Admins</code> and <code>MEHO-Platform-Admins</code>).
+Write the login into a file that only you can read:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">umask</span><span class="w"> </span><span class="m">077</span>
 kubectl<span class="w"> </span>-n<span class="w"> </span><span class="nv">$NS</span><span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span><span class="nv">$REL</span>-core-first-login<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-o<span class="w"> </span>go-template<span class="o">=</span><span class="s1">'{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}'</span><span class="w"> </span>&gt;<span class="w"> </span><span class="nv">$W</span>/first-login.txt
 cat<span class="w"> </span><span class="nv">$W</span>/first-login.txt
 </code></pre></div>
-<p>You should see four lines: <code>admin_password</code>, <code>admin_username</code>,
-<code>approver_password</code> and <code>approver_username</code>.</p>
-<p>You log in <strong>twice</strong>, once as each user, in <strong>two separate browser
-windows</strong>. Both logins go to the same Keycloak, which remembers who is
-logged in, so a normal window and a private (incognito) window keep them
-apart:</p>
-<table>
-<thead>
-<tr>
-<th>Who</th>
-<th>Where</th>
-<th>Browser window</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>admin</code></td>
-<td>the <code>meho</code> command line (6.1)</td>
-<td>your normal window</td>
-</tr>
-<tr>
-<td><code>approver</code></td>
-<td>the web console (6.2)</td>
-<td>a <strong>private</strong> window</td>
-</tr>
-</tbody>
-</table>
-<p>The first login of each user asks for a new password, a name and an
-email. Remember both new passwords: the admin's changes wait for the
-approver's yes.</p>
+<p>You should see two lines: <code>admin_password</code> and <code>admin_username</code>.</p>
+<p>The first login asks for a new password, a name and an email.</p>
 <h3 id="61-log-in-as-admin-on-the-command-line">6.1 Log in as <code>admin</code> on the command line<a class="headerlink" href="#61-log-in-as-admin-on-the-command-line" title="Permanent link">&para;</a></h3>
 <p>Keep this login apart from any other MEHO you use. The command line
 then keeps it in its own folder:</p>
@@ -4595,21 +4562,17 @@ command. Check the whole chain:</p>
 <p><code>Vault: read OK</code> means MEHO logged in to OpenBao with your login and read
 a secret. A warning that the command line is newer or older than the
 install is harmless, but keep both at the same version when you can.</p>
-<h3 id="62-log-in-as-approver-in-the-web-console">6.2 Log in as <code>approver</code> in the web console<a class="headerlink" href="#62-log-in-as-approver-in-the-web-console" title="Permanent link">&para;</a></h3>
-<p>Open a <strong>private</strong> browser window, so the <code>admin</code> login from 6.1 does
-not carry over, and go to:</p>
+<h3 id="62-log-in-as-admin-in-the-web-console">6.2 Log in as <code>admin</code> in the web console<a class="headerlink" href="#62-log-in-as-admin-in-the-web-console" title="Permanent link">&para;</a></h3>
+<p>Go to this address and sign in as <code>admin</code> with the password you set in 6.1:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">echo</span><span class="w"> </span>https://<span class="nv">$HOST</span>/ui/
 </code></pre></div>
-<p>Sign in as <code>approver</code> with its temporary password and set the new
-password. If the console shows you as <code>admin</code>, the window is not
-private: close it and open a new private one.</p>
-<p>The install notes also name a third login, the <strong>console admin</strong>: a
+<p>The install notes also name a second login, the <strong>console admin</strong>: a
 user of Keycloak's own realm <code>master</code>, for Keycloak's admin page (for
 example to connect a company directory). MEHO itself refuses this
 login. Its user name and temporary password are in the Secret
 <code>$REL-core-console-admin</code>. You do not need it for this guide.</p>
 <h3 id="63-delete-the-login-file">6.3 Delete the login file<a class="headerlink" href="#63-delete-the-login-file" title="Permanent link">&para;</a></h3>
-<p>Keep both new passwords in your key store, then delete the file:</p>
+<p>Keep the new password in your key store, then delete the file:</p>
 <div class="highlight"><pre><span></span><code>rm<span class="w"> </span>-P<span class="w"> </span><span class="nv">$W</span>/first-login.txt<span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span>shred<span class="w"> </span>-u<span class="w"> </span><span class="nv">$W</span>/first-login.txt
 </code></pre></div>
 <h2 id="step-7-the-openbao-unseal-key">Step 7: The OpenBao unseal key<a class="headerlink" href="#step-7-the-openbao-unseal-key" title="Permanent link">&para;</a></h2>

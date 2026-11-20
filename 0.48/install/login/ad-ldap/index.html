@@ -3310,7 +3310,7 @@ directory. Keycloak reads the people and their groups from the
 directory. Passwords stay in the directory.</p>
 <p><strong>Before you start:</strong></p>
 <ul>
-<li>The realm is set up and the five MEHO groups exist. See
+<li>The realm is set up and the MEHO role groups exist. See
   <a href="../">Company login</a>.</li>
 <li>You can log in to the Keycloak admin console as the console admin
   (a user of realm <code>master</code>, default name <code>console-admin</code>; name and
@@ -3339,8 +3339,7 @@ directory. Passwords stay in the directory.</p>
 <p>You need one directory group per MEHO role. Pick one of two ways:</p>
 <ul>
 <li><strong>A. Same names (simplest).</strong> Make groups named exactly like the MEHO
-  groups: <code>MEHO-Readers</code>, <code>MEHO-Operators</code>, <code>MEHO-SA-Operators</code>,
-  <code>MEHO-Admins</code>, <code>MEHO-Approvers</code>. Keycloak links each one to the MEHO
+  groups: <code>MEHO-Readers</code>, <code>MEHO-Operators</code>, <code>MEHO-Admins</code>. Keycloak links each one to the MEHO
   group of the same name.</li>
 <li><strong>B. Your own names.</strong> Use groups you already have or name by your
   rules, for example <code>SG-MEHO-Ops</code>. Keycloak puts each one under its
@@ -3538,7 +3537,7 @@ directory, not in Keycloak.</p>
 </table>
 <p>Paste the filter as one line, exactly as it is here. No spaces and no
 line breaks.</p>
-<div class="highlight"><pre><span></span><code>(|(cn=MEHO-Readers)(cn=MEHO-Operators)(cn=MEHO-SA-Operators)(cn=MEHO-Admins)(cn=MEHO-Approvers))
+<div class="highlight"><pre><span></span><code>(|(cn=MEHO-Readers)(cn=MEHO-Operators)(cn=MEHO-Admins))
 </code></pre></div>
 <p><strong>B. Your own names:</strong> one mapper per MEHO group, each bringing in
 exactly one directory group under its MEHO group.</p>
@@ -3562,19 +3561,9 @@ exactly one directory group under its MEHO group.</p>
 <td><code>/MEHO-Operators</code></td>
 </tr>
 <tr>
-<td><code>meho-sa-operators</code></td>
-<td><code>(cn=SG-MEHO-SAOps)</code></td>
-<td><code>/MEHO-SA-Operators</code></td>
-</tr>
-<tr>
 <td><code>meho-admins</code></td>
 <td><code>(cn=SG-MEHO-Admin)</code></td>
 <td><code>/MEHO-Admins</code></td>
-</tr>
-<tr>
-<td><code>meho-approvers</code></td>
-<td><code>(cn=SG-MEHO-Approve)</code></td>
-<td><code>/MEHO-Approvers</code></td>
 </tr>
 </tbody>
 </table>
@@ -3582,7 +3571,7 @@ exactly one directory group under its MEHO group.</p>
 <p>What you see after the sync, in <strong>Groups</strong>:</p>
 <ul>
 <li><strong>A:</strong> each <code>MEHO-*</code> group once, at the top level, still with its
-  attributes. The sync reports the five as <em>updated</em>, not <em>imported</em>.</li>
+  attributes. The sync reports the three as <em>updated</em>, not <em>imported</em>.</li>
 <li><strong>B:</strong> each directory group as the only child of its MEHO group, for
   example <code>MEHO-Operators</code> → <code>SG-MEHO-Ops</code>. Nothing new at the top level.</li>
 </ul>

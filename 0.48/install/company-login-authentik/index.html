@@ -3690,7 +3690,7 @@ ADFS) work the same way. Only the clicks in Part 1 differ.</p>
   a short form to fill it in at their first login.</li>
 </ul>
 <h2 id="how-the-groups-work">How the groups work<a class="headerlink" href="#how-the-groups-work" title="Permanent link">&para;</a></h2>
-<p>MEHO has five role groups. Each group gives a role:</p>
+<p>A new MEHO realm has three role groups. Each group gives a role:</p>
 <table>
 <thead>
 <tr>
@@ -3711,19 +3711,9 @@ ADFS) work the same way. Only the clicks in Part 1 differ.</p>
 <td>Run actions. Risky changes wait until a second person approves.</td>
 </tr>
 <tr>
-<td><code>MEHO-SA-Operators</code></td>
-<td><code>operator</code></td>
-<td>An old group: MEHO reads it as <code>MEHO-Operators</code>.</td>
-</tr>
-<tr>
 <td><code>MEHO-Admins</code></td>
 <td><code>tenant_admin</code></td>
 <td>Manage the tenant.</td>
-</tr>
-<tr>
-<td><code>MEHO-Approvers</code></td>
-<td><code>read_only</code></td>
-<td>An old group: MEHO reads it as <code>MEHO-Readers</code>.</td>
 </tr>
 </tbody>
 </table>
@@ -3736,13 +3726,13 @@ ADFS) work the same way. Only the clicks in Part 1 differ.</p>
   groups. Who may approve what is in
   <a href="../../guides/approvals-and-break-glass/#who-may-approve">Approvals and break-glass</a>.</li>
 </ul>
-<p>The easiest setup is to give the authentik groups the same five names.
+<p>The easiest setup is to give the authentik groups the same names.
 You can also use groups you already have and map them (see <code>groupMap</code>
 in Part 2).</p>
 <h2 id="part-1-authentik">Part 1: authentik<a class="headerlink" href="#part-1-authentik" title="Permanent link">&para;</a></h2>
 <h3 id="1-create-the-groups">1. Create the groups<a class="headerlink" href="#1-create-the-groups" title="Permanent link">&para;</a></h3>
-<p>In authentik, open <strong>Directory &gt; Groups &gt; New Group</strong>. Create the five
-groups from the table above, or pick five groups you already have. Put
+<p>In authentik, open <strong>Directory &gt; Groups &gt; New Group</strong>. Create the three
+groups from the table above, or pick three groups you already have. Put
 each person in exactly one of them.</p>
 <h3 id="2-create-the-application-and-the-provider">2. Create the application and the provider<a class="headerlink" href="#2-create-the-application-and-the-provider" title="Permanent link">&para;</a></h3>
 <p>Open <strong>Applications &gt; Applications &gt; New Application</strong>, and choose
@@ -3786,7 +3776,7 @@ the install notes print the exact address.</p>
 </ul>
 </li>
 <li><strong>Bindings</strong> (recommended): <strong>Bind existing policy/group/user</strong>, and
-  bind the five groups. Then authentik refuses people who are in none
+  bind the three groups. Then authentik refuses people who are in none
   of them. Without bindings, such a person reaches Keycloak, and MEHO
   refuses them with <code>401 missing_tenant_claim</code>.</li>
 </ul>
@@ -3838,9 +3828,7 @@ values:</p>
 <span class="w">    </span><span class="nt">groupMap</span><span class="p">:</span><span class="w">                         </span><span class="c1"># authentik group -&gt; MEHO group</span>
 <span class="w">      </span><span class="nt">MEHO-Readers</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Readers</span>
 <span class="w">      </span><span class="nt">MEHO-Operators</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Operators</span>
-<span class="w">      </span><span class="nt">MEHO-SA-Operators</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-SA-Operators</span>
 <span class="w">      </span><span class="nt">MEHO-Admins</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Admins</span>
-<span class="w">      </span><span class="nt">MEHO-Approvers</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MEHO-Approvers</span>
 <span class="w">    </span><span class="nt">autoRedirect</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">                </span><span class="c1"># go straight to authentik</span>
 <span class="w">    </span><span class="nt">caBundle</span><span class="p">:</span><span class="w">                         </span><span class="c1"># only for a private CA; else leave the name empty</span>
 <span class="w">      </span><span class="nt">configMapName</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">company-login-ca</span>
@@ -3919,7 +3907,7 @@ the Keycloak admin console, realm <code>meho</code>, open <strong>Clients &gt;
 <li><code>tenant_id</code> is your tenant UUID, and <code>tenant_role</code> is the role of
   your group;</li>
 <li><code>groups</code> lists your MEHO group;</li>
-<li><code>approver: true</code> appears only for <code>MEHO-Approvers</code>.</li>
+<li><code>approver: true</code> does not appear: no group of a new realm sets it.</li>
 </ul>
 </li>
 </ol>
@@ -3928,7 +3916,7 @@ the Keycloak admin console, realm <code>meho</code>, open <strong>Clients &gt;
 built-in one. You set up the same broker by hand. The result is the
 same as with the Helm values above.</p>
 <p><strong>First:</strong> set up the realm with <a href="../keycloak-realm/">Keycloak realm setup</a>,
-including the five groups and the mappers that read them. Check that a
+including the three groups and the mappers that read them. Check that a
 local user in a group can log in. This page writes your Keycloak as
 <code>&lt;keycloak-host&gt;</code> and your realm as <code>&lt;realm&gt;</code>.</p>
 <h3 id="1-let-keycloak-trust-authentik">1. Let Keycloak trust authentik<a class="headerlink" href="#1-let-keycloak-trust-authentik" title="Permanent link">&para;</a></h3>
@@ -3965,7 +3953,7 @@ Keycloak admin command line. Both give the same result.</p>
 </ul>
 </li>
 <li>
-<p><strong>Mappers</strong> tab &gt; <strong>Add mapper</strong>, once for each of the five groups:</p>
+<p><strong>Mappers</strong> tab &gt; <strong>Add mapper</strong>, once for each of the three groups:</p>
 <ul>
 <li><strong>Name</strong> <code>meho-group-MEHO-Operators</code>, <strong>Sync mode override</strong>
   Force, <strong>Mapper type</strong> Advanced Claim to Group.</li>
@@ -4009,7 +3997,7 @@ jq<span class="w"> </span>--arg<span class="w"> </span>s<span class="w"> </span>
 <span class="w">  </span><span class="p">|</span><span class="w"> </span>kcadm.sh<span class="w"> </span>create<span class="w"> </span>identity-provider/instances<span class="w"> </span>-r<span class="w"> </span><span class="s2">"</span><span class="nv">$REALM</span><span class="s2">"</span><span class="w"> </span>-f<span class="w"> </span>-
 <span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
 
-<span class="k">for</span><span class="w"> </span>G<span class="w"> </span><span class="k">in</span><span class="w"> </span>MEHO-Readers<span class="w"> </span>MEHO-Operators<span class="w"> </span>MEHO-SA-Operators<span class="w"> </span>MEHO-Admins<span class="w"> </span>MEHO-Approvers<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="k">for</span><span class="w"> </span>G<span class="w"> </span><span class="k">in</span><span class="w"> </span>MEHO-Readers<span class="w"> </span>MEHO-Operators<span class="w"> </span>MEHO-Admins<span class="p">;</span><span class="w"> </span><span class="k">do</span>
 <span class="w">  </span>jq<span class="w"> </span>-n<span class="w"> </span>--arg<span class="w"> </span>g<span class="w"> </span><span class="s2">"</span><span class="nv">$G</span><span class="s2">"</span><span class="w"> </span><span class="s1">'{name: ("meho-group-" + $g), identityProviderAlias: "company",</span>
 <span class="s1">      identityProviderMapper: "oidc-advanced-group-idp-mapper",</span>
 <span class="s1">      config: {syncMode: "FORCE", "are.claim.values.regex": "false", group: ("/" + $g),</span>
@@ -4123,7 +4111,7 @@ Keycloak admin console. With the built-in Keycloak:</p>
 <tr>
 <td>The bootstrap Job stops: "groupMap names the group …, which the realm does not have"</td>
 <td>A right side in <code>groupMap</code> is not a MEHO group.</td>
-<td>Use one of the five MEHO group names.</td>
+<td>Use one of the MEHO role group names.</td>
 </tr>
 <tr>
 <td>Keycloak shows "Unexpected error when authenticating with identity provider"</td>

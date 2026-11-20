@@ -18088,7 +18088,7 @@
 <div class="highlight"><pre><span></span><code>meho admin keycloak bootstrap-clients [flags]
 </code></pre></div>
 <ul>
-<li><code>--add-tenant</code> — also make the five groups <code>MEHO-&lt;name&gt;-&lt;Role&gt;</code> of one more tenant with this short name</li>
+<li><code>--add-tenant</code> — also make the three groups <code>MEHO-&lt;name&gt;-&lt;Role&gt;</code> of one more tenant with this short name</li>
 <li><code>--add-tenant-id</code> — the UUID of the <code>--add-tenant</code> tenant (default: the UUID its groups already carry, else a new one, printed at the end)</li>
 <li><code>--admin-user-email</code> — optional email for the new admin user</li>
 <li><code>--admin-user-username</code> — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)</li>
@@ -18108,9 +18108,9 @@
 <li><code>--mcp-resource-uri</code> — audience the <code>meho-mcp-audience</code> mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)</li>
 <li><code>--mcp-web-origin</code> — CORS web origin(s) for the MCP browser-flow client (default: <code>+</code> — allow the redirect-URI origins)</li>
 <li><code>--realm</code> — target realm name (NOT the master realm — that's where the admin token is minted)</li>
-<li><code>--skip-user-provisioning</code> — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created</li>
-<li><code>--tenant-id</code> — tenant UUID written as the <code>tenant_id</code> attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant</li>
-<li><code>--tenant-name</code> — the first tenant's short name (lowercase letters, digits, dashes), written into the <code>meho_tenant</code> attribute of the five MEHO role groups</li>
+<li><code>--skip-user-provisioning</code> — skip the admin user step (use when people come from a directory or another login system); the three role groups are still created</li>
+<li><code>--tenant-id</code> — tenant UUID written as the <code>tenant_id</code> attribute on the three MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant</li>
+<li><code>--tenant-name</code> — the first tenant's short name (lowercase letters, digits, dashes), written into the <code>meho_tenant</code> attribute of the three MEHO role groups</li>
 <li><code>--web-approve-client-id</code> — the console's approval sign-in client_id (matches the backplane's UI_KEYCLOAK_APPROVE_CLIENT_ID); when the realm has it, it is bound to the approval sign-in flow</li>
 <li><code>--web-client-id</code> — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level</li>
 </ul>

@@ -3716,7 +3716,7 @@ control is load-bearing or where the setting differs.</p>
 </tr>
 <tr>
 <td><strong>Realm claim mappers</strong></td>
-<td>On a shared, multi-user public client, take <code>tenant_id</code> and <code>tenant_role</code> from the person's login group (one of the five MEHO groups, read by the stock User Attribute mapper) — never install a hardcoded privileged <code>tenant_role</code> (e.g. <code>tenant_admin</code>) mapper that every user authenticating through that client inherits. A hardcoded claim is acceptable only on a single-identity lab client.</td>
+<td>On a shared, multi-user public client, take <code>tenant_id</code> and <code>tenant_role</code> from the person's login group (one of the MEHO role groups, read by the stock User Attribute mapper) — never install a hardcoded admin-level <code>tenant_role</code> (e.g. <code>tenant_admin</code>) mapper that every user authenticating through that client inherits. A hardcoded claim is acceptable only on a single-identity lab client.</td>
 <td><a href="../install/keycloak-realm/"><code>install/keycloak-realm.md</code></a></td>
 </tr>
 <tr>

@@ -3271,22 +3271,15 @@ on each login client copies them into the token.</p>
 <td>Run actions. Their <code>dangerous</code> and <code>destructive</code> changes wait for an admin.</td>
 </tr>
 <tr>
-<td><code>MEHO-SA-Operators</code></td>
-<td><code>operator</code></td>
-<td>An old group: MEHO reads it as <code>MEHO-Operators</code> (<a href="../../guides/approvals-and-break-glass/#who-may-approve">who may approve</a>).</td>
-</tr>
-<tr>
 <td><code>MEHO-Admins</code></td>
 <td><code>tenant_admin</code></td>
 <td>Manage the tenant.</td>
 </tr>
-<tr>
-<td><code>MEHO-Approvers</code></td>
-<td><code>read_only</code></td>
-<td>An old group: MEHO reads it as <code>MEHO-Readers</code>.</td>
-</tr>
 </tbody>
 </table>
+<p>A realm made by an older MEHO version can also have <code>MEHO-SA-Operators</code>
+and <code>MEHO-Approvers</code>. MEHO reads them as <code>MEHO-Operators</code> and
+<code>MEHO-Readers</code>. A new realm does not have them, so a recipe that maps people into them stops the setup.</p>
 <p><code>MEHO-Platform-Admins</code> is separate. It adds <code>platform_admin</code> to the
 token and gives no tenant or role. Only the first admin needs it.</p>
 <p>The full decision, with the reasons, is in the
@@ -3330,7 +3323,7 @@ console. Okta or ADFS work the same way. We have not tested them.</p>
 set it up, so that recipe uses the Keycloak admin console.</p>
 <h2 id="the-rules">The rules<a class="headerlink" href="#the-rules" title="Permanent link">&para;</a></h2>
 <ol>
-<li><strong>One group per person.</strong> A person is in exactly one of the five
+<li><strong>One group per person.</strong> A person is in exactly one of the role
    groups. In two groups, MEHO refuses the login with
    <code>401 multiple_role_groups</code>. In none, MEHO refuses it with
    <code>401 missing_tenant_claim</code>.</li>

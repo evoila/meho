@@ -260,7 +260,7 @@ class CoreInstallTests(InstallTestCase):
             f"First-login passwords: {FIRST_LOGIN_FILE} (root only;",
             f"Unseal key:            {UNSEAL_KEY_FILE} (root only;",
             "Console CA:            /var/lib/meho/console-ca.crt (not secret;",
-            "First-start list:      green",
+            "First-start list:      after the first login, open https://meho.example.com/ui/",
         ):
             with self.subTest(line=line):
                 self.assertIn(line, result.stdout)

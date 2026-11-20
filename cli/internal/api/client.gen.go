@@ -13731,6 +13731,11 @@ type FeedEndpointApiV1FeedGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// FirstStartSignedInApiV1FirstStartGetParams defines parameters for FirstStartSignedInApiV1FirstStartGet.
+type FirstStartSignedInApiV1FirstStartGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
 type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
@@ -17883,6 +17888,9 @@ type ClientInterface interface {
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// FirstStartSignedInApiV1FirstStartGet request
+	FirstStartSignedInApiV1FirstStartGet(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PollNextCommandApiV1GatewayRunnerNextGet request
 	PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21068,6 +21076,18 @@ func (c *Client) IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context,
 
 func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartSignedInApiV1FirstStartGet(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartSignedInApiV1FirstStartGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -34509,6 +34529,48 @@ func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewFirstStartSignedInApiV1FirstStartGetRequest generates requests for FirstStartSignedInApiV1FirstStartGet
+func NewFirstStartSignedInApiV1FirstStartGetRequest(server string, params *FirstStartSignedInApiV1FirstStartGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -55298,6 +55360,9 @@ type ClientWithResponsesInterface interface {
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
+	// FirstStartSignedInApiV1FirstStartGetWithResponse request
+	FirstStartSignedInApiV1FirstStartGetWithResponse(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*FirstStartSignedInApiV1FirstStartGetResponse, error)
+
 	// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request
 	PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error)
 
@@ -59205,6 +59270,29 @@ func (r FeedEndpointApiV1FeedGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartSignedInApiV1FirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FirstStartResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartSignedInApiV1FirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartSignedInApiV1FirstStartGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -68652,6 +68740,15 @@ func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.C
 	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
 }
 
+// FirstStartSignedInApiV1FirstStartGetWithResponse request returning *FirstStartSignedInApiV1FirstStartGetResponse
+func (c *ClientWithResponses) FirstStartSignedInApiV1FirstStartGetWithResponse(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	rsp, err := c.FirstStartSignedInApiV1FirstStartGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartSignedInApiV1FirstStartGetResponse(rsp)
+}
+
 // PollNextCommandApiV1GatewayRunnerNextGetWithResponse request returning *PollNextCommandApiV1GatewayRunnerNextGetResponse
 func (c *ClientWithResponses) PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
 	rsp, err := c.PollNextCommandApiV1GatewayRunnerNextGet(ctx, runner, params, reqEditors...)
@@ -76771,6 +76868,39 @@ func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartSignedInApiV1FirstStartGetResponse parses an HTTP response from a FirstStartSignedInApiV1FirstStartGetWithResponse call
+func ParseFirstStartSignedInApiV1FirstStartGetResponse(rsp *http.Response) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartSignedInApiV1FirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FirstStartResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -213,27 +213,14 @@ KUBECTL_STUB = textwrap.dedent("""\
     esac
     """)
 
-# The download's meho command answers "meho status --first-start" as the test
-# says, and logs the CA file it was given in SSL_CERT_FILE.
+# The download's meho command. Its calls go to calls.log, like every stub.
 MEHO_CLI_STUB = textwrap.dedent("""\
     # fake meho CLI {version}
-    printf 'meho-env SSL_CERT_FILE=%s\\n' "${{SSL_CERT_FILE:-}}" >> "$MEHO_FAKE/calls.log"
-    cat "$MEHO_FAKE/meho_first_start_out"
-    cat "$MEHO_FAKE/meho_first_start_err" >&2
-    exit "$(cat "$MEHO_FAKE/meho_first_start_rc")"
+    exit 0
     """)
 
 # The CA of the console certificate, as kubectl prints it decoded. Made up.
 CONSOLE_CA = "-----BEGIN CERTIFICATE-----\nMIIBfakeConsoleCA\n-----END CERTIFICATE-----\n"
-
-# What "meho status --first-start" prints for a green list.
-FIRST_START_GREEN = (
-    "GREEN   dns           meho.example.com points at this MEHO.\n"
-    "GREEN   certificate   The certificate of meho.example.com is valid for 820 more days.\n"
-    "GREEN   network       meho.example.com points at a private address.\n"
-    "GREEN   clock         The clock is within 60 seconds of Keycloak and PostgreSQL.\n"
-    "GREEN   reachability  No systems are in the settings yet.\n"
-)
 
 # Like RKE2's installer, the stub puts RKE2's kernel settings file for the
 # CIS profile into the share folder of RKE2.
@@ -307,9 +294,6 @@ DEFAULT_ANSWERS = {
     "kube_secret_unseal_rc": "0",
     "kube_secret_tls": CONSOLE_CA,
     "kube_secret_tls_rc": "0",
-    "meho_first_start_out": FIRST_START_GREEN,
-    "meho_first_start_err": "",
-    "meho_first_start_rc": "0",
     "rke2_installer_rc": "0",
     "rke2_share_dir": RKE2_SHARE_DIR,
     "rke2_cis_sysctl": RKE2_CIS_SYSCTL,

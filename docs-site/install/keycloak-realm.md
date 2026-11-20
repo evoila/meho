@@ -857,7 +857,7 @@ complete.
 
 ## The console admin
 
-The built-in Keycloak makes a third user at install: the console
+The built-in Keycloak makes a second user at install: the console
 admin, default name `console-admin` (values key
 `coreKeycloak.firstLogin.consoleAdminUsername`). It administers realm
 `meho` in the Keycloak admin console. Use it for the recipes

@@ -353,6 +353,13 @@ Two kinds of rows carry a keyed hash of a call's params:
   call that changed any value, a password too, does not match.
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
+  - A credential write, and a `k8s.apply` whose manifest holds a Secret
+    (the param a connector declares with `declare_hidden_stored_param`),
+    keep the params, and the params of a parent multi-step call, only in
+    the encrypted one-time handoff (`approval_handoff`). The row keeps no
+    plain copy, also not when the request is approved and never runs.
+    Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
+    call instead of letting it wait.
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
@@ -3056,8 +3063,12 @@ The per-op preview is opt-in via a builder registry in
   stored preview as the filter returns it, for fields deeper than the
   top-level keys; it runs after the person-only keys are gone, so an op
   can have both. So the caller gets the same answer there as from
-  `preview_operation`. The REST
-  approvals API and the console show the stored card.
+  `preview_operation`. The console shows the stored card, and so does the
+  REST approvals API for a person. For an agent, service or runner login
+  the REST API leaves out the top-level person-only keys (for example
+  `credential_wait`, the line that says why a credential call waits), and
+  for `linux.script.run` and `k8s.apply` it gives the same view as the MCP
+  tools (`api/v1/approvals.py::_proposed_effect_for`).
 - `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
   every preview the builder of `op_id` returns, whatever module
   registered the builder and when. A step that raises makes the preview
@@ -3218,6 +3229,22 @@ in an `additionalProperties` representation) never reaches the durable
 row. `keycloak.role_mapping.assign` populates
 `{resource, username, id, realm, granted_roles}` (the granted realm role
 names). Further connectors register their own builders as needed.
+
+For a person the `k8s.apply` preview also has `run_commands`: one entry
+per container (init, main and ephemeral, at any depth) with the object,
+the container name, the image, the `command` and `args`, and in
+`exec_commands` the `exec` command of each lifecycle hook (`postStart`,
+`preStop`) and exec probe (`startupProbe`, `livenessProbe`,
+`readinessProbe`), with secret values hidden by the rules of the Job
+preview. The `manifest` echo above shows only the size of each command
+line. When the dry run fails, the stored request has the
+`preview_unavailable` marker and, for a person, a top-level `run_commands`
+built from the manifest text (`register_preview_failure_keys` in
+`operations/_preview.py`). The console card shows that list in a "What
+each container runs" block under the warning that the preview failed
+(`approvals/_modal.html`). An agent never reads `run_commands`: its own
+preview has no such key, and the stored request it reads (MCP tools and
+the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 
 ## Credential writes: what the approver sees (#4850)
 

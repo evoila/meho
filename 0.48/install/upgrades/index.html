@@ -3934,6 +3934,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>MEHO now refuses a broadcast announcement whose <code>activity</code>, <code>target</code>, an entry of <code>targets</code>, or <code>scope</code> holds a line break, a tab or another control character: <code>POST /api/v1/broadcast/announce</code> answers 422 and the MCP tool <code>meho_broadcast_announce</code> answers -32602. In its text output (without <code>--json</code>) the CLI shows control characters in text that an agent or another person wrote as visible escapes. <code>meho kb show</code>, <code>meho conventions show</code>, <code>meho recall</code>, <code>meho runbook start</code> and <code>meho runbook next</code> keep the line breaks of a body, but print a tab as <code>\x09</code>. The <code>--json</code> output is unchanged.</td>
+<td>Make sure that agents and scripts that announce on the broadcast feed send each text field as one line without tabs. A script that pipes the text output of <code>meho kb show</code>, <code>meho conventions show</code>, <code>meho recall</code>, <code>meho runbook start</code> or <code>meho runbook next</code> and needs the exact bytes of a body now gets <code>\x09</code> for each tab: switch it to <code>--json</code> and read the body field there.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>In its text output (without <code>--json</code>) the CLI shows control characters in text from an API description, a target system or an uploaded session as visible escapes, for example <code>\x1b</code> for ESC. This holds for <code>meho operation search</code>, <code>meho operation groups</code>, <code>meho operation preview</code>, the failure text of <code>meho operation call</code> and of the vendor commands (not <code>meho vcf-automation about</code>), the <code>meho audit trace</code> list, <code>meho targets describe</code>, and <code>meho sessions show</code> and <code>list</code>. Other text is printed as it is. The <code>--json</code> output is unchanged.</td>
 <td>None for most installs. A script that reads the text output of these commands and needs the exact bytes of a field gets the visible escape for each control character: switch it to <code>--json</code> and read the field there.</td>
 </tr>

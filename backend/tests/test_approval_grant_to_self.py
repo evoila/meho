@@ -31,7 +31,7 @@ from sqlalchemy import select
 import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
-from meho_backplane.connectors.keycloak.ops_write_delete_lookup import FoundObject
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import REASON_KEYS
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
@@ -106,6 +106,7 @@ def _grant(
                 "group_id": group_id,
                 "login_realm": login_realm,
                 "platform_admin": platform_admin,
+                "harmless_keys_only": False,
                 **more,
             }
         },
@@ -719,16 +720,23 @@ async def _grant_block(ctx: PreviewContext) -> dict[str, Any]:
     return effect["preview"]["grant"]
 
 
-def _groups_by_id(monkeypatch: pytest.MonkeyPatch, names: dict[str, str]) -> None:
-    """Reading a group by id gives its name; an id not in *names* fails."""
+def _groups_by_id(monkeypatch: pytest.MonkeyPatch, groups: dict[str, str | dict[str, Any]]) -> None:
+    """Reading a group by id gives its data; an id not in *groups* fails.
 
-    async def _find(_c: Any, _o: Any, _t: Any, params: dict[str, Any]) -> FoundObject:
-        group_id = params["id"]
-        if group_id not in names:
+    A name alone stands for a top-level group with no attributes.
+    """
+
+    async def _read(_c: Any, _ctx: Any, _realm: str, group_id: str) -> dict[str, Any] | None:
+        if group_id not in groups:
             raise RuntimeError("read failed")
-        return FoundObject(realms=None, object_id=group_id, name=names[group_id], rep={})  # type: ignore[arg-type]
+        group = groups[group_id]
+        if isinstance(group, str):
+            return {"id": group_id, "name": group, "path": f"/{group}", "attributes": {}}
+        return {"id": group_id, **group}
 
-    monkeypatch.setattr("meho_backplane.connectors.keycloak.ops_write_grant.find_group", _find)
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.ops_write_grant_platform._read_group", _read
+    )
 
 
 def _connector_with(
@@ -805,7 +813,10 @@ async def test_the_connector_resolves_a_user_name_to_its_id(
         "user_id": _USER,
         "group_id": _GROUP,
         "login_realm": True,
-        "platform_admin": False,
+        # The group gives no platform admin rights; the harmless keys rule asks for one.
+        "platform_admin": True,
+        "platform_admin_reason": REASON_KEYS,
+        "harmless_keys_only": False,
     }
 
 
@@ -856,7 +867,9 @@ async def test_a_group_id_wins_over_a_group_name_as_in_the_handler(
     )
 
     assert (by_id["group_id"], by_id["platform_admin"]) == (_PLATFORM_GROUP, True)
-    assert (reverse["group_id"], reverse["platform_admin"]) == (_GROUP, False)
+    assert by_id["platform_admin_reason"] != REASON_KEYS
+    assert reverse["group_id"] == _GROUP
+    assert reverse["platform_admin_reason"] == REASON_KEYS
 
 
 @pytest.mark.asyncio
@@ -864,6 +877,7 @@ async def test_a_group_name_alone_is_looked_up_on_its_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    _groups_by_id(monkeypatch, {_PLATFORM_GROUP: _PLATFORM_NAME})
     connector, _ = _connector_with(
         groups_by_name={_PLATFORM_NAME: _PLATFORM_GROUP}, members={_PLATFORM_GROUP: []}
     )
@@ -882,7 +896,7 @@ async def test_a_group_name_alone_is_looked_up_on_its_level(
     assert (block["group_id"], block["platform_admin"]) == (_PLATFORM_GROUP, True)
     assert (unknown["group_id"], unknown["platform_admin"], unknown["members"]) == (
         None,
-        False,
+        None,
         None,
     )
 
@@ -892,9 +906,16 @@ async def test_the_connector_marks_the_platform_admin_group_and_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_LOGIN_REALMS, lambda: {_REALM})
+    _groups_by_id(monkeypatch, {_PLATFORM_GROUP: "meho-platform-admins"})
+    lookup, _ = _connector_with(groups_by_name={"meho-platform-admins": _PLATFORM_GROUP})
 
     group = await _grant_block(
-        _ctx(_ADD, {"group_name": "meho-platform-admins", "user_id": _USER}, realm=_REALM)
+        _ctx(
+            _ADD,
+            {"group_name": "meho-platform-admins", "user_id": _USER},
+            realm=_REALM,
+            connector=lookup,
+        )
     )
     role = await _grant_block(
         _ctx(_ROLES, {"id": _USER, "roles": ["platform_admin"]}, realm=_REALM)
@@ -911,7 +932,9 @@ async def test_the_connector_marks_the_platform_admin_group_and_role(
 
     assert group["platform_admin"] is True
     assert role["platform_admin"] is True
-    assert plain["platform_admin"] is False
+    assert group["platform_admin_reason"] != REASON_KEYS
+    assert role["platform_admin_reason"] != REASON_KEYS
+    assert plain["platform_admin_reason"] == REASON_KEYS
     assert "members" not in role
 
 

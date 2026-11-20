@@ -9,19 +9,19 @@ chart gives it. Then the realm stage runs twice against it, exactly as the
 Job runs it, with a fake Secret store in place of the Kubernetes API:
 
 1. The first run logs in with the first-start account, makes the first admin
-   and the second person, sets the client secrets and removes the
+   (and no second person), sets the client secrets and removes the
    first-start account.
 2. Keycloak asks the first admin for a new password before any login. Once
    that required action is done, the password from the Secret is the one
    Keycloak holds, and a login through ``meho-cli`` gives a token the
    backplane accepts as a ``tenant_admin`` of the first tenant with
-   ``platform_admin``. The second person is an ``operator``.
-3. With the two logins, the first admin asks for a credential write through
-   the backplane's REST API. It waits for approval, the first admin cannot
-   approve it alone, and the second person approves it through the
-   approvals API, which runs the write. The second person's password-grant
-   token alone is refused: it shows no sign-in time (#3979).
-4. The plan names one extra tenant. Its five groups carry only
+   ``platform_admin``.
+3. The first admin asks for a credential write through the backplane's REST
+   API. It waits for approval, and a second admin (a person this test adds
+   to ``MEHO-Admins``) approves it through the approvals API, which runs
+   the write. The second admin's password-grant token alone is refused: it
+   shows no sign-in time (#3979).
+4. The plan names one extra tenant. Its three groups carry only
    ``meho_tenant``: a person in ``MEHO-Readers`` and
    ``MEHO-lab-b-Operators`` gets both tenants in ``meho_tenants`` and the
    first tenant's ``tenant_id`` as before; a person only in the extra
@@ -162,7 +162,6 @@ def _plan() -> Plan:
         realm_file=str(_SUBCHART / "files" / "meho-realm.json"),
         first_login_secret="rel-core-first-login",
         admin_username="admin",
-        approver_username="approver",
         tenants=(TenantPlan(name="lab-b", id=UUID(_LAB_B_ID)),),
         console_admin_secret="rel-core-console-admin",
         console_admin_username="console-admin",
@@ -315,9 +314,13 @@ async def test_first_run_makes_the_people_and_removes_the_first_start_account(
     assert admin["enabled"] is True
     assert sorted(admin["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
     assert set(admin["groups"]) == {"MEHO-Admins", "MEHO-Platform-Admins"}
-    approver = _user(keycloak, "approver")
-    assert approver["groups"] == ["MEHO-SA-Operators"]
-    assert sorted(approver["requiredActions"]) == ["CONFIGURE_TOTP", "UPDATE_PASSWORD"]
+    assert set(keycloak.first_login) == {"admin_username", "admin_password"}
+    no_approver = httpx.get(
+        f"{keycloak.base_url}/admin/realms/meho/users",
+        headers=_admin_headers(keycloak),
+        params={"username": "approver", "exact": "true"},
+    )
+    assert no_approver.json() == []
     assert "recovery codes: set" in keycloak.output
     assert _recovery_settings(keycloak) == ("true", "ALTERNATIVE")
 
@@ -471,22 +474,6 @@ async def test_first_admin_must_change_the_password_then_is_a_platform_admin(
     assert operator.approver is False
 
 
-async def test_second_person_is_an_operator(
-    keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    first_login = keycloak.first_login
-    assert first_login["approver_username"] == "approver"
-    _finish_first_login(keycloak, "approver")
-    _check_the_code_is_needed(keycloak, "approver", first_login["approver_password"])
-
-    operator = await _operator_for(
-        keycloak, "approver", first_login["approver_password"], monkeypatch
-    )
-    assert str(operator.tenant_id) == _TENANT_ID
-    assert operator.tenant_role is TenantRole.OPERATOR
-    assert operator.platform_admin is False
-
-
 def _person_in(kc: _Keycloak, username: str, groups: list[str]) -> str:
     """Make a person with a full profile in *groups*; return the password."""
     admin = f"{kc.base_url}/admin/realms/meho"
@@ -521,7 +508,7 @@ def _claims(kc: _Keycloak, username: str, password: str) -> dict[str, Any]:
 def test_extra_tenant_groups_carry_only_meho_tenant(keycloak: _Keycloak) -> None:
     admin = f"{keycloak.base_url}/admin/realms/meho"
     headers = _admin_headers(keycloak)
-    for role in ("Readers", "Operators", "SA-Operators", "Admins", "Approvers"):
+    for role in ("Readers", "Operators", "Admins"):
         name = f"MEHO-lab-b-{role}"
         found = httpx.get(
             f"{admin}/groups", headers=headers, params={"search": name, "exact": "true"}
@@ -731,7 +718,7 @@ def test_meho_admin_cannot_find_or_take_over_the_console_admin(keycloak: _Keyclo
     assert reset.status_code in (401, 403), reset.text
 
 
-# --- The admin's credential write and the second person's approval ----------
+# --- The admin's credential write and the second admin's approval ----------
 
 _WRITE_OP = "k8s.secret.create"  # classified credential_write by the backplane
 _SENTINEL = "s3cret-sentinel-value"
@@ -790,10 +777,10 @@ async def _register_write_op() -> None:
     )
 
 
-async def test_the_second_person_approves_the_first_admins_credential_write(
+async def test_a_second_admin_approves_the_first_admins_credential_write(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The acceptance path with the two people the Job made, over the REST API."""
+    """The acceptance path with the first admin and a second admin, over the REST API."""
     from meho_backplane.api.v1 import approvals as approvals_module
     from meho_backplane.main import app
 
@@ -801,9 +788,11 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
     admin_token = _login_with_code(keycloak, "admin", first_login["admin_password"]).json()[
         "access_token"
     ]
-    approver_token = _login_with_code(
-        keycloak, "approver", first_login["approver_password"]
-    ).json()["access_token"]
+    _allow_password_grant_on_cli(keycloak)
+    second_password = _person_in(keycloak, "second-admin", ["MEHO-Admins"])
+    approver_token = _password_login(keycloak, "second-admin", second_password).json()[
+        "access_token"
+    ]
 
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
@@ -868,7 +857,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             )
 
             # The first admin may approve their own request too (#5969); the
-            # tests of the approval groups check that. Here the second person
+            # tests of the approval groups check that. Here the second admin
             # approves it, and the write runs.
             decided = await api.post(
                 f"/api/v1/approvals/{request_id}/decide",
@@ -878,7 +867,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             assert decided.status_code == 200, decided.text
             body = decided.json()
             assert body["decision"] == "approved"
-            assert body["decided_by_name"] == "Test approver"
+            assert body["decided_by_name"] == "Test second-admin"
             assert body["dispatch_status"] == "ok", body
             assert body["dispatch_result"] == {"written": True}
 
@@ -1143,12 +1132,16 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     headers = _master_headers(keycloak)
     flow_id, bound = _approval_flow_and_binding(keycloak)
     assert flow_id and bound == flow_id
-    (client,) = httpx.get(
-        f"{admin}/clients", headers=headers, params={"clientId": "meho-cli-approve"}
-    ).json()
-    # Keycloak refuses to delete a flow a client is bound to: unbind first.
-    client["authenticationFlowBindingOverrides"] = {"browser": ""}
-    httpx.put(f"{admin}/clients/{client['id']}", headers=headers, json=client).raise_for_status()
+    # Keycloak refuses to delete a flow a client is bound to: unbind both
+    # approval clients first (the console's one is bound too, #6282).
+    for client_id in ("meho-cli-approve", "meho-web-approve"):
+        (client,) = httpx.get(
+            f"{admin}/clients", headers=headers, params={"clientId": client_id}
+        ).json()
+        client["authenticationFlowBindingOverrides"] = {"browser": ""}
+        httpx.put(
+            f"{admin}/clients/{client['id']}", headers=headers, json=client
+        ).raise_for_status()
     httpx.delete(f"{admin}/authentication/flows/{flow_id}", headers=headers).raise_for_status()
     assert _approval_flow_and_binding(keycloak) == (None, None)
     capfd.readouterr()
@@ -1160,6 +1153,10 @@ async def test_an_upgrade_makes_the_approval_flow_and_binds_it_again(
     assert f"login flow {_APPROVAL_FLOW}: created" in output
     flow_id, bound = _approval_flow_and_binding(keycloak)
     assert flow_id and bound == flow_id
+    (console,) = httpx.get(
+        f"{admin}/clients", headers=headers, params={"clientId": "meho-web-approve"}
+    ).json()
+    assert console["authenticationFlowBindingOverrides"] == {"browser": flow_id}
     steps = httpx.get(
         f"{admin}/authentication/flows/meho%20approval%20sign-in%20level/executions",
         headers=headers,

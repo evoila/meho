@@ -317,6 +317,17 @@ The same rule serves the places that had a list of their own:
   (`connectors/keycloak/redaction.py`, `redact_preview_fields` and
   `redact_trace_fields`) hide the Keycloak field names and every name the
   shared rule marks (a flag or a number stays).
+  One name is shown on purpose: `passwordPolicy`, the text of the realm's
+  password rules (for example `length(8) and digits(1)`). It holds no
+  password, and the approver needs to read it. `redact_preview_fields`
+  hides it like any other name. Then the realm create card and the realm
+  update card put it back with one shared helper
+  (`connectors/keycloak/ops_write_realm_smtp.py::show_password_policy`):
+  only a text value at the top level of the realm, and only after the
+  value-shape pass checked it for secret-shaped text. A `passwordPolicy`
+  deeper in the realm (for example in an identity provider config) stays
+  hidden. The group, account, SMTP and rights cards do not carry it and
+  still hide it. The trace hides it too.
 - The Keycloak read results (`redact_secret_fields`) hide only the Keycloak
   field names. The dispatcher hides the shared names in the normal answer
   and keeps their values, so `reveal_secret: true` still returns them.
@@ -540,7 +551,25 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     numbers included; booleans and `None` stay. The name rule is
     `is_secret_param_name` ("One name rule for secret fields" above); the
     `value` of a name/value pair whose `name` is a secret name is hidden
-    too. The
+    too. The default view also hides secret-named fields inside text
+    values: a JSON or YAML file in a string, such as a ConfigMap entry or
+    the last-applied note of kubectl (`redaction/secret_text.py`: the
+    quoted-pair text step, then a YAML read that replaces each secret value
+    in place; a YAML file inside a JSON note is read too). The YAML read
+    uses the same rules as the key-name walk: a bare `community` in an SNMP
+    place, and the `value` of a secret-named pair also when it is a list
+    or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one
+    line and keeps its anchor, so the text still reads as YAML. An alias
+    of an anchor inside a hidden value also becomes the marker. An alias
+    that a merge key uses (`<<: *name`, or each alias of a merge list
+    `<<: [*name]`) becomes an empty map `{}` when it names a hidden value
+    or a value inside one. A map an alias names in an SNMP place is
+    checked with the SNMP rule there. A text nested deeper than the
+    levels the pass reads, or too deep to parse, is hidden whole when it
+    may hold a secret name. The dispatcher builds this view in a
+    worker thread, like the redaction pass of a script, so a large text
+    value does not hold up other requests. The audit copy
+    then holds a fingerprint of the whole text. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.
 - **Plain fields** (`register_plain_fields(op_id, names)`, exported by

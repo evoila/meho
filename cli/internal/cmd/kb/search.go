@@ -204,8 +204,8 @@ func printSearchTable(w io.Writer, r *api.RetrieveResponse) {
 		fmt.Fprintf(w, "%-5d %-8.4f %-40s %s\n",
 			i+1,
 			hit.FusedScore,
-			truncate(hitSlug(hit), 40),
-			truncate(snippetOf(hit.Body), 80),
+			output.SafeText(truncate(hitSlug(hit), 40)),
+			output.SafeText(truncate(snippetOf(hit.Body), 80)),
 		)
 	}
 	if r.QueryDurationMs > 0 {

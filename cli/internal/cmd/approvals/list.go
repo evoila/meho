@@ -65,11 +65,11 @@ func newListCmd() *cobra.Command {
 			"The APPROVE column says whether you may approve each " +
 			"pending request. MEHO works this out with the same checks " +
 			"as the approve: yes; yes:own_change (your own change, " +
-			"which a MEHO-SA-Operator or a MEHO-Admin may approve: a " +
+			"which a MEHO-Admin may approve: a " +
 			"self-approval); " +
 			"no:own_change; no:wrong_group (another person's dangerous " +
-			"or destructive change needs a MEHO-SA-Operator or a " +
-			"MEHO-Admin); no:role_too_low; no:rights_change (a change " +
+			"or destructive change needs a MEHO-Admin" +
+			"); no:role_too_low; no:rights_change (a change " +
 			"of rights: another admin must approve); no:no_approval_access; " +
 			"no:not_a_person; no:not_routed (approver routing sends the " +
 			"change to other login groups). A request that is not pending shows -. " +

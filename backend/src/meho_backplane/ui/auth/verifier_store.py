@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Final
 
@@ -92,12 +93,19 @@ class PendingFlow:
     matching cookie). It is a distinct random value from ``state``
     precisely because ``state`` travels on the callback URL the attacker
     controls; the binding value lives only in the browser cookie.
+
+    ``session_id`` is set only for the console's approval sign-in (#6282):
+    the console session the sign-in belongs to. The callback reads it here,
+    not from the session cookie, because a browser leaves that
+    ``SameSite=Strict`` cookie out when the login server on another site
+    sends it back.
     """
 
     code_verifier: str
     return_to: str
     browser_binding: str
     created_at: float
+    session_id: uuid.UUID | None = None
 
 
 class PKCEVerifierStore:
@@ -126,6 +134,7 @@ class PKCEVerifierStore:
         code_verifier: str,
         return_to: str,
         browser_binding: str,
+        session_id: uuid.UUID | None = None,
     ) -> None:
         """Register a fresh flow.
 
@@ -155,6 +164,7 @@ class PKCEVerifierStore:
                 return_to=return_to,
                 browser_binding=browser_binding,
                 created_at=now,
+                session_id=session_id,
             )
 
     async def pop(self, state: str) -> PendingFlow | None:

@@ -160,7 +160,8 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     assert plan.keycloak_url == f"http://{_RELEASE}-keycloak:8080/auth"
     assert plan.realm_file == "/opt/meho/realm/meho-realm.json"
     assert plan.first_login_secret == f"{_RELEASE}-core-first-login"
-    assert (plan.admin_username, plan.approver_username) == ("admin", "approver")
+    assert plan.admin_username == "admin"
+    assert "approver_username" not in _env(job)["MEHO_CORE_KEYCLOAK_PLAN"]["value"]
     assert plan.console_admin_secret == f"{_RELEASE}-core-console-admin"
     assert plan.console_admin_username == "console-admin"
     assert plan.ci.enabled is False
@@ -173,8 +174,6 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
             "--set",
             "coreKeycloak.firstLogin.adminUsername=root-person",
             "--set",
-            "coreKeycloak.firstLogin.approverUsername=second",
-            "--set",
             "coreKeycloak.firstLogin.consoleAdminUsername=kc-root",
             "--set",
             "coreKeycloak.ci.enabled=true",
@@ -184,10 +183,18 @@ def test_plan_names_keycloak_the_realm_file_and_the_first_login_secret() -> None
     )
     assert custom is not None
     plan = Plan.model_validate_json(_env(custom)["MEHO_CORE_KEYCLOAK_PLAN"]["value"])
-    assert (plan.admin_username, plan.approver_username) == ("root-person", "second")
+    assert plan.admin_username == "root-person"
     assert plan.console_admin_username == "kc-root"
     assert plan.ci.enabled is True
     assert plan.ci.tenant_id == _TENANT
+
+
+def test_an_old_values_file_with_the_approver_login_key_still_renders() -> None:
+    job = _job(_render(*_CORE_ON, "--set", "coreKeycloak.firstLogin.approverUsername=second"))
+    assert job is not None
+    raw = _env(job)["MEHO_CORE_KEYCLOAK_PLAN"]["value"]
+    assert "approver" not in raw
+    assert Plan.model_validate_json(raw).admin_username == "admin"
 
 
 def test_extra_tenants_reach_the_plan_and_the_first_tenant_name_the_env() -> None:
@@ -330,11 +337,12 @@ def test_notes_name_the_first_login_secret_and_the_command_but_no_value() -> Non
     assert "meho login https://{{ .Values.coreKeycloak.hostname }}" in block
     assert "new password, a name and an email at the first login" in block
     assert "MEHO-Admins" in block
-    assert "MEHO-SA-Operators" in block
+    assert "MEHO-Platform-Admins" in block
+    assert "approver" not in block
     assert "{{- if .Values.coreKeycloak.enabled }}" in notes[: notes.index("First login")]
 
 
-_SECRET_KEY_RE = re.compile(r"\.data\.(?!(?:admin_|approver_)?username\})")
+_SECRET_KEY_RE = re.compile(r"\.data\.(?!(?:admin_)?username\})")
 _CLIPBOARD_TOOLS = ("pbcopy", "xclip -selection clipboard", "wl-copy")
 
 

@@ -24,6 +24,32 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
+Two of these calls always wait for a person, and no standing grant, no
+agent grant and no run approval covers them
+([service-principal-grants.md](service-principal-grants.md#credential-calls)):
+
+- every `k8s.exec` call: a command in a container can read or write any
+  credential the container holds. Grant create, agent grant create and
+  run approval create refuse `k8s.exec`.
+- a `k8s.apply` whose manifest holds a `kind: Secret` (also a
+  ServiceAccount token Secret), in any document or any item of a list
+  object (`kind: List` or `<Kind>List`), or a manifest MEHO cannot read.
+  MEHO reads the manifest when the call is made. It reads each object
+  and each `items` array once, also when YAML aliases name them many
+  times. It reads at most 10,000 objects (each document and each entry
+  of an `items` array counts); a larger manifest counts as one MEHO
+  cannot read. The `items` field of any other kind (for example a
+  custom resource) is not read. An apply of other kinds keeps the rules
+  of `k8s.apply`.
+
+Both are declared in `op_classes.py` of the connector. The approval card
+says in one line why the call waits; only a person reads that line.
+The stored request of such a `k8s.apply` keeps its manifest only until
+the run starts, or until the request is rejected, withdrawn or expires.
+Then MEHO replaces the manifest with the same marker it writes for a
+secret-named value, so no `data` or `stringData` value of the Secret
+stays in it. A new run of a failed apply needs the params sent again.
+
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Key types
@@ -531,6 +557,8 @@ a secret stay visible. An option group without `c` (`sh -e`) does not
 start a shell string: the next item is a direct argument.
 The command-line hider lives in `redaction/command_line.py`; the
 `linux.script.run` preview uses it too, for the script text.
+The Job previews run the pass in a worker thread, so the backend keeps
+answering other requests.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`
@@ -1334,8 +1362,11 @@ value of `spec.set` becomes one (keys kept). Chart values often hold
 passwords. A chart made with `kubectl apply` also carries its whole
 manifest, values included, in the last-applied annotation, so every
 annotation value of a `HelmChart` becomes a placeholder too (keys kept),
-as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
-recorder (next paragraph) records the answer only in this masked form.
+as on a Secret. A `kind: HelmChartConfig` object (it overrides the values
+of a packaged chart) and the kind-less items of a `HelmChartConfigList`
+are masked the same way. `k8s.meho.release.info` reads such objects, and
+the flight recorder (next paragraph) records the answer only in this
+masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
@@ -1348,7 +1379,21 @@ and annotations carry placeholders, never the values text. For a list
 read, each item first gets its `kind` from the list envelope
 (`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
 "Built-in kinds" above), because the API server leaves `kind` off list
-items. The dedicated way
+items. For every kind, `custom_resource_row` also hides the values under
+secret-shaped key names in `spec` and `status` (numbers included) and the
+secret-named fields inside their text values, before it builds
+`spec_excerpt`, `status_excerpt` and `fields`. It hides a secret-named
+field inside an annotation value before it cuts the value. On a
+`reveal_secret: true` call by a person, an excerpt or an annotation value
+that is not cut keeps the raw values: the dispatcher hides them in the
+default view and the audit copy and gives them back on the reveal. In
+`fields` a raw value stays only where the dispatcher hides it under its
+path (`_revealed_fields`). A value cut out of its object loses the names
+around it (the `name` of an env entry, the SNMP setting next to a
+`community`), so the dispatcher cannot hide it there; such a value comes
+from the hidden object. A cut excerpt stays hidden, also on a reveal. Both operations
+build their rows in a worker thread, so a large text value does not hold
+up other calls. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 

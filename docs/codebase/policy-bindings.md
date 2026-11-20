@@ -2,8 +2,12 @@
 
 The `bindings` section of a tenant's policy file
 ([policy.md](policy.md)) says which login group is which team. A binding
-gives a group one of today's five group kinds (`Readers`, `Operators`,
-`SA-Operators`, `Admins`, `Approvers`) and a set of categories
+gives a group one of three group kinds (`Readers`, `Operators`,
+`Admins`) and a set of categories. The old kinds `SA-Operators` and
+`Approvers` are still accepted: MEHO reads them as `Operators` and
+`Readers` (`read_kind` in `policy/document.py`). A routing entry keeps an
+old kind as written: it matches only the members of that old login group
+(`covers`, `narrow` and `in_kinds` in `policy/routing.py`)
 ([policy-classification.md](policy-classification.md)). There are no new
 roles.
 
@@ -89,10 +93,10 @@ another case.
    kind, exactly as with the switch off.
 5. `bind` matches the login:
    - No binding matches: the login keeps the kind MEHO works out today
-     (from the token's `tenant_role`, `approver` and the self-approval
-     group).
+     (from the token's `tenant_role`, the login group and the
+     self-approval group).
    - The bindings that match give two kinds (for example `Operators` and
-     `SA-Operators`, or `Operators` and `Readers`): the login is refused
+     `Admins`, or `Operators` and `Readers`): the login is refused
      with `401 multiple_bound_kinds`. A login gets one kind per tenant, as
      today. This check counts every binding that matches, also one of
      another base level. So a person in groups of two base levels (for
@@ -106,14 +110,13 @@ another case.
      for an `operator` token), it is left out and logged as
      `policy_binding_other_base_level`. The login keeps today's kind.
    - A shipped binding counts only when its kind gives the same
-     `approver` and `self_approver` flags as the token. Else it is left
+     `approver` and `self_approver` flags as the login has. Else it is left
      out and logged as `policy_shipped_binding_other_flags` (at debug
      level: it comes on every request of such a person), and the login
-     keeps today's kind. So a shipped group alone never gives or takes the
-     right to approve: a person in `/MEHO-Approvers` without the
-     `approver` claim (or with `approver: false`) gets no approve right,
-     and a person with `approver: true` in `/MEHO-Readers` keeps it, as
-     with the switch off. A stored binding is the tenant's own choice:
+     keeps today's kind. MEHO does not read an `approver` claim of the token,
+     and no shipped group gives the flag. So a shipped group alone never
+     gives or takes the right to approve: a person in `/MEHO-Approvers`
+     is read as a Reader and gets no approve right. A stored binding is the tenant's own choice:
      there the group alone gives the flags of its kind.
    - Else the login gets the `approver` and `self_approver` flags of that
      kind (`group_grant` in `auth/operator.py`), `bound_kind` and the
@@ -121,12 +124,10 @@ another case.
      category. A machine login never gets either flag. A token with a bad
      `meho_tenants` claim never gets `self_approver`.
    - The one exception to the two-kinds rule: when only shipped bindings
-     match and they give `SA-Operators` and one other kind (a person in a
-     role group and in a self-approval group that is not a role group),
-     the self-approval group does not make it two kinds. Next to
-     `Operators` the login gets `SA-Operators`: today such a person is an
-     operator who may approve their own changes. Next to any other kind
-     (for example `Admins` or `Readers`) that kind stays, as with the
+     match and they give `Operators` for the old self-approval group and
+     one other kind (a person in a role group and in that old group, which
+     is not a role group), the old group does not make it two kinds. The
+     other kind (for example `Admins` or `Readers`) stays, as with the
      switch off, where the role group decides. Two role groups never get
      this far: the token parser refuses them first
      (`multiple_role_groups`).
@@ -140,10 +141,9 @@ another case.
 `shipped_binding_documents` makes them from the two login settings:
 
 - each group of `JWT_ROLE_GROUPS` gets the kind its name **ends with**
-  (`MEHO-Operators` and `Corp-SA-Operators` give `Operators` and
-  `SA-Operators`; upper and lower case do not count). A group whose name
+  (`MEHO-Operators` and `Corp-SA-Operators` both give `Operators`; upper and lower case do not count). A group whose name
   ends with no kind gets no shipped binding;
-- the group of `JWT_SELF_APPROVER_GROUP` gets `SA-Operators`;
+- the group of `JWT_SELF_APPROVER_GROUP` gets `Operators`;
 - each is matched by its top-level full path (`/MEHO-Operators`) and gets
   every category.
 
@@ -216,9 +216,9 @@ attribute values with the tenant's name in them.
 ## Other places that read the kind
 
 - Approver routing (`policy/routing.py`, [approvals.md](approvals.md)):
-  at the click, `kind_of` reads the role and the `approver` and
-  `self_approver` flags. A binding sets these flags, so it sets the kind
-  that the routing checks.
+  at the click, `kind_of` reads the role and the `approver` flag (a
+  `read_only` person with the flag counts as Operators). A binding sets
+  the role and the flag, so it sets the kind that the routing checks.
 
 - A delegated agent run (`delegated_operator` in `auth/delegation.py`)
   clears `bound_kind` and `bound_categories`, next to the `approver` and

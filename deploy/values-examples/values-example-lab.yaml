@@ -170,7 +170,7 @@ config:
   # may not approve it). This example leaves the secure default in place by
   # not setting it. Set "true" ONLY as an audited, posture-wide emergency
   # break-glass — it never reaches a dangerous/destructive op, and the
-  # endorsed single-operator answer is the agent-requester pattern instead.
+  # endorsed single-operator answer is the MEHO-Admins group instead.
   # See docs-site guides/approvals-and-break-glass.md.
   # approvalAllowSelfApproval: "false"
 

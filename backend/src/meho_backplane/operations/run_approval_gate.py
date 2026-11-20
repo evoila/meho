@@ -76,15 +76,8 @@ def _never_covered(descriptor: EndpointDescriptor) -> bool:
     operation that runs a command as root on the host.
     """
     never = never_covered_reason(descriptor)
-    if never is not None and never[0] == "credential_read":
-        _log.info(
-            "run_approval_refused_credential_read",
-            op_id=descriptor.op_id,
-            reason=(
-                f"A run approval cannot cover {descriptor.op_id}: it reads a credential, "
-                "so a person approves each call."
-            ),
-        )
+    if never is not None and never[0] == "credential":
+        _log.info("run_approval_refused_credential", op_id=descriptor.op_id, reason=never[1])
     return never is not None or is_root_shell(descriptor.op_id)
 
 
@@ -146,8 +139,8 @@ async def consult_and_record_run_approval(
     the request's ``Meho-Work-Ref``; a call without one is never covered.
     An operation with a delete sign, one that connects to an address the
     caller gives, one that runs a command as root on the host, one a
-    connector marks for per-call approval, or one of the ``credential_read``
-    class (it reads a credential), is never covered.
+    connector marks for per-call approval, or one that reads, writes or
+    makes a credential, is never covered.
 
     On a hit with ``record=True`` it writes one ``approval.decision`` audit
     row (same shape as a standing grant use) in its own committed

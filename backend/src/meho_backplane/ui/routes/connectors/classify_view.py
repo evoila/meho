@@ -192,6 +192,7 @@ async def _request(
                 "approval_request_id": extras.get("approval_request_id"),
                 "error": result.get("error"),
                 "matched_operations": result["matched_operations"],
+                "approval_note": extras.get("approval_note"),
             }
         },
     )

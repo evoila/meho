@@ -12,8 +12,8 @@ section 6 (hardware version 20).
 
 `deploy/appliance/build.sh <version> <out-dir>` runs the steps against the
 lab's vSphere 8 cluster with `govc`. `.github/workflows/appliance-build.yml`
-runs it on the lab runner and keeps the OVA and `SHA256SUMS` as workflow
-artifacts. Publishing is #4814.
+runs it on the lab runner and keeps the OVA and `SHA256SUMS-ova` as
+workflow artifacts. Its `publish` job signs and uploads them (below).
 
 The clean step is the security-relevant part. A file missed there would be
 copied from one OVA into every appliance: the same RKE2 keys, the same SSH
@@ -27,12 +27,14 @@ what it keeps.
 | --- | --- |
 | `deploy/appliance/build.sh` | Options, settings, the five steps, `--from-step`. |
 | `deploy/appliance/clean.sh` | Runs on the build VM as root, outside any SSH session: the deletions, the check (`--check` runs only that), the power-off. |
+| `deploy/appliance/os-packages.sh` | Makes `meho-appliance-<version>-os-packages.tar`, a flat apt repository with a signed `InRelease`. A release run (`MEHO_RELEASE=1`) reads the key only from `MEHO_OS_PACKAGES_SIGNING_KEY`, and refuses an empty key, a key whose user id holds `TEST KEY`, and a key whose fingerprint is not `MEHO_OS_PACKAGES_KEY_FINGERPRINT`. Each `.deb` file is named `<package>_<version>_<architecture>.deb` without the epoch, the names `install.sh --os-packages` accepts. |
+| `deploy/appliance/upload-release.sh` | Copies the OVA, the OS-package file, `SHA256SUMS` and its cosign bundle to `gs://<bucket>/<version>/`. Never creates a bucket, never overwrites. Stops on a missing bucket and on any `gcloud` error other than "no such file". Tested against a stand-in `gcloud` (`tests/test_release_files.py`). |
 | `deploy/appliance/rewrite-ovf.sh` | Replaces the product section of an exported `.ovf` and declares the OVF transports. `awk` does the rewrite. |
 | `deploy/appliance/product-section.xml` | The wizard fields of the form-1 design, section 2, with `@VERSION@`. |
 | `deploy/appliance/firststart/` | The first-start service and the console banner that step 3 puts into the OVA ([appliance-firststart.md](appliance-firststart.md)). |
 | `deploy/appliance/cis/` | The OS hardening to CIS Ubuntu 24.04 Level 1 - Server that step 3 runs, its tailoring and its two lists ([appliance-cis.md](appliance-cis.md)). |
 | `deploy/appliance/tests/` | `test_clean.py` with `clean_harness.py` (a fake build VM), `test_rewrite_ovf.py`, `test_build.py` (`build.sh` against a stub `govc`), and the Ubuntu cloud image's own `.ovf` as the fixture. First start has its own tests; see [appliance-firststart.md](appliance-firststart.md). |
-| `.github/workflows/appliance-build.yml` | The build on the lab runner. |
+| `.github/workflows/appliance-build.yml` | The build on the lab runner, then signing and upload on a GitHub-hosted runner. |
 | `.github/workflows/linux-server-test.yml` | shellcheck and the unit tests, on every pull request that touches `deploy/appliance/`. |
 
 The scripts have the shape of `install.sh`: `set -Eeuo pipefail`, an ERR
@@ -247,8 +249,17 @@ this version runs as a single appliance.
 installs a pinned `govc`, fetches the tag's form-2 download from the
 GitHub release and checks it the way `docs/RELEASING.md` says (the cosign
 signature of `SHA256SUMS-linux`, then the checksum), makes a new ed25519
-key for the build, runs `build.sh` and keeps the OVA, `SHA256SUMS` and the
-CIS scan's result list as one artifact for 3 days. The job log of a public repository is public.
+key for the build, runs `build.sh` and keeps the OVA, its unsigned
+checksum `SHA256SUMS-ova` and the CIS scan's result list as one artifact
+for 3 days. This `build` job has read rights only. A second job,
+`publish`, runs on a GitHub-hosted runner: it checks the OVA checksum,
+signs `SHA256SUMS` with cosign and checks it, and on a release run (input
+`publish`, started from the tag) makes the OS-package file, signs in to
+Google Cloud and uploads. Only a release run uses the GitHub environment
+`release` with the signing key ([RELEASING.md](../RELEASING.md),
+"Appliance release files"). A release run first reads that environment
+through the GitHub API and stops when it has no required reviewer or its
+deployment rule is not "tags `v*` only". The job log of a public repository is public.
 The vCenter login is in the repository secrets `GOVC_URL`,
 `GOVC_USERNAME` and `GOVC_PASSWORD`. The place of the build VM and its
 network are repository secrets too: `MEHO_LAB_DATASTORE`,

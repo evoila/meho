@@ -72,6 +72,7 @@ from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     SpilledRowSet,
     get_result_handle_store,
+    record_connector_scope,
     result_profile_scope,
 )
 from meho_backplane.jsonflux.query.contract import (
@@ -93,7 +94,12 @@ from meho_backplane.jsonflux.query.result_catalog import (
     ResultFieldCatalog,
     _build_catalog_from_admitted,
 )
+from meho_backplane.operations._target_connector_limit import (
+    allowed_connectors_var,
+    stored_result_within_limit,
+)
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.result_query_no_match import no_match_hint, returns_one_row_always
 from meho_backplane.operations.result_read_admission import (
     ResultReadCapacityError,
     ResultReadRateLimitError,
@@ -501,7 +507,9 @@ def _query_pipeline_sync(
     rows: list[dict[str, Any]],
     spec: ResultQuerySpec,
     max_output_rows: int,
-) -> tuple[list[dict[str, Any]], bool, int, bytes]:
+    *,
+    small_form: bool = False,
+) -> tuple[list[dict[str, Any]], bool, int, bytes, dict[str, Any] | None]:
     """Catalog, compile, register, SELECT, rehydrate, encode (worker thread).
 
     The field catalog is built from every stored row (the rows passed the
@@ -509,7 +517,9 @@ def _query_pipeline_sync(
     capped to ``max_output_rows``; ``truncated`` is ``True`` when the
     underlying result had more rows. Output rows come from the compiled
     output plan: flat queries copy the raw stored rows. Returns the rows,
-    the flag, the effective limit, and the rows encoded as JSON bytes.
+    the flag, the effective limit, the rows encoded as JSON bytes, and the
+    ``no_match`` block: ``None`` unless *small_form* is set and the filter
+    matched no stored row (:mod:`~meho_backplane.operations.result_query_no_match`).
     """
     catalog = _build_catalog_from_admitted(rows)
     compiled = compile_query(spec, catalog, max_limit=max_output_rows)
@@ -518,6 +528,9 @@ def _query_pipeline_sync(
     try:
         engine.conn.register(RESULT_TABLE, table)
         _, fetched = _execute_sync(engine, compiled)
+        no_match = (
+            small_form and bool(spec.filter) and not _filter_matches(engine, spec, catalog, fetched)
+        )
     finally:
         guard.close()
     guard.check()
@@ -526,7 +539,30 @@ def _query_pipeline_sync(
     capped = fetched[: compiled.effective_limit]
     result_rows = compiled.output_plan.rehydrate(capped, raw_rows=rows)
     guard.check()
-    return result_rows, truncated, compiled.effective_limit, msgspec.json.encode(result_rows)
+    hint = no_match_hint(rows, spec) if no_match else None
+    encoded = msgspec.json.encode(result_rows)
+    return result_rows, truncated, compiled.effective_limit, encoded, hint
+
+
+def _filter_matches(
+    engine: QueryEngine,
+    spec: ResultQuerySpec,
+    catalog: ResultFieldCatalog,
+    fetched: list[Any],
+) -> bool:
+    """True when the filter of *spec* matches at least one stored row.
+
+    An empty answer means no row matched. An aggregate without ``group_by``
+    answers one row anyway, so then the filter alone runs once more, for at
+    most one row, on the table that is already registered.
+    """
+    if not returns_one_row_always(spec):
+        return bool(fetched)
+    probe = spec.model_copy(
+        update={"select": [], "group_by": [], "aggregate": [], "order_by": [], "limit": 1}
+    )
+    _, found = _execute_sync(engine, compile_query(probe, catalog, max_limit=1))
+    return bool(found)
 
 
 async def _run_admitted_read[T](
@@ -551,14 +587,27 @@ async def _run_admitted_read[T](
     at once, and the worker keeps the lease until it finishes.
 
     Raises :class:`ResultHandleNotFoundError` when the operator has no
-    tenant or the store holds no record, :class:`ResultReadRejectedError`
-    from admission, :class:`ResultQueryTimeoutError` on expiry, and
+    tenant, the store holds no record, or a hosted agent with a connector
+    list reads a record not stored under a list inside its own
+    (:func:`~._target_connector_limit.stored_result_within_limit`),
+    :class:`ResultReadRejectedError` from admission, :class:`ResultQueryTimeoutError` on expiry, and
     whatever *work* raises.
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
     timeout_seconds = get_settings().result_query_timeout_seconds
     guard = _WorkerGuard()
+    allowed = allowed_connectors_var.get()
+
+    def limited_work(raw: bytes, guard: _WorkerGuard) -> T:
+        # A hosted agent with a connector list reads only results stored
+        # under a list inside its own; any other result is a miss.
+        if allowed is not None and not stored_result_within_limit(
+            record_connector_scope(raw), allowed
+        ):
+            raise ResultHandleNotFoundError(handle_id)
+        return work(raw, guard)
+
     async with admit_result_read(operator) as lease:
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -566,7 +615,7 @@ async def _run_admitted_read[T](
                 if raw is None:
                     raise ResultHandleNotFoundError(handle_id)
                 return await run_on_result_read_executor(
-                    lease, work, raw, guard, on_abandon=guard.abandon
+                    lease, limited_work, raw, guard, on_abandon=guard.abandon
                 )
         except TimeoutError as exc:
             raise ResultQueryTimeoutError(
@@ -581,6 +630,7 @@ async def run_result_query(
     *,
     offset: int = 0,
     limit: int | None = None,
+    small_form: bool = False,
 ) -> dict[str, Any]:
     """Run a bounded, validated structured query over a spilled handle (#3366).
 
@@ -607,6 +657,10 @@ async def run_result_query(
     :func:`_read_document_path`, which uses *offset* / *limit* to page an
     array value or to read a text value in parts. *offset* / *limit* are
     ignored for a relational query.
+
+    *small_form* is set by the MCP tool while ``RESULT_QUERY_SMALL_FORM`` is
+    on: a filter that matched no stored row then adds a ``no_match`` block
+    with values the filter fields really have.
     """
     if spec.path is not None:
         return await _read_document_path(operator, handle_id, spec.path, offset, limit)
@@ -626,8 +680,8 @@ async def run_result_query(
         if row_set is None:
             raise ResultHandleNotFoundError(handle_id)
         guard.check()
-        _, truncated, effective_limit, encoded_rows = _query_pipeline_sync(
-            guard, row_set.rows, spec, max_output_rows
+        _, truncated, effective_limit, encoded_rows, no_match = _query_pipeline_sync(
+            guard, row_set.rows, spec, max_output_rows, small_form=small_form
         )
         # Byte cap applied AFTER the row cap: wide/nested rows can overflow
         # the token budget even under the row ceiling. The encode also
@@ -638,6 +692,8 @@ async def run_result_query(
         json_safe_rows: list[dict[str, Any]] = msgspec.json.decode(encoded_rows)
         guard.check()
         payload = _query_payload(handle_id, row_set, json_safe_rows, truncated, effective_limit)
+        if no_match is not None:
+            payload["no_match"] = no_match
         # The wire check encodes the whole response again, so it is worker
         # work under the same deadline, like the paging and ``path`` reads.
         _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.QUERY_REMEDIATION)
@@ -709,7 +765,7 @@ async def _read_document_path(
     try:
         tokens = parse_json_pointer(path)
     except JsonPointerError as exc:  # already checked by the spec; kept for direct callers
-        raise QueryContractError(str(exc)) from exc
+        raise QueryContractError(str(exc), loc="path") from exc
     store = get_result_handle_store()
     max_bytes = get_settings().result_query_max_output_bytes
 
@@ -725,7 +781,7 @@ async def _read_document_path(
         try:
             node = resolve_json_pointer(stored.document, tokens)
         except JsonPointerError as exc:
-            raise QueryContractError(str(exc)) from exc
+            raise QueryContractError(str(exc), loc="path") from exc
         guard.check()
 
         result: dict[str, Any] = {

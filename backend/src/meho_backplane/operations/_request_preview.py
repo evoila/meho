@@ -85,7 +85,10 @@ from meho_backplane.operations._errors import (
     result_target_required,
     result_unqualified_target_version,
 )
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.operations._ingested_owner import (
     INGESTED_OPS_NOT_ACCEPTED,
     accepts_ingested_operations,
@@ -103,17 +106,19 @@ from meho_backplane.operations._preview_steps import (
     preview_step_verdict,
 )
 from meho_backplane.operations._secret_values import split_reveal_secret
+from meho_backplane.operations._target_connector_limit import not_allowed_preview_envelope
 from meho_backplane.operations._target_connector_match import mismatch_preview_envelope
 from meho_backplane.operations._target_version_range import version_range_preview_envelope
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
-    params_check_errors,
+    params_errors,
     policy_gate,
     validate_params,
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import apply_connector_boundary_redaction
@@ -363,8 +368,11 @@ async def _resolve_descriptor(
     when the target's connector cannot run the op (#5948); like
     ``dispatch``, this comes right after the target check, so it is never
     hidden by the catalog choice or by the op's check before the wait for
-    approval. Returns the ``denied`` envelope when the target's connector
-    is outside the session's MCP profile (#6099).
+    approval. Right before it comes the ``connector_not_allowed`` envelope
+    of a hosted agent whose connector list does not hold the target's
+    connector (:mod:`._target_connector_limit`). Returns the ``denied``
+    envelope when the target's connector is outside the session's MCP
+    profile (#6099).
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -417,22 +425,36 @@ async def _resolve_descriptor(
     # target check, before the catalog choice (and so before the version
     # check of a composite) and before the check before the wait for
     # approval. No audit row.
-    mismatch = mismatch_preview_envelope(
+    refused = await _target_check_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )
-    if mismatch is not None:
-        return mismatch
-    outside = version_range_preview_envelope(
-        descriptor=descriptor, connector_id=connector_id, target=target
-    )
-    if outside is not None:
-        return outside
+    if refused is not None:
+        return refused
     refused = await _profile_target_envelope(operator, descriptor, connector_id, target)
     if refused is not None:
         return refused
 
     return await _catalog_choice(
         operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+    )
+
+
+async def _target_check_envelope(
+    *, descriptor: EndpointDescriptor, connector_id: str, target: Any
+) -> dict[str, Any] | None:
+    """The first refusal of the target checks, in the order ``dispatch`` runs them."""
+    not_allowed = await not_allowed_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if not_allowed is not None:
+        return not_allowed
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
+    return version_range_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
     )
 
 
@@ -518,7 +540,7 @@ def _validate_params_envelope(
     """Dispatch Step 3: the ``invalid_params`` / ``invalid_op_schema`` envelope, or ``None``."""
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
     try:
-        validation_errors = validate_params(descriptor.parameter_schema, params)
+        validation_errors = validate_params(schema_for_checks(descriptor), params)
     except InvalidOpSchemaError as exc:
         return _invalid_op_schema_envelope(
             op_id=op_id,
@@ -526,7 +548,7 @@ def _validate_params_envelope(
             source_kind=descriptor.source_kind,
             missing_ref=exc.missing_ref,
         )
-    validation_errors = validation_errors or params_check_errors(op_id, params)
+    validation_errors = params_errors(op_id, params, validation_errors)
     if validation_errors:
         return _invalid_params_envelope(
             op_id=op_id,
@@ -796,6 +818,8 @@ async def _build_ingested_preview(
             "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
         }
     connector_instance = get_or_create_connector_instance(cls)
+    if target is not None:
+        await forget_target_if_changed(target)
 
     # The literal request, resolved through the SAME code path
     # ``dispatch_ingested`` sends through -- no drift.
@@ -917,6 +941,7 @@ async def preview_dispatch(
     Returns a JSON-shaped envelope: ``status`` ``"ok"`` (request/synthetic
     preview resolved), ``"error"`` (structured ``unknown_op`` /
     ``target_required`` / ``target_connector_mismatch`` /
+    ``connector_not_allowed`` /
     ``unqualified_target_version`` / ``invalid_params`` /
     ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error`` /
     ``refused_before_approval`` -- the op's check before the wait for
@@ -925,7 +950,8 @@ async def preview_dispatch(
     ``connector_id`` / ``source_kind`` echo for correlation. Every envelope
     whose op resolved (every status except ``unknown_op`` /
     ``unknown_connector`` / ``target_required`` /
-    ``target_connector_mismatch`` / ``unqualified_target_version``) carries
+    ``target_connector_mismatch`` / ``connector_not_allowed`` /
+    ``unqualified_target_version``) carries
     ``safety_level``,
     ``requires_approval``, ``policy_verdict`` and ``policy_reason`` (#4923).
     On ``ok``: ``method``, ``resolved_path``, ``query``, ``redacted_body``,
@@ -1002,6 +1028,23 @@ async def _preview_resolved_op(
     if fault is not None:
         return fault  # structured unavailable / invalid_params / invalid_op_schema
     if descriptor.source_kind != "ingested":
+        if is_credential_builder_op(descriptor):
+            # The builder of a credential write runs only for a caller the policy does not refuse.
+            verdict, reason = await policy_gate(
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                connector_id=connector_id,
+                params=params,
+                decide_only=True,
+            )
+            if verdict is PermissionVerdict.DENY:
+                return _refused_envelope(
+                    result_denied(op_id, reason or "denied by policy", 0.0),
+                    op_id=op_id,
+                    connector_id=connector_id,
+                    source_kind=descriptor.source_kind,
+                )
         # A destructive/requires_approval typed/composite op cleared the
         # previewability gate (#3198/#3312) — bind the logical request tuple
         # + reuse the park-time proposed_effect, no handler runs. Imported

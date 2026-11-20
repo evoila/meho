@@ -251,7 +251,9 @@ this text must stay short.
 
 `tests/test_mcp_tool_text_budget.py` sets two limits. It measures a tool
 as its name plus description plus input schema as compact JSON, taken
-from `ToolDefinition.to_wire()`. Output schemas are not counted.
+from `ToolDefinition.to_wire()`. Output schemas are not counted here.
+The size check of the lean tool profiles counts them (see "Lean tool
+profiles under 6,000 tokens" below).
 
 - One tool: at most 6,000 characters.
 - The whole default list (26 tools, docs add-on on): at most 70,000
@@ -422,7 +424,8 @@ in Claude Desktop with a bare "Tool execution failed" while the server
 logged 200 and wrote its audit row (found by the #2666 Desktop smoke
 re-run; the third Anthropic-conformance class after #2644 and #2745).
 The text block stays alongside per the spec's backwards-compatibility
-recommendation, byte-identical to the structured object. Tools without
+recommendation. It holds the same JSON as the structured object, written
+compact (no space after `,` and `:`, #4716). Tools without
 an `outputSchema` get no `structuredContent` key — nothing to conform
 to, no wire bloat.
 
@@ -442,6 +445,76 @@ in prod**:
   that schema to a `oneOf` flat|replay union). It also covers the
   `list_targets` over-threshold page: a JSONFlux summary plus `handle`,
   with no inline `targets` (#3858, see [`targets.md`](targets.md)).
+
+### Each result once: `?results=structured` (#4716)
+
+A client that reads `structuredContent` can ask for each result once. It
+adds `?results=structured` to the MCP URL, for example
+`https://<meho-host>/mcp?results=structured`. It works with a profile:
+`?profile=operate&results=structured`. With `texts=short` no tool has an
+`outputSchema` (#4714), so every result keeps the full text and this
+option changes nothing.
+
+What that session gets:
+
+- A successful result of a tool with an `outputSchema`: `content` holds
+  one short line, `The result is in structuredContent.`
+  (`STRUCTURED_ONLY_TEXT` in `operations/delivery_budget.py`).
+  `structuredContent` holds the full result, as before.
+- A tool without an `outputSchema`: the full text, as before. It has no
+  `structuredContent`.
+- A result with `isError: true`: the full text and `structuredContent`,
+  as before. Claude Code shows the model only the text of an error
+  result.
+
+The default is off. Without the parameter, or with an empty `results=`,
+nothing changes. Any value other than `structured` (not case-sensitive)
+is refused with HTTP 400 before the body is read, like an unknown
+profile.
+
+How it is built:
+
+- The MCP route reads the parameter (`_apply_url_options` in
+  `mcp/server.py`, `parse_tool_results` in `mcp/structured_results.py`)
+  and sets `mcp_structured_results` on the request's `Operator`. Only
+  this route sets it.
+- `handle_tools_call` passes `structured_only` to `tool_result_text`.
+- There is no server-wide switch on purpose. One MEHO serves many
+  clients, and a client that reads only the text (for example Cursor)
+  would lose every result. Only the client knows which copy it reads.
+- It is a URL option, not a tool profile. A profile picks the tools and
+  connectors of a session. Which copy a client reads is a property of
+  the client, and it combines with any profile.
+
+**What each client gives the model.** Checked in November 2026, from the
+client source code or its public bug reports:
+
+| Client | Successful result with both copies | Result with `isError: true` | Source |
+|---|---|---|---|
+| Claude Code | `structuredContent` only | the text only | anthropics/claude-code issues 79944, 86032, 103396 |
+| Claude Desktop, Code tab and Cowork | `structuredContent` only | the text only | anthropics/claude-code issue 79944, anthropics/claude-ai-mcp issue 1132 |
+| Claude Desktop and claude.ai chat | not documented; the reports say chat reads the full result. `structuredContent` must be there for a tool with an `outputSchema` (#2774) | not documented | anthropics/claude-ai-mcp issue 1132 |
+| Codex | `structuredContent` only, as compact JSON text | `structuredContent` only | openai/codex, `codex-rs/protocol/src/models.rs`, `as_function_call_output_payload` |
+| pydantic-ai `MCPToolset` (the model scoring runner, #4253) | `structuredContent` only, when every `content` block is text | `structuredContent` | `pydantic_ai/mcp.py`, `_map_mcp_call_tool_result` (2.53) |
+| Cursor (through the `mcp-remote` shim) | the text only | the text only | Cursor forum, August 2026 |
+| `meho` CLI | not an MCP client: it uses REST, which sends the result once | | `cli/` |
+
+So the clients we checked already give the model one copy. The switch
+saves bytes on the wire and in the client. It saves model tokens only
+for a client that gives the model both copies. Do not use it with a
+client that reads only the text: that client then sees only the short
+line. The benchmark measures the saving before the switch is
+recommended to anyone.
+
+**Size check.** `sent_wire_bytes(result, structured_only=True)` counts
+the short line plus `structuredContent`, which is what such a session
+sends. The delivery ceilings do not use it. They use
+`measure_delivered_wire_bytes`, which counts both copies in every
+session, with the text as spaced JSON. So every session gets the same
+result, the ceilings decide as before the compact text, and a
+structured-only session only sends fewer bytes.
+
+Tests: `tests/test_mcp_structured_results.py`.
 
 A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
@@ -556,11 +629,15 @@ Tests: `tests/test_mcp_call_operation_audit_status.py`.
 
 A completed `call_operation` response is also checked against a wire ceiling,
 `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
-on the real `tools/call` wire by `measure_delivered_wire_bytes`
+on the `tools/call` wire by `measure_delivered_wire_bytes`
 (`operations/delivery_budget.py`): the encoded text block plus the encoded
-`structuredContent` copy, escaping included. It is a byte count, not a token
-count. The MCP dispatcher builds the text block with the same
-`tool_result_text` function, so the measurement cannot drift from what is sent.
+`structuredContent` copy, escaping included. It measures
+both copies also for a `?results=structured` session, so every session gets
+the same result. It is a byte count, not a token
+count. The text block that is sent is compact JSON; the count uses the
+same JSON with a space after `,` and `:`. That count is never smaller than
+what is sent, and it keeps the decisions of the ceiling as they were before
+the text became compact.
 
 When an `ok` response is over the ceiling, `bound_complete_response` drops the
 inline `result` and the extras and keeps the status `ok`:
@@ -965,6 +1042,37 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
     live run on a test install: set a `custom_description`, search
     with words that appear only in it, check the hit shows the new
     text, set it to `null`, check the original is back.
+- **How to call a hit, behind a switch (#4331).** The backplane switch
+  `SEARCH_HIT_CALL_HINTS` (an env var, off by default) adds two small
+  fields to each ranked hit, so an agent can make a right first call
+  without a second lookup:
+  - `required_params`: the names in the top-level `required` list of the
+    operation's stored `parameter_schema`, in that order. `call_operation`
+    checks `params` against that same schema. Names only, no schemas: the
+    full schema stays in exact-op mode. An operation with no `required`
+    list gives `[]`.
+  - `target_required`: `true` when a call needs a `target`. It uses the
+    dispatcher's own rule, `descriptor_requires_target` in
+    `operations/dispatcher.py`, which the exact-op contract's
+    `target.required` also uses. So the two always agree. Every generic
+    (ingested) operation needs a target; a typed or multi-step operation
+    needs one when its handler reaches the connector through the target.
+  - **Off (default):** both keys are left out, and the handler of a hit is
+    not even imported, so every answer is the same as before. The
+    registered `outputSchema` names both fields; while the switch is off,
+    `call_hints_schema_for_settings`
+    (`mcp/tools/_search_call_hints_schema.py`) takes them out of the
+    schema that `tools/list` sends. The REST `GET /api/v1/operations/search`
+    answer follows the same switch; the CLI `meho operation search --json`
+    prints the fields when the backplane sends them.
+  - **Before turning it on** (measurement plan of the pull request): on
+    the benchmark lane, compare the job score with the switch off and on,
+    for a small model and for Claude, and the size of a search answer
+    (it must grow by less than 10%). Turn it on only if the small model's
+    score goes up and Claude's does not go down. Then one live run on a
+    test install through the agent surface. Code:
+    `operations/_search_call_hints.py`. Tests:
+    `backend/tests/test_search_hit_call_hints.py`.
 
 The `outputSchema` is a top-level `oneOf` of the ranked shape (hits plus
 the `outcome` fields described in the next section) and the exact-op
@@ -1060,6 +1168,100 @@ Every other result has an `outcome` field:
   - **Before turning it on:** compare the benchmark lane with the switch
     off and on, for a small model and for Claude, then one live run on a
     test install (see the pull request of #6014).
+- **Typed and multi-step operations first, behind a switch (#4712).** A
+  big connector holds many more raw operations (made from a vendor API
+  description, `source_kind='ingested'`) than typed and multi-step ones,
+  in the same groups. So a search often finds a raw call first, even
+  when a safer typed or multi-step operation exists. The backplane
+  switch `SEARCH_TYPED_FIRST` (an env var, off by default) changes what
+  `search_operations` and `list_operation_groups` show (MCP, REST and
+  CLI the same):
+  - Ranked search returns only `source_kind` `typed` and `composite`
+    rows. The filter is in the candidate queries, so raw rows cannot
+    push typed ones out of the top hits.
+  - `include_raw: true` (REST `include_raw=true`, CLI `--include-raw`)
+    adds raw operations back.
+  - A connector with no typed or multi-step operation the caller can use
+    (same tenant, enabled and package rules as the search) shows its raw
+    operations without the flag.
+  - Each answer has `raw_operations`: `included`, a count, and a `note`.
+    When a typed-only search is `no_match` or `ambiguous`, the search runs
+    once more with raw operations, and `hidden_matches` says how many
+    raw hits were left out; the note names `include_raw`.
+  - `list_operation_groups` counts typed and multi-step operations
+    (`operation_count`, `enabled_op_count`) and leaves out groups of raw
+    operations only (`hidden_groups`). The filter is in the query, so
+    paging stays correct.
+  - Not changed: exact-op mode (`op_id`) finds any operation; calling,
+    policy and approval are the same. The operator console search still
+    shows every operation.
+  - Off: no `include_raw` input, no `raw_operations` field and no
+    description line in `tools/list`
+    (`mcp/tools/_include_raw.py`); the REST and CLI flag change nothing.
+    Hosted agent runs follow the switch the same way, with the setting
+    `agent_operation_tools_from_mcp` on or off. On: their tools are built
+    for each run (`agent/toolset_operations.py`). Off: the hand-written
+    tools get the `include_raw` input and the line while the switch is on
+    (`with_include_raw_input`), so a hosted run can follow the note.
+  - Code: `operations/_search_typed_first.py`, `typed_only` in
+    `operations/_search.py`, `search_operations` and
+    `list_operation_groups` in `operations/meta_tools.py`. Tests:
+    `tests/test_search_typed_first.py`, and
+    `test_include_raw_follows_the_typed_first_switch` in
+    `tests/test_mcp_surface_conformance.py` and
+    `tests/test_agent_toolset_operations.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #4712).
+- **Operations in the group listing, behind a switch (#4713).** A model
+  had to search to see any operation, and a search needs good words. The
+  backplane switch `GROUP_LISTING_OPERATIONS` (an env var, off by default)
+  lets a model walk down without a search query: connector, group,
+  operation, contract (`search_operations` with `op_id`), call. When on,
+  `list_operation_groups` changes like this (MCP, REST
+  `GET /api/v1/operations/groups` and CLI `meho operation groups` the
+  same):
+  - Each group has `operations`: its typed and multi-step operations
+    (`source_kind` `typed` and `composite`), by `op_id`. Each line has
+    `op_id`, `summary` (the first sentence of the summary, cut to 100
+    characters; `null` when there is none), `safety_level` and
+    `requires_approval`. The risk level and the approval flag are the
+    ones a call uses, operator overrides included. Only operations that
+    are on for the tenant, in its scope, with their package installed.
+  - Raw operations are never listed one by one (a big connector has
+    thousands). `operation_count` still counts them when the listing
+    shows them; search finds them.
+  - Size limits, as compact JSON: one group under 4 KB, one answer under
+    12 KB. A group with more operations than fit lists the first ones (by
+    `op_id`) and says how many are left out in `operations_more`. An
+    answer whose groups do not fit ends early, with `next_cursor` set to
+    the last group shown, like a full page. Every group of every
+    built-in connector fits whole. The text of a group (`name` and
+    `when_to_use`) stays under 3 KB, so a group always has room for
+    operation lines: a longer text is cut and ends with `…`. Every ASCII
+    text within the limits of a group fits whole; only a long text with
+    many non-ASCII characters is cut.
+  - `group` (REST `group=`, CLI `--group`) lists one group. A `group`
+    that matches no group gives an empty list and a `note`. The CLI also
+    has `--cursor`.
+  - Not changed: the operator console list and the hosted agent tools
+    that have no `cursor` input (the hand-written `list_operation_groups`
+    and the agent's default tool) keep the old listing
+    (`list_operations=False`). The hosted tool built from the MCP tool
+    (`agent_operation_tools_from_mcp` on) follows the switch.
+  - Off: no `group` input, no `operations`, `operations_more` or `note`
+    field and no description line in `tools/list`
+    (`mcp/tools/_group_operations.py`); the REST and CLI `group` change
+    nothing.
+  - Code: `operations/_group_listing_operations.py`, called from
+    `list_operation_groups` in `operations/meta_tools.py`. Tests:
+    `tests/test_group_listing_operations.py` (with the size check over
+    every connector MEHO registers at start-up), and
+    `test_group_operations_follow_their_switch` in
+    `tests/test_mcp_surface_conformance.py`.
+  - **Before turning it on:** compare the benchmark lane with the switch
+    off and on, for a small model and for Claude, then one live run on a
+    test install (see the pull request of #4713).
 - The enabled-operation check and the group list use the same tenant
   filter as dispatch, and count enabled rows only. So the text never
   names a disabled operation or another tenant's operation.
@@ -1584,7 +1786,7 @@ registration at all.
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
 `tests/test_mcp_human_only_surface.py`. The approval groups
-(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+(MEHO-Operators, MEHO-Admins and the old groups read as those roles) decide only
 *which people* may approve on REST, the command line and the web
 interface; they never open an MCP path.
 
@@ -1888,6 +2090,47 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
+A parameter of an operation can wait behind a switch. Its schema carries
+`x-meho-switch: "<switch name>"` (`SWITCH_MARKER` in the connector kit;
+`operations/switch_params.py`). The keyword goes on a property schema,
+at any depth, or on a shared schema that a property links to with a
+local `$ref` (`$defs`, `definitions`, `components.schemas`). MEHO
+knows one switch name today: `file_ref_params`, the setting
+`FILE_REF_PARAMS` (off by default, listed by `GET /version`).
+
+| Switch (off by default) | Where | With the switch off |
+| --- | --- | --- |
+| `FILE_REF_PARAMS` | `search_operations` (`required_params`), the exact-op contract, `preview_operation`, the operation read of REST, the console and the CLI | The marked parameter is left out of the shown schema: out of every `required` and `dependentRequired` list of the same object (also in `allOf`, `anyOf`, `oneOf`, `then`, `else` and a branch it links to), out of `example`, `examples` and `default` values at any depth (also map values from `additionalProperties` or `patternProperties`, and list items), and a shared schema only it used is dropped. Examples in `llm_instructions` (`examples`, `example_call`) that name it, and its `parameter_hints` entry, are not shown. A call that gives it is refused as `invalid_params`, before it can wait for approval, so no approval request is stored. The answer is the one of an unknown parameter, and no error text names a hidden parameter: an object with `additionalProperties: false` leaves it out of the check schema, any other object gets the schema `false` for it (in the object and in each branch of it). No rule requires it. An `anyOf` or `oneOf` branch that requires it matches no object, but still matches other values such as `null`, so a call without it gets the same answer as without the keyword. The hash of a call that does not give it is the same. |
+
+* The stored schema is not changed. MEHO leaves the parameter out when it
+  reads the operation row for the caller (`apply_effective_policy` and
+  the operation read by id). The row keeps the schema for the call check
+  in `parameter_check_schema` (not a column).
+* A keyword that names another switch, or a keyword that is not on a
+  property (for example on `items`, `additionalProperties` or a
+  `patternProperties` schema), stops the operation from registering, for
+  typed, multi-step and ingested operations
+  (`operations/switch_registration.py`).
+* The keyword under `if`, `then`, `else` or `not` also stops the
+  operation from registering. So does a schema with the keyword that
+  links in a way MEHO does not follow: `$anchor`, `$dynamicRef`, an
+  `$id` below the root, or a `$ref` that is not a plain `#/` pointer
+  (for example one with `%` escapes).
+* These checks read every shared schema (`$defs`, `definitions`,
+  `components.schemas`, also below the root) and every
+  `patternProperties` or `dependentSchemas` schema, also when its name
+  is a keyword such as `default`, `examples`, `enum` or `const`.
+* With the switch on, the parameter shows and is accepted as usual.
+* No new MCP tool and no new field.
+
+Measurement before the switch goes on by default: run the benchmark job
+list on the same build with the switch off and on, with the same models.
+Record the pass rate of a small model and of Claude, and the size of an
+operation read. Turn it on only if the small model does not get worse,
+Claude does not get worse, and the answers grow by less than 10%. Then
+run once on the sandbox through the agent surface. A later pull request
+turns the switch on and links the numbers.
+
 Three switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |
@@ -1905,7 +2148,7 @@ resolved has two more fields (#6045):
   `null` when the evaluator failed.
 * `approvers`: the login groups that may approve the call when
   `policy_verdict` is `needs-approval` (for example
-  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  `["MEHO-Admins"]`), else `[]`. `null` when the
   stored routing is not valid: the preview still answers.
 
 No new MCP tool: the default working surface stays the same. The person
@@ -1980,9 +2223,10 @@ not score worse.
 
 - **Off (default):** every tool shows its full text, byte for byte as
   before, unless the session asks for the short texts.
-- **On:** 14 tools show a short description and short input texts, in
-  every session. The whole default list goes from 67,865 to 46,067
-  characters (32% less). No other tool changes.
+- **On:** 17 tools show a short description and short input texts, in
+  every session. The whole default list goes from 68,280 to 43,176
+  characters (37% less). No tool sends an output schema (#4714, see
+  "Lean tool profiles under 6,000 tokens" below). Nothing else changes.
 
 ### One session asks for the short texts (#6293)
 
@@ -2024,7 +2268,11 @@ What stays the same in both states:
 - The inputs each tool accepts. Only `description` strings change. Every
   property, type, enum, default, limit and `required` list stays, so the
   `tools/call` input check accepts and refuses the same calls.
-- The output schema and annotations.
+- The annotations.
+- The result of each call. The text block holds the same JSON.
+
+What changes besides the texts: no tool sends an `outputSchema`, and so
+no `tools/call` result has `structuredContent` (#4714).
 
 What a short text keeps: what the tool is for, when to call it, its
 arguments, and the rules that stop wrong calls. What it leaves out:
@@ -2061,12 +2309,74 @@ How it works:
 | `list_targets` | 2,945 | 1,116 |
 | `search_docs` | 2,943 | 1,563 |
 | `meho_broadcast_watch` | 2,701 | 1,543 |
+| `search_memory` | 2,428 | 1,714 |
+| `list_operation_groups` | 2,300 | 840 |
+| `meho_connector_list` | 1,898 | 865 |
 
 Sizes are characters as `tests/test_mcp_tool_text_budget.py` counts them
 (name, description and input schema), with the similar-entry check off.
 The first ten are the ten biggest tools. The next four are needed to
-reach 30% less. `query_topology` and `result_query` stay larger because
-their input schemas are large.
+reach 30% less. The last three are in both tool profiles; they bring the
+profiles under 6,000 tokens. `query_topology` and `result_query` stay
+larger because their input schemas are large.
+
+### Lean tool profiles under 6,000 tokens (#4714)
+
+A session with a tool profile and the short texts
+(`?profile=investigate&texts=short`, or `?profile=operate&texts=short`)
+gets a lean tool list. Each lean profile is under 6,000 tokens, and
+`query_topology` is under 6,000 bytes.
+
+What the model sees depends on the client. A client turns each MCP tool
+into a tool for the model: name, description and input schema. The
+Claude API and the OpenAI-style tool format have no field for an output
+schema, so most clients do not show it to the model. A client may still
+put it in the context in another way. The size check therefore counts
+the whole `tools/list` entry, output schema included.
+
+So the short texts also leave out every `outputSchema`. The MCP spec
+makes the output schema optional. A tool that declares one must return
+`structuredContent`, or Claude Desktop fails the call (#2774). The
+`tools/call` handler uses the tool as the session lists it
+(`tool_for_settings` in `mcp/registry.py`), so a session without output
+schemas also gets no `structuredContent`. The text block still holds the
+whole JSON result. Claude Desktop and Claude Code read it as before.
+
+Sizes are UTF-8 bytes of the whole `tools/list` entry as compact JSON.
+"Before" is the full text, "after" the short text.
+
+| Tool | Before | After |
+| --- | ---: | ---: |
+| `query_topology` | 13,034 | 3,272 |
+| `search_operations` | 6,658 | 1,568 |
+| `preview_operation` | 5,933 | 1,425 |
+| `result_query` | 5,364 | 2,585 |
+| `call_operation` | 4,683 | 2,129 |
+| `list_targets` | 4,429 | 1,195 |
+| `search_memory` | 3,741 | 1,793 |
+| `list_operation_groups` | 3,560 | 919 |
+| `meho_broadcast_recent` | 3,255 | 1,886 |
+| `meho_broadcast_announce` | 3,216 | 1,955 |
+| `search_knowledge` | 3,092 | 2,221 |
+| `meho_broadcast_watch` | 2,722 | 1,637 |
+| `meho_connector_list` | 1,981 | 944 |
+| `meho_status` | 986 | 986 |
+
+| List | Bytes before | Bytes after | Tokens after (Qwen2.5 / o200k / cl100k) |
+| --- | ---: | ---: | ---: |
+| `investigate` (9 tools) | 34,494 | 14,340 | 3,503 / 3,511 / 3,449 |
+| `operate` (13 tools) | 49,620 | 21,243 | 5,199 / 5,177 / 5,093 |
+| Full default list (26 tools) | 92,106 | 45,132 | 10,961 / 10,916 / 10,753 |
+
+The tokens are counted on the list as one compact JSON text. The byte
+count divided by 4 is a little higher than every tokenizer count.
+`tests/test_mcp_tool_text_budget.py` fails when a lean profile is over
+6,000 tokens of the test model (Qwen2.5), over 24,000 bytes (6,000
+tokens at 4 bytes per token), or when `query_topology` is over 6,000
+bytes. The test downloads the Qwen2.5 tokenizer file from Hugging Face at
+a fixed revision and checks its SHA-256. In CI a failed download fails
+the test; without network on a local machine only the token test is
+skipped.
 
 Tests:
 
@@ -2074,7 +2384,11 @@ Tests:
   tool equals the tool as listed before; with it on, each changed tool is
   shorter and takes the same inputs, and no other tool changes.
 - `tests/test_mcp_tool_text_budget.py`: with the switch on, the whole
-  default list is at most 47,000 characters and at least 30% smaller.
+  default list is at most 47,000 characters and at least 30% smaller;
+  each tool profile is at most 6,000 tokens of the test model and at most
+  24,000 bytes; `query_topology` is at most 6,000 bytes.
+- `tests/test_mcp_structured_content.py`: with the switch on, `tools/list`
+  has no output schema and `tools/call` returns no `structuredContent`.
 - `tests/test_mcp_surface_conformance.py` runs every test in both states.
 - `tests/test_mcp_tool_profiles.py`: a profile shows the short texts only
   with the switch on.
@@ -2088,7 +2402,55 @@ Tests:
 How to measure it: run the same benchmark task set twice against one
 build, once with `MCP_SHORT_TOOL_TEXTS=false` and once with `true`, with a
 small model and with Claude. `/ready` tells which state a run used.
-Compare the task scores and the tokens used before the first answer.
+Compare the task scores and the tokens used before the first answer. Do
+it for the full list and for each tool profile (`?profile=investigate`,
+`?profile=operate`). Then one live run on the sandbox MEHO with
+`?profile=operate&texts=short` through Claude Desktop and Claude Code:
+call every tool of the profile once and check that no call fails.
+
+## A guide to the call flow in the session-start text (`MCP_CALL_FLOW_GUIDE`, off by default, #4715)
+
+With the `MCP_CALL_FLOW_GUIDE` switch on, the session-start text (the
+`instructions` of `initialize`) starts with a short guide. It explains
+once, in order, how to find and call an operation:
+
+1. connectors and targets (`meho_connector_list`, `list_targets`; a
+   target is named, not given by its id);
+2. operation groups (`list_operation_groups`);
+3. search, then the exact contract (`search_operations` with `query`,
+   then with `op_id`);
+4. preview before a change (`preview_operation`);
+5. the call (`call_operation`);
+6. large results come back as a handle, read with `result_query`;
+7. a call that waits for a person's approval: `status` is
+   `awaiting_approval`, nothing has run, do not call again. A call with
+   `reveal_secret: true` is different: the approval runs nothing. With
+   `MCP_REVEAL_FETCH` on, the guide says to call `call_operation` again
+   with `approval_request_id` to get the value. With it off, the guide
+   says the person who asked gets the value in the console or on the
+   command line.
+
+- **Off (default):** the session-start text does not change.
+- **On:** the guide comes first, before the other bands. The full guide
+  is about 235 words, 434 tokens by the same estimate the
+  `mcp_preamble_receipt` log uses (`estimate_tokens`), and 446 tokens with
+  `MCP_REVEAL_FETCH` on. A test keeps both at 450 or less.
+- The text is the same for every client. It names only tools the
+  session can see (`all_tools_for`, the filter `tools/list` uses). A step
+  whose tool is not on the list is left out, and the steps are numbered
+  again. For example, the `investigate` profile has no preview step. A
+  session without `call_operation` gets no guide.
+- A client may ignore `instructions`. So each tool description still
+  carries the rules a correct call needs. The guide adds the overview.
+- Code: `mcp/call_flow_guide.py`, used by `_session_call_flow_guide` in
+  `mcp/server.py`. Tests: `tests/test_mcp_call_flow_guide.py`.
+
+How to measure it: run the same benchmark task set twice against one
+build, once with `MCP_CALL_FLOW_GUIDE=false` and once with `true`, with a
+small model and with Claude. Compare the steps and the tokens to the
+first correct call. Then do one live run on the sandbox MEHO with the
+switch on. The switch goes on by default only in a later pull request
+that links this measurement.
 
 ## Empty optional text on read tools (#4110)
 

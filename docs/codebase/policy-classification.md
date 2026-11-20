@@ -150,7 +150,10 @@ always waits.
    `destructive` always waits. So a level never goes below the code's
    value, and `always_wait: false` only goes back to the code's value;
 3. the floors: an operation that connects to an address the caller gives
-   is at least `caution` and always waits.
+   is at least `caution` and always waits. An operation that writes or
+   makes a credential (class `credential_write` or `credential_mint`)
+   keeps the approval its code turns on, also when an install or tenant
+   override turns it off (`_with_floors`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they
@@ -188,7 +191,12 @@ approving that call.
 write step against a row built in memory from the step's declared risk
 level (`enforce_subop_policy` in `operations/composite.py`), and the
 preview checks the same steps (`operations/_preview_steps.py`). Both call
-`apply_step_classification` in `operations/op_policy.py` first. It
+`apply_step_policy` in `operations/op_policy.py` first. It reads the
+override rows of the step's operation (install-wide and the caller's
+tenant) like a direct call, with the switch on or off: the highest risk
+level wins, and an override that sets the approval flag makes the step
+wait. An override only makes a step stricter; one that turns approval off
+leaves the step's own flag as it is. With the switch on, it then
 classifies the step (`classify_step` in `policy/store.py`), raises its
 level and sets `policy_always_wait`. So a marked step waits for a person
 also when a standing grant or a run approval covers it, and also when a

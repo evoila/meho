@@ -137,6 +137,17 @@ The biggest tools then show a short description. They accept the same
 inputs as before. Other sessions keep the full texts. A value other than
 `short` is refused with HTTP 400.
 
+A client that reads `structuredContent` can get each result once. Add
+`results=structured` to the URL, for example
+`https://<meho-host>/mcp?results=structured`. A tool that declares an
+output schema then sends one short line as its text, and the full result
+only in `structuredContent`. Errors and tools without an output schema
+still send the full text. Use it only with a client that gives the model
+`structuredContent`: a client that reads only the text (for example
+Cursor) would see only the short line. With `texts=short`, no tool
+declares an output schema, so this option then changes nothing. A value
+other than `structured` is refused with HTTP 400.
+
 ## The operator planes (behind `mcp:admin`)
 
 The governance and lifecycle tools — connector lifecycle and ingest,

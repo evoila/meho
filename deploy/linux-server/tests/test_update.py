@@ -187,8 +187,8 @@ class UpdateFlowTests(UpdateTestCase):
         self.assert_succeeds(result)
         headers = [line for line in result.stdout.splitlines() if line.startswith("== ")]
         last_step = (
-            "== Update step 5: install the meho command and meho-host, write the install record"
-            " and read the first-start list"
+            "== Update step 5: install the meho command and meho-host, and write the install"
+            " record"
         )
         self.assertEqual(
             [
@@ -213,6 +213,9 @@ class UpdateFlowTests(UpdateTestCase):
         helm = calls[index(HELM_UPGRADE)]
         self.assertIn(f"chart/meho-{NEW_VERSION}.tgz", helm)
         self.assertIn(f"--set image.tag=v{NEW_VERSION}", helm)
+        # The new download's values: they mount the CA that meho-host
+        # certificate wrote, so an update keeps that trust (#6698).
+        self.assertIn(f"-f {self.machine.download}/chart/values-single-node.yaml -f ", helm)
         self.assertIn(f"-f {self.machine.root}{PLACE_VALUES}", helm)
 
     def test_the_checks_an_installed_machine_fails_are_skipped(self) -> None:
@@ -378,7 +381,6 @@ class AnswersTests(InstallTestCase):
             ["--admin-network", "10.0.50.0/24"],
             ["--first-tenant-id", TENANT_ID],
             ["--admin-user", "first.admin"],
-            ["--approver-user", "approver"],
             ["--cluster-cidr=172.30.0.0/16"],
             ["--service-cidr", "172.31.0.0/20"],
             ["--join-address", "10.0.0.20", "--join-token-file", str(token_file)],
@@ -420,6 +422,28 @@ class AnswersTests(InstallTestCase):
 
         self.assertNotIn("server:", self.machine.host_path(RKE2_CONFIG).read_text())
         self.assertEqual("", self.options()["join_address"])
+
+    def test_a_record_of_an_older_install_sh_with_an_approver_user_works(self) -> None:
+        record = self.machine.host_path(INSTALL_RECORD)
+        record.write_text(
+            record.read_text().replace(
+                '    "admin_user": "first.admin",\n',
+                '    "admin_user": "first.admin",\n    "approver_user": "approver",\n',
+            )
+        )
+        values = self.machine.host_path(PLACE_VALUES)
+        values.write_text(
+            values.read_text().replace(
+                '    adminUsername: "first.admin"\n',
+                '    adminUsername: "first.admin"\n    approverUsername: "approver"\n',
+            )
+        )
+
+        self.assert_succeeds(self.machine.run("--confirm-backup"))
+
+        self.assertNotIn("approver", self.options())
+        self.assertEqual(self.place_values, values.read_text())
+        self.assertNotIn("approver", self.machine.calls())
 
     def test_a_record_changed_by_hand_stops_the_update(self) -> None:
         record = self.machine.host_path(INSTALL_RECORD)

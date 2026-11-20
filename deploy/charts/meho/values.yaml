@@ -656,9 +656,9 @@ config:
   # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
   # single-operator answer — enabling it posture-wide re-opens, for every
   # op, the single-account request+grant hole the guard closes. The
-  # endorsed single-operator posture is an **agent-requester** (park the
-  # write under a scheduled agent run whose distinct subject clears the
-  # gate with no flag). Even under break-glass the self-approval is
+  # endorsed single-operator posture is the **MEHO-Admins** group:
+  # its members approve their own changes on purpose, with a click in the
+  # web interface. Even under break-glass the self-approval is
   # forensically visible: it writes a decision audit row (requester ==
   # approver), emits a WARNING `approval_self_approval_break_glass` log,
   # and flips `GET /ready` → `features.approval_queue.effective_posture`
@@ -733,9 +733,14 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `fileRefParams` is rendered into `FILE_REF_PARAMS`. When `"true"`,
+  # the operation parameters that wait behind this switch show to agents
+  # and people and are accepted. See `docs/codebase/mcp.md`.
+  fileRefParams: "false"
   # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
   # `"true"`, the biggest tools on the default MCP tool list send a short
-  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  # text, and no tool sends an output schema. The inputs they accept stay
+  # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
   # -- `mcpProfileConnectorLists` is rendered into
   # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of
@@ -1590,13 +1595,12 @@ coreKeycloak:
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
   # -- The first tenant's short name (lowercase letters, digits, dashes).
-  # The five role groups carry it in the `meho_tenant` attribute.
+  # The role groups carry it in the `meho_tenant` attribute.
   tenantName: main
   # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
-  # keep). The bootstrap Job makes five groups for each one:
-  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
-  # `-Approvers`. Empty by default: a site with one tenant needs nothing
-  # here. Putting people in these groups waits for a second person's
+  # keep). The bootstrap Job makes three groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators` and `-Admins`. Empty by default: a
+  # site with one tenant needs nothing here. Putting people in these groups waits for a second person's
   # approval when done through MEHO.
   tenants: []
   ingress:
@@ -1609,15 +1613,17 @@ coreKeycloak:
     # `client_id` and `client_secret`). Empty = the install makes
     # `<release>-core-keycloak-bootstrap`.
     bootstrap: ""
-  # The two people the install makes at the first start (the realm stage of
-  # the bootstrap Job, docs/codebase/core-bootstrap.md). Their temporary
-  # passwords are in `<release>-core-first-login`; Keycloak asks for a new
+  # The one person the install makes at the first start (the realm stage of
+  # the bootstrap Job, docs/codebase/core-bootstrap.md). Its temporary
+  # password is in `<release>-core-first-login`; Keycloak asks for a new
   # password at the first login. A change here after the first install has
-  # no effect: the Secret and the users already exist.
+  # no effect: the Secret and the user already exist.
   firstLogin:
-    # -- User name of the first admin (in MEHO-Admins, with platform_admin).
+    # -- User name of the one Admin login (in MEHO-Admins and
+    # MEHO-Platform-Admins, with platform_admin).
     adminUsername: admin
-    # -- User name of the second person, who can approve (MEHO-SA-Operators).
+    # -- Not used. MEHO ignores this value: the install makes only one Admin
+    # login. The key stays so that an existing values file still works.
     approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of

@@ -98,12 +98,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BLAST_RADIUS_KEY",
+    "PERSON_ONLY_EFFECT_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "PreviewContext",
     "approved_preview",
     "approved_preview_var",
     "blast_radius_missing_reason",
+    "build_card_warnings",
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
@@ -111,10 +113,14 @@ __all__ = [
     "has_preview_builder",
     "preview_failure_reason",
     "proposed_effect_for_agent",
+    "register_agent_preview_filter",
+    "register_card_warnings",
     "register_permission_preflight",
     "register_person_only_preview_keys",
     "register_preview_builder",
     "register_preview_builder_switch",
+    "register_preview_last_step",
+    "without_person_only_effect_keys",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -395,6 +401,26 @@ class PreviewBuilder(Protocol):
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
 
 
+class CardWarnings(Protocol):
+    """Gives the warning lines for the approval card of one op.
+
+    The lines are plain text for the approver. They name the target and the
+    setting, and hold no secret value. Return ``[]`` when there is none.
+    """
+
+    async def __call__(self, ctx: PreviewContext) -> list[str]: ...
+
+
+class PreviewLastStep(Protocol):
+    """A step that runs on the preview of an op after its builder.
+
+    It may change the preview in place. A step that raises makes the
+    preview unavailable, the same as a builder that raises.
+    """
+
+    async def __call__(self, ctx: PreviewContext, preview: dict[str, Any]) -> None: ...
+
+
 class PermissionPreflight(Protocol):
     """An op's opt-in park-time permission check.
 
@@ -418,8 +444,14 @@ class PermissionPreflight(Protocol):
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
 
 
+#: ``op_id`` -> builder of the warning lines on the approval card.
+_CARD_WARNINGS: dict[str, CardWarnings] = {}
+
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
+
+#: ``op_id`` -> the step that runs on the builder's preview (:func:`register_preview_last_step`).
+_PREVIEW_LAST_STEPS: dict[str, PreviewLastStep] = {}
 
 #: ``op_id`` -> the switch of its builder for the caller's side. Off, the
 #: preview the caller gets back is the one of an op with no builder; the
@@ -429,6 +461,10 @@ _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 #: ``op_id`` -> the switch, and the keys its builder adds to the preview for
 #: the person only. Off, a caller reads the stored preview without them.
 _PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] = {}
+
+#: ``op_id`` -> a function that takes the stored preview and gives back the
+#: preview a caller reads (:func:`register_agent_preview_filter`).
+_AGENT_PREVIEW_FILTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
 #: The keys a builder's result puts on a stored ``proposed_effect``.
 _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
@@ -445,6 +481,17 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def register_preview_last_step(op_id: str, step: PreviewLastStep) -> None:
+    """Run *step* on every preview the builder of *op_id* returns.
+
+    The step runs after the builder, whatever module registered the
+    builder and when. It does not run when the builder returns ``None``,
+    or when no builder runs (for example for the caller while the
+    builder's switch is off).
+    """
+    _PREVIEW_LAST_STEPS[op_id] = step
 
 
 def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> None:
@@ -470,6 +517,30 @@ def register_person_only_preview_keys(
     _PERSON_ONLY_PREVIEW_KEYS[op_id] = (enabled, keys)
 
 
+def register_agent_preview_filter(
+    op_id: str, preview_filter: Callable[[dict[str, Any]], dict[str, Any]]
+) -> None:
+    """Give a caller the stored preview of *op_id* as *preview_filter* returns it.
+
+    For person-only fields deeper in the preview than its top-level keys
+    (:func:`register_person_only_preview_keys`). The filter reads its own
+    switch and gives back a new dict; it never changes the stored one.
+    """
+    _AGENT_PREVIEW_FILTERS[op_id] = preview_filter
+
+
+#: Top-level keys of a stored ``proposed_effect`` that only a person reads:
+#: the line of the approval card that says why a credential call waits.
+PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait"})
+
+
+def without_person_only_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
+    """*effect* without :data:`PERSON_ONLY_EFFECT_KEYS`; *effect* itself when it has none."""
+    if PERSON_ONLY_EFFECT_KEYS.isdisjoint(effect):
+        return effect
+    return {key: value for key, value in effect.items() if key not in PERSON_ONLY_EFFECT_KEYS}
+
+
 def proposed_effect_for_agent(
     op_id: str,
     effect: dict[str, Any] | None,
@@ -487,12 +558,17 @@ def proposed_effect_for_agent(
     * the generic params echo of the stored params, for an op whose builder
       switch is off (:func:`register_preview_builder_switch`);
     * the preview without the person-only keys
-      (:func:`register_person_only_preview_keys`).
+      (:func:`register_person_only_preview_keys`);
+    * the preview as the op's filter gives it back
+      (:func:`register_agent_preview_filter`), after the person-only keys
+      are gone.
 
-    Every other ``proposed_effect`` comes back unchanged.
+    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) are
+    never in it. Every other ``proposed_effect`` comes back unchanged.
     """
     if not isinstance(effect, dict):
         return effect
+    effect = without_person_only_effect_keys(effect)
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
     if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
         shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}
@@ -508,12 +584,18 @@ def proposed_effect_for_agent(
         if reason is not None:
             shown["preview_reason"] = reason
         return shown
-    person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
     preview = effect.get("preview")
-    if person_only is None or person_only[0]() or not isinstance(preview, dict):
+    if not isinstance(preview, dict):
         return effect
-    kept = {key: value for key, value in preview.items() if key not in person_only[1]}
-    return {**effect, "preview": kept}
+    person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
+    preview_filter = _AGENT_PREVIEW_FILTERS.get(op_id)
+    if person_only is None and preview_filter is None:
+        return effect
+    if person_only is not None and not person_only[0]():
+        preview = {key: value for key, value in preview.items() if key not in person_only[1]}
+    if preview_filter is not None:
+        preview = preview_filter(preview)
+    return {**effect, "preview": preview}
 
 
 def _preview_builder(op_id: str, *, for_agent: bool) -> PreviewBuilder | None:
@@ -536,6 +618,31 @@ def register_permission_preflight(op_id: str, preflight: PermissionPreflight) ->
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PERMISSION_PREFLIGHTS[op_id] = preflight
+
+
+def register_card_warnings(op_id: str, builder: CardWarnings) -> None:
+    """Register *builder*: the warning lines for the approval card of *op_id*.
+
+    Used by a write that changes a setting which is allowed but risky, so the
+    approver sees the warning before approving. Re-registration overwrites.
+    """
+    _CARD_WARNINGS[op_id] = builder
+
+
+async def build_card_warnings(ctx: PreviewContext) -> list[str]:
+    """The warning lines a registered builder gives for this call; ``[]`` for none.
+
+    A warning is a help for the approver. A builder that fails never blocks
+    the park: the failure is logged and the card has no such line.
+    """
+    builder = _CARD_WARNINGS.get(ctx.descriptor.op_id)
+    if builder is None:
+        return []
+    try:
+        return list(await builder(ctx))
+    except Exception:
+        _log.warning("card_warnings_failed", op_id=ctx.descriptor.op_id, exc_info=True)
+        return []
 
 
 def has_permission_preflight(op_id: str) -> bool:
@@ -618,6 +725,9 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
 
     try:
         preview = await builder(ctx)
+        last_step = _PREVIEW_LAST_STEPS.get(op_id)
+        if preview is not None and last_step is not None:
+            await last_step(ctx, preview)
     except Exception as exc:
         # Fail-soft: a preview is a convenience, the park is the
         # safety-relevant action. Never let a dry-run fault block it.
@@ -953,6 +1063,7 @@ def _register_builtin_builders() -> None:
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",
+        "vault.kv.generate",
         "vault.kv.delete",
         "vault.kv.metadata.delete",
     ):

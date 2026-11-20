@@ -219,7 +219,11 @@ def _seed_request(
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
-    effect = proposed_effect or {"op_id": op_id, "connector_id": connector_id}
+    effect = proposed_effect or {
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "safety_level": "caution",
+    }
     # A live pending request carries a future deadline. The decision-time
     # deadline gate (F12 / #274) refuses an overdue row on the approve path,
     # so a decision-flow test must seed a non-expired deadline; ``None`` (the
@@ -519,7 +523,7 @@ def test_detail_modal_renders_request_fields() -> None:
         tenant_id=_TENANT_A,
         op_id="vsphere.vm.create",
         connector_id="vsphere-1.x",
-        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3"},
+        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3", "safety_level": "caution"},
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
@@ -702,11 +706,27 @@ def test_detail_modal_approve_enabled_for_other_operator() -> None:
     assert "disabled" not in approve_button
 
 
+#: Words an own-change refusal never holds: it names who may approve and
+#: where to ask, and no setting or other way to approve the change.
+_OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS = (
+    "APPROVAL_ALLOW_SELF_APPROVAL",
+    "agent-requester",
+    "break-glass",
+    "re-park",
+)
+
+
+def _assert_names_only_who_may_approve(text: str) -> None:
+    """Assert *text* holds none of :data:`_OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS`."""
+    for word in _OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS:
+        assert word.lower() not in text.lower(), word
+
+
 def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     """When the reviewer IS the requester, Approve is disabled (Deny stays enabled).
 
-    The disabled button's aria-label names the ``APPROVAL_ALLOW_SELF_APPROVAL``
-    break-glass flag (#1401).
+    The disabled button's aria-label says who may approve and where to ask.
+    The page names no setting and no other way to approve the change.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer.
@@ -724,13 +744,11 @@ def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     approve_button = body.split('data-action="approve"')[1].split("</button>")[0]
     deny_button = body.split('data-action="reject"')[1].split("</button>")[0]
     assert "disabled" in approve_button
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_button
+    assert "Ask another person in MEHO-Operators" in approve_button
+    assert "Approvals page" in approve_button
     assert "disabled" not in deny_button
-    # #2669: the disabled button carries actionable single-operator guidance,
-    # not just a greyed-out control -- both patterns named + a docs deep link
-    # so a solo operator reaches an informed choice without reading source.
-    assert "agent-requester" in body
-    assert "guides/approvals-and-break-glass" in body
+    assert "You requested this" in body
+    _assert_names_only_who_may_approve(body)
 
 
 def test_detail_modal_unknown_id_is_404() -> None:
@@ -1142,10 +1160,9 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     """A forged self-approve (bypassing the disabled button) 403s; the row stays pending.
 
     The disabled Approve button is UX only; the BFF re-checks the
-    requester != approver invariant (#1401) via ``approve_request``. Rather
-    than a bare 403, the re-render carries the actionable single-operator
-    guidance -- both patterns named + a docs deep link (#2669) -- so the
-    solo operator reaches an informed choice in place.
+    requester != approver invariant via ``approve_request``. The
+    re-render says who may approve and where to ask, and names no setting
+    and no other way to approve the change.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer, break-glass OFF (default).
@@ -1170,12 +1187,9 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "cannot approve your own request" in body.lower()
-    # #2669: the rejected self-approval renders the guidance, not the bare
-    # error -- both single-operator patterns + the docs link, and the
-    # break-glass flag named as the emergency lever.
-    assert "agent-requester" in body
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in body
-    assert "guides/approvals-and-break-glass" in body
+    assert "Ask another person in MEHO-Operators" in body
+    assert "Approvals page" in body
+    _assert_names_only_who_may_approve(body)
     # The row is NOT approved, and nothing was re-dispatched.
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
@@ -2564,6 +2578,32 @@ def test_modal_names_a_classification_conflict() -> None:
     assert "tenant:classifications[0]" in conflict
 
 
+def test_modal_says_in_one_line_why_a_credential_call_waits() -> None:
+    from meho_backplane.operations.service_grants import CREDENTIAL_CARD_LINE
+
+    body = _render_modal(
+        {
+            "op_id": "k8s.exec",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "credential_wait": CREDENTIAL_CARD_LINE,
+        }
+    )
+    line = body.split('data-testid="approval-credential-wait">')[1].split("</p>")[0]
+    assert line == CREDENTIAL_CARD_LINE
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-credential-wait"' not in plain
+
+
 def test_modal_shows_no_classification_without_one() -> None:
     """A request made with the switch off has no classification block."""
     plain = _render_modal(
@@ -2571,6 +2611,37 @@ def test_modal_shows_no_classification_without_one() -> None:
     )
     assert 'data-testid="approval-classification"' not in plain
     assert 'title="Category"' not in plain
+
+
+def test_modal_says_meho_could_not_build_the_preview() -> None:
+    """A request whose preview build failed says so plainly on its card."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "op_class": "config_write",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
+    )
+    assert "MEHO could not build the preview of this change." in body
+    assert "data-preview-failed" in body
+    assert "No preview was populated" not in body
+
+
+def test_modal_with_a_preview_has_no_preview_failed_notice() -> None:
+    """A request with a built preview shows no preview-failed notice."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "safety_level": "caution",
+            "preview": {"would_change": ["app/web"]},
+            "preview_populated": True,
+        }
+    )
+    assert "MEHO could not build the preview" not in body
 
 
 def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:
@@ -2689,6 +2760,20 @@ def test_modal_pending_shows_consequence_banner_naming_safety_level() -> None:
     assert "re-file" in banner
 
 
+def test_modal_pending_says_a_second_person_is_a_second_login() -> None:
+    """A pending card tells the reader that a second person means a second login."""
+    body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})
+    assert 'data-testid="approval-second-login"' in body
+    assert "A second person means a second login." in body
+
+
+def test_modal_decided_row_has_no_second_login_line() -> None:
+    """A decided card offers no decision, so it does not carry the line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    body = _render_modal_of(_seed_withdrawn())
+    assert "approval-second-login" not in body
+
+
 def test_modal_consequence_banner_is_generic_warning_when_safety_absent() -> None:
     """AC1 (absent case): with no ``safety_level`` the banner is generic warning."""
     body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})
@@ -2729,7 +2814,7 @@ def test_modal_decisions_are_two_phase_armers_not_direct_posts() -> None:
 
 def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
     """AC3: the armed confirm buttons post to the existing approve/reject routes;
-    the ``/ui/approvals`` route inventory gains no new endpoint."""
+    the ``/ui/approvals`` route inventory gains no new endpoint for the confirm."""
     body, rid = _render_pending_modal()
     assert f'hx-post="/ui/approvals/{rid}/approve"' in body
     assert f'hx-post="/ui/approvals/{rid}/reject"' in body
@@ -2749,6 +2834,8 @@ def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
         ("/ui/approvals/list", frozenset({"GET"})),
         ("/ui/approvals", frozenset({"GET"})),
         ("/ui/approvals/{request_id}", frozenset({"GET"})),
+        # The script block's page links of a long ``linux.script.run`` script.
+        ("/ui/approvals/{request_id}/script", frozenset({"GET"})),
         ("/ui/approvals/{request_id}/approve", frozenset({"POST"})),
         ("/ui/approvals/{request_id}/reject", frozenset({"POST"})),
     }
@@ -2761,7 +2848,8 @@ def test_modal_self_approval_blocks_approve_armer_and_confirm_state() -> None:
 
     approve_armer = _opening_tag(body, 'data-action="approve"')
     assert "disabled" in approve_armer
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_armer
+    assert "Approvals page" in approve_armer
+    _assert_names_only_who_may_approve(body)
     # A blocked Approve never arms: no click-to-arm handler on it, and the
     # approve confirm state is not rendered at all.
     assert "armed = 'approve'" not in body

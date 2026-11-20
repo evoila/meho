@@ -554,3 +554,151 @@ async def test_request_without_params_fails_with_a_reason_and_can_run_again(
     )
     assert outcome.result.status == "ok"
     assert fake_dispatch.calls[0]["params"] == _PLAIN_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# k8s.apply: the manifest of a Secret
+# ---------------------------------------------------------------------------
+
+_K8S_OP_ID = "k8s.apply"
+_K8S_CONNECTOR_ID = "kubernetes-1.x"
+_SECRET_VALUE = "made-up-secret-value-91"
+_SECRET_MANIFEST_PARAMS: dict[str, Any] = {
+    "manifest": (
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata: {name: web-settings, namespace: apps}\n"
+        "data: {mode: fast}\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata: {name: db-login, namespace: apps}\n"
+        f"data: {{token: {_SECRET_VALUE}}}\n"
+        f"stringData: {{login: {_SECRET_VALUE}}}\n"
+    ),
+    "dry_run": "none",
+}
+_CONFIG_MAP_PARAMS: dict[str, Any] = {
+    "manifest": (
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata: {name: web-settings, namespace: apps}\n"
+        "data: {mode: fast}\n"
+    ),
+}
+
+
+@pytest.fixture
+def k8s_rules() -> None:
+    """The rules the Kubernetes connector declares for its operations."""
+    import meho_backplane.connectors.kubernetes.op_classes  # noqa: F401
+
+
+async def _park_apply(params: dict[str, Any], **kwargs: Any) -> uuid.UUID:
+    return await _park(params, connector_id=_K8S_CONNECTOR_ID, op_id=_K8S_OP_ID, **kwargs)
+
+
+def _assert_no_secret_value(params: dict[str, Any] | None) -> None:
+    assert params is not None
+    assert _SECRET_VALUE not in json.dumps(params)
+    assert params == {"manifest": _MARKER, "dry_run": "none"}
+
+
+@pytest.mark.asyncio
+async def test_waiting_apply_of_a_secret_keeps_the_manifest_its_run_needs(
+    k8s_rules: None,
+) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS)
+
+    assert await _stored_params(request_id) == _SECRET_MANIFEST_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_apply_of_a_secret_keeps_no_secret_value_after_the_claim(k8s_rules: None) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS, approved=True)
+
+    assert await claim_resume(request_id) is True
+
+    _assert_no_secret_value(await _stored_params(request_id))
+
+
+@pytest.mark.asyncio
+async def test_apply_of_a_secret_runs_with_the_manifest_and_keeps_no_value(
+    k8s_rules: None, fake_dispatch: _FakeDispatch
+) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS, approved=True)
+
+    result = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+
+    assert result.status == "ok"
+    assert fake_dispatch.calls[0]["params"] == _SECRET_MANIFEST_PARAMS
+    _assert_no_secret_value(await _stored_params(request_id))
+
+
+@pytest.mark.asyncio
+async def test_rejected_apply_of_a_secret_keeps_no_secret_value(k8s_rules: None) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS)
+
+    async with get_sessionmaker()() as s:
+        await reject_request(s, request_id, operator=_reviewer(), reason="wrong manifest")
+        await s.commit()
+
+    _assert_no_secret_value(await _stored_params(request_id))
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_apply_of_a_secret_keeps_no_secret_value(k8s_rules: None) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS)
+
+    async with get_sessionmaker()() as s:
+        await withdraw_request(s, request_id, operator=_requester(), reason="plan changed")
+        await s.commit()
+
+    _assert_no_secret_value(await _stored_params(request_id))
+
+
+@pytest.mark.asyncio
+async def test_expired_apply_of_a_secret_keeps_no_secret_value(k8s_rules: None) -> None:
+    request_id = await _park_apply(
+        _SECRET_MANIFEST_PARAMS, expires_at=datetime.now(UTC) - timedelta(minutes=1)
+    )
+
+    async with get_sessionmaker()() as s:
+        expired = await expire_stale_requests(s, operator=expiry_operator(_TENANT_ID))
+        await s.commit()
+
+    assert [r.id for r in expired] == [request_id]
+    _assert_no_secret_value(await _stored_params(request_id))
+
+
+@pytest.mark.asyncio
+async def test_rerun_of_an_apply_of_a_secret_needs_the_params_again(
+    k8s_rules: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDispatch(status="error")
+    monkeypatch.setattr(dispatcher_module, "dispatch", fake)
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS, approved=True)
+    first = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+    assert first.status == "error"
+
+    with pytest.raises(RerunParamsRequiredError):
+        await rerun_failed_request(operator=_requester(), request_id=request_id)
+    assert len(fake.calls) == 1, "nothing ran with the hidden manifest"
+
+
+@pytest.mark.asyncio
+async def test_apply_of_other_kinds_keeps_its_manifest(
+    k8s_rules: None, fake_dispatch: _FakeDispatch
+) -> None:
+    request_id = await _park_apply(_CONFIG_MAP_PARAMS, approved=True)
+
+    result = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+
+    assert result.status == "ok"
+    assert await _stored_params(request_id) == _CONFIG_MAP_PARAMS

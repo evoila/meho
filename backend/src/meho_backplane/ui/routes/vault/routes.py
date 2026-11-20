@@ -130,7 +130,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import (
+    effective_tenant_scope_template,
+    rendered_tenant_prefix,
+)
 from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
@@ -252,10 +255,10 @@ def _default_path(operator: Operator) -> str:
     its mount segment stripped, since the mount is a separate field), so a
     first browse lands inside the guard's namespace and never trips it.
 
-    When the guard is disabled (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) there
-    is no tenant partition to default into, so the path is left blank.
+    When the guard is disabled for the operator there is no tenant
+    partition to default into, so the path is left blank.
     """
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    template = effective_tenant_scope_template(operator)
     if not template:
         return ""
     rendered = rendered_tenant_prefix(operator, template=template).strip().strip("/")

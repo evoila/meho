@@ -60,15 +60,13 @@ _REALM_FILE = (
 _ROLE_GROUPS = {
     "MEHO-Readers",
     "MEHO-Operators",
-    "MEHO-SA-Operators",
     "MEHO-Admins",
-    "MEHO-Approvers",
 }
 _ALNUM_32 = re.compile(r"^[A-Za-z0-9]{32}$")
 _TENANT = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 _CI_TENANT = "9a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d"
 _LAB_B = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
-_ROLES = ("Readers", "Operators", "SA-Operators", "Admins", "Approvers")
+_ROLES = ("Readers", "Operators", "Admins")
 
 _ENV = {
     BOOTSTRAP_ID_ENV: "boot-client",
@@ -89,7 +87,6 @@ def _plan(realm_file: Path, **overrides: Any) -> Plan:
             "realm_file": str(realm_file),
             "first_login_secret": "rel-core-first-login",
             "admin_username": "admin",
-            "approver_username": "approver",
             "console_admin_secret": "rel-core-console-admin",
             "console_admin_username": "console-admin",
             **overrides,
@@ -615,16 +612,9 @@ async def test_fresh_install_makes_people_sets_secrets_and_removes_the_first_sta
     await finish_realm(_plan(realm_file), _ENV, kc, store)
 
     secret = store.secrets["rel-core-first-login"]
-    assert set(secret) == {
-        "admin_username",
-        "admin_password",
-        "approver_username",
-        "approver_password",
-    }
-    assert (secret["admin_username"], secret["approver_username"]) == ("admin", "approver")
+    assert set(secret) == {"admin_username", "admin_password"}
+    assert secret["admin_username"] == "admin"
     assert _ALNUM_32.match(secret["admin_password"])
-    assert _ALNUM_32.match(secret["approver_password"])
-    assert secret["admin_password"] != secret["approver_password"]
 
     admin = kc.users["admin"]
     assert admin["enabled"] is True
@@ -633,11 +623,7 @@ async def test_fresh_install_makes_people_sets_secrets_and_removes_the_first_sta
     ]
     assert admin["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
     assert admin["groups"] == ["MEHO-Admins", "MEHO-Platform-Admins"]
-    approver = kc.users["approver"]
-    assert approver["credentials"][0]["value"] == secret["approver_password"]
-    assert approver["credentials"][0]["temporary"] is True
-    assert approver["groups"] == ["MEHO-SA-Operators"]
-    assert approver["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
+    assert set(kc.users) == {"admin"}, "one person login, and no approver login"
 
     assert kc.clients["meho-admin"]["secret"] == _ENV[ADMIN_SECRET_ENV]
     assert kc.clients["meho-web"]["secret"] == _ENV["MEHO_REALM_WEB_CLIENT_SECRET"]
@@ -650,7 +636,7 @@ async def test_fresh_install_makes_people_sets_secrets_and_removes_the_first_sta
     assert "login: first-start account" in out
     assert "secret rel-core-first-login: created" in out
     assert "user admin: created (in MEHO-Admins, MEHO-Platform-Admins)" in out
-    assert "user approver: created (in MEHO-SA-Operators)" in out
+    assert "approver" not in out
     assert "first-start account: removed" in out
 
 
@@ -658,8 +644,7 @@ async def test_each_person_is_in_exactly_one_role_group(realm_file: Path) -> Non
     kc = _fresh()
     await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
 
-    for name in ("admin", "approver"):
-        assert len(_ROLE_GROUPS & set(kc.users[name]["groups"])) == 1, name
+    assert len(_ROLE_GROUPS & set(kc.users["admin"]["groups"])) == 1
     assert "console-admin" not in kc.users, "the console admin is not a user of realm meho"
     assert set(kc.groups) > _ROLE_GROUPS
     assert set(kc.groups["MEHO-Platform-Admins"]["attributes"]) == {"platform_admin"}
@@ -706,7 +691,6 @@ async def test_upgrade_adds_what_a_newer_realm_file_brings(
     kc.import_realm(old)
     kept_mapper_ids = {m["name"]: m["id"] for m in kc.clients["meho-mcp"]["protocolMappers"]}
     kc.users["admin"] = {"id": "u1", "username": "admin", "groups": ["MEHO-Admins"]}
-    kc.users["approver"] = {"id": "u2", "username": "approver", "groups": ["MEHO-SA-Operators"]}
 
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
 
@@ -848,7 +832,6 @@ async def test_an_existing_local_account_keeps_its_required_actions(realm_file: 
     await finish_realm(_plan(realm_file), _ENV, kc, FakeStore())
 
     assert kc.users["admin"]["requiredActions"] == []
-    assert kc.users["approver"]["requiredActions"] == ["UPDATE_PASSWORD", "CONFIGURE_TOTP"]
 
 
 _APPROVAL_FLOW = "meho approval sign-in level"
@@ -888,15 +871,18 @@ def _without_flows(realm: dict[str, Any]) -> dict[str, Any]:
     """*realm* as a realm made before the file had login flows: no flow binds a client."""
     del realm["authenticationFlows"]
     del realm["authenticatorConfig"]
-    web = next(c for c in realm["clients"] if c["clientId"] == "meho-web")
-    del web["authenticationFlowBindingOverrides"]
+    for client in realm["clients"]:
+        if client["clientId"] in ("meho-web", "meho-web-approve"):
+            del client["authenticationFlowBindingOverrides"]
     return realm
 
 
 def _realm_before_the_approval_flow() -> dict[str, Any]:
     old = _without_flows(_realm_as_imported())
     del old["attributes"]["acr.loa.map"]
-    old["clients"] = [c for c in old["clients"] if c["clientId"] != "meho-cli-approve"]
+    old["clients"] = [
+        c for c in old["clients"] if c["clientId"] not in ("meho-cli-approve", "meho-web-approve")
+    ]
     return old
 
 
@@ -931,6 +917,13 @@ async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFix
     assert f"login flow {_APPROVAL_FLOW}: created" in out
     assert "sign-in levels: set (meho-approve)" in out
     assert "client meho-cli-approve: created" in out
+    # The console's approval client comes with it, bound to the same flow (#6282).
+    console = kc.clients["meho-web-approve"]
+    assert console["publicClient"] is False
+    assert console["authenticationFlowBindingOverrides"] == {
+        "browser": kc.flows[_APPROVAL_FLOW]["id"]
+    }
+    assert "client meho-web-approve: created" in out
 
 
 async def test_upgrade_adds_the_clients_of_the_ai_tools(capfd: pytest.CaptureFixture[str]) -> None:
@@ -1511,7 +1504,7 @@ async def test_output_never_contains_a_secret_value(
     values = [v for k, v in _ENV.items() if "SECRET" in k]
     values += [v for data in store.secrets.values() for k, v in data.items() if "password" in k]
     values += [store.secrets["rel-core-ci-login"]["client_secret"]]
-    assert len(values) == 8
+    assert len(values) == 7
     for value in values:
         assert value not in output
     assert "\n" in output
@@ -1550,15 +1543,10 @@ async def test_first_start_account_stays_when_meho_admin_cannot_log_in(
     assert "admin" in kc.users, "the realm work before the swap is done"
 
 
-async def test_existing_first_login_secret_is_the_source_for_missing_people(
+async def test_existing_first_login_secret_is_the_source_for_the_missing_person(
     realm_file: Path,
 ) -> None:
-    stored = {
-        "admin_username": "root-person",
-        "admin_password": "P" * 32,
-        "approver_username": "second",
-        "approver_password": "Q" * 32,
-    }
+    stored = {"admin_username": "root-person", "admin_password": "P" * 32}
     store = FakeStore(existing={"rel-core-first-login": stored})
     kc = _fresh()
 
@@ -1566,11 +1554,41 @@ async def test_existing_first_login_secret_is_the_source_for_missing_people(
 
     assert store.created == ["rel-core-console-admin"]
     assert store.secrets["rel-core-first-login"] == stored
-    assert set(kc.users) == {"root-person", "second"}
+    assert set(kc.users) == {"root-person"}
     assert kc.users["root-person"]["credentials"][0]["value"] == "P" * 32
 
 
-async def test_a_failed_create_leaves_no_half_made_person_and_the_next_run_makes_both(
+async def test_an_existing_approver_login_and_its_secret_keys_are_left_as_they_are(
+    realm_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    stored = {
+        "admin_username": "admin",
+        "admin_password": "P" * 32,
+        "approver_username": "approver",
+        "approver_password": "Q" * 32,
+    }
+    store = FakeStore(existing={"rel-core-first-login": stored})
+    kc = _fresh()
+    kc.groups["MEHO-SA-Operators"] = {"id": "g-sa", "name": "MEHO-SA-Operators", "attributes": {}}
+    kc.users["approver"] = {
+        "id": "u2",
+        "username": "approver",
+        "groups": ["MEHO-SA-Operators"],
+        "requiredActions": [],
+    }
+    before = copy.deepcopy(kc.users["approver"])
+
+    await finish_realm(_plan(realm_file), _ENV, kc, store)
+
+    assert kc.users["approver"] == before
+    assert kc.groups["MEHO-SA-Operators"]["attributes"] == {}
+    assert store.secrets["rel-core-first-login"] == stored
+    assert set(kc.users) == {"admin", "approver"}
+    assert not [c for c in kc.calls if c[0] == "DELETE" and "/users/" in c[1]]
+    assert "approver" not in capfd.readouterr().out
+
+
+async def test_a_failed_create_leaves_no_half_made_person_and_the_next_run_makes_it(
     realm_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """A person and their groups are one request: a failure makes neither."""
@@ -1589,13 +1607,11 @@ async def test_a_failed_create_leaves_no_half_made_person_and_the_next_run_makes
     await finish_realm(plan, _ENV, kc, store)
 
     assert kc.users["admin"]["groups"] == ["MEHO-Admins", "MEHO-Platform-Admins"]
-    assert kc.users["approver"]["groups"] == ["MEHO-SA-Operators"]
     assert kc.users["admin"]["credentials"][0]["value"] == stored["admin_password"]
     assert store.secrets["rel-core-first-login"] == stored
     assert kc.master_clients == {}
     out = capfd.readouterr().out
     assert "user admin: created (in MEHO-Admins, MEHO-Platform-Admins)" in out
-    assert "user approver: created (in MEHO-SA-Operators)" in out
 
 
 async def test_a_missing_group_is_reported_before_the_person_is_made(tmp_path: Path) -> None:
@@ -1608,41 +1624,6 @@ async def test_a_missing_group_is_reported_before_the_person_is_made(tmp_path: P
 
     with pytest.raises(RealmStageError, match="group MEHO-Platform-Admins does not exist"):
         await finish_realm(_plan(older_file), _ENV, kc, FakeStore())
-    assert kc.users == {}
-
-
-@pytest.mark.parametrize(
-    ("admin", "approver"),
-    [("admin", "admin"), ("Admin", "admin"), ("admin", " admin ")],
-)
-async def test_two_names_for_the_same_keycloak_user_stop_the_stage_before_the_secret(
-    realm_file: Path, admin: str, approver: str
-) -> None:
-    kc = _fresh()
-    store = FakeStore()
-    plan = _plan(realm_file, admin_username=admin, approver_username=approver)
-
-    with pytest.raises(RealmStageError, match="two different people") as caught:
-        await finish_realm(plan, _ENV, kc, store)
-
-    assert "the chart names" in str(caught.value)
-    assert store.secrets == {}
-    assert kc.users == {}
-    assert "boot-client" in kc.master_clients
-
-
-async def test_a_first_login_secret_with_one_name_twice_stops_the_stage(realm_file: Path) -> None:
-    stored = {
-        "admin_username": "same",
-        "admin_password": "P" * 32,
-        "approver_username": "SAME",
-        "approver_password": "Q" * 32,
-    }
-    store = FakeStore(existing={"rel-core-first-login": stored})
-    kc = _fresh()
-
-    with pytest.raises(RealmStageError, match='Secret "rel-core-first-login" names'):
-        await finish_realm(_plan(realm_file), _ENV, kc, store)
     assert kc.users == {}
 
 
@@ -1783,7 +1764,7 @@ async def test_a_master_user_this_install_did_not_make_is_never_adopted(
     assert "boot-client" in kc.master_clients
 
 
-@pytest.mark.parametrize("field", ["admin_username", "approver_username", "console_admin_username"])
+@pytest.mark.parametrize("field", ["admin_username", "console_admin_username"])
 @pytest.mark.parametrize("name", ["service-account-meho-admin", " Service-Account-x"])
 async def test_a_service_account_name_stops_the_stage_before_any_change(
     realm_file: Path, field: str, name: str
@@ -1933,7 +1914,7 @@ def test_load_realm_file_errors_name_the_file(tmp_path: Path) -> None:
         ('{"keycloak_url": "u"}', "realm_file"),
         (
             '{"keycloak_url": "u", "realm_file": "f", "first_login_secret": "s", '
-            '"admin_username": "a", "approver_username": "b", "console_admin_secret": "k", '
+            '"admin_username": "a", "console_admin_secret": "k", '
             '"console_admin_username": "c", "extra": 1}',
             "extra",
         ),
@@ -1947,7 +1928,7 @@ def test_load_plan_rejects_a_bad_plan(raw: str, problem: str) -> None:
 # --- Several tenants (docs/decisions/2026-10-28-several-tenants-per-person.md)
 
 
-async def test_extra_tenant_gets_five_groups_with_only_meho_tenant(
+async def test_extra_tenant_gets_three_groups_with_only_meho_tenant(
     realm_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     kc = _fresh()
@@ -1959,6 +1940,11 @@ async def test_extra_tenant_gets_five_groups_with_only_meho_tenant(
     for role in _ROLES:
         group = kc.groups[f"MEHO-lab-b-{role}"]
         assert group["attributes"] == {"meho_tenant": [f"{_LAB_B}:lab-b:{role}"]}
+    assert sorted(name for name in kc.groups if name.startswith("MEHO-lab-b-")) == [
+        "MEHO-lab-b-Admins",
+        "MEHO-lab-b-Operators",
+        "MEHO-lab-b-Readers",
+    ]
     for user in kc.users.values():
         assert not [g for g in user["groups"] if g.startswith("MEHO-lab-b-")]
     assert "group MEHO-lab-b-Readers: created" in capfd.readouterr().out
@@ -2024,16 +2010,13 @@ async def test_one_tenant_install_gets_meho_tenant_on_its_groups(
     kc = FakeKeycloak(bootstrap=None)
     kc.import_realm(old)
     kc.users["admin"] = {"id": "u1", "username": "admin", "groups": ["MEHO-Admins"]}
-    kc.users["approver"] = {"id": "u2", "username": "approver", "groups": ["MEHO-SA-Operators"]}
 
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
 
     roles = {
         "MEHO-Readers": "Readers",
         "MEHO-Operators": "Operators",
-        "MEHO-SA-Operators": "SA-Operators",
         "MEHO-Admins": "Admins",
-        "MEHO-Approvers": "Approvers",
     }
     for name, role in roles.items():
         attributes = kc.groups[name]["attributes"]

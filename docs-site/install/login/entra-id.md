@@ -12,7 +12,7 @@ the same values in more detail.
 
 **Before you start:**
 
-- The realm is set up and the five MEHO groups exist. See
+- The realm is set up and the MEHO role groups exist. See
   [Company login](index.md).
 - You can create an app registration in Entra.
 - You know the address of your MEHO, for example
@@ -88,9 +88,7 @@ coreKeycloak:
     groupMap:                         # Entra group Object ID -> MEHO group
       "<object-id-of-readers>": MEHO-Readers
       "<object-id-of-operators>": MEHO-Operators
-      "<object-id-of-sa-operators>": MEHO-SA-Operators
       "<object-id-of-admins>": MEHO-Admins
-      "<object-id-of-approvers>": MEHO-Approvers
     autoRedirect: false               # true later: go straight to Entra
 ```
 

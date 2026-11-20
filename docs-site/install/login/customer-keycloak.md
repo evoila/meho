@@ -14,7 +14,7 @@ front of it. To use your Keycloak in place of the built-in one
 
 | On your side (your Keycloak) | On MEHO's side (realm `meho`) |
 |---|---|
-| Your people and your user directory | The five MEHO groups |
+| Your people and your user directory | The three MEHO role groups |
 | Passwords, MFA, login checks | Tenant and role, from the MEHO group |
 | Which of your groups may use MEHO | The tokens that MEHO accepts |
 
@@ -29,7 +29,7 @@ explains the same values in more detail.
 
 **Before you start:**
 
-- The realm is set up and the five MEHO groups exist. See
+- The realm is set up and the MEHO role groups exist. See
   [Company login](index.md).
 - You are an admin in your Keycloak.
 - You know the address of your MEHO, for example
@@ -85,9 +85,7 @@ for example:
 |---|---|
 | `meho-readers` | `MEHO-Readers` |
 | `meho-operators` | `MEHO-Operators` |
-| `meho-sa-operators` | `MEHO-SA-Operators` |
 | `meho-admins` | `MEHO-Admins` |
-| `meho-approvers` | `MEHO-Approvers` |
 
 Put each person who may use MEHO in **one** of them. People in none of
 them cannot use MEHO.
@@ -129,9 +127,7 @@ coreKeycloak:
     groupMap:                         # your group -> MEHO group
       meho-readers: MEHO-Readers
       meho-operators: MEHO-Operators
-      meho-sa-operators: MEHO-SA-Operators
       meho-admins: MEHO-Admins
-      meho-approvers: MEHO-Approvers
     autoRedirect: false               # true later: go straight to your Keycloak
 ```
 

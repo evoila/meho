@@ -468,12 +468,12 @@ async def submit_toggle(
     ``identity_ref`` (and so skips the identity-ref re-validation the
     service applies only when that field is set).
     """
-    del operator  # gate only.
     service = AgentDefinitionService()
     entry = await service.update(
         session_ctx.tenant_id,
         name,
         AgentDefinitionUpdate(enabled=enabled),
+        updated_by_sub=operator.sub,
     )
     if entry is None:
         from fastapi import HTTPException

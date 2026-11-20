@@ -321,7 +321,7 @@ async def test_a_request_shows_the_groups_the_approve_check_uses(
         assert approvers == {"groups": ["MEHO-Admins"], "rule": "tenant:routing[0]", "floor": None}
     else:
         assert approvers == {
-            "groups": ["MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers"],
+            "groups": ["MEHO-Operators", "MEHO-Admins"],
             "rule": "default",
             "floor": None,
         }

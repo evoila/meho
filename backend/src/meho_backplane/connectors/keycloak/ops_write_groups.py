@@ -278,6 +278,14 @@ async def keycloak_group_update_attributes(
         },
         operator,
     )
+    # Imported late: the group guard imports this module.
+    from meho_backplane.connectors.keycloak.ops_group_meho_access_guard import (
+        refuse_group_meho_access_loss,
+    )
+
+    await refuse_group_meho_access_loss(
+        self, operator, target, group_id, op_id="keycloak.group.update_attributes", params=params
+    )
     attributes = _normalise_attributes(params.get("attributes"))
     replace = bool(params.get("replace", False))
     current = await self._get_admin_json(

@@ -47,6 +47,9 @@ The rules:
 * **Credential read.** An operation that shows a secret value
   (:mod:`meho_backplane.operations.credential_read`) is at least
   ``caution`` and waits for approval. No override removes this.
+* **Credential write or mint.** An operation that writes or makes a
+  credential (class ``credential_write`` or ``credential_mint``) keeps the
+  approval its code turns on. No override removes it.
 
 * **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
   operation also gets a category, labels and the rule that set them, and
@@ -75,14 +78,21 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.op_classes import is_credential_capable
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.grant_approval import is_rights_change_op
+from meho_backplane.operations.switch_params import (
+    checked_parameter_schema,
+    visible_llm_instructions,
+    visible_parameter_schema,
+)
 from meho_backplane.policy.classification import Classification
 from meho_backplane.policy.store import (
     InvalidStoredPolicyError,
@@ -101,7 +111,7 @@ __all__ = [
     "PolicyEditResult",
     "apply_effective_policy",
     "apply_policy_edit",
-    "apply_step_classification",
+    "apply_step_policy",
     "approval_classification",
     "effective_policy",
     "effective_policy_map",
@@ -121,6 +131,12 @@ SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "
 #: switch is off, so those answers stay exactly as they were.
 CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
 
+#: The classes of an operation that writes or makes a credential. When the
+#: code turns approval on for such an operation, no override turns it off.
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_write", "credential_mint"}
+)
+
 
 def hidden_classification_fields() -> set[str]:
     """The fields to leave out of an answer: all of them while the switch is off."""
@@ -132,7 +148,7 @@ def approval_classification(row: EndpointDescriptor) -> dict[str, Any]:
 
     ``category``, ``labels`` and ``classification_rule`` (the entry that
     set them) of *row*, as :func:`apply_effective_policy` or
-    :func:`apply_step_classification` set them. ``category`` is ``None``
+    :func:`apply_step_policy` set them. ``category`` is ``None``
     when two entries conflict. A classified row always has a rule; a row
     has none when the switch was off at lookup, so this reads no setting.
     """
@@ -398,19 +414,29 @@ def policy_in_force(
 
 
 def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectivePolicy:
-    """Raise *policy* for a credential read, a caller-address parameter and a change of rights.
+    """Raise *policy* for a credential call, a caller-address parameter and a change of rights.
 
     A change of rights (an operation registered with
     :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`
     or :func:`~meho_backplane.operations.grant_approval.register_grant_op`)
     always waits for approval, also when an older override turned it off.
+    An operation that writes or makes a credential keeps the approval its
+    code turns on, also when an install or tenant override turns it off. So
+    does an operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable`.
     """
+    stored_op_class = getattr(row, "op_class", None)
     safety_level, requires_approval = raise_for_credential_read(
         row.op_id,
         safety_level=policy.safety_level,
         requires_approval=policy.requires_approval,
-        stored_op_class=getattr(row, "op_class", None),
+        stored_op_class=stored_op_class,
     )
+    if row.requires_approval and (
+        is_credential_capable(row.op_id)
+        or resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
+    ):
+        requires_approval = True
     safety_level, requires_approval = raise_for_caller_address(
         row.parameter_schema,
         safety_level=safety_level,
@@ -438,6 +464,10 @@ async def apply_effective_policy(
     ``policy_labels`` and ``policy_rule_ref`` (not columns either) get the
     classification, so approver routing can match the category and the
     call contract and the approval request can show it.
+    ``row.parameter_schema`` gets the shown schema and
+    ``row.parameter_check_schema`` (not a column) the schema a call is
+    checked against, and ``row.llm_instructions`` loses the examples and
+    hints that name a hidden parameter (``operations/switch_params.py``).
     """
     policies = await effective_policy_map(
         session, tenant_id=tenant_id, rows=[row], group_keys=group_keys
@@ -446,31 +476,54 @@ async def apply_effective_policy(
     session.expunge(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
+    row.parameter_check_schema = checked_parameter_schema(row.parameter_schema)
+    row.llm_instructions = visible_llm_instructions(row.llm_instructions, row.parameter_schema)
+    row.parameter_schema = visible_parameter_schema(row.parameter_schema)
     _set_classification(row, policy)
     return row
 
 
-async def apply_step_classification(
+async def apply_step_policy(
     *, tenant_id: UUID | None, step: EndpointDescriptor
 ) -> EndpointDescriptor:
-    """Apply the classification to *step*, the in-memory row of a composite step.
+    """Apply the override rows and the classification to *step*.
 
-    A multi-step operation checks each write step against a row built from
-    the step's declared risk level and approval flag. This raises them the
-    same way :func:`_with_classification` does for a stored row, and sets
-    ``step.policy_always_wait``, so no standing grant and no approval of
-    the run clears an "always wait" step. With the
-    ``POLICY_CLASSIFICATION`` switch off, *step* is returned unchanged and
-    no database session is opened.
+    *step* is the in-memory row of a write step of a multi-step operation,
+    built from the step's declared risk level and approval flag. The step
+    gate and the step preview both call this, so they give the same answer.
+
+    The override rows of the step's operation (install-wide plus the
+    tenant's, :func:`load_overrides`) apply like for a direct call
+    (:func:`effective_policy`): the highest risk level wins, and an
+    override that sets the approval flag makes the step wait. They only
+    make a step stricter: an override that turns approval off leaves the
+    step's own approval flag as it is. This holds with every policy switch.
+
+    With the ``POLICY_CLASSIFICATION`` switch on, the classification then
+    raises the level or adds a wait the same way :func:`_with_classification`
+    does for a stored row, and sets ``step.policy_always_wait``, so no
+    standing grant and no approval of the run clears an "always wait"
+    step. The category and labels of an override row count too, so the
+    step's approval request is routed like a direct call's.
     """
-    if not classification_enabled():
-        return step
+    key = OpKey.of(step)
     async with get_sessionmaker()() as session:
-        classified = await classify_step(session, tenant_id=tenant_id, step=step)
-    policy = _with_classification(
-        EffectivePolicy(safety_level=step.safety_level, requires_approval=step.requires_approval),
-        classified,
+        overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(key, [])
+        classified = (
+            await classify_step(session, tenant_id=tenant_id, step=step, overrides=overrides)
+            if classification_enabled()
+            else None
+        )
+    policy = EffectivePolicy(
+        safety_level=step.safety_level, requires_approval=step.requires_approval
     )
+    if overrides:
+        raised = effective_policy(step.safety_level, step.requires_approval, overrides)
+        policy = replace(
+            raised, requires_approval=step.requires_approval or raised.requires_approval
+        )
+    if classified is not None:
+        policy = _with_classification(policy, classified)
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval
     _set_classification(step, policy)

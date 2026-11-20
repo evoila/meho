@@ -18,7 +18,8 @@ What is proven, for each op:
   says so in one line; a 403 at the run stops with a text that names the
   roles;
 * an account with the roles waits for approval as before; the card lists
-  the roles;
+  the roles. Before the wait MEHO only reads (the card shows the flow that
+  is bound now), it never writes;
 * the admin token never reaches the card or the result;
 * the card and the check of one request share one read of the roles;
 * after a refusal, MEHO drops the admin token it keeps;
@@ -187,6 +188,15 @@ def _mount(mock: respx.MockRouter, token: str, *, admin_status: int = 403) -> re
     )
 
 
+def _admin_writes(admin: respx.Route) -> list[str]:
+    """The Admin REST API calls that are not reads.
+
+    Before the wait, MEHO only reads: the approval card reads the flow that
+    is bound now. Nothing is written before the approval.
+    """
+    return [str(call.request.url) for call in admin.calls if call.request.method != "GET"]
+
+
 async def _dispatch(op_id: str, *, approved: bool = False) -> dict[str, Any]:
     async with get_sessionmaker()() as session:
         target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
@@ -243,7 +253,7 @@ async def test_account_without_manage_realm_is_refused_before_any_approval_reque
     assert _ACCOUNT in result["error"]
     assert "vault" not in result["error"].lower()
     assert await _approval_count() == 0
-    assert admin.call_count == 0
+    assert _admin_writes(admin) == []
     assert token not in json.dumps(result)
     assert "try again after that" in result["error"]
     # The kept admin token is dropped, so the next call signs in again.
@@ -261,7 +271,7 @@ async def test_client_op_without_manage_clients_still_waits(
         result = await _dispatch(op_id)
 
     assert result["status"] == "awaiting_approval", result
-    assert admin.call_count == 0
+    assert _admin_writes(admin) == []
     effect = await _effect(result)
     preflight = effect["permission_preflight"]
     assert preflight["will_be_denied"] is False
@@ -307,7 +317,7 @@ async def test_unreadable_roles_wait_for_approval_and_the_card_says_so(
         result = await _dispatch(op_id)
 
     assert result["status"] == "awaiting_approval", result
-    assert admin.call_count == 0
+    assert _admin_writes(admin) == []
     effect = await _effect(result)
     card = effect["preview"]
     assert card["rights_check"] == NO_RIGHTS_CHECK
@@ -370,7 +380,7 @@ async def test_account_with_the_roles_waits_for_approval(kc: KeycloakConnector, 
         result = await _dispatch(op_id)
 
     assert result["status"] == "awaiting_approval", result
-    assert admin.call_count == 0
+    assert _admin_writes(admin) == []
     effect = await _effect(result)
     card = effect["preview"]
     assert card["roles_needed"] == _ROLES[op_id]
@@ -412,14 +422,15 @@ async def test_flow_op_card_names_the_client(kc: KeycloakConnector) -> None:
 
 
 async def test_wrong_password_makes_one_failed_sign_in(kc: KeycloakConnector) -> None:
-    # The card and the check share one read, so one sign-in, not two.
+    # The card and the check share one read, so one sign-in for both. The
+    # approver rule reads the realm name once more, with its own sign-in.
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         sign_in = mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
             401, json={"error": "invalid_client"}
         )
         result = await _dispatch(_FLOW_OP)
     assert result["status"] == "awaiting_approval", result
-    assert sign_in.call_count == 1
+    assert sign_in.call_count == 2
     assert (await _effect(result))["preview"]["rights_check"] == NO_RIGHTS_CHECK
 
 
@@ -492,7 +503,7 @@ async def test_refused_then_role_given_then_the_call_waits(
     assert "manage-realm" in refused["extras"]["reason"]
     assert waits["status"] == "awaiting_approval", waits
     assert sign_in.call_count == 2
-    assert admin.call_count == 0
+    assert _admin_writes(admin) == []
     assert await _approval_count() == 1
     preflight = (await _effect(waits))["permission_preflight"]
     assert preflight["will_be_denied"] is False

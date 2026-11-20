@@ -33,11 +33,13 @@ from sqlalchemy import select
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequestStatus, AuditEventClass, AuditLog
 from meho_backplane.main import app
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._errors import result_connector_auth_failed
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
@@ -553,6 +555,49 @@ async def test_request_that_did_not_fail_cannot_run_again(
 
     assert exc_info.value.state == state
     assert fake_dispatch.calls == []
+
+
+@pytest.mark.asyncio
+async def test_refusal_after_the_send_cannot_run_again_and_says_what_to_do(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    """A change refused after it was sent is stored as unknown; no re-run."""
+    http_exc = httpx.HTTPStatusError(
+        "401",
+        request=httpx.Request("POST", "https://target.test/api"),
+        response=httpx.Response(401, json={"message": "session ended"}),
+    )
+    stored = result_connector_auth_failed(
+        _OP_ID,
+        http_exc,
+        None,
+        1.0,
+        relogin="reestablished",
+        changes_target=True,
+    ).model_dump(mode="json")
+    request_id = await _park_failed(resume_result=stored)
+
+    with pytest.raises(RerunNotAllowedError) as exc_info:
+        await rerun_failed_request(operator=_operator(), request_id=request_id)
+
+    assert exc_info.value.state == "uncertain"
+    assert "A person must check the target first" in str(exc_info.value)
+    assert fake_dispatch.calls == []
+
+
+@pytest.mark.asyncio
+async def test_refused_sign_in_before_the_send_can_run_again(
+    fake_dispatch: _FakeDispatch,
+) -> None:
+    refused = ConnectorAuthError("login refused", status_code=401, cause="session_establish_401")
+    stored = result_connector_auth_failed(
+        _OP_ID, refused, None, 1.0, changes_target=True
+    ).model_dump(mode="json")
+    request_id = await _park_failed(resume_result=stored)
+
+    await rerun_failed_request(operator=_operator(), request_id=request_id)
+
+    assert len(fake_dispatch.calls) == 1
 
 
 @pytest.mark.asyncio

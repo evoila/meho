@@ -235,6 +235,23 @@ func (c *AuthedClient) GetLiveness(ctx context.Context) (*LivenessApiV1HealthLiv
 	return c.LivenessApiV1HealthLiveGetWithResponse(ctx, nil)
 }
 
+// GetFirstStart calls GET /api/v1/first-start, the first-start list of
+// the signed-in person, with the same one-shot refresh on a 401 as
+// GetHealth.
+func (c *AuthedClient) GetFirstStart(ctx context.Context) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	resp, err := c.FirstStartSignedInApiV1FirstStartGetWithResponse(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() != 401 { // 401: the login was refused, so refresh once below
+		return resp, nil
+	}
+	if rerr := c.box.refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return c.FirstStartSignedInApiV1FirstStartGetWithResponse(ctx, nil)
+}
+
 // IsTokenNotFound reports whether err is the "operator never ran
 // meho login" sentinel. Exposed as a helper because the underlying
 // auth package is intentionally not imported by cobra command

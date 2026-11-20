@@ -10,14 +10,36 @@
 * A script with hidden values or a cut text says so; a preview without a
   text says why; a preview without script fields shows no script block.
 * Script text is escaped as HTML.
+* A script of more than one page shows "page N of M", and while the request
+  waits, "previous page" and "next page" links; the page route gives the page.
 """
 
 from __future__ import annotations
 
-from meho_backplane.connectors.linux.script_preview import SCRIPT_CHECK_MISMATCH
+import asyncio
+import uuid
+from unittest.mock import AsyncMock, patch
+
+import respx
+
+from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors.linux.script_preview import (
+    SCRIPT_CHECK_MISMATCH,
+    SCRIPT_SHOWN_MAX_BYTES,
+    script_preview_fields,
+)
 from tests.test_ui_approvals import (
+    _RESOLVE_OPERATOR,
+    _REVIEWER_SUB,
+    _TENANT_A,
+    _authenticated_client,
     _bff_env,  # noqa: F401 -- autouse fixture: pins the BFF env for these tests
+    _operator,
     _render_modal,
+    _render_modal_of,
+    _seed_request,
+    _seed_session_sync,
+    _seed_tenant,
 )
 
 _SCRIPT = "#!/bin/bash\nset -eu\nuname -a\n  df -h /\n"
@@ -154,3 +176,146 @@ def test_modal_without_script_fields_shows_no_script_block() -> None:
     )
     assert 'data-testid="approval-script"' not in body
     assert 'aria-label="Proposed effect fields"' in body
+
+
+def _text(size: int) -> str:
+    line = "echo " + "a" * 58 + "\n"
+    whole, rest = divmod(size, len(line))
+    return line * whole + "b" * rest
+
+
+def _seed_script_request(script: str, *, status_value: str = "pending") -> uuid.UUID:
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations.approval_handoff import store
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="linux.script.run",
+        connector_id="linux-ssh",
+        status_value=status_value,
+        proposed_effect=_effect(script_preview_fields({"script": script})),
+    )
+
+    async def _attach() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            row = await session.get(ApprovalRequest, rid)
+            assert row is not None
+            row.execution_handle = store(
+                session, rid, _TENANT_A, {"params": {"script": script}, "resume_parent": None}
+            )
+
+    asyncio.run(_attach())
+    return rid
+
+
+def test_modal_of_a_long_script_shows_page_one_of_two_with_a_next_link() -> None:
+    script = _text(SCRIPT_SHOWN_MAX_BYTES + 100)
+    rid = _seed_script_request(script)
+    block = _block(_render_modal_of(rid))
+    assert "page 1 of 2" in block
+    assert f"/ui/approvals/{rid}/script?page=2" in block
+    assert 'data-testid="approval-script-prev"' not in block
+    assert 'data-testid="approval-script-next"' in block
+
+
+def test_modal_of_a_decided_long_script_shows_no_page_links() -> None:
+    rid = _seed_script_request(_text(SCRIPT_SHOWN_MAX_BYTES + 100), status_value="approved")
+    block = _block(_render_modal_of(rid))
+    assert "page 1 of 2" in block
+    assert "/script?page=" not in block
+    assert 'data-testid="approval-script-truncated"' in block
+    assert "Only page 1 is shown." in block
+    assert "the other pages are no longer shown" in block
+
+
+def test_modal_of_a_one_page_script_shows_no_page_line() -> None:
+    block = _block(_render_modal_of(_seed_script_request(_SCRIPT)))
+    assert "approval-script-pages" not in block
+
+
+def _get_script_page(rid: uuid.UUID, page: int, **operator_args: object) -> object:
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, **operator_args)  # type: ignore[arg-type]
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            return client.get(f"/ui/approvals/{rid}/script?page={page}")
+
+
+def test_script_page_route_gives_the_last_page_with_a_previous_link() -> None:
+    script = _text(SCRIPT_SHOWN_MAX_BYTES) + "last-line\n"
+    rid = _seed_script_request(script)
+    response = _get_script_page(rid, 2)
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    text = response.text  # type: ignore[attr-defined]
+    assert "page 2 of 2" in text
+    assert "last-line" in text
+    assert "echo aaaa" not in text
+    assert f"/ui/approvals/{rid}/script?page=1" in text
+    assert 'data-testid="approval-script-next"' not in text
+    assert 'id="approval-script-block"' in text
+
+
+def test_script_page_route_after_the_decision_says_the_script_is_not_kept() -> None:
+    # A page link of a modal opened before the decision: the block is replaced
+    # by a plain sentence, with no page links, instead of showing nothing.
+    rid = _seed_script_request(_text(SCRIPT_SHOWN_MAX_BYTES + 100), status_value="rejected")
+    response = _get_script_page(rid, 2)
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    text = response.text  # type: ignore[attr-defined]
+    assert "MEHO no longer keeps this script" in text
+    assert 'id="approval-script-block"' in text
+    assert "/script?page=" not in text
+    assert "echo aaaa" not in text
+
+
+def test_script_page_route_of_a_script_that_cannot_be_decrypted_says_so() -> None:
+    from sqlalchemy import update
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
+
+    rid = _seed_script_request(_text(SCRIPT_SHOWN_MAX_BYTES + 100))
+
+    async def _spoil() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            await session.execute(
+                update(ApprovalExecutionPayload)
+                .where(ApprovalExecutionPayload.request_id == rid)
+                .values(ciphertext=b"not-a-fernet-token")
+            )
+
+    asyncio.run(_spoil())
+    response = _get_script_page(rid, 2)
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    assert "MEHO cannot read the stored script of this request" in response.text  # type: ignore[attr-defined]
+
+
+def test_modal_shows_control_and_format_characters_as_visible_marks() -> None:
+    # A right-to-left override, an escape code, a zero-width space and a NUL.
+    script = "echo safe\u202e;tpircs-live\nprintf '\x1b[2J'\u200b\x00\n\tindented\n"
+    body = _render_modal(_effect({"script": script, "script_bytes": len(script.encode("utf-8"))}))
+    shown = _block(body).split('data-testid="approval-script-body">')[1].split("</pre>")[0]
+    for raw in ("\u202e", "\x1b", "\u200b", "\x00"):
+        assert raw not in shown
+    assert "echo safe\\u202e;tpircs-live" in shown
+    assert "printf &#39;\\x1b[2J&#39;\\u200b\\x00" in shown
+    # A new line and a tab stay as they are.
+    assert "\n\tindented\n" in shown
+
+
+def test_script_page_route_refuses_a_page_that_does_not_exist() -> None:
+    rid = _seed_script_request(_SCRIPT)
+    assert _get_script_page(rid, 2).status_code == 404  # type: ignore[attr-defined]
+
+
+def test_script_page_route_is_not_open_to_a_person_who_may_not_read_the_request() -> None:
+    rid = _seed_script_request(_text(SCRIPT_SHOWN_MAX_BYTES + 100))
+    denied = _get_script_page(rid, 2, role=TenantRole.READ_ONLY)
+    assert denied.status_code == 403  # type: ignore[attr-defined]
+    assert "echo" not in denied.text  # type: ignore[attr-defined]
+    # A read-only person with the approver right may read it, like the request itself.
+    allowed = _get_script_page(rid, 2, role=TenantRole.READ_ONLY, approver=True)
+    assert allowed.status_code == 200  # type: ignore[attr-defined]

@@ -749,6 +749,34 @@ def test_target_wrong_type_returns_invalid_params(
     assert body["error"]["code"] == INVALID_PARAMS
 
 
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("field", "arguments"),
+    [
+        ("activity", {"activity": "working\x1b[2K\rdone\x07"}),
+        ("target", {"activity": "x", "target": "\x1b]0;title\x07"}),
+        ("targets[0]", {"activity": "x", "targets": ["cluster\x9b"]}),
+        ("scope", {"activity": "x", "scope": "a\nb"}),
+    ],
+)
+def test_control_characters_in_text_fields_return_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    field: str,
+    arguments: dict[str, Any],
+) -> None:
+    """The four text fields of an announcement hold no control character."""
+    client, _op = client_with_operator
+    resp = post_mcp(client, _tools_call("meho_broadcast_announce", arguments))
+    body = resp.json()
+    assert "error" in body
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert f"{field}: must not contain control characters" in body["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # Optional testcontainers integration suite
 # ---------------------------------------------------------------------------

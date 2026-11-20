@@ -31,14 +31,57 @@ type GroupSummary struct {
 	Name           string `json:"name"`
 	WhenToUse      string `json:"when_to_use"`
 	OperationCount int    `json:"operation_count"`
+	// Operations is a pointer so --json keeps the backplane's answer: no
+	// field while the switch is off, and `[]` for a group without typed
+	// operations while it is on.
+	Operations     *[]GroupOperation `json:"operations,omitempty"`
+	OperationsMore int               `json:"operations_more,omitempty"`
+}
+
+// GroupOperation is one typed or multi-step operation of a group. The
+// backplane sends the list only while its GROUP_LISTING_OPERATIONS switch
+// is on.
+type GroupOperation struct {
+	OpID             string  `json:"op_id"`
+	Summary          *string `json:"summary"`
+	SafetyLevel      string  `json:"safety_level"`
+	RequiresApproval bool    `json:"requires_approval"`
 }
 
 // GroupsResponse is the JSON envelope returned by
 // GET /api/v1/operations/groups. Hand-typed for the same reason as
 // GroupSummary above.
 type GroupsResponse struct {
-	ConnectorID string         `json:"connector_id"`
-	Groups      []GroupSummary `json:"groups"`
+	ConnectorID   string         `json:"connector_id"`
+	Groups        []GroupSummary `json:"groups"`
+	NextCursor    *string        `json:"next_cursor"`
+	RawOperations *RawOperations `json:"raw_operations,omitempty"`
+	Note          string         `json:"note,omitempty"`
+}
+
+// groupsQuery holds the optional query parameters of the groups call.
+type groupsQuery struct {
+	includeRaw bool
+	group      string
+	cursor     string
+}
+
+// RawOperations is the `raw_operations` part of a search or group
+// answer. The backplane sends it only while its SEARCH_TYPED_FIRST
+// switch is on: then raw operations (made from the vendor API
+// description) are hidden unless --include-raw is set.
+type RawOperations struct {
+	Included      bool    `json:"included"`
+	HiddenMatches int     `json:"hidden_matches,omitempty"`
+	HiddenGroups  int     `json:"hidden_groups,omitempty"`
+	Note          *string `json:"note"`
+}
+
+// printRawNote prints the note of raw_operations, when there is one.
+func printRawNote(w io.Writer, raw *RawOperations) {
+	if raw != nil && raw.Note != nil && *raw.Note != "" {
+		fmt.Fprintf(w, "note: %s\n", output.SafeText(*raw.Note))
+	}
 }
 
 // newGroupsCmd returns the `meho operation groups <connector_id>` command.
@@ -46,6 +89,9 @@ type GroupsResponse struct {
 // CLI shape (matches issue #481 spec):
 //
 //	meho operation groups <connector_id> \
+//	  [--include-raw]                         # also count raw operations
+//	  [--group <group_key>]                   # list one group only
+//	  [--cursor <group_key>]                  # the next page
 //	  [--json]                                # machine-readable output
 //	  [--backplane <url>]                     # override the backplane URL
 //
@@ -56,6 +102,7 @@ type GroupsResponse struct {
 //   - 4   unexpected response shape
 func newGroupsCmd() *cobra.Command {
 	var (
+		query             groupsQuery
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -72,9 +119,17 @@ func newGroupsCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runGroups(cmd, args[0], jsonOut, backplaneOverride)
+			return runGroups(cmd, args[0], query, jsonOut, backplaneOverride)
 		},
 	}
+	cmd.Flags().BoolVar(&query.includeRaw, "include-raw", false,
+		"also count raw operations made from the vendor API description "+
+			"(matters only while the backplane switch SEARCH_TYPED_FIRST is on)")
+	cmd.Flags().StringVar(&query.group, "group", "",
+		"list only this group (matters only while the backplane switch "+
+			"GROUP_LISTING_OPERATIONS is on)")
+	cmd.Flags().StringVar(&query.cursor, "cursor", "",
+		"the next_cursor of the previous page, to list the next page")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -82,7 +137,7 @@ func newGroupsCmd() *cobra.Command {
 	return cmd
 }
 
-func runGroups(cmd *cobra.Command, connectorID string, jsonOut bool, backplaneOverride string) error {
+func runGroups(cmd *cobra.Command, connectorID string, query groupsQuery, jsonOut bool, backplaneOverride string) error {
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
@@ -91,7 +146,7 @@ func runGroups(cmd *cobra.Command, connectorID string, jsonOut bool, backplaneOv
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	result, err := getGroups(cmd.Context(), client, connectorID)
+	result, err := getGroups(cmd.Context(), client, connectorID, query)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
@@ -107,9 +162,18 @@ func runGroups(cmd *cobra.Command, connectorID string, jsonOut bool, backplaneOv
 // (mirroring api.AuthedClient.GetHealth), and unmarshals the 200
 // body into the hand-typed GroupsResponse. Non-2xx outcomes wrap as
 // *apiResponseError for renderRequestError to classify.
-func getGroups(ctx context.Context, client operationsAPI, connectorID string) (*GroupsResponse, error) {
+func getGroups(ctx context.Context, client operationsAPI, connectorID string, query groupsQuery) (*GroupsResponse, error) {
 	params := &api.GetGroupsApiV1OperationsGroupsGetParams{
 		ConnectorId: connectorID,
+	}
+	if query.includeRaw {
+		params.IncludeRaw = &query.includeRaw
+	}
+	if query.group != "" {
+		params.Group = &query.group
+	}
+	if query.cursor != "" {
+		params.Cursor = &query.cursor
 	}
 	resp, err := client.GetGroupsApiV1OperationsGroupsGetWithResponse(ctx, params)
 	if err != nil {
@@ -140,19 +204,51 @@ func getGroups(ctx context.Context, client operationsAPI, connectorID string) (*
 // when_to_use is truncated to 80 chars; full text comes back via
 // --json.
 func printGroupsTable(w io.Writer, r *GroupsResponse) {
+	defer printRawNote(w, r.RawOperations)
+	if r.Note != "" {
+		defer fmt.Fprintf(w, "note: %s\n", output.SafeText(r.Note))
+	}
+	if r.NextCursor != nil && *r.NextCursor != "" {
+		defer fmt.Fprintf(w, "more groups: run again with --cursor %s\n", output.SafeText(*r.NextCursor))
+	}
 	if len(r.Groups) == 0 {
-		fmt.Fprintf(w, "%s — 0 enabled groups\n", r.ConnectorID)
+		fmt.Fprintf(w, "%s — 0 enabled groups\n", output.SafeText(r.ConnectorID))
 		return
 	}
-	fmt.Fprintf(w, "%s — %d enabled group(s)\n", r.ConnectorID, len(r.Groups))
+	fmt.Fprintf(w, "%s — %d enabled group(s)\n", output.SafeText(r.ConnectorID), len(r.Groups))
 	fmt.Fprintf(w, "%-24s %4s  %-30s %s\n", "group_key", "ops", "name", "when_to_use")
 	for _, g := range r.Groups {
 		fmt.Fprintf(w, "%-24s %4d  %-30s %s\n",
-			truncate(g.GroupKey, 24),
+			truncate(output.SafeText(g.GroupKey), 24),
 			g.OperationCount,
-			truncate(g.Name, 30),
-			truncate(g.WhenToUse, 80),
+			truncate(output.SafeText(g.Name), 30),
+			truncate(output.SafeText(g.WhenToUse), 80),
 		)
+		printGroupOperations(w, g)
+	}
+}
+
+// printGroupOperations prints the operation lines of one group, one per
+// line, under the group's row.
+func printGroupOperations(w io.Writer, g GroupSummary) {
+	var operations []GroupOperation
+	if g.Operations != nil {
+		operations = *g.Operations
+	}
+	for _, op := range operations {
+		approval := ""
+		if op.RequiresApproval {
+			approval = ", needs approval"
+		}
+		summary := ""
+		if op.Summary != nil {
+			summary = *op.Summary
+		}
+		fmt.Fprintf(w, "    %s (%s%s) %s\n",
+			output.SafeText(op.OpID), output.SafeText(op.SafetyLevel), approval, output.SafeText(summary))
+	}
+	if g.OperationsMore > 0 {
+		fmt.Fprintf(w, "    … %d more: use meho operation search with --group %s\n", g.OperationsMore, output.SafeText(g.GroupKey))
 	}
 }
 

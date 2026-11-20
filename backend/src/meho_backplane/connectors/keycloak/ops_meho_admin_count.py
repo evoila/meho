@@ -28,10 +28,13 @@ MEHO reads each value in two ways (:class:`Own`). The wide way takes an
 attribute named ``platform_admin`` or the name in
 ``JWT_PLATFORM_ADMIN_CLAIM_NAME``, in any letter case. The login way takes
 only the attribute that MEHO's login reads: ``platform_admin``, in exactly
-this letter case. A person is ``possible`` when one of the two ways says so,
-and ``sure`` only when both ways say so. So an attribute with another name
-or letter case can make a person a platform admin for the write, but never
-makes another person sure.
+this letter case, and takes its value as ``true`` only when it is ``true`` in
+any letter case with no white space around it. The wide way also takes a
+value with white space around it. A person is ``possible`` when one of the
+two ways says so, and ``sure`` only when both ways say so. So an attribute
+with another name or letter case, or a value with white space around it, can
+make a person a platform admin for the write, but never makes another person
+sure.
 
 MEHO finds the other platform admins through the groups whose value is
 ``true``. A person with the rights only from their own value is not looked
@@ -120,13 +123,23 @@ class Own(NamedTuple):
     login: bool | None
 
 
-def _value(attributes: dict[Any, Any], wanted: Callable[[Any], bool]) -> bool | None:
+def _wide_true(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().casefold() == "true"
+
+
+def _login_true(value: Any) -> bool:
+    return isinstance(value, str) and value.casefold() == "true"
+
+
+def _value(
+    attributes: dict[Any, Any], wanted: Callable[[Any], bool], is_true: Callable[[Any], bool]
+) -> bool | None:
     found: set[bool] = set()
     for key, value in attributes.items():
         if not wanted(key):
             continue
         values = value if isinstance(value, list) else [value]
-        found.update(isinstance(v, str) and v.strip().casefold() == "true" for v in values)
+        found.update(is_true(v) for v in values)
     if len(found) > 1:
         raise CannotCountError("a platform admin value that is both true and not true")
     return found.pop() if found else None
@@ -144,8 +157,12 @@ def own_values(rep: dict[str, Any]) -> Own:
 
     names = platform_flag_names()
     return Own(
-        _value(attributes, lambda key: isinstance(key, str) and key.strip().casefold() in names),
-        _value(attributes, lambda key: key == LOGIN_ATTRIBUTE),
+        _value(
+            attributes,
+            lambda key: isinstance(key, str) and key.strip().casefold() in names,
+            _wide_true,
+        ),
+        _value(attributes, lambda key: key == LOGIN_ATTRIBUTE, _login_true),
     )
 
 

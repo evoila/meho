@@ -11,7 +11,8 @@ Uses the mocked Keycloak of ``test_connectors_keycloak_meho_access_guard.py``
   the write is done;
 * a person counts only when MEHO's login gives them the rights: the user's
   own value, else the nearest group value up the parent chain; the name of a
-  group gives no rights;
+  group gives no rights, and a value with white space around ``true`` makes
+  no one another platform admin;
 * ``keycloak.group.delete`` and ``keycloak.group.update_attributes`` are
   refused before approval and when they run, when they take the rights of
   the last active platform admin, also when a group without a value gets
@@ -185,6 +186,26 @@ async def test_a_group_value_in_another_letter_case_makes_no_one_another_platfor
     assert written == []
 
 
+@pytest.mark.parametrize(
+    "value", [" true", "true ", " TRUE "], ids=["space-before", "space-after", "both"]
+)
+async def test_a_group_value_with_white_space_makes_no_one_another_platform_admin(
+    kc: KeycloakConnector,  # noqa: F811
+    value: str,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        api.group(_OTHER_ADMIN_GROUP, "white-space", None)
+        api.groups[_OTHER_ADMIN_GROUP]["attributes"] = {"platform_admin": [value]}
+        api.add(_user(_SECOND_ADMIN_UUID, "white-space-member"), _OTHER_ADMIN_GROUP)
+        call = await _call("keycloak.user.disable", {"id": _ADMIN_UUID})
+        result = await _run("keycloak.user.disable", {"id": _ADMIN_UUID})
+        written = _writes(mock)
+    _refused_before_approval(call, "the last active platform admin")
+    _refused_on_run(result, "last_platform_admin")
+    assert written == []
+
+
 async def test_a_group_value_under_the_claim_setting_makes_no_one_another_platform_admin(
     kc: KeycloakConnector,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -214,6 +235,20 @@ async def test_the_user_a_write_changes_is_a_platform_admin_by_any_letter_case(
         api.group(_OTHER_ADMIN_GROUP, "other-case", None)
         api.groups[_OTHER_ADMIN_GROUP]["attributes"] = {"PLATFORM_ADMIN": ["true"]}
         api.add(_user(_SECOND_ADMIN_UUID, "other-case-member"), _OTHER_ADMIN_GROUP)
+        call = await _call("keycloak.user.disable", {"id": _SECOND_ADMIN_UUID})
+    _refused_before_approval(call, "the last active platform admin")
+
+
+async def test_the_user_a_write_changes_is_a_platform_admin_by_a_value_with_white_space(
+    kc: KeycloakConnector,  # noqa: F811
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _realm(mock)
+        api.users.pop(_ADMIN_UUID)
+        api.members[_PLATFORM_GROUP] = []
+        api.group(_OTHER_ADMIN_GROUP, "white-space", None)
+        api.groups[_OTHER_ADMIN_GROUP]["attributes"] = {"platform_admin": [" true "]}
+        api.add(_user(_SECOND_ADMIN_UUID, "white-space-member"), _OTHER_ADMIN_GROUP)
         call = await _call("keycloak.user.disable", {"id": _SECOND_ADMIN_UUID})
     _refused_before_approval(call, "the last active platform admin")
 

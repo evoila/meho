@@ -1221,7 +1221,9 @@ check is `ops_user_meho_access_guard.py` for user writes and
   `JWT_PLATFORM_ADMIN_CLAIM_NAME`, in any letter case. For another
   person to count, the value must be sure both that way and when MEHO
   reads only the attribute its login reads: `platform_admin`, in exactly
-  this letter case.
+  this letter case, with the value `true` in any letter case and no white
+  space around it. A value such as `" true"` makes the changed user a
+  platform admin, but makes no other person count.
 - **How MEHO counts.** MEHO first reads only the user's own groups and
   their parent chains. When the user is no platform admin, it reads
   nothing more. Else it reads the whole group tree page by page, then the

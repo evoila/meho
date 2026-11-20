@@ -15,6 +15,9 @@ manages MEHO's own login realm. What is proven:
   its internal id or the stored client id has other letter case;
 * a client that becomes MEHO's own while the request waits is refused when
   the approved call runs;
+* a realm named in another spelling that Keycloak answers as the login
+  realm counts as the login realm, before approval and at the run; when
+  MEHO cannot read the realm, the run is refused;
 * each allowed change waits for approval and runs;
 * the same writes on another client, or in another realm, are not refused;
 * the refusal text names no client the caller did not name and gives no
@@ -27,9 +30,11 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import uuid
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -45,6 +50,7 @@ from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, ServicePrincipalGrant
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
@@ -53,6 +59,7 @@ from tests.test_connectors_keycloak_user_login_guard import (  # noqa: F401  (fi
     _ADMIN_REALM,
     _CONNECTOR_ID,
     _KC_BASE_URL,
+    _KC_HOST,
     _LOGIN_REALM,
     _LOGIN_REALM_TARGET,
     _OTHER_REALM,
@@ -72,6 +79,10 @@ _OTHER_CLIENT = "event-portal"
 _REDIRECT = "https://console.example.invalid/*"
 _NEW_REDIRECT = "https://console-new.example.invalid/*"
 
+#: A realm name in another spelling that Keycloak answers as the login realm.
+_SPELLED_REALM = "meh\u00f6"
+_SPELLED_TARGET = "kc-guard-login-realm-spelled"
+
 _CLIENT_UPDATE = "keycloak.client.update"
 _CLIENT_DELETE = "keycloak.client.delete"
 _REALM_UPDATE = "keycloak.realm.update"
@@ -89,6 +100,31 @@ def _admin_client_env(
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture
+async def spelled_target(kc: KeycloakConnector) -> str:  # noqa: F811
+    """A target whose managed realm is the login realm in another spelling."""
+    async with get_sessionmaker()() as session:
+        session.add(
+            TargetORM(
+                tenant_id=_TENANT_ID,
+                name=_SPELLED_TARGET,
+                aliases=[],
+                product="keycloak",
+                host=_KC_HOST,
+                port=443,
+                fqdn=None,
+                secret_ref="keycloak/admin",
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={"managed_realm": _SPELLED_REALM, "admin_realm": _ADMIN_REALM},
+                fingerprint={"version": "26.3.3"},
+                notes="seeded by test_connectors_keycloak_meho_own_login_guard",
+            )
+        )
+        await session.commit()
+    return _SPELLED_TARGET
 
 
 def _client(client_uuid: str, client_id: str) -> dict[str, Any]:
@@ -124,11 +160,12 @@ class _Keycloak:
 
     def __init__(self, mock: respx.MockRouter, realm: str) -> None:
         self.realm = _realm_rep(realm)
+        self.realm_read_fails = False
         self.clients = {
             _OWN_UUID: _client(_OWN_UUID, _ADMIN_CLIENT),
             _OTHER_UUID: _client(_OTHER_UUID, _OTHER_CLIENT),
         }
-        base = f"/admin/realms/{realm}"
+        base = re.escape(f"/admin/realms/{quote(realm, safe='')}")
         mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-admin-token", "expires_in": 300}
         )
@@ -159,6 +196,8 @@ class _Keycloak:
         if request.method == "PUT":
             self.realm = json.loads(request.content)
             return httpx.Response(204)
+        if self.realm_read_fails:
+            return httpx.Response(500)
         return httpx.Response(200, json=self.realm)
 
 
@@ -506,6 +545,55 @@ async def test_when_meho_cannot_read_its_settings_the_run_is_refused(
 
 
 # ---------------------------------------------------------------------------
+# The login realm in another spelling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("op_id", "params", "words", "code"), _REFUSED, ids=_REFUSED_IDS)
+async def test_a_target_realm_in_another_spelling_is_the_login_realm(
+    spelled_target: str,
+    op_id: str,
+    params: dict[str, Any],
+    words: str,
+    code: str,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _SPELLED_REALM)
+        api.realm["realm"] = _LOGIN_REALM
+        call = await _call(op_id, params, target=spelled_target)
+        result = await _run(op_id, params, target=spelled_target)
+        written = _writes(mock)
+    _refused_before_approval(call, words)
+    _refused_on_run(result, code)
+    assert written == []
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        (_CLIENT_UPDATE, {"id": _OWN_UUID, "representation": {"enabled": False}}),
+        (_CLIENT_DELETE, {"id": _OWN_UUID}),
+    ],
+    ids=["update", "delete"],
+)
+async def test_when_meho_cannot_read_the_realm_the_client_write_is_refused_on_run(
+    spelled_target: str,
+    op_id: str,
+    params: dict[str, Any],
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _SPELLED_REALM)
+        api.realm_read_fails = True
+        call = await _call(op_id, params, target=spelled_target)
+        result = await _run(op_id, params, target=spelled_target)
+        written = _writes(mock)
+    # Before approval a realm MEHO cannot read is left to the run.
+    assert call["status"] == "awaiting_approval", call
+    _refused_on_run(result, "meho_access_not_checked")
+    assert written == []
+
+
+# ---------------------------------------------------------------------------
 # Other changes that can lock MEHO out
 # ---------------------------------------------------------------------------
 
@@ -546,7 +634,11 @@ async def test_other_changes_of_meho_own_client_are_refused(
     assert written == []
 
 
-@pytest.mark.parametrize("named", [_LOGIN_REALM, _LOGIN_REALM.upper()], ids=["same", "upper-case"])
+@pytest.mark.parametrize(
+    "named",
+    [_LOGIN_REALM, _LOGIN_REALM.upper(), _SPELLED_REALM],
+    ids=["same", "upper-case", "another-spelling"],
+)
 async def test_the_login_realm_named_by_the_realm_param_is_refused(
     kc: KeycloakConnector,  # noqa: F811
     named: str,

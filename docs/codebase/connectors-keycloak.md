@@ -1458,7 +1458,12 @@ working (`ops_meho_own_login_guard.py`):
   allowed list counts as a change that can lock MEHO out.
 - **Which realm.** For `client.update` and `client.delete`, the target's
   managed realm. For `realm.update`, the `realm` param or the target's
-  managed realm, and also the name Keycloak answers with for it.
+  managed realm. In both cases MEHO also reads the realm from Keycloak and
+  takes the name Keycloak answers with: the realm is the login realm when
+  the typed name or the answered name is a login realm. So a realm name in
+  another spelling that Keycloak takes for the login realm counts as the
+  login realm. For the client writes MEHO reads the realm only when the
+  client may be one of its own.
 - **When.** Before the request waits for approval (the park checks of
   `register_meho_own_login_checks`, and for `realm.update` after the check
   of the SMTP password) and again when the call runs
@@ -1468,7 +1473,8 @@ working (`ops_meho_own_login_guard.py`):
   and no run approval lets these writes through. A client that becomes one
   of MEHO's own while the request waits is refused when it runs.
 - **On doubt MEHO refuses.** At the run, settings MEHO cannot read, a
-  client without a `clientId`, or a realm in an odd shape refuse the write
+  client without a `clientId`, a realm MEHO cannot read for a client
+  write, or a realm in an odd shape refuse the write
   (`meho_access_not_checked`). Before approval, a client or realm MEHO
   cannot read is let through to wait; the run checks again.
 - **The refusal.** `MehoAccessRefusedError` with the reason

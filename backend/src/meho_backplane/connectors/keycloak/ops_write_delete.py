@@ -390,7 +390,15 @@ async def keycloak_client_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_client_guards(self, operator, target, found)
-    refuse_own_client_write(CLIENT_DELETE_OP, found.realm, found.rep, named=params.get("client_id"))
+    await refuse_own_client_write(
+        self,
+        operator,
+        target,
+        CLIENT_DELETE_OP,
+        found.realm,
+        found.rep,
+        named=params.get("client_id"),
+    )
     path = fill_path(_CLIENT_PATH, {"realm": found.realm, "client-uuid": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=CLIENT_DELETE_OP, path=path, result=result

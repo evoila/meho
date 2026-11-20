@@ -27,12 +27,18 @@ A map such as ``attributes`` counts as one key: it changes when one of its
 keys changes. The allowed changes are short lists; every other key counts
 as a change that can lock MEHO out.
 
+**The login realm** is the realm whose name on the target or in the call,
+or whose name in Keycloak's answer, is a realm of MEHO's login. MEHO reads
+the realm, so a name in another spelling that Keycloak takes for the login
+realm counts as the login realm.
+
 The check runs before the request waits for approval
 (:func:`register_meho_own_login_checks`) and again when the call runs, in
 the handlers of the three writes. So no approval and no standing grant lets
 such a write through. On doubt MEHO refuses at the run: when it cannot read
-its settings, or the client or realm comes back in an odd shape. Before
-approval, a client or realm MEHO cannot read is left to the run.
+its settings or the realm, or the client or realm comes back in an odd
+shape. Before approval, a client or realm MEHO cannot read is left to the
+run.
 
 Each refusal is a
 :exc:`~.ops_user_meho_access_guard.MehoAccessRefusedError` with the code
@@ -235,20 +241,65 @@ def _is_own_client(op_id: str, client: Any, named: str | None) -> bool:
     return not names.isdisjoint(own)
 
 
-def refuse_own_client_write(
+def _may_be_own_client(client: Any, named: str | None) -> bool:
+    """Whether the client may be one MEHO uses; ``True`` when MEHO cannot tell."""
+    try:
+        return _is_own_client("", client, named)
+    except MehoAccessRefusedError:
+        return True
+
+
+async def _answered_login_realm(
+    connector: Any, operator: Any, target: Any, realm: str
+) -> bool | None:
+    """Whether Keycloak answers for *realm* with the name of MEHO's login realm.
+
+    ``None`` when MEHO cannot read the realm or its name.
+    """
+    try:
+        stored = await get_or_none(
+            connector, target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator
+        )
+    except Exception:
+        return None
+    name = _text(stored.get("realm")) if stored is not None else None
+    return None if name is None else is_meho_login_realm(name)
+
+
+async def refuse_own_client_write(
+    connector: Any,
+    operator: Any,
+    target: Any,
     op_id: str,
     realm: str,
     client: Any,
     *,
     named: Any,
     requested: dict[str, Any] | None = None,
+    refuse_unread: bool = True,
 ) -> None:
     """Raise :exc:`MehoAccessRefusedError` when the write breaks a client MEHO itself uses.
 
-    *client* is the client as Keycloak stores it, *named* the ``client_id``
-    the caller sent, and *requested* the representation of an update.
+    *realm* is the realm of the target, *client* the client as Keycloak
+    stores it, *named* the ``client_id`` the caller sent, and *requested*
+    the representation of an update.
+
+    The realm is MEHO's login realm when its name on the target, or the
+    name Keycloak answers with for it, is the login realm. MEHO reads the
+    realm only when the client may be its own. When that read fails, MEHO
+    refuses; with *refuse_unread* off (before approval) it leaves the write
+    to the run.
     """
-    if not is_meho_login_realm(realm) or not _is_own_client(op_id, client, _text(named)):
+    named_text = _text(named)
+    if not is_meho_login_realm(realm):
+        if not _may_be_own_client(client, named_text):
+            return
+        answered = await _answered_login_realm(connector, operator, target, realm)
+        if answered is None and refuse_unread:
+            raise _not_checked(op_id, "MEHO could not read the realm")
+        if not answered:
+            return
+    if not _is_own_client(op_id, client, named_text):
         return
     if op_id == CLIENT_DELETE_OP:
         action = "deleting it"
@@ -302,8 +353,6 @@ def _client_park_check(op_id: str) -> ParkCheck:
         if connector is None:
             return None
         realm = resolve_realm_config(ctx.target).managed_realm
-        if not is_meho_login_realm(realm):
-            return None
         try:
             found = await find_client(connector, ctx.operator, ctx.target, ctx.params)
         except Exception:
@@ -313,12 +362,16 @@ def _client_park_check(op_id: str) -> ParkCheck:
             return None
         representation = ctx.params.get("representation")
         try:
-            refuse_own_client_write(
+            await refuse_own_client_write(
+                connector,
+                ctx.operator,
+                ctx.target,
                 op_id,
                 realm,
                 found.rep,
                 named=ctx.params.get("client_id"),
                 requested=representation if isinstance(representation, dict) else None,
+                refuse_unread=False,
             )
         except MehoAccessRefusedError as exc:
             return exc.reason
@@ -333,8 +386,6 @@ async def login_realm_park_reason(ctx: PreviewContext) -> str | None:
     if connector is None:
         return None
     realm = _text(ctx.params.get("realm")) or resolve_realm_config(ctx.target).managed_realm
-    if not is_meho_login_realm(realm):
-        return None
     representation = ctx.params.get("representation")
     if not isinstance(representation, dict):
         return None
@@ -347,6 +398,8 @@ async def login_realm_park_reason(ctx: PreviewContext) -> str | None:
         return None
     if stored is None:
         return None
+    # The realm is read first: Keycloak can answer with the login realm for a
+    # name in another spelling.
     try:
         refuse_login_realm_write(realm, stored, representation)
     except MehoAccessRefusedError as exc:

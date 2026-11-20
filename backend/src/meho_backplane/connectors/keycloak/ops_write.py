@@ -462,7 +462,10 @@ async def keycloak_client_update(
     path = fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": uuid})
     requested = dict(params["representation"])
     current = await self._get_admin_json(target, path, operator=operator)
-    refuse_own_client_write(
+    await refuse_own_client_write(
+        self,
+        operator,
+        target,
         "keycloak.client.update",
         realms.managed_realm,
         current,

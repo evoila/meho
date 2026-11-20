@@ -26,7 +26,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.keycloak.ops_meho_admin_count import Change, Counter, own_value
+from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_check_only
+from meho_backplane.connectors.keycloak.ops_meho_admin_count import (
+    Change,
+    Counter,
+    Own,
+    own_values,
+)
 from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import (
     NO_APPROVAL,
     MehoAccessRefusedError,
@@ -72,16 +78,20 @@ async def _change(counter: Counter, group_id: str, op_id: str, params: dict[str,
     base = current.get("attributes")
     base = base if isinstance(base, dict) else {}
     merged = dict(attributes) if params.get("replace", False) else {**base, **attributes}
-    return Change(group_value=(group_id, own_value({"attributes": merged})))
+    return Change(group_value=(group_id, own_values({"attributes": merged})))
 
 
-def _can_take_rights(before: bool | None, after: bool | None) -> bool:
-    """Whether a change of a group's value can take the rights of a member.
+def _one_way_takes(before: bool | None, after: bool | None) -> bool:
+    return (before is True and after is not True) or (after is False and before is not False)
+
+
+def _can_take_rights(before: Own, after: Own) -> bool:
+    """Whether a change of a group's value, read either way, can take the rights of a member.
 
     A value ``true`` that goes away takes them. A new value ``false`` takes
     the sure rights of a member who has the value ``true`` from another group.
     """
-    return (before is True and after is not True) or (after is False and before is not False)
+    return _one_way_takes(before.wide, after.wide) or _one_way_takes(before.login, after.login)
 
 
 async def _loses_last_platform_admin(
@@ -203,15 +213,16 @@ def _park_check(op_id: str) -> ParkCheck:
             return None
         realm, group_id = found
         try:
-            await refuse_group_meho_access_loss(
-                connector,
-                ctx.operator,
-                ctx.target,
-                group_id,
-                op_id=op_id,
-                params=ctx.params,
-                realm=realm,
-            )
+            async with meho_access_check_only():
+                await refuse_group_meho_access_loss(
+                    connector,
+                    ctx.operator,
+                    ctx.target,
+                    group_id,
+                    op_id=op_id,
+                    params=ctx.params,
+                    realm=realm,
+                )
         except MehoAccessRefusedError as exc:
             return exc.reason
         return None

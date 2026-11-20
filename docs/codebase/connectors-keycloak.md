@@ -1199,7 +1199,15 @@ check is `ops_user_meho_access_guard.py` for user writes and
   The connector methods of the guarded writes and the secret move sink
   open the scope (`meho_access_scope`); the check takes the lock right
   before it counts. So two writes on the last two platform admins that run
-  at the same moment cannot both pass.
+  at the same moment cannot both pass. The lock's transaction turns off
+  `idle_in_transaction_session_timeout` and `transaction_timeout` for
+  itself, so the database does not end it during a slow Keycloak read.
+  After the count and before the write is sent, MEHO checks that the
+  database still holds the lock (`confirm_meho_access_lock`); when it does
+  not, MEHO refuses the write. The check before approval writes nothing
+  and takes no lock (`meho_access_check_only`). A check that asks for the
+  lock outside both scopes raises `MehoAccessScopeError` and sends no
+  write.
 - **Who has platform admin rights.** The rules of MEHO's login
   (`ops_meho_admin_count.py`): the user's own `platform_admin` value;
   without one, the value of the user's groups, where a group's own value
@@ -1207,7 +1215,13 @@ check is `ops_user_meho_access_guard.py` for user writes and
   rights. The user that a write changes is a platform admin when one of
   these values can be `true`. Another person counts only when the value
   is sure to be `true`: their own value is `true`, or they have no own
-  value and every group of theirs with a value has `true`.
+  value and every group of theirs with a value has `true`. For the user
+  that a write changes, and for refusing an odd value, MEHO reads every
+  attribute named `platform_admin` or named in
+  `JWT_PLATFORM_ADMIN_CLAIM_NAME`, in any letter case. For another
+  person to count, the value must be sure both that way and when MEHO
+  reads only the attribute its login reads: `platform_admin`, in exactly
+  this letter case.
 - **How MEHO counts.** MEHO first reads only the user's own groups and
   their parent chains. When the user is no platform admin, it reads
   nothing more. Else it reads the whole group tree page by page, then the
@@ -1236,7 +1250,8 @@ check is `ops_user_meho_access_guard.py` for user writes and
   refused and why, names no user, and gives no advice to change rights:
   an agent reads it. Nothing is written.
 - **Who approves.** With a second platform admin the write waits for
-  approval as any other write in the login realm.
+  approval as any other write in the login realm: an operator cannot
+  approve it, another admin can.
 - **Other realms.** The check reads nothing and refuses nothing.
 
 ### One-time code set-up

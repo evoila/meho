@@ -58,7 +58,12 @@ from meho_backplane.connectors.keycloak._paths import (
     _USER_ROLE_MAPPINGS_REALM_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.ops_meho_access_lock import hold_meho_access_lock
+from meho_backplane.connectors.keycloak.ops_meho_access_lock import (
+    MehoAccessScopeError,
+    confirm_meho_access_lock,
+    hold_meho_access_lock,
+    meho_access_check_only,
+)
 from meho_backplane.connectors.keycloak.ops_meho_admin_count import (
     CannotCountError,
     Change,
@@ -315,9 +320,15 @@ def _refused(op_id: str, code: str, reason: str) -> MehoAccessRefusedError:
 async def refuse_last_admin_loss(
     op_id: str, realm: str, last_reason: str, count: Callable[[], Awaitable[bool]]
 ) -> None:
-    """Take the realm's lock, run *count*, and refuse when it is true or cannot be known."""
+    """Take the realm's lock, run *count*, and refuse when it is true or cannot be known.
+
+    Before the write is sent, MEHO checks that the database still holds the
+    lock. A run path without a lock scope raises :exc:`MehoAccessScopeError`.
+    """
     try:
         await hold_meho_access_lock(realm)
+    except MehoAccessScopeError:
+        raise
     except Exception as exc:
         raise _refused(
             op_id,
@@ -344,6 +355,17 @@ async def refuse_last_admin_loss(
         ) from exc
     if last:
         raise _refused(op_id, _LAST_PLATFORM_ADMIN, last_reason)
+    try:
+        await confirm_meho_access_lock(realm)
+    except MehoAccessScopeError:
+        raise
+    except Exception as exc:
+        raise _refused(
+            op_id,
+            _NOT_CHECKED,
+            f"{_REFUSED}: MEHO lost its hold that no other write of this kind runs at the "
+            f"same time ({type(exc).__name__}). Nothing was changed.",
+        ) from exc
 
 
 async def refuse_meho_access_loss(
@@ -447,9 +469,10 @@ async def meho_access_park_reason(
     if user is None:
         return None
     try:
-        await refuse_meho_access_loss(
-            connector, operator, target, user, op_id=op_id, params=params, realm=realm
-        )
+        async with meho_access_check_only():
+            await refuse_meho_access_loss(
+                connector, operator, target, user, op_id=op_id, params=params, realm=realm
+            )
     except MehoAccessRefusedError as exc:
         return exc.reason
     return None

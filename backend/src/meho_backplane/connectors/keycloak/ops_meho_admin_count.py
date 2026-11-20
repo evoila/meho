@@ -24,6 +24,15 @@ Two answers for one person (:class:`Rights`):
   When two groups give different values, Keycloak picks one of them, so
   such a person is not counted.
 
+MEHO reads each value in two ways (:class:`Own`). The wide way takes an
+attribute named ``platform_admin`` or the name in
+``JWT_PLATFORM_ADMIN_CLAIM_NAME``, in any letter case. The login way takes
+only the attribute that MEHO's login reads: ``platform_admin``, in exactly
+this letter case. A person is ``possible`` when one of the two ways says so,
+and ``sure`` only when both ways say so. So an attribute with another name
+or letter case can make a person a platform admin for the write, but never
+makes another person sure.
+
 MEHO finds the other platform admins through the groups whose value is
 ``true``. A person with the rights only from their own value is not looked
 for, so such a person is not counted.
@@ -36,9 +45,9 @@ read, or a row in an odd shape, raises :exc:`CannotCountError`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from meho_backplane.connectors.keycloak._paths import (
     _GROUP_CHILDREN_PATH,
@@ -59,12 +68,22 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
-__all__ = ["CannotCountError", "Change", "Counter", "Rights", "own_value"]
+__all__ = [
+    "LOGIN_ATTRIBUTE",
+    "CannotCountError",
+    "Change",
+    "Counter",
+    "Own",
+    "Rights",
+    "own_values",
+]
 
 #: Rows read per page.
 _PAGE_SIZE: Final = 100
 #: A list with more pages than this is a broken read.
 _MAX_PAGES: Final = 1000
+#: The attribute that MEHO's login reads, in this exact letter case.
+LOGIN_ATTRIBUTE: Final = "platform_admin"
 
 
 class CannotCountError(Exception):
@@ -92,26 +111,42 @@ def is_person(user: dict[str, Any]) -> bool:
     return enabled and not username.casefold().startswith(SERVICE_ACCOUNT_PREFIX)
 
 
-def own_value(rep: dict[str, Any]) -> bool | None:
+class Own(NamedTuple):
     """The platform admin value a user or group carries itself; ``None`` for no value."""
-    attributes = rep.get("attributes")
-    if attributes is None:
-        return None
-    if not isinstance(attributes, dict):
-        raise CannotCountError("attributes that are not an object")
-    # Imported late: the grant module imports the user lookup, which imports the guard.
-    from meho_backplane.connectors.keycloak.ops_write_grant_platform import platform_flag_names
 
-    names = platform_flag_names()
+    #: Any attribute MEHO treats as the flag, in any letter case.
+    wide: bool | None
+    #: Only the attribute MEHO's login reads.
+    login: bool | None
+
+
+def _value(attributes: dict[Any, Any], wanted: Callable[[Any], bool]) -> bool | None:
     found: set[bool] = set()
     for key, value in attributes.items():
-        if not (isinstance(key, str) and key.strip().casefold() in names):
+        if not wanted(key):
             continue
         values = value if isinstance(value, list) else [value]
         found.update(isinstance(v, str) and v.strip().casefold() == "true" for v in values)
     if len(found) > 1:
         raise CannotCountError("a platform admin value that is both true and not true")
     return found.pop() if found else None
+
+
+def own_values(rep: dict[str, Any]) -> Own:
+    """The values a user or group carries itself; an odd value raises."""
+    attributes = rep.get("attributes")
+    if attributes is None:
+        return Own(None, None)
+    if not isinstance(attributes, dict):
+        raise CannotCountError("attributes that are not an object")
+    # Imported late: the grant module imports the user lookup, which imports the guard.
+    from meho_backplane.connectors.keycloak.ops_write_grant_platform import platform_flag_names
+
+    names = platform_flag_names()
+    return Own(
+        _value(attributes, lambda key: isinstance(key, str) and key.strip().casefold() in names),
+        _value(attributes, lambda key: key == LOGIN_ATTRIBUTE),
+    )
 
 
 @dataclass(frozen=True)
@@ -122,12 +157,19 @@ class Rights:
     sure: bool
 
 
-def rights(own: bool | None, group_values: Iterable[bool | None]) -> Rights:
-    """The rights from the user's own value and the values of the user's groups."""
+def _one_way(own: bool | None, group_values: Iterable[bool | None]) -> Rights:
     if own is not None:
         return Rights(own, own)
     values = {value for value in group_values if value is not None}
     return Rights(True in values, values == {True})
+
+
+def rights(own: Own, group_values: Iterable[Own]) -> Rights:
+    """The rights from the user's own values and the values of the user's groups."""
+    values = list(group_values)
+    wide = _one_way(own.wide, (value.wide for value in values))
+    login = _one_way(own.login, (value.login for value in values))
+    return Rights(wide.possible or login.possible, wide.sure and login.sure)
 
 
 @dataclass(frozen=True)
@@ -140,8 +182,8 @@ class Change:
     user_left: tuple[str, str] | None = None
     #: A group that is deleted with all groups under it.
     group_gone: str | None = None
-    #: ``(group id, new own value)``: the group's own value after the write.
-    group_value: tuple[str, bool | None] | None = None
+    #: ``(group id, new own values)``: the group's own values after the write.
+    group_value: tuple[str, Own] | None = None
 
 
 @dataclass
@@ -153,8 +195,8 @@ class Counter:
     target: KeycloakTargetLike
     realm: str
     change: Change = field(default_factory=Change)
-    #: group id -> (own value, parent id)
-    _groups: dict[str, tuple[bool | None, str | None]] = field(default_factory=dict)
+    #: group id -> (own values, parent id)
+    _groups: dict[str, tuple[Own, str | None]] = field(default_factory=dict)
     _gone: set[str] = field(default_factory=set)
 
     async def read_list(self, path: str, **params: str) -> list[dict[str, Any]]:
@@ -177,7 +219,7 @@ class Counter:
 
     def _keep(self, group: dict[str, Any], parent: str | None) -> str:
         group_id = row_id(group)
-        self._groups[group_id] = (own_value(group), parent)
+        self._groups[group_id] = (own_values(group), parent)
         return group_id
 
     async def read_group(self, group_id: str) -> dict[str, Any]:
@@ -192,7 +234,7 @@ class Counter:
         self._keep(group, parent)
         return group
 
-    async def _group(self, group_id: str) -> tuple[bool | None, str | None]:
+    async def _group(self, group_id: str) -> tuple[Own, str | None]:
         if group_id not in self._groups:
             await self.read_group(group_id)
         return self._groups[group_id]
@@ -221,10 +263,11 @@ class Counter:
         if self.change.group_gone is not None:
             self._gone = set(await self.subtree(self.change.group_gone))
 
-    async def value(self, group_id: str, *, after: bool) -> bool | None:
-        """The platform admin value a member of the group gets from it."""
+    async def _chain(self, group_id: str, *, after: bool) -> list[Own]:
+        """The own values of the group and of its parents, nearest first."""
         from meho_backplane.connectors.keycloak.ops_write_grant_platform import PARENT_CAP
 
+        chain: list[Own] = []
         seen: set[str] = set()
         current: str | None = group_id
         while current is not None:
@@ -233,13 +276,19 @@ class Counter:
             seen.add(current)
             own, parent = await self._group(current)
             if after and current in self._gone:
-                return None
+                return []
             if after and self.change.group_value and self.change.group_value[0] == current:
                 own = self.change.group_value[1]
-            if own is not None:
-                return own
+            chain.append(own)
             current = parent
-        return None
+        return chain
+
+    async def value(self, group_id: str, *, after: bool) -> Own:
+        """The platform admin values a member of the group gets from it, read both ways."""
+        chain = await self._chain(group_id, after=after)
+        wide = next((own.wide for own in chain if own.wide is not None), None)
+        login = next((own.login for own in chain if own.login is not None), None)
+        return Own(wide, login)
 
     async def user_groups(self, user_id: str) -> list[str]:
         path = fill_path(_USER_GROUPS_PATH, {"realm": self.realm, "user-id": user_id})
@@ -250,7 +299,7 @@ class Counter:
         user_id = row_id(user)
         if after and self.change.user_gone == user_id:
             return Rights(False, False)
-        own = own_value(user)
+        own = own_values(user)
         groups = await self.user_groups(user_id)
         left = self.change.user_left
         if after and left is not None and left[0] == user_id:
@@ -286,7 +335,7 @@ class Counter:
         """Whether a person is sure to have platform admin rights after the write."""
         checked: set[str] = set()
         for group_id in await self.walk():
-            if await self.value(group_id, after=True) is not True:
+            if (await self.value(group_id, after=True)).login is not True:
                 continue
             # Every row must have an id, also the rows after a platform admin is found.
             for member_id in await self.members(group_id):

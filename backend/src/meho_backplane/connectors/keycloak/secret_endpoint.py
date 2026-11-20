@@ -139,7 +139,10 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
-from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
+from meho_backplane.connectors.keycloak.ops_meho_access_lock import (
+    meho_access_check_only,
+    meho_access_scope,
+)
 from meho_backplane.connectors.keycloak.ops_user_login_guard import (
     SECRET_SINK_ACTION,
     park_refusal_for_login_user,
@@ -386,7 +389,8 @@ class KeycloakCredentialSecretEndpoint:
                 target, self._realm, self._username, operator=operator
             )
             if uuid is not None:
-                await self._refuse_login_user(connector, operator, target, uuid)
+                async with meho_access_check_only():
+                    await self._refuse_login_user(connector, operator, target, uuid)
         except (TargetNotFoundError, AmbiguousTargetError):
             return None
         except MehoAccessRefusedError as exc:

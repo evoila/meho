@@ -1753,9 +1753,7 @@ async def test_preview_names_the_rule_and_who_may_approve_a_waiting_call(
     }
     assert envelope["approvers"] == [
         "MEHO-Operators",
-        "MEHO-SA-Operators",
         "MEHO-Admins",
-        "MEHO-Approvers",
     ]
     # Advisory fields: the binding hash stays what it was.
     _shadow(monkeypatch, on=False)

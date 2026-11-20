@@ -252,8 +252,10 @@ meho login https://meho.example.com
 The CLI prints a verification URL and a code. You approve it in a
 browser. The install made two users with temporary passwords: the first
 admin (`admin`, in `MEHO-Admins`) and an approver (`approver`, in
-`MEHO-SA-Operators`). The approver is not an admin. The approver can
-approve the admin's risky changes. See
+`MEHO-SA-Operators`). The approver is not an admin. MEHO reads the old group `MEHO-SA-Operators` as
+Operators, so the approver can approve the admin's `safe` and `caution`
+changes. The admin approves their own `dangerous` and `destructive`
+changes. A change of rights needs a second admin. See
 [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 Both logins are in the Secret `meho-core-first-login`. Read the
 admin's login with:

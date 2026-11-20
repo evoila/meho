@@ -200,8 +200,11 @@ async def push_service() -> AsyncIterator[_FakePushService]:
 #: The login facts a subscription keeps, by the kind of person.
 _LOGINS: dict[str, dict[str, Any]] = {
     "admin": {"tenant_role": "tenant_admin"},
-    "sa": {"tenant_role": "operator", "self_approver": True},
+    # A person of MEHO-SA-Operators: an Operator, no stored flags.
+    "sa": {"tenant_role": "operator"},
+    # A login with the approver claim of a customer role.
     "approver": {"tenant_role": "read_only", "approver": True},
+    "operator": {"tenant_role": "operator"},
     "read_only": {"tenant_role": "read_only"},
 }
 
@@ -282,23 +285,23 @@ async def _rows() -> list[PushSubscription]:
 async def test_a_new_request_goes_to_the_people_who_may_approve_it(
     push_service: _FakePushService,
 ) -> None:
-    admin, approver, operator, elsewhere = (
+    admin, operator, reader, elsewhere = (
         _browser("admin"),
-        _browser("approver", host="web.push.apple.com"),
-        _browser("operator"),
+        _browser("operator", host="web.push.apple.com"),
+        _browser("reader"),
         _browser("elsewhere"),
     )
     await _subscribe(admin, sub="admin", login="admin")
-    await _subscribe(approver, sub="approver", login="approver")
-    await _subscribe(operator, sub="operator", login="read_only")
+    await _subscribe(operator, sub="operator", login="operator")
+    await _subscribe(reader, sub="reader", login="read_only")
     await _subscribe(elsewhere, sub="admin-b", login="admin", tenant_id=_OTHER_TENANT)
 
     request = _request(level="caution")
     await _step(request)
 
     assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
-    assert [m["title"] for m in push_service.to(approver)] == ["An approval waits"]
-    assert push_service.to(operator) == []
+    assert [m["title"] for m in push_service.to(operator)] == ["An approval waits"]
+    assert push_service.to(reader) == []
     assert push_service.to(elsewhere) == []
     message = push_service.to(admin)[0]
     assert message == {
@@ -309,7 +312,7 @@ async def test_a_new_request_goes_to_the_people_who_may_approve_it(
     }
 
 
-async def test_a_high_risk_request_goes_only_to_admins_and_sa_operators(
+async def test_a_high_risk_request_goes_only_to_admins(
     push_service: _FakePushService,
 ) -> None:
     admin, approver = _browser("admin"), _browser("approver")
@@ -324,23 +327,41 @@ async def test_a_high_risk_request_goes_only_to_admins_and_sa_operators(
     assert push_service.to(approver) == []
 
 
-async def test_own_request_reaches_only_a_person_who_may_approve_their_own(
+async def test_own_request_reaches_only_an_admin_who_may_approve_their_own(
     push_service: _FakePushService,
 ) -> None:
-    sa_operator, approver = _browser("sa"), _browser("approver")
-    await _subscribe(sa_operator, sub="sa-op", login="sa")
+    admin, operator, approver = _browser("admin"), _browser("op"), _browser("approver")
+    await _subscribe(admin, sub="admin", login="admin")
+    await _subscribe(operator, sub="operator", login="operator")
     await _subscribe(approver, sub="approver", login="approver")
 
-    by_sa_operator = _request(requester="sa-op")
-    by_approver = _request(requester="approver")
-    await _step(by_sa_operator)
+    by_admin = _request(requester="admin", level="dangerous")
+    by_operator = _request(requester="operator", level="dangerous")
+    await _step(by_admin)
+    send_module.reset_for_testing()
+    await _step(by_operator)
+
+    # The admin gets both, also their own. Nobody else may approve a
+    # dangerous change.
+    assert len(push_service.to(admin)) == 2
+    assert push_service.to(operator) == []
+    assert push_service.to(approver) == []
+
+
+async def test_a_stored_approver_flag_gets_the_push_of_a_lower_risk_change(
+    push_service: _FakePushService,
+) -> None:
+    """A row with the approver flag, stored at a sign-in, gets the message of a caution change."""
+    approver = _browser("approver")
+    by_other, by_approver = _request(), _request(requester="approver")
+    await _subscribe(approver, sub="approver", login="approver")
+
+    await _step(by_other)
     send_module.reset_for_testing()
     await _step(by_approver)
 
-    # The SA-Operator gets both, also their own; the approver gets only the
-    # other person's request, never their own.
-    assert len(push_service.to(sa_operator)) == 2
-    assert [m["tag"] for m in push_service.to(approver)] == [f"approval-{by_sa_operator.id}"]
+    # Only the other person's request, never their own.
+    assert [m["tag"] for m in push_service.to(approver)] == [f"approval-{by_other.id}"]
 
 
 async def test_nothing_is_sent_with_the_setting_off(
@@ -394,18 +415,24 @@ async def test_a_routed_request_reaches_only_the_routed_groups(
     monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true")
     get_settings.cache_clear()
     admin, approver, sa_operator = _browser("admin"), _browser("approver"), _browser("sa")
+    reader = _browser("reader")
     await _subscribe(admin, sub="admin", login="admin")
     await _subscribe(approver, sub="approver", login="approver")
     await _subscribe(sa_operator, sub="sa-op", login="sa")
+    await _subscribe(reader, sub="reader", login="read_only")
     request = _request(level="caution")
     request.approver_roles = ["SA-Operators", "Admins"]
     request.approver_rule = "install:routing[0]"
 
     await _step(request)
 
+    # The old kind SA-Operators matches only the members of the old group,
+    # by the group in the token. A push row stores no login group, so the
+    # message goes to the Admins only, never to every Operator.
     assert [m["title"] for m in push_service.to(admin)] == ["An approval waits"]
-    assert [m["title"] for m in push_service.to(sa_operator)] == ["An approval waits"]
+    assert push_service.to(sa_operator) == []
     assert push_service.to(approver) == []
+    assert push_service.to(reader) == []
 
 
 async def test_a_routed_request_reaches_only_the_groups_of_the_install_routing_now(

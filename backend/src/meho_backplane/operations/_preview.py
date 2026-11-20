@@ -112,6 +112,7 @@ __all__ = [
     "has_preview_builder",
     "preview_failure_reason",
     "proposed_effect_for_agent",
+    "register_agent_preview_filter",
     "register_card_warnings",
     "register_permission_preflight",
     "register_person_only_preview_keys",
@@ -445,6 +446,10 @@ _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 #: the person only. Off, a caller reads the stored preview without them.
 _PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] = {}
 
+#: ``op_id`` -> a function that takes the stored preview and gives back the
+#: preview a caller reads (:func:`register_agent_preview_filter`).
+_AGENT_PREVIEW_FILTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
 #: The keys a builder's result puts on a stored ``proposed_effect``.
 _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
 
@@ -485,6 +490,18 @@ def register_person_only_preview_keys(
     _PERSON_ONLY_PREVIEW_KEYS[op_id] = (enabled, keys)
 
 
+def register_agent_preview_filter(
+    op_id: str, preview_filter: Callable[[dict[str, Any]], dict[str, Any]]
+) -> None:
+    """Give a caller the stored preview of *op_id* as *preview_filter* returns it.
+
+    For person-only fields deeper in the preview than its top-level keys
+    (:func:`register_person_only_preview_keys`). The filter reads its own
+    switch and gives back a new dict; it never changes the stored one.
+    """
+    _AGENT_PREVIEW_FILTERS[op_id] = preview_filter
+
+
 def proposed_effect_for_agent(
     op_id: str,
     effect: dict[str, Any] | None,
@@ -502,7 +519,9 @@ def proposed_effect_for_agent(
     * the generic params echo of the stored params, for an op whose builder
       switch is off (:func:`register_preview_builder_switch`);
     * the preview without the person-only keys
-      (:func:`register_person_only_preview_keys`).
+      (:func:`register_person_only_preview_keys`);
+    * the preview as the op's filter gives it back
+      (:func:`register_agent_preview_filter`).
 
     Every other ``proposed_effect`` comes back unchanged.
     """
@@ -523,12 +542,18 @@ def proposed_effect_for_agent(
         if reason is not None:
             shown["preview_reason"] = reason
         return shown
-    person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
     preview = effect.get("preview")
-    if person_only is None or person_only[0]() or not isinstance(preview, dict):
+    if not isinstance(preview, dict):
         return effect
-    kept = {key: value for key, value in preview.items() if key not in person_only[1]}
-    return {**effect, "preview": kept}
+    person_only = _PERSON_ONLY_PREVIEW_KEYS.get(op_id)
+    preview_filter = _AGENT_PREVIEW_FILTERS.get(op_id)
+    if person_only is not None and not person_only[0]():
+        preview = {key: value for key, value in preview.items() if key not in person_only[1]}
+    elif preview_filter is not None:
+        preview = preview_filter(preview)
+    else:
+        return effect
+    return {**effect, "preview": preview}
 
 
 def _preview_builder(op_id: str, *, for_agent: bool) -> PreviewBuilder | None:

@@ -110,6 +110,7 @@ def delegated_operator(operator: Operator) -> Operator:
             "tenant_role": role,
             "approver": False,
             "self_approver": False,
+            "old_group": None,
             "platform_admin": False,
             "bound_kind": None,
             "bound_categories": frozenset(),

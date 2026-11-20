@@ -569,6 +569,12 @@ malformed shape is logged under `malformed_platform_admin_realm_access`.
 
 ## The `approver` approve-only capability — group-based recipe (#3243)
 
+> **MEHO does not read the `approver` claim of the token, and no default
+> login group gives the approver flag.** The group `MEHO-Approvers` is read
+> as Readers and gives no approval right. The mapper below is not needed
+> for approval. The text that follows describes the older claim and is
+> kept only for a realm that still has it.
+
 `tenant_role` gates *dispatch* (who may run operations). A separate,
 **optional** boolean claim — `approver` — gates the *approvals plane*
 (list / show / approve / reject / decide) **without** granting dispatch.

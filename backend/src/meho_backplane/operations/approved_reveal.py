@@ -55,6 +55,7 @@ __all__ = [
     "fetch_approved_reveal",
     "is_secret_reveal",
     "is_write_reveal",
+    "refuse_reveal_outside_limit",
     "result_waiting_for_requester",
     "reveal_fetch_window",
     "without_secret_values",
@@ -194,6 +195,49 @@ def _check_fetch(request: ApprovalRequest, *, now: datetime) -> None:
             "params_changed",
             "The stored request no longer matches the approved one. Send the request again.",
         )
+
+
+async def refuse_reveal_outside_limit(operator: Operator, request_id: uuid.UUID) -> bool:
+    """True when the bound connector limit refuses the fetch of *request_id*.
+
+    The check is
+    :func:`~meho_backplane.operations._target_connector_limit.stored_request_outside_limit`.
+    A refused try writes one ``approval.reveal`` audit row with the outcome
+    ``connector_not_allowed`` and runs nothing. A request that is not in the
+    caller's tenant is not refused here: the fetch answers it as not found.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditEventClass
+    from meho_backplane.operations._target_connector_limit import stored_request_outside_limit
+    from meho_backplane.operations.approval_queue import (
+        ApprovalNotFoundError,
+        _write_audit_row,
+        get_request,
+    )
+    from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
+
+    async with get_sessionmaker()() as session:
+        try:
+            request = await get_request(
+                session, tenant_id=operator.tenant_id, request_id=request_id
+            )
+        except ApprovalNotFoundError:
+            return False
+        if not await stored_request_outside_limit(operator, request):
+            return False
+        await _write_audit_row(
+            session,
+            audit_id=uuid.uuid4(),
+            event_class=AuditEventClass.APPROVAL_DECISION,
+            operator=operator,
+            request=request,
+            path="approval.reveal",
+            status_code=_REFUSED_STATUS_CODE,
+            duration_ms=0.0,
+            extra_payload={"outcome": CONNECTOR_NOT_ALLOWED},
+        )
+        await session.commit()
+    return True
 
 
 async def fetch_approved_reveal(

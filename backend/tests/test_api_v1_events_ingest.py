@@ -9,8 +9,9 @@ Acceptance-criteria coverage:
   Content-Length endpoint path)
 * missing / paused source -> the same 401 as a bad signature
 * bad signature -> 401; a non-ASCII signature or a ``nan`` timestamp too
-* wrongly signed deliveries count against the rate limit, before any
-  secret read
+* failed sender checks have their own limit: they do not use up the
+  source's delivery limit, and past their limit they make no Vault read
+* an empty or blank stored secret refuses every sender
 * accepted delivery -> 202 ``{event_id}`` with one ``event_outbox`` row
   (``origin`` = source id, ``dedupe_key`` set) and one synchronous
   ``__ingest__`` audit row (criterion 2)
@@ -23,6 +24,8 @@ Acceptance-criteria coverage:
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import gzip
 import hashlib
 import hmac
@@ -30,8 +33,10 @@ import json
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -41,10 +46,15 @@ from sqlalchemy import func, select
 from meho_backplane.api.v1.events_ingest import _read_capped_body, router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.vault import _resolve_login_role
+from meho_backplane.auth.vault import VaultClientError, _resolve_login_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EventOutbox, Tenant
 from meho_backplane.events.ingest.rate_limit import IngestRateLimitError
+from meho_backplane.events.ingest.secret_cache import (
+    _entries,
+    bump_secret_version,
+    clear_secret_cache,
+)
 from meho_backplane.events.ingest.service import IngestPayloadError, _parse_json_or_fail
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
@@ -72,28 +82,79 @@ def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
 
 
+class _FakePipeline:
+    """Runs its queued commands in one step, like a ``MULTI`` transaction."""
+
+    def __init__(self, store: dict[str, int]) -> None:
+        self._store = store
+        self._ops: list[tuple[str, int]] = []
+
+    async def __aenter__(self) -> _FakePipeline:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    def incr(self, name: str) -> None:
+        self._ops.append((name, 1))
+
+    def decr(self, name: str) -> None:
+        self._ops.append((name, -1))
+
+    def expire(self, name: str, time: int) -> None:
+        return None
+
+    async def execute(self) -> list[object]:
+        results: list[object] = []
+        for key, step in self._ops:
+            self._store[key] = self._store.get(key, 0) + step
+            results.append(self._store[key])
+        return [results[0], True]
+
+
+class _FakeValkey:
+    """In-memory stand-in for the counters the ingest rate limits keep."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, int] = {}
+
+    def pipeline(self, transaction: bool = True) -> _FakePipeline:
+        return _FakePipeline(self.store)
+
+    async def get(self, name: str) -> bytes | None:
+        value = self.store.get(name)
+        return None if value is None else str(value).encode()
+
+    async def incr(self, name: str) -> int:
+        self.store[name] = self.store.get(name, 0) + 1
+        return self.store[name]
+
+
 @pytest.fixture(autouse=True)
 def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Stub the Vault read and the rate limiter for the endpoint.
+    """Stub the Vault read and the Valkey counters for the endpoint.
 
-    The Vault read returns the known secret (no socket); the rate limiter is a
-    no-op (its own behaviour is unit-tested). Individual tests re-patch a seam
-    to drive its failure path.
+    The Vault read returns the known secret (no socket); the rate limits run
+    for real against an in-memory fake Valkey. Individual tests re-patch a
+    seam to drive its failure path.
     """
 
     async def _read_secret(_operator: object, _ref: str) -> SecretStr:
         return SecretStr(_SECRET_VALUE)
 
-    async def _no_rate_limit(*_a: object, **_k: object) -> None:
-        return None
-
+    fake = _FakeValkey()
     monkeypatch.setattr(
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
     monkeypatch.setattr(
-        "meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _no_rate_limit
+        "meho_backplane.events.ingest.rate_limit.get_broadcast_client", lambda: fake
     )
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.secret_cache.get_broadcast_client", lambda: fake
+    )
+    clear_secret_cache()
     yield
+    clear_secret_cache()
 
 
 async def _seed_tenant() -> None:
@@ -272,43 +333,269 @@ async def test_nan_timestamp_returns_401(client: TestClient) -> None:
     assert resp.status_code == 401
 
 
-@pytest.mark.asyncio
-async def test_rate_limit_counts_every_delivery_before_the_secret_read(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Wrongly signed deliveries count against the source's limit, and the
-    limit stops them before any Vault read."""
-    await _seed_source()
+def _count_secret_reads(monkeypatch: pytest.MonkeyPatch, value: str = _SECRET_VALUE) -> list[str]:
     reads: list[str] = []
-    counted: list[str] = []
-    limit = 2
 
     async def _read_secret(_operator: object, ref: str) -> SecretStr:
         reads.append(ref)
-        return SecretStr(_SECRET_VALUE)
-
-    async def _count(_tenant: object, slug: str, _limit: int) -> None:
-        counted.append(slug)
-        if len(counted) > limit:
-            raise IngestRateLimitError(limit=limit, window_seconds=60, retry_after_seconds=7)
+        return SecretStr(value)
 
     monkeypatch.setattr(
         "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
     )
-    monkeypatch.setattr("meho_backplane.events.ingest.service.enforce_ingest_rate_limit", _count)
+    return reads
 
+
+def _bad_signature(body: bytes) -> dict[str, str]:
+    headers = _signed(body)
+    headers["X-Meho-Signature"] = "0" * 64
+    return headers
+
+
+@pytest.mark.asyncio
+async def test_bad_deliveries_do_not_use_up_the_source_limit(client: TestClient) -> None:
+    """With a limit of 2, two bad deliveries do not block the real sender."""
+    await _seed_source(extras={"rate_per_minute": 2})
     body = b'{"alert":"firing"}'
-    bad = _signed(body)
-    bad["X-Meho-Signature"] = "0" * 64
-    codes = [
-        client.post("/api/v1/events/ingest/prod-am", content=body, headers=bad).status_code
-        for _ in range(limit + 3)
-    ]
+    url = "/api/v1/events/ingest/prod-am"
 
+    bad = [client.post(url, content=body, headers=_bad_signature(body)) for _ in range(2)]
+    good = client.post(url, content=body, headers=_signed(body))
+
+    assert [r.status_code for r in bad] == [401, 401]
+    assert good.status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_bad_deliveries_over_their_limit_get_429_and_no_vault_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the failed-check limit, bad deliveries get 429 and read no secret;
+    the real sender is still checked and accepted."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _count_secret_reads(monkeypatch)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+
+    codes = [
+        client.post(url, content=body, headers=_bad_signature(body)).status_code for _ in range(5)
+    ]
     assert codes == [401, 401, 429, 429, 429]
-    assert len(counted) == limit + 3
-    # Only the deliveries under the limit reached Vault.
-    assert len(reads) == limit
+    assert len(reads) == 1
+
+    over = client.post(url, content=body, headers=_bad_signature(body))
+    assert over.headers["Retry-After"].isdigit()
+    good = client.post(url, content=body, headers=_signed(body))
+    assert good.status_code == 202
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_good_deliveries_over_the_limit_get_429_and_read_the_secret_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Good deliveries past the delivery limit get 429 and read no more secrets."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _count_secret_reads(monkeypatch)
+    url = "/api/v1/events/ingest/prod-am"
+    codes = []
+    for i in range(10):
+        body = json.dumps({"n": i}).encode()
+        codes.append(client.post(url, content=body, headers=_signed(body)).status_code)
+    assert codes == [202, 202] + [429] * 8
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_changed_secret_works_at_once_while_the_failed_check_limit_is_reached(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a secret change, the new secret is accepted and the old one is
+    refused, also when the source is over its failed-check limit."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+    for _ in range(2):
+        assert client.post(url, content=body, headers=_bad_signature(body)).status_code == 401
+    reads = _count_secret_reads(monkeypatch, value="the-new-secret")
+
+    (secret_ref,) = {ref for _source_id, ref in _entries}
+    await bump_secret_version(secret_ref)
+
+    new = client.post(url, content=body, headers=_signed(body, secret="the-new-secret"))
+    old_body = b'{"alert":"resolved"}'
+    old = client.post(url, content=old_body, headers=_signed(old_body))
+    assert new.status_code == 202
+    assert old.status_code == 429
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_bad_deliveries_read_the_secret_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bad deliveries that arrive at the same time read the secret once; only
+    ``limit`` of them get 401, the rest get 429."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads: list[str] = []
+
+    async def _slow_read(_operator: object, ref: str) -> SecretStr:
+        reads.append(ref)
+        await asyncio.sleep(0.05)
+        return SecretStr(_SECRET_VALUE)
+
+    monkeypatch.setattr("meho_backplane.events.ingest.service.read_event_source_secret", _slow_read)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_build_app()), base_url="http://testserver"
+    ) as ac:
+        responses = await asyncio.gather(
+            *(ac.post(url, content=body, headers=_bad_signature(body)) for _ in range(20))
+        )
+        codes = [r.status_code for r in responses]
+        assert len(reads) == 1
+        assert codes.count(401) == 2
+        assert codes.count(429) == 18
+
+        good = await ac.post(url, content=body, headers=_signed(body))
+    assert good.status_code == 202
+    assert len(reads) == 1
+
+
+def _failing_secret_reads(monkeypatch: pytest.MonkeyPatch, *, delay: float = 0.0) -> list[str]:
+    reads: list[str] = []
+
+    async def _read_secret(_operator: object, ref: str) -> SecretStr:
+        reads.append(ref)
+        await asyncio.sleep(delay)
+        raise VaultClientError("vault down")
+
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.service.read_event_source_secret", _read_secret
+    )
+    return reads
+
+
+@pytest.mark.asyncio
+async def test_failed_secret_read_is_not_repeated_in_the_same_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Vault fails, ten deliveries in one window read Vault once; all get 503."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _failing_secret_reads(monkeypatch)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+
+    codes = [client.post(url, content=body, headers=_signed(body)).status_code for _ in range(10)]
+    assert codes == [503] * 10
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_deliveries_during_a_vault_failure_read_vault_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twenty deliveries at the same time during a Vault failure read Vault once."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    reads = _failing_secret_reads(monkeypatch, delay=0.05)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_build_app()), base_url="http://testserver"
+    ) as ac:
+        responses = await asyncio.gather(
+            *(ac.post(url, content=body, headers=_bad_signature(body)) for _ in range(20))
+        )
+    assert [r.status_code for r in responses] == [503] * 20
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_after_a_failed_read_a_new_window_or_secret_change_reads_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept read error ends with the window and with a secret change."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    _failing_secret_reads(monkeypatch)
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+    assert client.post(url, content=body, headers=_signed(body)).status_code == 503
+
+    reads = _count_secret_reads(monkeypatch)
+    assert client.post(url, content=body, headers=_signed(body)).status_code == 503
+    for key, entry in list(_entries.items()):
+        _entries[key] = replace(entry, window=entry.window - 1)
+    assert client.post(url, content=body, headers=_signed(body)).status_code == 202
+    assert len(reads) == 1
+
+    _failing_secret_reads(monkeypatch)
+    (secret_ref,) = {ref for _source_id, ref in _entries}
+    await bump_secret_version(secret_ref)
+    other = b'{"alert":"resolved"}'
+    assert client.post(url, content=other, headers=_signed(other)).status_code == 503
+    reads = _count_secret_reads(monkeypatch, value="the-new-secret")
+    await bump_secret_version(secret_ref)
+    new = client.post(url, content=other, headers=_signed(other, secret="the-new-secret"))
+    assert new.status_code == 202
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_kept_secret_from_an_older_window_is_read_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A secret kept from an earlier window is not used: the next delivery
+    reads the secret again."""
+    await _seed_source(extras={"rate_per_minute": 2})
+    body = b'{"alert":"firing"}'
+    url = "/api/v1/events/ingest/prod-am"
+    assert client.post(url, content=body, headers=_bad_signature(body)).status_code == 401
+    for key, entry in list(_entries.items()):
+        _entries[key] = replace(entry, window=entry.window - 1)
+    reads = _count_secret_reads(monkeypatch)
+
+    resp = client.post(url, content=body, headers=_signed(body))
+    assert resp.status_code == 202
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", ["", "   "])
+@pytest.mark.parametrize("strategy", ["hmac-sha256", "basic"])
+async def test_blank_stored_secret_refuses_every_sender(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, stored: str, strategy: str
+) -> None:
+    """A source whose stored secret is empty or blank accepts no sender, also one
+    that signs or logs in with that same empty value."""
+    await _seed_source(auth_strategy=strategy, extras={"basic_username": "am"})
+    _count_secret_reads(monkeypatch, value=stored)
+    body = b'{"alert":"firing"}'
+    if strategy == "basic":
+        token = base64.b64encode(f"am:{stored}".encode()).decode()
+        headers = {"Authorization": f"Basic {token}"}
+    else:
+        headers = _signed(body, secret=stored)
+
+    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=headers)
+    assert resp.status_code == 401
+    assert await _count(EventOutbox) == 0
+
+
+@pytest.mark.asyncio
+async def test_basic_source_with_a_real_secret_accepts_the_sender(client: TestClient) -> None:
+    await _seed_source(auth_strategy="basic", extras={"basic_username": "am"})
+    body = b'{"alert":"firing"}'
+    token = base64.b64encode(f"am:{_SECRET_VALUE}".encode()).decode()
+    resp = client.post(
+        "/api/v1/events/ingest/prod-am",
+        content=body,
+        headers={"Authorization": f"Basic {token}"},
+    )
+    assert resp.status_code == 202
+    assert await _count(EventOutbox) == 1
 
 
 @pytest.mark.asyncio

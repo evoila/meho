@@ -101,13 +101,16 @@ def _tenants(raw: Any) -> tuple[TenantMembership, ...]:
         (RoleGroup.OPERATORS, GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False)),
         (
             RoleGroup.SA_OPERATORS,
-            GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=True),
+            GroupGrant(TenantRole.OPERATOR, approver=False, self_approval=False),
         ),
         (
             RoleGroup.ADMINS,
             GroupGrant(TenantRole.TENANT_ADMIN, approver=False, self_approval=False),
         ),
-        (RoleGroup.APPROVERS, GroupGrant(TenantRole.READ_ONLY, approver=True, self_approval=False)),
+        (
+            RoleGroup.APPROVERS,
+            GroupGrant(TenantRole.READ_ONLY, approver=False, self_approval=False),
+        ),
     ],
 )
 def test_group_grant_matches_the_table(group: RoleGroup, expected: GroupGrant) -> None:

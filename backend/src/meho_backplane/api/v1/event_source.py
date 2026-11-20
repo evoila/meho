@@ -50,6 +50,7 @@ from meho_backplane.event_source.secrets import (
     event_source_secret_ref,
     store_event_source_secret,
 )
+from meho_backplane.events.ingest.secret_cache import bump_secret_version
 
 __all__ = ["router"]
 
@@ -102,6 +103,33 @@ async def _store_secret_or_502(operator: Operator, secret_ref: str, secret: Secr
                 "message": (
                     "failed to store the event source secret in Vault; "
                     "the registry write was rolled back"
+                ),
+            },
+        ) from exc
+
+
+async def _renew_ingest_secret_or_503(secret_ref: str) -> None:
+    """Make every MEHO process read the changed secret on its next delivery.
+
+    The ingest path keeps a short copy of each source's secret
+    (``events/ingest/secret_cache.py``). A Valkey failure answers 503
+    ``secret_renew_failed``, so the operator sends the change again.
+    """
+    try:
+        await bump_secret_version(secret_ref)
+    except Exception as exc:
+        _log.error(
+            "event_source_secret_renew_failed",
+            secret_ref=secret_ref,
+            error_class=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "secret_renew_failed",
+                "message": (
+                    "the new secret is stored, but MEHO could not tell every "
+                    "process to use it; send the change again"
                 ),
             },
         ) from exc
@@ -236,6 +264,7 @@ async def update_event_source(
         # this also (re)homes secret_ref when the source had none.
         secret_ref = event_source_secret_ref(operator.tenant_id, row.slug)
         await _store_secret_or_502(operator, secret_ref, body.secret)
+        await _renew_ingest_secret_or_503(secret_ref)
         row.secret_ref = secret_ref
     row.updated_at = datetime.now(UTC)
     _log.info(

@@ -37,12 +37,14 @@ from tests.mcp_test_fixtures import (
 AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
     {
         "agent_operation_tools_from_mcp",
+        "agent_topology_off_with_connector_list",
         "agent_reads_custom_description",
         "checks_agent_events",
         "connector_list_product_aliases",
         "group_listing_operations",
         "jsonflux_answer_ready",
         "k8s_node_list_resources",
+        "file_ref_params",
         "kb_similar_check",
         "keycloak_rights_change_cards",
         "knowledge_upkeep_enabled",
@@ -60,6 +62,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "search_hit_call_hints",
         "search_plain_sentences",
         "search_typed_first",
+        "secret_move_linux_target_card",
         "team_knowledge_recall",
     }
 )
@@ -137,6 +140,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "event_drain_enabled",
         "event_drain_tick_interval_seconds",
         "events_ingest_rate_per_minute",
+        "feed_stream_max_seconds",
         "flight_recorder_enabled",
         "flight_recorder_reaper_enabled",
         "flight_recorder_reaper_max_per_tick",
@@ -265,6 +269,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "topology_history_prune_interval_seconds",
         "topology_history_retention_days",
         "topology_refresh_interval_seconds",
+        "ui_keycloak_approve_client_id",
         "ui_keycloak_client_id",
         "ui_keycloak_client_secret",
         "ui_session_absolute_lifetime_seconds",

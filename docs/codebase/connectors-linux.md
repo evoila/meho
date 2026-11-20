@@ -494,6 +494,14 @@ backplane rather than around it. It returns `stdout` as a list of lines so
 a large output spills to a `result_query` handle through the JSONFlux
 reducer rather than flooding agent context; `stderr` is capped inline.
 
+`script.run` sends a fixed command over SSH, and that command holds no
+value. Without sudo it is always `bash -s`; with sudo it is the fixed
+`_sudo.py` command (see "Root elevation"). Everything else goes on stdin,
+with and without sudo: the script, every `env` and `secret_env` value, and
+the `arguments`. The interpreter gets the `arguments` as its own arguments.
+The host's process list shows `bash -s` for a call without sudo, and a
+script that reads stdin gets end-of-file.
+
 ### Firewall changes with a timed way back
 
 A rule with good syntax can still cut the SSH path to the host. Then only
@@ -581,11 +589,14 @@ system folders), places in a home that the system runs or reads for logins
 (for example a `.ssh` folder, `.config/systemd` or `.bashrc`, compared in
 lower case), a home that does not exist, a link in
 any folder of the path below the home, and a target that is not a
-`linux-ssh` target. A person approves each move. The ref
+`linux-ssh` target. A person approves each move. The approval card names the
+target, its host and its port, and the approved run writes only to that
+target, host and port. The ref
 grammar and the full rules are in
 [connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
 store".
-Code: `connectors/linux/secret_endpoint.py`.
+Code: `connectors/linux/secret_endpoint.py` and
+`connectors/linux/secret_sink_target.py`.
 
 ### Root elevation
 

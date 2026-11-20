@@ -217,7 +217,6 @@ async def test_disable_by_username_keeps_every_other_field(kc: KeycloakConnector
         reads = mock.get(_USER_PATH).mock(
             side_effect=[
                 httpx.Response(200, json=_user(True)),
-                httpx.Response(200, json=_user(True)),
                 httpx.Response(200, json=_user(False)),
             ]
         )
@@ -232,7 +231,8 @@ async def test_disable_by_username_keeps_every_other_field(kc: KeycloakConnector
         "read_back_checked": True,
     }
     assert lookup.calls.last.request.url.params["exact"] == "true"
-    assert reads.call_count == 3
+    # One read is checked and written back, one read-back.
+    assert reads.call_count == 2
     assert put.call_count == 1
     assert json.loads(put.calls.last.request.content) == _user(False)
 
@@ -276,7 +276,6 @@ async def test_unrequested_change_is_named_not_valued(kc: KeycloakConnector) -> 
         _mount_token(mock)
         mock.get(_USER_PATH).mock(
             side_effect=[
-                httpx.Response(200, json=_user(True)),
                 httpx.Response(200, json=_user(True)),
                 httpx.Response(200, json=after),
             ]

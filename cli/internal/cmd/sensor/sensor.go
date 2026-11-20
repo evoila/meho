@@ -27,6 +27,9 @@
 //   - `meho sensor pause|resume <sensor_id> [--tenant <id>] [--json]` —
 //     stop or restart the runner's checks of one sensor via
 //     PATCH /api/v1/sensors/{id} with status. Role: tenant_admin.
+//   - `meho sensor run <sensor_id> [--tenant <id>] [--json]` — make one
+//     sensor due now via POST /api/v1/sensors/{id}/run; the runner runs it
+//     at its next tick. Role: tenant_admin.
 //   - `meho sensor results <sensor_id> [--from T] [--to T] [--state S]
 //     [--limit N] [--cursor C] [--json]` — the per-tick evidence trend
 //     query (#2756) via GET /api/v1/sensors/{id}/results: raw rows in
@@ -147,7 +150,7 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sensor",
-		Short: "Manage deterministic-check sensors (list / create / edit / pause / resume / delete / results / ack)",
+		Short: "Manage deterministic-check sensors (list / create / edit / pause / resume / run / delete / results / ack)",
 		Long: "Manage tenant-scoped sensors wired by the deterministic " +
 			"check layer (Initiative #2416). A sensor pins an (op + args + " +
 			"assertion + cadence + severity) tuple the check runner " +
@@ -155,7 +158,7 @@ func NewRootCmd() *cobra.Command {
 			"kind=cron for >=1-minute cadence). The op must be safe (a " +
 			"caution/dangerous op is refused at create and edit). Write verbs " +
 			"(create / edit / delete) require tenant_admin; the read verb (list) and " +
-			"ack (acknowledge a finding for a set time) are operator-level; ack is also open to a person with the approver claim. Tenant scoping is enforced server-side via the " +
+			"ack (acknowledge a finding for a set time) are operator-level. Tenant scoping is enforced server-side via the " +
 			"JWT; platform_admin callers may use --tenant to act on another " +
 			"tenant's sensors.",
 		SilenceUsage: true,
@@ -166,6 +169,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newPauseCmd())
 	cmd.AddCommand(newResumeCmd())
+	cmd.AddCommand(newRunNowCmd())
 	cmd.AddCommand(newResultsCmd())
 	cmd.AddCommand(newAckCmd())
 	return cmd

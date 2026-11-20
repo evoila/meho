@@ -1786,7 +1786,7 @@ registration at all.
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
 `tests/test_mcp_human_only_surface.py`. The approval groups
-(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+(MEHO-Operators, MEHO-Admins and the old groups read as those roles) decide only
 *which people* may approve on REST, the command line and the web
 interface; they never open an MCP path.
 
@@ -2090,6 +2090,47 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
+A parameter of an operation can wait behind a switch. Its schema carries
+`x-meho-switch: "<switch name>"` (`SWITCH_MARKER` in the connector kit;
+`operations/switch_params.py`). The keyword goes on a property schema,
+at any depth, or on a shared schema that a property links to with a
+local `$ref` (`$defs`, `definitions`, `components.schemas`). MEHO
+knows one switch name today: `file_ref_params`, the setting
+`FILE_REF_PARAMS` (off by default, listed by `GET /version`).
+
+| Switch (off by default) | Where | With the switch off |
+| --- | --- | --- |
+| `FILE_REF_PARAMS` | `search_operations` (`required_params`), the exact-op contract, `preview_operation`, the operation read of REST, the console and the CLI | The marked parameter is left out of the shown schema: out of every `required` and `dependentRequired` list of the same object (also in `allOf`, `anyOf`, `oneOf`, `then`, `else` and a branch it links to), out of `example`, `examples` and `default` values at any depth (also map values from `additionalProperties` or `patternProperties`, and list items), and a shared schema only it used is dropped. Examples in `llm_instructions` (`examples`, `example_call`) that name it, and its `parameter_hints` entry, are not shown. A call that gives it is refused as `invalid_params`, before it can wait for approval, so no approval request is stored. The answer is the one of an unknown parameter, and no error text names a hidden parameter: an object with `additionalProperties: false` leaves it out of the check schema, any other object gets the schema `false` for it (in the object and in each branch of it). No rule requires it. An `anyOf` or `oneOf` branch that requires it matches no object, but still matches other values such as `null`, so a call without it gets the same answer as without the keyword. The hash of a call that does not give it is the same. |
+
+* The stored schema is not changed. MEHO leaves the parameter out when it
+  reads the operation row for the caller (`apply_effective_policy` and
+  the operation read by id). The row keeps the schema for the call check
+  in `parameter_check_schema` (not a column).
+* A keyword that names another switch, or a keyword that is not on a
+  property (for example on `items`, `additionalProperties` or a
+  `patternProperties` schema), stops the operation from registering, for
+  typed, multi-step and ingested operations
+  (`operations/switch_registration.py`).
+* The keyword under `if`, `then`, `else` or `not` also stops the
+  operation from registering. So does a schema with the keyword that
+  links in a way MEHO does not follow: `$anchor`, `$dynamicRef`, an
+  `$id` below the root, or a `$ref` that is not a plain `#/` pointer
+  (for example one with `%` escapes).
+* These checks read every shared schema (`$defs`, `definitions`,
+  `components.schemas`, also below the root) and every
+  `patternProperties` or `dependentSchemas` schema, also when its name
+  is a keyword such as `default`, `examples`, `enum` or `const`.
+* With the switch on, the parameter shows and is accepted as usual.
+* No new MCP tool and no new field.
+
+Measurement before the switch goes on by default: run the benchmark job
+list on the same build with the switch off and on, with the same models.
+Record the pass rate of a small model and of Claude, and the size of an
+operation read. Turn it on only if the small model does not get worse,
+Claude does not get worse, and the answers grow by less than 10%. Then
+run once on the sandbox through the agent surface. A later pull request
+turns the switch on and links the numbers.
+
 Three switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |
@@ -2107,7 +2148,7 @@ resolved has two more fields (#6045):
   `null` when the evaluator failed.
 * `approvers`: the login groups that may approve the call when
   `policy_verdict` is `needs-approval` (for example
-  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  `["MEHO-Admins"]`), else `[]`. `null` when the
   stored routing is not valid: the preview still answers.
 
 No new MCP tool: the default working surface stays the same. The person

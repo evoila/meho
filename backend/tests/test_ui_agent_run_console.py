@@ -1006,6 +1006,33 @@ def test_run_cancel_role_backstop_is_403() -> None:
     assert response.json()["detail"] == "agent_run_cancel_forbidden"
 
 
+def test_run_cancel_of_another_persons_run_says_who_may_stop_it() -> None:
+    """A refused stop of another person's run is 403 with the rule in the detail."""
+    from meho_backplane.auth.operator import RUN_STOP_RULE
+    from meho_backplane.operations.agent_run import RunNotOwnedCancellationError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(
+        _FakeInvoker(
+            cancel_error=RunNotOwnedCancellationError(operator_sub=_OP_A, role=TenantRole.OPERATOR)
+        )
+    )
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{uuid.uuid4()}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == f"agent_run_cancel_forbidden: {RUN_STOP_RULE}"
+
+
 def test_run_cancel_non_uuid_handle_is_422() -> None:
     """A non-UUID handle 422s at the path boundary (never reaches the invoker)."""
     _seed_tenant(_TENANT_A, "tenant-a")

@@ -114,6 +114,50 @@ async def test_without_a_confirmed_copy_the_oldest_is_kept() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unconfirmed_copy_of_another_creator_is_listed_and_not_replaced() -> None:
+    service = KbService()
+    await service.create_entry(TENANT, "agent-note", "Open port 22.", actor_sub="agent:bot")
+    await service.create_entry(
+        TENANT, "admin-note", "Open port 22.", {"status": "candidate"}, actor_sub="person-admin"
+    )
+
+    reports = await run_upkeep(now=NOW)
+
+    assert (await _status("admin-note"))["status"] == "candidate"
+    assert "status" not in await _status("agent-note")
+    report = reports[TENANT]
+    assert report.merged == []
+    assert report.merge_for_review_count == 1
+    assert [(m.slug, m.same_as) for m in report.merge_for_review] == [("admin-note", "agent-note")]
+
+
+@pytest.mark.asyncio
+async def test_two_copies_of_one_creator_still_merge() -> None:
+    service = KbService()
+    await service.create_entry(TENANT, "first", "Open port 22.", actor_sub="agent:bot")
+    await service.create_entry(TENANT, "second", "Open port 22.", actor_sub="agent:bot")
+
+    reports = await run_upkeep(now=NOW)
+
+    assert (await _status("second"))["replaced_by"] == "first"
+    assert reports[TENANT].merge_for_review == []
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_kept_entry_still_replaces_a_copy_of_another_creator() -> None:
+    service = KbService()
+    await service.create_entry(TENANT, "agent-copy", "Open port 22.", actor_sub="agent:bot")
+    await service.create_entry(
+        TENANT, "reviewed", "Open port 22.", {"status": "confirmed"}, actor_sub="person-admin"
+    )
+
+    reports = await run_upkeep(now=NOW)
+
+    assert (await _status("agent-copy"))["replaced_by"] == "reviewed"
+    assert reports[TENANT].merge_for_review == []
+
+
+@pytest.mark.asyncio
 async def test_expired_entries_are_retired_and_others_stay() -> None:
     service = KbService()
     past = (NOW - timedelta(days=1)).isoformat()

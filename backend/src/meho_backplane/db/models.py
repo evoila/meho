@@ -2042,7 +2042,7 @@ class EndpointDescriptor(Base):
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
-    #: ``apply_step_classification`` returned. ``None``, empty and ``None``
+    #: ``apply_step_policy`` returned. ``None``, empty and ``None``
     #: otherwise. Search, the call contract and the approval request show them.
     #: Approver routing matches a ``routing`` entry's ``category`` on
     #: ``policy_category``; the install's entries match on
@@ -2052,6 +2052,11 @@ class EndpointDescriptor(Base):
     policy_install_category = cast("str | None", None)
     policy_labels = cast(Mapping[str, str], MappingProxyType({}))
     policy_rule_ref = cast("str | None", None)
+    #: Not a column. On a row that ``apply_effective_policy`` returned, the
+    #: schema a call is checked against: a parameter whose switch is off
+    #: accepts no value there (``operations/switch_params.py``).
+    #: ``parameter_schema`` is then the shown schema, without it.
+    parameter_check_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -3863,6 +3868,9 @@ class WebSession(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Fernet ciphertext of the console approval sign-in's access token
+    # (#6282, migration 0176). NULL = no approval sign-in on this session.
+    approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -7245,11 +7253,11 @@ class ApprovalRequest(Base):
       instead of the un-executable raw key. The resume runs under the
       approving reviewer, who auto-executes every governed sub-op (all
       ``dangerous`` + ``requires_approval=False``), so the composite completes
-      in that single pass; a composite that would open a *second* governed gate
-      is unsupported and fails closed
-      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1), unless that gate is an ``after_main_effect`` step with saved
-      state (#4217). NULL for every non-composite (direct-op) park — those keep
+      in that single pass; a later step that needs its own approval waits
+      again. The optional key ``"steps"`` lists the steps the composite's run
+      already went through, with their results, so a re-entry does not send
+      them again (:mod:`~meho_backplane.operations.composite_steps`). NULL for
+      every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -7281,7 +7289,7 @@ class ApprovalRequest(Base):
       NULL on every other request. Added by migration ``0153``.
 
     * ``approver_roles`` -- JSON nullable. The login group kinds that may
-      approve the request (for example ``["SA-Operators", "Admins"]``),
+      approve the request (for example ``["Operators", "Admins"]``),
       worked out from the policy file's ``routing`` section when the
       request started to wait (:mod:`meho_backplane.policy.routing`). Group
       kinds only, never people. At the click the person must be in one of
@@ -7324,6 +7332,14 @@ class ApprovalRequest(Base):
       approved run reads it here, also the re-run of a failed credential
       write, whose encrypted input the first run deleted. ``false`` on rows
       saved before this column. Added by migration ``0131``.
+
+    * ``allowed_connectors`` -- JSON nullable. The connector ids a hosted
+      agent with a connector list could use when its call started to wait
+      (:mod:`~meho_backplane.operations._target_connector_limit`). The run
+      after the approval binds the list again, so the call and every step
+      of a multi-step operation stay on targets of those connectors. NULL
+      for a caller without a connector list and on rows saved before this
+      column. Added by migration ``0175``.
 
     Indexes
     -------
@@ -7578,6 +7594,9 @@ class ApprovalRequest(Base):
     # migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     approver_install_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The connector list of the hosted agent that asked. See the class
+    # docstring. Added by migration ``0175``.
+    allowed_connectors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     # An operator checked the target of an approved run whose outcome MEHO
     # does not know, and wrote down what they found (#5026): the verdict
     # (``happened`` / ``did_not_happen``), a note, who and when. NULL until
@@ -9323,8 +9342,9 @@ class Sensor(Base):
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
-    # when the state changes so #2506's ``for:`` hysteresis can read how
-    # long the current state has held.
+    # when the state changes (or the first result confirms the initial
+    # ``unknown``) so the ``for:`` hysteresis can read how long the
+    # current state has held.
     last_state: Mapped[str] = mapped_column(
         Text,
         nullable=False,

@@ -102,6 +102,15 @@ routed by :func:`build_keycloak_secret_endpoint`:
   Any other field on a ``clients/`` ref is rejected with a value-free
   error.
 
+The user this target signs in with
+==================================
+
+The sink refuses the user its target signs in with (when the ref's realm is
+the realm the target signs in to), before approval
+(:meth:`KeycloakCredentialSecretEndpoint.refuse_before_approval`) and again
+before the write, as ``keycloak.user.reset_password`` does
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`).
+
 No secret in logs / response / audit
 ====================================
 
@@ -130,13 +139,27 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_user_login_guard import (
+    SECRET_SINK_ACTION,
+    park_refusal_for_login_user,
+    refuse_login_user_in_realm,
+)
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
-from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
+from meho_backplane.connectors.keycloak.ops_write_delete_lookup import KeycloakDeleteRefusedError
+from meho_backplane.connectors.keycloak.secret_move_target import check_approved_keycloak_target
+from meho_backplane.connectors.keycloak.session import KeycloakTargetLike, resolve_realm_config
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.targets.required_extras import realm_name_problem
-from meho_backplane.targets.resolver import resolve_target
+from meho_backplane.targets.resolver import (
+    AmbiguousTargetError,
+    TargetNotFoundError,
+    resolve_target,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -169,6 +192,7 @@ _SOURCE_FIELD = "secret"
 #: ref ``<target>/<realm>/<username>`` (three) — so a user literally named
 #: ``clients`` still routes to the sink (three segments).
 _CLIENTS_SEGMENT = "clients"
+_MOVE_OP_ID = "secret.move"
 
 
 class KeycloakSecretRefError(ValueError):
@@ -293,11 +317,70 @@ class KeycloakCredentialSecretEndpoint:
         confirm the structural match across the ORM's mutable column types
         (the ``AuthModel`` enum vs the Protocol's ``str | None``), so the
         narrow is made explicit at this single reuse site.
+
+        During the approved run of a ``secret.move``, the target, its host and
+        its secret reference must be the ones on the approval card
+        (:func:`~meho_backplane.connectors.keycloak.secret_move_target.check_approved_keycloak_target`),
+        before any Keycloak login.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
+        check_approved_keycloak_target("sink", self._target_name, row)
+        await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
+
+    async def check_target(self, operator: Operator) -> None:
+        """Find the named target and check it against the approval card. No Keycloak call.
+
+        ``secret.move`` calls this before it reads the source.
+        """
+        await self._resolve_target(operator)
+
+    def _in_sign_in_realm(self, target: KeycloakTargetLike) -> bool:
+        return self._realm == resolve_realm_config(target).admin_realm
+
+    async def _refuse_login_user(
+        self,
+        connector: KeycloakConnector,
+        operator: Operator,
+        target: KeycloakTargetLike,
+        uuid: str,
+    ) -> None:
+        if self._in_sign_in_realm(target):
+            await refuse_login_user_in_realm(
+                connector,
+                operator,
+                target,
+                realm=self._realm,
+                user_id=uuid,
+                op_id=_MOVE_OP_ID,
+                action=SECRET_SINK_ACTION,
+            )
+
+    async def refuse_before_approval(self, operator: Operator) -> str | None:
+        """The check before approval: the reason to refuse the sign-in user, or ``None``.
+
+        Calls Keycloak only in the realm the target signs in to. A target or
+        user that is not found is left to the run. The reason names no user.
+        """
+        connector = get_or_create_connector_instance(KeycloakConnector)
+        if not isinstance(connector, KeycloakConnector):  # pragma: no cover -- registry invariant
+            return None
+        try:
+            target = await self._resolve_target(operator)
+            if not self._in_sign_in_realm(target):
+                return None
+            uuid = await connector._find_user_uuid(
+                target, self._realm, self._username, operator=operator
+            )
+            if uuid is not None:
+                await self._refuse_login_user(connector, operator, target, uuid)
+        except (TargetNotFoundError, AmbiguousTargetError):
+            return None
+        except KeycloakDeleteRefusedError:
+            return park_refusal_for_login_user(_MOVE_OP_ID, SECRET_SINK_ACTION)
+        return None
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:
         """Unsupported — keycloak credentials are write-only.
@@ -343,6 +426,7 @@ class KeycloakCredentialSecretEndpoint:
                 f"keycloak secret sink: no user with username={self._username!r} "
                 f"in realm {self._realm!r} on target {self._target_name!r}"
             )
+        await self._refuse_login_user(connector, operator, target, uuid)
 
         # Read the value exactly once, here, on the write path; strip the
         # trailing-newline artifact as the existing reset-password path does.
@@ -390,10 +474,16 @@ class KeycloakClientSecretSourceEndpoint:
         extras) — the same row the dispatcher hands the keycloak read ops
         at runtime — but mypy cannot confirm the structural match across
         the ORM's mutable column types, so the narrow is explicit here.
+
+        During the approved run of a ``secret.move``, the target, its host and
+        its secret reference must be the ones on the approval card, before
+        any Keycloak login (the same check as the sink's).
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
+        check_approved_keycloak_target("source", self._target_name, row)
+        await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:

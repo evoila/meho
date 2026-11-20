@@ -4,13 +4,16 @@ Most pages in this section are **generated from the codebase**, so they
 cannot drift from the product without a red build. Each such page is
 rendered from a registry, command tree, or contract snapshot and
 committed, with a CI freshness gate that fails the moment the source and
-the committed page disagree. [What's new](whats-new.md) is the one page
-written by hand, at each release.
+the committed page disagree. Two pages are written by hand:
+[What's new](whats-new.md), at each release, and
+[Words we use](words.md).
 
 ## Available now
 
 - [What's new](whats-new.md) — a plain-language summary of what landed
   in recent releases, since v0.28.0.
+- [Words we use](words.md) — what MEHO's own words mean, in plain
+  English and A to Z order. Written by hand, not generated.
 - [Connectors](connectors.md) — the per-connector inventory: connector
   id, product, supported version range, and kind, from the connector
   registry.

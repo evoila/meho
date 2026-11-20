@@ -128,45 +128,45 @@ func getTarget(
 // rendered as a compact one-liner with the high-signal fields; the
 // full structure is in --json.
 func printTargetSummary(w io.Writer, t *api.Target) {
-	fmt.Fprintf(w, "%-18s %s\n", "name:", t.Name)
+	fmt.Fprintf(w, "%-18s %s\n", "name:", output.SafeText(t.Name))
 	fmt.Fprintf(w, "%-18s %s\n", "id:", t.Id.String())
 	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", t.TenantId.String())
 	if len(t.Aliases) > 0 {
-		fmt.Fprintf(w, "%-18s %s\n", "aliases:", strings.Join(t.Aliases, ", "))
+		fmt.Fprintf(w, "%-18s %s\n", "aliases:", output.SafeText(strings.Join(t.Aliases, ", ")))
 	} else {
 		fmt.Fprintf(w, "%-18s -\n", "aliases:")
 	}
-	fmt.Fprintf(w, "%-18s %s\n", "product:", t.Product)
-	fmt.Fprintf(w, "%-18s %s\n", "host:", t.Host)
+	fmt.Fprintf(w, "%-18s %s\n", "product:", output.SafeText(t.Product))
+	fmt.Fprintf(w, "%-18s %s\n", "host:", output.SafeText(t.Host))
 	if t.Port != nil {
 		fmt.Fprintf(w, "%-18s %d\n", "port:", *t.Port)
 	}
 	if t.Fqdn != nil && *t.Fqdn != "" {
-		fmt.Fprintf(w, "%-18s %s\n", "fqdn:", *t.Fqdn)
+		fmt.Fprintf(w, "%-18s %s\n", "fqdn:", output.SafeText(*t.Fqdn))
 	}
 	fmt.Fprintf(w, "%-18s %s\n", "auth_model:", string(t.AuthModel))
 	fmt.Fprintf(w, "%-18s %t\n", "vpn_required:", t.VpnRequired)
 	if t.SecretRef != nil && *t.SecretRef != "" {
 		if t.SecretRefDerived != nil && *t.SecretRefDerived {
-			fmt.Fprintf(w, "%-18s %s (built from the target name; store the credential there or set --secret-ref)\n", "secret_ref:", *t.SecretRef)
+			fmt.Fprintf(w, "%-18s %s (built from the target name; store the credential there or set --secret-ref)\n", "secret_ref:", output.SafeText(*t.SecretRef))
 		} else {
-			fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", *t.SecretRef)
+			fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", output.SafeText(*t.SecretRef))
 		}
 	}
 	if t.SecretFieldMap != nil && len(*t.SecretFieldMap) > 0 {
-		fmt.Fprintf(w, "%-18s %s\n", "secret_field_map:", formatSecretFieldMap(*t.SecretFieldMap))
+		fmt.Fprintf(w, "%-18s %s\n", "secret_field_map:", output.SafeText(formatSecretFieldMap(*t.SecretFieldMap)))
 	}
 	if t.PreferredImplId != nil && *t.PreferredImplId != "" {
-		fmt.Fprintf(w, "%-18s %s\n", "preferred_impl_id:", *t.PreferredImplId)
+		fmt.Fprintf(w, "%-18s %s\n", "preferred_impl_id:", output.SafeText(*t.PreferredImplId))
 	} else {
 		fmt.Fprintf(w, "%-18s -\n", "preferred_impl_id:")
 	}
-	fmt.Fprintf(w, "%-18s %s\n", "fingerprint:", formatFingerprint(t.Fingerprint))
+	fmt.Fprintf(w, "%-18s %s\n", "fingerprint:", output.SafeText(formatFingerprint(t.Fingerprint)))
 	if t.Notes != nil && *t.Notes != "" {
-		fmt.Fprintf(w, "%-18s %s\n", "notes:", *t.Notes)
+		fmt.Fprintf(w, "%-18s %s\n", "notes:", output.SafeText(*t.Notes))
 	}
 	if len(t.Extras) > 0 {
-		fmt.Fprintf(w, "%-18s %s\n", "extras:", formatExtras(t.Extras))
+		fmt.Fprintf(w, "%-18s %s\n", "extras:", output.SafeText(formatExtras(t.Extras)))
 	}
 	// Render timestamps in the same RFC3339Z shape the backend's
 	// model_dump(mode="json") emits, so --json output and the human

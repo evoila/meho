@@ -113,7 +113,7 @@ Use your own DNS name and your own admin range.
 | `--public-address <ipv4>` | Only when address translation inside your network is in front of the machine, for example a load balancer: the address that the DNS name points to. Never an address on the internet. | None. |
 | `--first-tenant-id <uuid>` | The id of the first tenant. Give the old id when you move MEHO to another machine. | A new random id. |
 | `--admin-user <name>` | The user name of the first admin. | `admin` |
-| `--approver-user <name>` | The user name of the approver (in `MEHO-SA-Operators`), who approves the admin's risky changes. | `approver` |
+| `--approver-user <name>` | The user name of the approver (in `MEHO-SA-Operators`), whom MEHO reads as an Operator: they approve the admin's `safe` and `caution` changes, but not a change of rights. | `approver` |
 | `--cluster-cidr <cidr>` | The address range of the pods. | `10.42.0.0/16` |
 | `--service-cidr <cidr>` | The address range of the services. | `10.43.0.0/16` |
 
@@ -206,8 +206,10 @@ says `First-start list: not in this version yet`.
 ## Step 4: First login
 
 The install made two users with temporary passwords: the first admin
-(in `MEHO-Admins`) and an approver (in `MEHO-SA-Operators`). The approver
-is not an admin. The approver can approve the admin's risky changes. See
+(in `MEHO-Admins`) and an approver (in `MEHO-SA-Operators`). The approver is not an admin. MEHO reads the old group `MEHO-SA-Operators` as
+Operators, so the approver can approve the admin's `safe` and `caution`
+changes. The admin approves their own `dangerous` and `destructive`
+changes. A change of rights needs a second admin. See
 [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 1. On the server, read the file with the passwords:

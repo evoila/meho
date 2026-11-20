@@ -63,19 +63,53 @@ def test_theme_js_is_deleted_and_unreferenced() -> None:
 
 
 def test_every_hardcoded_theme_is_the_brand_theme() -> None:
-    """Six documents set ``data-theme`` themselves, three of them standalone.
+    """No document may render with a theme other than the brand one.
 
-    ``base.html`` plus the pages that do not inherit it: the session-ended
-    page, both tenant pages, the broadcast wall and the offline page. They
-    are the ones a sweep over ``templates/`` alone misses -- the offline
-    page does not even live there.
+    Five documents still set ``data-theme`` themselves: the pages that do
+    not inherit ``base.html`` -- the session-ended page, both tenant
+    pages, the broadcast wall and the offline page. They are the ones a
+    sweep over ``templates/`` alone misses; the offline page does not
+    even live there.
+
+    ``base.html`` used to be the sixth. It now inherits the attribute
+    from the shared page frame, which is asserted separately below --
+    the count alone would have quietly dropped to five either way, so
+    the two halves are checked apart.
     """
     found = 0
     for path in _source_files():
         for value in re.findall(r'data-theme="([^"]+)"', path.read_text(encoding="utf-8")):
             found += 1
             assert value == "evoila", f"{path.name} renders with data-theme={value!r}"
-    assert found >= 6, f"expected at least six documents to pin the theme, found {found}"
+    assert found >= 5, (
+        f"expected at least five standalone documents to pin the theme, found {found}"
+    )
+
+
+def test_base_html_gets_the_theme_from_the_shared_frame() -> None:
+    """The other half of the guard above.
+
+    ``base.html`` stopped declaring ``data-theme`` when it moved onto the
+    shared page frame. That is correct -- the frame sets it -- but it
+    means the sweep above can no longer see the attribute for the 67
+    pages that inherit it. Without this test, a frame that stopped
+    setting the theme, or a ``base.html`` that stopped extending it,
+    would leave every console page unthemed and every assertion green.
+    """
+    from jinja2 import Environment
+
+    from meho_backplane.ui.templating import get_jinja_env
+
+    env: Environment = get_jinja_env()
+    source = (templates_dir() / "base.html").read_text(encoding="utf-8")
+    assert '{% extends "_page_frame.html" %}' in source, (
+        "base.html no longer extends the shared frame, so nothing sets its theme"
+    )
+
+    # The frame is resolved through the app's own loader, so this also
+    # proves the shared templates are reachable at render time.
+    frame = env.get_template("_page_frame.html").render()
+    assert 'data-theme="evoila"' in frame, "the shared frame stopped setting the brand theme"
 
 
 def test_the_head_links_the_packaged_brand_stylesheets() -> None:

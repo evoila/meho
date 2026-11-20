@@ -55,12 +55,13 @@ from __future__ import annotations
 import json
 import re
 import sys
-import xml.parsers.expat
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Final
 
 import yaml
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import DefusedXMLParser, ParseError
 
 from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER, _is_placeholder
 
@@ -693,18 +694,20 @@ def _is_xml_document(text: str) -> bool:
     """True when *text* is one complete XML document, such as one root element.
 
     Such a text can also read as YAML (``key: value`` lines inside the root
-    element), but it is XML, so it is read as XML whole. Entities a DTD
-    could define count as defined, and no DTD is loaded.
+    element), but it is XML, so it is read as XML whole. A text with entity
+    declarations is XML too; the parser refuses to expand them.
     """
     body = text.lstrip("\ufeff \t\r\n")
     if not body.startswith("<"):
         return False
-    parser = xml.parsers.expat.ParserCreate()
-    parser.UseForeignDTD(True)
+    parser = DefusedXMLParser()
     try:
-        parser.Parse(body, True)
-    except xml.parsers.expat.ExpatError:
+        parser.feed(body)
+        parser.close()
+    except ParseError:
         return False
+    except DefusedXmlException:
+        return True
     return True
 
 

@@ -3989,6 +3989,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The approval card of <code>linux.script.run</code> in the console shows each <code>env</code> name with its value. Reads by an agent or a token show the names only: the MCP approval tools (<code>meho_approvals_get</code>, <code>meho_approvals_list</code>), <code>preview_operation</code>, and the REST approval reads of a <code>linux.script.run</code> request with an agent, service or runner login. The script gets each <code>env</code> value byte for byte as the card shows it, also a value that ends in line breaks. A <code>linux.script.run</code> call with a secret in <code>env</code> (a name with a secret word such as <code>PASSWORD</code> or <code>TOKEN</code>, or a value that looks like a password, token or private key) is refused before it waits for approval: put secrets in <code>secret_env</code>.</td>
+<td>A <code>linux.script.run</code> request with <code>env</code> that waits for approval at the upgrade shows only the <code>env</code> names. Reject it and send the call again, so the new card shows the values.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td><code>linux.script.run</code> sends the script and its values to the host on standard input, also without sudo. The host's process list shows <code>bash -s</code> for such a call. A script that reads standard input gets end-of-file.</td>
 <td>None.</td>
 </tr>

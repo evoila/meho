@@ -3632,6 +3632,18 @@ printed with one command. Only that person can read it:</p>
 bell with the live pending count, a request-detail window with the
 proposed effect, and Approve / Deny buttons. The window also says
 whether you may approve the request, and why not.</p>
+<p>A <code>linux.script.run</code> request shows the script and each <code>env</code> name with
+its value. Read the <code>env</code> values as carefully as the script: some names
+change what a tool runs (for example <code>TAR_OPTIONS</code> or <code>GIT_SSH_COMMAND</code>).
+The run uses exactly these values; a call with other values needs a new
+approval. Secrets do not belong in <code>env</code>. Send them in <code>secret_env</code>, as a
+Vault path and field: the request shows only that reference, never the
+secret. MEHO refuses a call with a secret-looking <code>env</code> name (for example
+<code>DB_PASSWORD</code>) or value (for example a token or a password in a URL)
+before it waits for approval. The <code>env</code> values are for the person who
+approves: reads by an agent or a token show the <code>env</code> names only (the
+MCP approval tools, <code>preview_operation</code>, and the REST approval reads of a
+<code>linux.script.run</code> request with an agent, service or runner login).</p>
 <p>When several requests belong to one change ticket and depend on each
 other, approve them as a group, oldest first:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>--filter-work-ref<span class="w"> </span>&lt;ticket&gt;<span class="w"> </span>--in-order

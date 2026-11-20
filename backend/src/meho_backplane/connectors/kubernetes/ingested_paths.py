@@ -15,11 +15,11 @@ it (:func:`~meho_backplane.op_classes.declare_credential_capable_match`).
   pod (``exec``, ``attach``), a port forward and a proxy to a pod, a service
   or a node, and a new ServiceAccount token.
 * A write (``POST``, ``PUT``, ``PATCH``) of an object that is not one of
-  the plain objects of ``k8s.apply``
-  (:data:`~meho_backplane.connectors.kubernetes.op_classes.PLAIN_OBJECTS`),
+  the plain objects of ``k8s.apply`` that need no check of their body
+  (:data:`~meho_backplane.connectors.kubernetes.op_classes.PLAIN_PLURALS`),
   read by API group and plural: a pod or a workload, a role or a binding, a
-  webhook, a custom resource and every other kind. Also an ephemeral
-  container and the approval of a certificate signing request.
+  webhook, an Ingress, a custom resource and every other kind. Also an
+  ephemeral container and the approval of a certificate signing request.
 
 A path segment in braces or with a value counts the same, so the names of
 the path params in the API file do not matter. A path can have any prefix

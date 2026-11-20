@@ -72,7 +72,9 @@ PLAIN_OBJECTS: Final[tuple[tuple[str, str, str], ...]] = (
     # Picks pods by label and gives them one address. It starts no pod and
     # reads no Secret.
     ("", "Service", "services"),
-    # A name for a group of objects. It holds no workload and no rights.
+    # A name for a group of objects. It holds no workload and no rights. A
+    # label or an annotation can change how the cluster checks the pods in
+    # it, so a Namespace with one waits (_PLAIN_ONLY_IF).
     ("", "Namespace", "namespaces"),
     # A name a pod can run as. Its rights come only from a role binding,
     # and a binding waits.
@@ -83,7 +85,9 @@ PLAIN_OBJECTS: Final[tuple[tuple[str, str, str], ...]] = (
     ("", "LimitRange", "limitranges"),
     ("", "ResourceQuota", "resourcequotas"),
     # Routes outside traffic to a Service. It starts no pod and gives no
-    # rights in the cluster.
+    # rights in the cluster. A TLS entry makes the controller read a Secret,
+    # and an annotation can make a controller make one, so an Ingress with
+    # either waits (_PLAIN_ONLY_IF).
     ("networking.k8s.io", "Ingress", "ingresses"),
     # Names the controller that serves an Ingress. It starts no controller.
     ("networking.k8s.io", "IngressClass", "ingressclasses"),
@@ -103,10 +107,42 @@ _PLAIN_KINDS: Final[frozenset[tuple[str, str]]] = frozenset(
     (group, kind.lower()) for group, kind, _ in PLAIN_OBJECTS
 )
 
-#: ``(API group, plural)`` of :data:`PLAIN_OBJECTS`, for the paths of an
-#: ingested Kubernetes API file (:mod:`.ingested_paths`).
+
+def _metadata_is_bare(doc: Mapping[str, Any]) -> bool:
+    """True when *doc* has no labels and no annotations."""
+    metadata = doc.get("metadata")
+    if metadata is None:
+        return True
+    if not isinstance(metadata, Mapping):
+        return False
+    return not metadata.get("labels") and not metadata.get("annotations")
+
+
+def _ingress_is_plain(doc: Mapping[str, Any]) -> bool:
+    """True when the Ingress *doc* has no annotations, no labels and no TLS entry."""
+    spec = doc.get("spec")
+    if spec is None:
+        return _metadata_is_bare(doc)
+    if not isinstance(spec, Mapping):
+        return False
+    return _metadata_is_bare(doc) and not spec.get("tls")
+
+
+#: The plain kinds that are plain only when their object passes a check. The
+#: key is ``(API group, kind in lower case)``. Their write through an ingested
+#: API file waits: MEHO does not read the body of such a call.
+_PLAIN_ONLY_IF: Final[Mapping[tuple[str, str], Callable[[Mapping[str, Any]], bool]]] = {
+    ("", "namespace"): _metadata_is_bare,
+    ("networking.k8s.io", "ingress"): _ingress_is_plain,
+}
+
+#: ``(API group, plural)`` of the :data:`PLAIN_OBJECTS` that need no check of
+#: their object, for the paths of an ingested Kubernetes API file
+#: (:mod:`.ingested_paths`).
 PLAIN_PLURALS: Final[frozenset[tuple[str, str]]] = frozenset(
-    (group, plural) for group, _, plural in PLAIN_OBJECTS
+    (group, plural)
+    for group, kind, plural in PLAIN_OBJECTS
+    if (group, kind.lower()) not in _PLAIN_ONLY_IF
 )
 
 
@@ -207,7 +243,8 @@ def _is_not_plain(doc: Mapping[str, Any]) -> bool:
 
     The kind is read without case, the group as written. A list object is
     plain when it is a ``List`` (in any case) or a ``<Kind>List`` of a plain kind; its
-    items are then read one by one.
+    items are then read one by one. A kind of :data:`_PLAIN_ONLY_IF` is plain
+    only when its object passes the check there.
     """
     group = _api_group(doc.get("apiVersion"))
     if group is None:
@@ -215,9 +252,12 @@ def _is_not_plain(doc: Mapping[str, Any]) -> bool:
     kind = str(doc["kind"])
     if _is_list_kind(kind):
         kind = kind[: -len("List")]
-        if not kind:
-            return False
-    return (group, kind.lower()) not in _PLAIN_KINDS
+        return bool(kind) and (group, kind.lower()) not in _PLAIN_KINDS
+    key = (group, kind.lower())
+    if key not in _PLAIN_KINDS:
+        return True
+    passes = _PLAIN_ONLY_IF.get(key)
+    return passes is not None and not passes(doc)
 
 
 def manifest_holds_credential(params: Mapping[str, Any]) -> bool:

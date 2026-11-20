@@ -142,6 +142,40 @@ _WAITING_IDS = [f"{api_version.split('/')[0]}-{kind}" for api_version, kind, _, 
 
 _PLAIN_IDS = [f"{group or 'core'}-{kind}" for group, kind, _ in PLAIN_OBJECTS]
 
+#: The plain objects whose write through an ingested API file keeps its rules:
+#: all but an Ingress, whose body MEHO does not read there.
+_PATH_PLAIN = [entry for entry in PLAIN_OBJECTS if entry[1] != "Ingress"]
+_PATH_PLAIN_IDS = [f"{group or 'core'}-{kind}" for group, kind, _ in _PATH_PLAIN]
+
+#: Plain kinds whose object waits because of one of its fields.
+_FIELDS_THAT_WAIT: list[tuple[str, str, dict[str, Any]]] = [
+    ("v1", "Namespace", {"labels": {"pod-security.kubernetes.io/enforce": "baseline"}}),
+    ("v1", "Namespace", {"labels": {"team": "a"}}),
+    ("v1", "Namespace", {"annotations": {"note": "a"}}),
+    ("networking.k8s.io/v1", "Ingress", {"annotations": {"cert-manager.io/issuer": "a"}}),
+    ("networking.k8s.io/v1", "Ingress", {"labels": {"team": "a"}}),
+    ("networking.k8s.io/v1", "Ingress", {"spec": {"tls": [{"secretName": "a"}]}}),
+]
+_FIELDS_THAT_WAIT_IDS = [
+    "namespace-pod-security-label",
+    "namespace-other-label",
+    "namespace-annotation",
+    "ingress-issuer-annotation",
+    "ingress-label",
+    "ingress-tls",
+]
+
+
+def _with_fields(api_version: str, kind: str, fields: dict[str, Any]) -> dict[str, Any]:
+    doc = _object(api_version, kind)
+    for key in ("labels", "annotations"):
+        if key in fields:
+            doc["metadata"][key] = fields[key]
+    if "spec" in fields:
+        doc["spec"] = fields["spec"]
+    return doc
+
+
 #: A prefix a proxy puts in front of the Kubernetes API paths.
 _PREFIX = "/k8s/clusters/{cluster}"
 
@@ -198,6 +232,47 @@ def test_an_apply_of_a_plain_object_keeps_its_rules(group: str, kind: str, plura
     assert (
         manifest_needs_a_person({"manifest": _manifest(_api_version(group), kind.lower())}) is False
     )
+
+
+@pytest.mark.parametrize(
+    ("api_version", "kind", "fields"), _FIELDS_THAT_WAIT, ids=_FIELDS_THAT_WAIT_IDS
+)
+def test_a_namespace_or_ingress_with_a_field_that_can_change_checks_waits(
+    api_version: str, kind: str, fields: dict[str, Any]
+) -> None:
+    doc = _with_fields(api_version, kind, fields)
+    assert manifest_needs_a_person({"manifest": yaml.safe_dump(doc)}) is True
+    listed = {"apiVersion": "v1", "kind": "List", "items": [doc]}
+    assert manifest_needs_a_person({"manifest": yaml.safe_dump(listed)}) is True
+    in_kind_list = {"apiVersion": api_version, "kind": f"{kind}List", "items": [doc]}
+    assert manifest_needs_a_person({"manifest": yaml.safe_dump(in_kind_list)}) is True
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        _object("v1", "Namespace") | {"metadata": "a"},
+        _object("networking.k8s.io/v1", "Ingress") | {"metadata": ["a"]},
+        _object("networking.k8s.io/v1", "Ingress") | {"spec": "a"},
+    ],
+    ids=["namespace-metadata-not-a-map", "ingress-metadata-not-a-map", "ingress-spec-not-a-map"],
+)
+def test_a_namespace_or_ingress_meho_cannot_read_waits(doc: dict[str, Any]) -> None:
+    assert manifest_needs_a_person({"manifest": yaml.safe_dump(doc)}) is True
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        _object("v1", "Namespace") | {"metadata": {"name": "a", "labels": {}}},
+        {"apiVersion": "v1", "kind": "Namespace"},
+        _object("networking.k8s.io/v1", "Ingress")
+        | {"spec": {"tls": [], "rules": [{"host": "a.example.test"}]}},
+    ],
+    ids=["namespace-empty-labels", "namespace-no-metadata", "ingress-rules-without-tls"],
+)
+def test_a_bare_namespace_or_ingress_keeps_its_rules(doc: dict[str, Any]) -> None:
+    assert manifest_needs_a_person({"manifest": yaml.safe_dump(doc)}) is False
 
 
 def test_a_knative_service_waits_and_a_core_service_does_not() -> None:
@@ -307,7 +382,7 @@ def test_a_credential_call_behind_a_path_prefix_waits(op_id: str) -> None:
 
 def _plain_writes() -> list[str]:
     ops = []
-    for group, _, plural in PLAIN_OBJECTS:
+    for group, _, plural in _PATH_PLAIN:
         for prefix in ("", _PREFIX):
             ops.append(f"POST:{prefix}{_plain_path(group, plural)}")
             ops.append(f"PUT:{prefix}{_plain_path(group, plural, name=True)}")
@@ -318,6 +393,17 @@ def _plain_writes() -> list[str]:
 @pytest.mark.parametrize("op_id", _plain_writes())
 def test_an_api_write_of_a_plain_object_keeps_its_rules(op_id: str) -> None:
     assert ingested_op_is_credential_call(op_id) is False
+
+
+@pytest.mark.parametrize("prefix", ["", _PREFIX], ids=["no-prefix", "prefix"])
+def test_an_api_write_of_an_ingress_waits(prefix: str) -> None:
+    for op_id in (
+        f"POST:{prefix}{_plain_path('networking.k8s.io', 'ingresses')}",
+        f"PUT:{prefix}{_plain_path('networking.k8s.io', 'ingresses', name=True)}",
+        f"PATCH:{prefix}{_plain_path('networking.k8s.io', 'ingresses', name=True)}",
+    ):
+        assert ingested_op_is_credential_call(op_id) is True, op_id
+        assert credential_grant_reason(op_id) is not None
 
 
 @pytest.mark.parametrize(
@@ -394,6 +480,20 @@ async def test_a_k8s_apply_of_a_plain_object_keeps_its_grant(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("api_version", "kind", "fields"), _FIELDS_THAT_WAIT, ids=_FIELDS_THAT_WAIT_IDS
+)
+async def test_a_k8s_apply_of_a_namespace_or_ingress_with_such_a_field_waits_for_every_login(
+    api_version: str, kind: str, fields: dict[str, Any]
+) -> None:
+    rows = await _register_all()
+    params = {"manifest": yaml.safe_dump(_with_fields(api_version, kind, fields))}
+    await _assert_waits_with_and_without_a_grant(_row(rows, "k8s.apply"), params)
+    for operator in (_service(), _agent()):
+        assert await _step_waits(operator, "k8s.apply", params), operator.principal_kind
+
+
+@pytest.mark.asyncio
 async def test_a_knative_service_waits_and_a_core_service_keeps_its_grant() -> None:
     rows = await _register_all()
     apply_row = _row(rows, "k8s.apply")
@@ -441,7 +541,18 @@ async def test_an_api_write_of_an_object_that_is_not_plain_waits_for_every_login
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("group", "kind", "plural"), PLAIN_OBJECTS, ids=_PLAIN_IDS)
+@pytest.mark.parametrize("prefix", ["", _PREFIX], ids=["no-prefix", "prefix"])
+async def test_an_api_write_of_an_ingress_waits_for_every_login(prefix: str) -> None:
+    op_id = f"POST:{prefix}{_plain_path('networking.k8s.io', 'ingresses')}"
+    row = await _store(op_id)
+    params = {"namespace": "apps", "cluster": "c-1"}
+    await _assert_waits_with_and_without_a_grant(row, params)
+    for operator in (_service(), _agent()):
+        assert await _step_waits(operator, op_id, params), operator.principal_kind
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("group", "kind", "plural"), _PATH_PLAIN, ids=_PATH_PLAIN_IDS)
 async def test_an_api_write_of_a_plain_object_keeps_its_grant(
     group: str, kind: str, plural: str
 ) -> None:

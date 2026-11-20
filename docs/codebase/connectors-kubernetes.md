@@ -52,6 +52,13 @@ agent grant and no run approval covers them
   a GitOps application). A new custom kind waits until someone adds it
   to the table in code, with its reason.
 
+  Two plain kinds are plain only when their object passes a check
+  (`_PLAIN_ONLY_IF`): a `Namespace` with a label or an annotation waits,
+  because a label can change how the cluster checks the pods in it. An
+  `Ingress` with an annotation, a label or a TLS entry waits, because a
+  TLS entry makes the controller read a Secret and an annotation can make
+  a controller make one.
+
   MEHO reads the API group from `apiVersion` (`v1` is the core group,
   `<group>/<version>` otherwise) and compares it as written; the table
   holds it in lower case. It reads the kind without case. So a Knative `Service` waits and
@@ -94,7 +101,9 @@ The operations it makes that read or write a Secret, run a command in a
 pod, open a proxy or a port forward, or make a token get the same rule.
 So does every write (`POST`, `PUT`, `PATCH`) of an object that is not
 plain: MEHO reads the API group and the plural from the path and looks
-them up in the same `PLAIN_OBJECTS` table. A `/status` or `/scale`
+them up in the same `PLAIN_OBJECTS` table. MEHO does not read the body of
+such a call, so a write of an `Ingress` always waits (`PLAIN_PLURALS`
+leaves out the kinds of `_PLAIN_ONLY_IF`). A `/status` or `/scale`
 subresource and a write of a cluster-wide core object (a node, a
 namespace, a volume) keep their rules. A path can have any prefix in
 front, for example the base path of a proxy

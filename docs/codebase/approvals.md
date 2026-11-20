@@ -2007,7 +2007,10 @@ requests follow the agent row. A sensor never makes a request.
   (`AgentDefinitionService.update`). An edit by a machine login keeps the
   person who was there. The migration fills it from the newest successful
   `agent.edit` audit row of the definition by a login that is not a
-  machine login, else from `created_by_sub`. It reads only audit rows from the time the definition
+  machine login, else from `created_by_sub`. A machine login here is a
+  row of `machine_login`, or the login of an agent definition, an agent,
+  an add-on pairing (client id or service login) or a runner of the
+  tenant: the same records `machine_subs` reads. It reads only audit rows from the time the definition
   was created, so an edit of a deleted definition with the same name does
   not count.
 - `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`

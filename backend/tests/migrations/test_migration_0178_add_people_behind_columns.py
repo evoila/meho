@@ -9,7 +9,9 @@ The migration adds four nullable columns: ``approval_request.people_behind``,
 fills ``machine_login`` from the requests of machine logins and from the
 ``client`` block of the audit rows. It fills ``updated_by_sub`` from the
 newest successful ``agent.edit`` audit row of the definition by a login that
-is not a machine login, else from ``created_by_sub``. An edit from before the
+is not a machine login, else from ``created_by_sub``. A machine login is
+also the login of an agent, an add-on pairing or a runner of the tenant,
+when none of its records names it as one. An edit from before the
 definition was created (an edit of a deleted definition with the same name)
 does not count. ``downgrade()`` removes the columns and the table again.
 Every step targets this migration's own revision (``0178``) and its
@@ -240,3 +242,99 @@ def test_machine_login_comes_from_machine_requests_and_audit_rows(
 
     rows = _run(sync_url, "SELECT sub, kind FROM machine_login ORDER BY sub")
     assert rows == [("agent-editor", "agent"), ("service-sender", "service")]
+
+
+#: The machine logins of the tenant that only the records of an add-on
+#: pairing, an agent or a runner name. None of them made a request and no
+#: audit row of theirs has a ``client`` block.
+_PAIRED_DEFINITION = "00000000-0000-0000-0000-0000000001e4"
+_PAIRING_SQL = (
+    "INSERT INTO addon_pairing (id, tenant_id, name, keycloak_client_id, keycloak_internal_id, "
+    "service_account_sub, owner_sub, contract_version, addon_contract_version, "
+    "addon_min_backplane_version, created_by_sub, paired_at, updated_at) VALUES (:id, :tenant, "
+    ":name, :client, 'kc-internal', :service_sub, 'owner', 1, 1, 1, 'owner', :at, :at)"
+)
+_PRINCIPAL_SQL = (
+    "INSERT INTO {table} (id, tenant_id, name, keycloak_client_id, keycloak_internal_id, "
+    "owner_sub, created_by_sub, created_at, updated_at) VALUES (:id, :tenant, :name, :client, "
+    "'kc-internal', 'owner', 'owner', :at, :at)"
+)
+#: The edits of the definition, oldest first. Only the first is by a person.
+_PAIRED_EDITS = (
+    "editor-person",
+    "pairing-service-sub",
+    "pairing-client",
+    "agent-client",
+    "runner-client",
+)
+
+
+def test_updated_by_sub_skips_paired_agent_and_runner_logins(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
+    cfg, sync_url = alembic_cfg
+    copy_migrated_db(cfg, _DOWN_REVISION)
+    created = "2026-10-01 00:00:00"
+    _run(
+        sync_url,
+        DEFINITION_SQL,
+        id=_PAIRED_DEFINITION,
+        tenant=_TENANT,
+        name="paired",
+        creator="creator-d",
+        at=created,
+    )
+    _run(
+        sync_url,
+        _PAIRING_SQL,
+        id="00000000-0000-0000-0000-0000000003a1",
+        tenant=_TENANT,
+        name="addon",
+        client="pairing-client",
+        service_sub="pairing-service-sub",
+        at=created,
+    )
+    # A pairing without a service login must not hide every editor.
+    _run(
+        sync_url,
+        _PAIRING_SQL,
+        id="00000000-0000-0000-0000-0000000003a2",
+        tenant=_TENANT,
+        name="addon-new",
+        client="pairing-client-new",
+        service_sub=None,
+        at=created,
+    )
+    for index, (table, client) in enumerate(
+        (("agent_principal", "agent-client"), ("runner_principal", "runner-client"))
+    ):
+        _run(
+            sync_url,
+            _PRINCIPAL_SQL.format(table=table),
+            id=f"00000000-0000-0000-0000-0000000003b{index}",
+            tenant=_TENANT,
+            name=table,
+            client=client,
+            at=created,
+        )
+    for index, sub in enumerate(_PAIRED_EDITS):
+        _run(
+            sync_url,
+            AUDIT_SQL,
+            id=f"00000000-0000-0000-0000-0000000004{index:02d}",
+            at=f"2026-11-0{index + 1} 10:00:00",
+            sub=sub,
+            status=200,
+            payload=audit_payload("agent.edit", "paired", sub),
+            tenant=_TENANT,
+        )
+
+    command.upgrade(cfg, _REVISION)
+
+    rows = _run(
+        sync_url,
+        "SELECT updated_by_sub FROM agent_definition WHERE id = :id",
+        id=_PAIRED_DEFINITION,
+    )
+    assert rows == [("editor-person",)]
+    assert _run(sync_url, "SELECT sub FROM machine_login") == []

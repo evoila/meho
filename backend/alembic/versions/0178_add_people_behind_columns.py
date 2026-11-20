@@ -25,8 +25,9 @@ does not keep yet:
   that is not a machine login, and from ``created_by_sub`` when there is
   none. It reads only audit rows from the time the definition was created,
   so an edit of a deleted definition with the same name does not count.
-  A machine login here is a row of ``machine_login`` or the login of an
-  agent definition of the tenant.
+  A machine login here is a row of ``machine_login``, or the login of an
+  agent definition, an agent, an add-on pairing or a runner of the tenant:
+  the same records MEHO reads for a machine login after the upgrade.
 * ``runbook_runs.reassigned_by`` -- Text, nullable. The person who last
   handed the run to a new assignee.
 * ``run_approval.principal_client_id`` -- Text, nullable. The client id
@@ -92,6 +93,19 @@ UPDATE agent_definition SET updated_by_sub = COALESCE(
               UNION
               SELECT agent.identity_ref FROM agent_definition AS agent
               WHERE agent.tenant_id = agent_definition.tenant_id
+              UNION
+              SELECT agent_principal.keycloak_client_id FROM agent_principal
+              WHERE agent_principal.tenant_id = agent_definition.tenant_id
+              UNION
+              SELECT addon_pairing.keycloak_client_id FROM addon_pairing
+              WHERE addon_pairing.tenant_id = agent_definition.tenant_id
+              UNION
+              SELECT addon_pairing.service_account_sub FROM addon_pairing
+              WHERE addon_pairing.tenant_id = agent_definition.tenant_id
+                AND addon_pairing.service_account_sub IS NOT NULL
+              UNION
+              SELECT runner_principal.keycloak_client_id FROM runner_principal
+              WHERE runner_principal.tenant_id = agent_definition.tenant_id
           )
         ORDER BY audit_log.occurred_at DESC
         LIMIT 1

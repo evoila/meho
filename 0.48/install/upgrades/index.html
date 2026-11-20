@@ -3949,6 +3949,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A call that reads, writes or makes a credential (the classes <code>credential_read</code>, <code>credential_write</code> and <code>credential_mint</code>, for example <code>vault.kv.put</code>, <code>vault.token.create</code> or <code>vault.kv.generate</code>) waits for a person on every call. No standing grant, no agent grant and no run approval covers it, also one made before the upgrade: such a grant stays stored, but each call waits. The call of an agent or a service login of such an operation waits also at level <code>safe</code>, and the approval of a parent multi-step run does not cover such a step. When the code of an operation that writes or makes a credential turns approval on, an install or tenant override that turns approval off leaves it on. Grant create, run approval create and agent grant create (an exact op id with <code>auto-execute</code>) refuse such an operation. A credential read that returns no secret value (<code>vault.kv.list</code>, <code>vault.kv.compare</code>, <code>k8s.secret.compare_to_ref</code>, and <code>vault.kv.read</code> without <code>reveal_secret</code>) still runs at once. Inside a multi-step run, MEHO does not store the result of a step that reads, writes or makes a credential. When a later step of that run waits for a person, the run goes on after the approval as the row <code>composite-resume-steps.md</code> says. A credential write or make that ended well is not sent again. A Vault read that needed no person (<code>vault.kv.read</code>, <code>vault.kv.list</code>, <code>vault.kv.compare</code>) is sent again when it still needs none. A run with any other credential read before the waiting step stops with <code>composite_resume_read_not_sent</code>, and MEHO makes no approval request.</td>
+<td>Find the grants that name such an operation with <code>meho service-principals grants list</code>, <code>meho agent grant list</code> and <code>meho approvals runs list</code>, and remove them or leave them. An automation run that writes or makes credentials waits for a person on each such call: approve each call in the console or the CLI. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A webhook event now starts only an <code>event</code> trigger whose filter names the event source, by slug (<code>{"source": {"slug": "&lt;source-slug&gt;"}}</code>) or by id. Only deliveries that pass the sender check count against an event source's rate limit; failed checks have their own limit of the same size. An event source secret that is empty or only spaces is refused with 422, and a source whose stored secret is empty accepts no sender. No schema migration.</td>
 <td>For each <code>event</code> trigger that should start on webhook events, add <code>"source": {"slug": "&lt;source-slug&gt;"}</code> to its filter. Without it, the trigger does not start on webhook events. See <a href="https://evoila.github.io/meho/latest/guides/event-ingestion/">Event ingestion</a>.</td>
 </tr>
@@ -4006,6 +4011,11 @@ Rows of the next release are in this table at once.</p>
 <td><strong>v0.49.0</strong></td>
 <td>An agent login and a service login now see only the stored call traces (flight recorder) of their own calls, on <code>GET /api/v1/audit/{audit_id}/trace</code> and <code>GET /api/v1/audit/traces</code>. This holds for a paired add-on, because it logs in as a service login. It also holds for a client-credentials login whose token has no <code>principal_kind</code> claim: MEHO treats such a login as a service login. People still see every trace of their tenant.</td>
 <td>If a paired add-on or another client-credentials login must read the traces of calls that a person or another login made, give that work to a person login. A trace that such a login may not read answers <code>trace_present=false</code> on the single read, and is left out of the list on the search.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
+<td>A new run approval request that lists an operation that reads a credential (the <code>credential_read</code> class, for example <code>k8s.secret.read_to_ref</code>) is refused, with the reason and "Leave it out.". For a request made before the upgrade, <code>meho approvals runs show</code> and <code>meho approvals runs approve</code> name such an entry under <code>entries_that_wait</code>, and each of its calls waits for a person.</td>
+<td>Leave operations that read a credential out of new run approval requests. Approve each such call in the console or the CLI. No schema action.</td>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>

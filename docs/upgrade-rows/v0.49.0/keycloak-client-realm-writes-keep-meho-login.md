@@ -1,0 +1,5 @@
+## Note
+In MEHO's own login realm, MEHO now refuses a Keycloak write that would stop MEHO's own login: deleting a client MEHO itself uses, changing such a client, and changing the login realm. MEHO's own clients are the clients in `KEYCLOAK_ADMIN_CLIENT_ID`, `CHECK_RUNNER_CLIENT_ID`, `KEYCLOAK_CLI_CLIENT_ID`, `KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_CLIENT_ID`, `UI_KEYCLOAK_APPROVE_CLIENT_ID` and `KEYCLOAK_AUDIENCE`. A change of such a client may set only its name, its description, `enabled: true`, and new redirect addresses or web origins that keep the ones already there. A change of the login realm may set only its display names, its SMTP server, its locales, its event settings and `enabled: true`; switching the realm off or renaming it is refused. MEHO refuses before the request waits for approval and again when it runs, also under a standing grant. A request that waits for approval from before the upgrade is refused when it runs if it hits one of these cases.
+
+## Action
+Make other changes of these clients and of the login realm in the Keycloak admin console. No schema action.

@@ -127,6 +127,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.keycloak._paths import _GROUP_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_client_realm_meho_access_guard import (
+    register_meho_client_realm_checks,
+)
 from meho_backplane.connectors.keycloak.ops_group_meho_access_guard import (
     register_group_meho_access_checks,
 )
@@ -665,6 +668,7 @@ def _register_keycloak_preview_builders() -> None:
     register_group_meho_access_checks()
     register_preview_builder("keycloak.client.delete", _client_delete_preview)
     register_preview_builder("keycloak.realm.delete", _realm_delete_preview)
+    register_meho_client_realm_checks()
 
 
 _register_keycloak_preview_builders()

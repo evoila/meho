@@ -1428,6 +1428,40 @@ check is `ops_user_meho_access_guard.py` for user writes and
   approve it, another admin can.
 - **Other realms.** The check reads nothing and refuses nothing.
 
+#### MEHO's own clients and the login realm
+
+`ops_client_realm_meho_access_guard.py` keeps client and realm writes from
+stopping MEHO's own login. In MEHO's own login realm it refuses:
+
+| Write | What MEHO refuses | What stays allowed |
+|---|---|---|
+| `keycloak.client.delete` | deleting a client MEHO itself uses | deleting any other client |
+| `keycloak.client.update` | a change of a client MEHO itself uses, unless every changed field is on `CLIENT_ALLOWED` | `name`, `description`, `enabled: true`, and `redirectUris` or `webOrigins` that keep every address already there (a new redirect address) |
+| `keycloak.realm.update` | a change of the login realm, unless every changed field is on `REALM_ALLOWED` (switching the realm off, a rename and `sslRequired` are refused) | `displayName`, `displayNameHtml`, `smtpServer`, `internationalizationEnabled`, `supportedLocales`, `defaultLocale`, the event settings (`eventsEnabled`, `eventsExpiration`, `eventsListeners`, `enabledEventTypes`, `adminEventsEnabled`, `adminEventsDetailsEnabled`) and `enabled: true` |
+
+- **MEHO's own clients** come from its settings, never from a param of the
+  call (`meho_own_client_ids`): `KEYCLOAK_ADMIN_CLIENT_ID`,
+  `CHECK_RUNNER_CLIENT_ID`, `KEYCLOAK_CLI_CLIENT_ID`,
+  `KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_CLIENT_ID`,
+  `UI_KEYCLOAK_APPROVE_CLIENT_ID` and `KEYCLOAK_AUDIENCE`. MEHO reads the
+  client from Keycloak and compares the `clientId` Keycloak stores, without
+  letter case. So a client named by its internal id, or stored with another
+  spelling of the id, is the same client.
+- **A changed field** is a field whose value after the write differs from
+  the stored value. A field sent with the value it already has is let
+  through.
+- **When.** Before the request waits for approval (the park checks of the
+  three writes; the realm check runs after the inline SMTP password check)
+  and again when the call runs (`keycloak_client_update`,
+  `keycloak_client_delete`, `keycloak_realm_update`). The run writes back
+  the same read that the check used. No standing grant and no approval lets
+  such a write through.
+- **On doubt MEHO refuses**: when it cannot read its settings, when the
+  stored client has no client id, or when the read of the realm fails.
+- **The refusal.** `MehoAccessRefusedError` with the reason
+  `meho_own_client` or `meho_login_realm`. The text names only the fields
+  the caller sent, names no client, and gives no advice to change rights.
+
 ### One-time code set-up
 
 Two ops in `ops_user_required_actions.py`. The usual use is to make users

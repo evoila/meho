@@ -128,6 +128,10 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_client_realm_meho_access_guard import (
+    read_login_realm_for_update,
+    read_own_client_for_update,
+)
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     SMTP_PASSWORD_PREFIX,
@@ -354,6 +358,8 @@ async def keycloak_realm_update(
     realms = resolve_realm_config(target)
     realm_name = realm_param(params, "realm", "keycloak.realm.update") or realms.managed_realm
     representation = dict(params["representation"])
+    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
+    stored = await read_login_realm_for_update(self, operator, target, realm_name, representation)
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX
@@ -361,7 +367,6 @@ async def keycloak_realm_update(
         representation["smtpServer"] = with_smtp_password(
             representation.get("smtpServer"), password
         )
-    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
     check = await read_merge_write(
         self,
         operator,
@@ -369,6 +374,7 @@ async def keycloak_realm_update(
         path=fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
         requested=representation,
         read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
+        before=stored,
     )
     return {"realm": realm_name, "updated": True, **check}
 
@@ -451,6 +457,10 @@ async def keycloak_client_update(
                 f"keycloak.client.update: no client with clientId={client_id!r} in realm "
                 f"{realms.managed_realm!r}"
             )
+    requested = dict(params["representation"])
+    stored = await read_own_client_for_update(
+        self, operator, target, realms.managed_realm, uuid, requested
+    )
     check = await read_merge_write(
         self,
         operator,
@@ -459,7 +469,8 @@ async def keycloak_client_update(
             _CLIENT_PATH,
             {"realm": realms.managed_realm, "client-uuid": uuid},
         ),
-        requested=dict(params["representation"]),
+        requested=requested,
+        before=stored,
     )
     return {"id": uuid, "client_id": client_id, "updated": True, **check}
 

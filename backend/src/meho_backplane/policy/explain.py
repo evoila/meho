@@ -85,6 +85,7 @@ from meho_backplane.policy.routing import (
     DEFAULT_RULE,
     RouteEntry,
     _routes,
+    narrow,
     routing_enabled,
     stored_kinds,
 )
@@ -586,7 +587,7 @@ async def _request_approvers(
         return Approvers(tuple(f"MEHO-{kind}" for kind in kinds), rule)
     if floor.rule == CATEGORY_NOT_STORED:
         return Approvers((), CATEGORY_NOT_STORED)
-    narrowed = tuple(f"MEHO-{kind}" for kind in kinds if kind in floor.kinds)
+    narrowed = tuple(f"MEHO-{kind}" for kind in narrow(kinds, floor.kinds))
     return Approvers(narrowed, rule, floor.rule)
 
 

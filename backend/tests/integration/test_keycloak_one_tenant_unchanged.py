@@ -322,7 +322,7 @@ async def test_one_tenant_site_answers_the_same_before_and_after_the_tenant_list
 
     for username, _password, group in _people():
         old, new = before[username], after[username]
-        role, approver = _ROLE_GROUPS[group]
+        role, _claim_has_approver = _ROLE_GROUPS[group]
         who = f"{username} ({group})"
 
         assert old["claims_have_list"] is False, who
@@ -332,7 +332,8 @@ async def test_one_tenant_site_answers_the_same_before_and_after_the_tenant_list
         for answers in (old, new):
             assert answers["operator"]["tenant_id"] == _TENANT_ID, who
             assert answers["operator"]["tenant_role"] == role, who
-            assert answers["operator"]["approver"] is approver, who
+            # MEHO reads MEHO-Approvers as Readers: no group sets the flag.
+            assert answers["operator"]["approver"] is False, who
             assert answers["vault_role"] == _TENANT_VAULT_ROLE, who
             assert answers["live"]["operator"]["tenant_id"] == _TENANT_ID, who
             assert answers["live"]["operator"]["tenant_role"] == role, who

@@ -4,7 +4,7 @@ Use this when your people are not in a directory yet, or when the team
 is small. You create each person in Keycloak by hand.
 
 **Before you start:** MEHO's built-in Keycloak made the realm `meho`
-at install, so the five MEHO groups exist. See
+at install, so the MEHO role groups exist. See
 [Company login](index.md). Log in to the Keycloak admin console as the
 console admin (a user of realm `master`, default name `console-admin`;
 name and temporary password in the Secret
@@ -20,7 +20,7 @@ In the Keycloak admin console, pick the realm `meho`.
 1. Go to **Users → Add user**.
 2. Fill in **Username**, **Email**, **First name** and **Last name**.
    The realm's user profile asks for all of them.
-3. Click **Join groups** and pick **one** of the five MEHO groups. Only
+3. Click **Join groups** and pick **one** of the MEHO role groups. Only
    one.
 4. Click **Create**.
 

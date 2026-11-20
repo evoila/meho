@@ -1102,8 +1102,8 @@
         "enabled": { "type": "boolean" },
         "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
         "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
-        "tenantName": { "type": "string", "description": "The first tenant's short name. The five role groups carry it in `meho_tenant`." },
-        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the five groups `MEHO-<name>-<Role>` for each one." },
+        "tenantName": { "type": "string", "description": "The first tenant's short name. The three role groups carry it in `meho_tenant`." },
+        "tenants": { "type": "array", "description": "More tenants, as `{name, id}`. The bootstrap Job makes the three groups `MEHO-<name>-<Role>` for each one." },
         "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
         "image": { "type": "object" },
         "waitForDatabase": { "type": "object" },
@@ -1127,10 +1127,10 @@
         "firstLogin": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): two people, with temporary passwords in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
+          "description": "The users the bootstrap Job makes at the first start (docs/codebase/core-bootstrap.md): one Admin login, with a temporary password in <release>-core-first-login, and the console admin (a user of realm master), with its temporary password in <release>-core-console-admin.",
           "properties": {
-            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the first admin (MEHO-Admins, with platform_admin)." },
-            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the second person, who can approve (read as an Operator)." },
+            "adminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the one Admin login (MEHO-Admins and MEHO-Platform-Admins, with platform_admin)." },
+            "approverUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "Not used. The install makes one Admin login. An old values file that sets this key still installs; the key is ignored." },
             "consoleAdminUsername": { "type": "string", "minLength": 1, "not": { "pattern": "^\\s*[Ss][Ee][Rr][Vv][Ii][Cc][Ee]-[Aa][Cc][Cc][Oo][Uu][Nn][Tt]-" }, "description": "User name of the console admin: a user of realm master with every role of the master client meho-realm except impersonation, so it administers realm meho in the Keycloak admin console. Its temporary password is in <release>-core-console-admin; it sets up an authenticator code at the first login." }
           }
         },

@@ -664,10 +664,19 @@ async def _service_grant_verdict(
     ``(principal, op, connector)`` is a null-target grant (the operator
     likely created it believing null = "any target").
     """
+    from meho_backplane.operations.grant_cover_check import grant_cover_refusal
     from meho_backplane.operations.service_grants import (
         consult_and_record_grant,
         credential_grant_reason,
     )
+
+    refused = await grant_cover_refusal(operator, descriptor, target, connector_id, params)
+    if refused is not None:
+        if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and credential_grant_reason(
+            descriptor.op_id, getattr(descriptor, "op_class", None)
+        ):
+            refused = f"{refused}; {CREDENTIAL_WAIT_NOTE}"
+        return None, f"{gate_reason}; {refused}" if gate_reason else refused
 
     grant_id = await consult_and_record_grant(
         operator=operator,
@@ -1135,6 +1144,7 @@ async def _verdict_with_shadow(
         today=today,
         preview_hash=preview_hash,
         decide_only=decide_only,
+        params=params,
     )
     return today
 

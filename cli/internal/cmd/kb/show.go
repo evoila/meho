@@ -23,7 +23,8 @@ import (
 //
 //	meho kb show <slug> [--json] [--backplane <url>]
 //
-// Default output: writes the entry's body to stdout verbatim — the
+// Default output: writes the entry's body to stdout (control characters
+// shown as visible escapes) — the
 // body is already Markdown by the substrate's contract, so an
 // operator can pipe through `glow`, `bat -l md`, etc. for rendering.
 // `--json` wraps the full KbEntry shape (id, tenant_id, slug, body,
@@ -140,7 +141,10 @@ func getEntry(
 }
 
 // printEntryBody writes the entry's Markdown body to stdout
-// verbatim with exactly one trailing newline. The substrate stores
+// with exactly one trailing newline. Another login may have written
+// the body, so each line goes through output.SafeLines: control
+// characters (also a tab) show as visible escapes and the line breaks
+// stay. A CRLF line end counts as a plain line break. The substrate stores
 // the body unmodified, so a Markdown file that already ends in `\n`
 // (the conventional shape — most editors enforce a trailing LF on
 // save) would otherwise produce two newlines when `Fprintln` adds
@@ -151,5 +155,6 @@ func printEntryBody(w io.Writer, e *api.KbEntry) {
 	if e == nil {
 		return
 	}
-	fmt.Fprintln(w, strings.TrimRight(e.Body, "\r\n"))
+	body := strings.ReplaceAll(strings.TrimRight(e.Body, "\r\n"), "\r\n", "\n")
+	fmt.Fprintln(w, output.SafeLines(body))
 }

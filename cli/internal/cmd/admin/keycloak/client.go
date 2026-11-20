@@ -235,7 +235,7 @@ type scopeRep struct {
 }
 
 // groupRep / userRep / credentialRep are the minimum shape we set or
-// read for the five MEHO role groups and the first admin user.
+// read for the three MEHO role groups and the first admin user.
 //
 // Attributes and Description are only filled by GET /groups/{id}: the
 // group list and search endpoints return a short form without them.

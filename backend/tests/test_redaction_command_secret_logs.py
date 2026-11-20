@@ -101,6 +101,28 @@ def test_a_connection_string_in_a_json_line_keeps_the_fields_after_the_password(
             assert row["ts"] == f"t{number}"
 
 
+#: A connection string password as the last field, with a ``;`` after it.
+_LAST_FIELD_COMMANDS: Final[list[str]] = [
+    f"{label}{value};"
+    for label in (_PWD_IS, "Pass" + "word=")
+    for value in (f"'{PW}'", f"{{{PW}}}", PW)
+]
+
+
+@pytest.mark.parametrize("style", ["compact", "spaced"])
+@pytest.mark.parametrize("command", _LAST_FIELD_COMMANDS)
+def test_a_last_connection_password_with_a_semicolon_keeps_the_json_line(
+    command: str, style: str
+) -> None:
+    log = _json_line(command, 1, style)
+    for out in _answer_and_trace(log):
+        assert PW not in out
+        row = json.loads(out)
+        assert row["msg"] == "[REDACTED:command_line_secret];"
+        assert row["status"] == "failed"
+        assert row["ts"] == "t1"
+
+
 # -- a quote that is never closed on its line ---------------------------------------
 
 #: (the form up to its opening quote, a closing mark on a later log line)

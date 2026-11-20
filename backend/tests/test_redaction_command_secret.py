@@ -28,7 +28,7 @@ from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 from meho_backplane.connectors.linux import LinuxSshConnector
-from meho_backplane.redaction.command_secret import COMMAND_SECRET
+from meho_backplane.redaction.command_secret import _PLAIN_FIELDS, COMMAND_SECRET
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
@@ -539,10 +539,46 @@ def _texts_of_other_tests() -> list[str]:
     return [text for _name, text, _hit in _PATTERN_TEST_ROWS] + _OTHER_RULE_TEXTS
 
 
-#: The next fields of a connection string after a hidden password
-#: (``[REDACTED:command_line_secret];Database=d``). Without this rule the
-#: api_key rule hid them with the password. They hold no secret.
-_NEXT_FIELDS: Final = re.compile(re.escape(_MARK) + r"(?:;[ \t]*[A-Za-z][\w .-]{0,63}=[^;\s'\"]*)+")
+#: The next fields of a connection string after a hidden password whose
+#: names hold no secret (``[REDACTED:command_line_secret];Database=d``).
+#: Without this rule the api_key rule hid them with the password. Any other
+#: next field must stay hidden.
+_PLAIN_NAMES: Final = "|".join(
+    re.escape(name).replace(r"\ ", "[ \t]+")
+    for name in sorted(_PLAIN_FIELDS, key=len, reverse=True)
+)
+_NEXT_FIELDS: Final = re.compile(
+    re.escape(_MARK) + r"(?:;[ \t]*(?i:" + _PLAIN_NAMES + r")[ \t]*=[^;\s'\"]*)+"
+)
+
+#: (text, what each policy shows): a field after a hidden connection password.
+#: A field that may hold a secret is hidden too; a plain field stays.
+_AFTER_A_PASSWORD: Final[list[tuple[str, str]]] = (
+    [
+        (f"{label}example-password;Token=demo12", f"{_MARK};Token={_MARK}")
+        for label in (_PWD_IS, _PASSWORD_IS)
+    ]
+    + [
+        (f"{label}example-password;{name}=ab;Database=d", f"{_MARK};{_MARK};Database=d")
+        for label in (_PWD_IS, _PASSWORD_IS)
+        for name in ("Token", "Secret", "AccountKey", "Api Key", "Pwd")
+    ]
+    + [
+        (
+            f"Server=db;{_PWD_IS}'{PW}';User ID=app;Encrypt=true; Token = t1",
+            f"Server=db;{_MARK};User ID=app;Encrypt=true; Token = {_MARK}",
+        ),
+    ]
+)
+
+
+@pytest.mark.parametrize(("line", "expected"), _AFTER_A_PASSWORD)
+def test_a_field_after_a_connection_password_is_hidden_unless_it_is_plain(
+    line: str, expected: str
+) -> None:
+    trace, _fired = scrub_content(line)
+    for out in (redact(line, get_default_policy()).redacted, trace):
+        assert out == expected
 
 
 def _shown(text: str) -> str:
@@ -553,12 +589,13 @@ def test_the_rule_only_hides_more() -> None:
     """No word that the policy without this rule hides is shown with it.
 
     The one exception: the next fields of a connection string after its
-    password, which hold no secret.
+    password whose names are on the plain list.
     """
     before_policy = _without_command_rule()
     texts = _texts_of_other_tests() + [line for line, _gone, _kept in _HIDDEN]
     texts += [line for line, _expected in _WHOLE_OUTPUT]
     texts += [line for line, _kept in _AFTER_APOSTROPHE]
+    texts += [line for line, _expected in _AFTER_A_PASSWORD]
     shown_now: dict[str, set[str]] = {}
     for text in texts:
         before = _shown(redact(text, before_policy).redacted)

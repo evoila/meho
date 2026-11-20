@@ -25,8 +25,10 @@ option name and the words around it stay readable:
   when a ``;`` stands before the label, or a ``;`` ends the value and a
   next field (``;Database=``) follows or no option (``-x``) or ``key=``
   word stands in the value. A label behind ``-`` is a command option.
-  When a next field follows the value, ``Password=`` and ``Pwd=`` are
-  hidden with it, so the ``api_key`` rule does not hide that field too.
+  When a ``;`` ends the value, ``Password=`` and ``Pwd=`` are hidden with
+  it, so the ``api_key`` rule does not hide the next fields or the closing
+  quote of a JSON string too. A next field stays only when its name holds
+  no secret (``;Database=``); the value of every other one is hidden too.
   Elsewhere ``password=`` takes one shell word, as an option does;
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY`` (``DB_PASSWORD=x``, ``APP_KEY=x``);
@@ -634,48 +636,139 @@ def _is_working_folder(text: str, match: re.Match[str], start: int, stop: int) -
 
 #: The connection string labels that the ``api_key`` rule reads too.
 _API_KEY_LABELS: Final = frozenset({"password", "pwd"})
+#: Connection string fields that hold no secret. After a hidden password, the
+#: value of every other next field is hidden too (``;Token=x``).
+_PLAIN_FIELDS: Final = frozenset(
+    {
+        "server",
+        "data source",
+        "host",
+        "hostname",
+        "address",
+        "addr",
+        "network address",
+        "port",
+        "database",
+        "initial catalog",
+        "dbname",
+        "uid",
+        "user",
+        "user id",
+        "userid",
+        "username",
+        "user name",
+        "driver",
+        "dsn",
+        "provider",
+        "encrypt",
+        "trustservercertificate",
+        "trust server certificate",
+        "timeout",
+        "connect timeout",
+        "connection timeout",
+        "command timeout",
+        "application name",
+        "integrated security",
+        "trusted_connection",
+        "multipleactiveresultsets",
+        "pooling",
+        "min pool size",
+        "max pool size",
+        "sslmode",
+        "ssl mode",
+        "schema",
+        "charset",
+        "character set",
+        "persist security info",
+        "authentication",
+    }
+)
+_SPACES: Final = re.compile(r"[ \t]+")
+_FIELD_END: Final = re.compile(r";(?:[ \t]*[A-Za-z][\w .-]{0,63}=|[\s'\"]|\Z)")
 
 
-def _with_label(text: str, match: re.Match[str], span: tuple[int, int]) -> tuple[int, int]:
-    """*span*, with the label in front of it when a next field follows the value.
+def _next_field_spans(
+    text: str, pos: int, window: int, marks: _ClosingMarks
+) -> list[tuple[int, int]]:
+    """The values of the next fields after *pos* whose names are not on the plain list."""
+    spans: list[tuple[int, int]] = []
+    while (field := _NEXT_FIELD.match(text, pos, window)) is not None:
+        start = field.end()
+        while start < window and text[start] in " \t":
+            start += 1
+        if start < window and text[start] in _CLOSING:
+            span = _quoted_connection_value(text, start, marks)
+        else:
+            stop = _VALUE_STOP.search(text, start, window)
+            stop_at = window if stop is None else stop.start()
+            span = (start, start + len(text[start:stop_at].rstrip()))
+        name = _SPACES.sub(" ", field.group(0)[1:-1].strip()).lower()
+        if name not in _PLAIN_FIELDS and _is_hidden(text[span[0] : span[1]]):
+            # The name goes with the value when a ``;`` follows, as for the password.
+            named = _FIELD_END.match(text, span[1]) is not None
+            spans.append((field.start() + 1, span[1]) if named else span)
+        pos = max(span[1], field.end())
+    return spans
+
+
+def _with_label(
+    text: str,
+    match: re.Match[str],
+    span: tuple[int, int],
+    window: int,
+    marks: _ClosingMarks,
+) -> list[tuple[int, int]]:
+    """*span*, with the label in front of it when a ``;`` ends the value.
+
+    The ``;`` ends it when a next field, white space, a quote or the end of
+    the text follows (``;Database=``, ``;"`` at the end of a JSON string).
 
     The ``api_key`` rule reads ``Pwd=<placeholder>;Database=d`` as one long
     value and hides the next fields with it, also the closing quote of a
     JSON string. Without its label (``[REDACTED:...];Database=d``) the rule
-    finds nothing, so the next fields stay.
+    finds nothing, so the closing quote stays. The next fields stay readable
+    only when they hold no secret: every other next field value is hidden.
     """
-    if match["label"].lower() in _API_KEY_LABELS and _NEXT_FIELD.match(text, span[1]):
-        return match.start(), span[1]
-    return span
+    if match["label"].lower() not in _API_KEY_LABELS or not _FIELD_END.match(text, span[1]):
+        return [span]
+    return [(match.start(), span[1]), *_next_field_spans(text, span[1], window, marks)]
 
 
 def _connection_span(
     text: str, match: re.Match[str], quotes: _OuterQuotes, marks: _ClosingMarks
-) -> tuple[int, int] | None:
+) -> list[tuple[int, int]]:
     start = match.end()
     if start >= len(text) or text[start] in ";\n":
-        return None
-    if text[start] in _CLOSING:
-        return _with_label(text, match, _quoted_connection_value(text, start, marks))
+        return []
     close = quotes.end(match.start())
+    if text[start] in _CLOSING:
+        span = _quoted_connection_value(text, start, marks)
+        end_of_fields = max(
+            span[1], min(len(text) if close is None else close, span[1] + _VALUE_MAX)
+        )
+        return _with_label(text, match, span, end_of_fields, marks)
     window = min(len(text) if close is None else close, start + _VALUE_MAX)
     stop = _VALUE_STOP.search(text, start, window)
     stop_at = window if stop is None else stop.start()
     if _is_working_folder(text, match, start, stop_at):
-        return None
+        return []
     if not _is_connection_field(text, match, start, stop_at):
         # A command option or word (``--password=x --user a``, ``password=x user=a``):
         # the value is one shell word, so the words after it stay. ``pwd`` and ``pw``
         # are connection string words only.
         if match["label"].lower() != "password":
-            return None
-        return _value_span(text, start, close)
+            return []
+        word = _value_span(text, start, close)
+        return [] if word is None else [word]
     # A value hidden by an earlier rule is not part of this one.
     earlier = _PLACEHOLDER.search(text, start, stop_at)
     if earlier is not None:
         stop_at = earlier.start()
     end = start + len(text[start:stop_at].rstrip())
-    return _with_label(text, match, (start, end)) if _is_hidden(text[start:end]) else None
+    if not _is_hidden(text[start:end]):
+        return []
+    end_of_fields = min(len(text) if close is None else close, end + _VALUE_MAX)
+    return _with_label(text, match, (start, end), end_of_fields, marks)
 
 
 def _connection_spans(text: str) -> list[tuple[int, int]]:
@@ -685,10 +778,10 @@ def _connection_spans(text: str) -> list[tuple[int, int]]:
     pos = 0
     while (match := _CONNECTION.search(text, pos)) is not None:
         pos = match.end()
-        span = _connection_span(text, match, quotes, marks)
-        if span is not None:
-            spans.append(span)
-            pos = max(pos, span[1])
+        found = _connection_span(text, match, quotes, marks)
+        spans.extend(found)
+        if found:
+            pos = max(pos, found[-1][1])
     return spans
 
 

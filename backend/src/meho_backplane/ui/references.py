@@ -68,6 +68,7 @@ from meho_backplane.db.models import (
     RunbookRun,
     Target,
 )
+from meho_backplane.operations._audit import payload_session_from_client
 
 __all__ = [
     "AuditReferences",
@@ -385,8 +386,10 @@ def _resolve_principal(row: AuditLog) -> PrincipalRef:
 
     Name / email come from ``payload`` (MCP writer, #1212); the service
     marker is derived from the row's own ``agent_session_id`` / ``actor_sub``
-    columns. No external store is consulted -- there is no ``sub`` -> name
-    join table -- so an HTTP-chassis row degrades to its raw sub.
+    columns. A session id that is the CLI login session (payload key
+    ``session_from_client``) does not set the marker. No external store
+    is consulted -- there is no ``sub`` -> name join table -- so an
+    HTTP-chassis row degrades to its raw sub.
     """
     payload = row.payload if isinstance(row.payload, dict) else {}
     name_raw = payload.get("principal_name")
@@ -394,7 +397,8 @@ def _resolve_principal(row: AuditLog) -> PrincipalRef:
     email_raw = payload.get("principal_email")
     email = email_raw if isinstance(email_raw, str) and email_raw else None
     actor_sub = row.actor_sub
-    is_service = actor_sub is not None
+    agent_session = row.agent_session_id is not None and not payload_session_from_client(payload)
+    is_service = agent_session or actor_sub is not None
     return PrincipalRef(
         sub=row.operator_sub,
         name=name,

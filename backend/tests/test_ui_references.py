@@ -35,6 +35,7 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.references import (
     SubjectRef,
@@ -322,11 +323,11 @@ def test_resolve_references_happy_path() -> None:
 
     refs = _resolve(row, op_id="acme.vm.list", is_admin=True)
 
-    # Principal: display name. A session id alone does not mark a service.
+    # Principal: display name + service marker (agent session present).
     assert refs.principal.resolved is True
     assert refs.principal.name == "Ada Lovelace"
     assert refs.principal.email == "ada@example.test"
-    assert refs.principal.is_service is False
+    assert refs.principal.is_service is True
     assert refs.principal.display == "Ada Lovelace"
 
     # Target: name + detail link.
@@ -471,10 +472,24 @@ def test_resolve_references_service_marker_from_actor_sub() -> None:
     assert refs.principal.actor_sub == "agent-sub-77"
 
 
-def test_resolve_references_client_session_is_not_a_service_marker() -> None:
-    """A row with a client session id and no delegated actor is not a service."""
+def test_resolve_references_agent_run_without_actor_is_a_service() -> None:
+    """A row of an agent run with no delegated actor keeps the service marker."""
     _seed_tenant(_TENANT_A, "tenant-a")
     row = _seed_audit(tenant_id=_TENANT_A, actor_sub=None, agent_session_id=uuid.uuid4())
+
+    refs = _resolve(row)
+    assert refs.principal.is_service is True
+
+
+def test_resolve_references_cli_session_is_not_a_service_marker() -> None:
+    """A row whose session id came from the CLI, with no delegated actor, is a person's row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row = _seed_audit(
+        tenant_id=_TENANT_A,
+        actor_sub=None,
+        agent_session_id=uuid.uuid4(),
+        payload_extra={SESSION_FROM_CLIENT_KEY: True},
+    )
 
     refs = _resolve(row)
     assert refs.principal.is_service is False

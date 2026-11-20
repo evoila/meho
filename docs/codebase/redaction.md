@@ -576,8 +576,12 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     the text of an element whose `name` or `key` attribute is a secret
     name (`<add key="DbPassword" value="..."/>`), and the `<value>` child
     of an element whose `<name>` child is a secret name (the name/value
-    form of many Java and Hadoop configuration files). In a JSON text each
-    string is read on its own, so a start tag and a closing tag in two
+    form of many Java and Hadoop configuration files). The name of such a
+    pair is read as XML text first, so a name in CDATA or with a character
+    reference (`&#x50;`) is the same name. In a JSON text each
+    string is read on its own, and as text: its escapes (`\"`, `\u003c`)
+    are read before its XML, and only the hidden value changes in the
+    JSON, so it still parses. A start tag and a closing tag in two
     different strings are no element. These steps
     write the marker without quotes. A step that is too deep to read hides
     the whole text. An element with no closing tag is not touched, and

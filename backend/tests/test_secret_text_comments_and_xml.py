@@ -41,6 +41,7 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
 )
 from meho_backplane.operations._secret_values import hide_secret_values
+from meho_backplane.redaction.secret_markup import hide_secret_xml
 from meho_backplane.redaction.secret_text import hide_secret_text
 from meho_backplane.settings import get_settings
 
@@ -53,6 +54,8 @@ _FAKE_ATTR = "FAKE" + "-made-up-attr-5548"
 _FAKE_PAIR = "FAKE" + "-made-up-pair-6659"
 _FAKE_DEEP = "FAKE" + "-made-up-deep-7760"
 _MARKER = "[REDACTED:param_name]"
+#: The XML decimal character reference of ``P``.
+_DECIMAL_P = "&" + chr(35) + str(ord("P")) + ";"
 _FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 
 _COMMENT_YAML = f"db:\n  host: db\n  # dbPassword: {_FAKE_COMMENT}\n  port: 5432\n"
@@ -508,6 +511,54 @@ def test_xml_tags_in_two_json_strings_keep_the_json_between() -> None:
         {"start": "<password>", "host": "db", "port": 5432, "end": "</password>"}, indent=2
     )
     assert hide_secret_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "<![CDATA[dbPassword]]>",
+        f"db{_DECIMAL_P}assword",
+        "db&#x50;assword",
+        " <![CDATA[db]]>Password ",
+    ],
+    ids=["cdata", "decimal-reference", "hex-reference", "cdata-and-text"],
+)
+def test_xml_pair_name_is_read_as_xml_text(name: str) -> None:
+    text = f"<c><property><name>{name}</name><value>{_FAKE_PAIR}</value></property></c>"
+    expected = f"<c><property><name>{name}</name><value>{_MARKER}</value></property></c>"
+    assert hide_secret_text(text) == expected
+
+
+def test_xml_pair_attribute_name_with_a_reference_is_read_as_xml_text() -> None:
+    text = f'<c><add key="Db{_DECIMAL_P}assword" value="{_FAKE_PAIR}"/></c>'
+    assert hide_secret_text(text) == f'<c><add key="Db{_DECIMAL_P}assword" value="{_MARKER}"/></c>'
+
+
+@pytest.mark.parametrize("ensure_ascii", [True, False], ids=["unicode-escapes", "plain-unicode"])
+def test_xml_with_escaped_quotes_in_a_json_string_is_hidden(ensure_ascii: bool) -> None:
+    xml = (
+        f'<props><entry key="dbPassword">{_FAKE_PAIR}</entry>'
+        '<entry key="note">caf\u00e9 path/x</entry></props>'
+    )
+    text = json.dumps([xml], ensure_ascii=ensure_ascii)
+    shown = hide_secret_text(text)
+    assert _shown_fakes(shown) == []
+    assert json.loads(shown) == [xml.replace(_FAKE_PAIR, _MARKER)]
+
+
+def test_xml_step_keeps_the_other_escapes_of_a_json_string() -> None:
+    xml = f'<c>caf\u00e9\t<add key="DbPassword" value="{_FAKE_PAIR}"/> a\\b</c>'
+    text = json.dumps({"web.config": xml, "n": "x\ny"})
+    expected = json.dumps({"web.config": xml.replace(_FAKE_PAIR, _MARKER), "n": "x\ny"})
+    assert hide_secret_xml(text) == expected
+
+
+def test_xml_with_escaped_angle_brackets_in_a_json_string_is_hidden() -> None:
+    xml = f'<c><add key="DbPassword" value="{_FAKE_PAIR}"/></c>'
+    text = json.dumps([xml]).replace("<", "\\u003c")
+    shown = hide_secret_text(text)
+    assert _shown_fakes(shown) == []
+    assert json.loads(shown) == [xml.replace(_FAKE_PAIR, _MARKER)]
 
 
 def test_too_deep_step_hides_the_whole_text(monkeypatch: pytest.MonkeyPatch) -> None:

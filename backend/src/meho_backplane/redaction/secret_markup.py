@@ -28,7 +28,10 @@ hides them in the text:
   attribute and the text of an element whose ``name`` or ``key`` attribute
   is a secret name (``<add key="DbPassword" value="..."/>``), and the text
   of a ``<value>`` child of an element whose ``<name>`` child is a secret
-  name. In a JSON text, each string is read on its own. A closing tag closes the
+  name. The name of such a pair is read as XML text first: CDATA and
+  character references count. In a JSON text, each string is read on its
+  own, as text: its escapes are read before its XML, and only the hidden
+  value changes in the JSON. A closing tag closes the
   nearest open element with its name, so a child with the same name does
   not end its parent. Tags inside CDATA are text. The text of an XML
   comment is read on its own, in one pass: comments do not nest.
@@ -48,6 +51,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -86,6 +90,21 @@ _QUOTE_CLOSE: Final[dict[str, re.Pattern[str]]] = {
 #: A string in a JSON text.
 _JSON_STRING: Final[re.Pattern[str]] = re.compile(r"\"(?:[^\"\\]|\\.)*+\"")
 
+#: ``<`` written as an escape in a JSON string.
+_JSON_ESCAPED_LT: Final[re.Pattern[str]] = re.compile(r"\\u003[cC]")
+
+#: The character of each short escape in a JSON string.
+_JSON_ESCAPES: Final[dict[str, str]] = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
 #: The indicator of a YAML block value, such as ``|``, ``>-`` or ``|2+``.
 _BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][0-9+\-]{0,2}")
 
@@ -114,6 +133,21 @@ _XML_ATTR: Final[re.Pattern[str]] = re.compile(
 
 #: The attributes that name the ``value`` attribute of a pair element.
 _PAIR_NAME_ATTRS: Final[tuple[str, ...]] = ("name", "key")
+
+#: A CDATA section, a character reference or a predefined entity in XML text.
+_XML_TEXT_PART: Final[re.Pattern[str]] = re.compile(
+    r"<!\[CDATA\[(?P<cdata>.*?)\]\]>|&#(?:(?P<decimal>[0-9]{1,7})|x(?P<hex>[0-9A-Fa-f]{1,6}));"
+    r"|&(?P<entity>lt|gt|amp|quot|apos);",
+    re.DOTALL,
+)
+
+_XML_ENTITIES: Final[dict[str, str]] = {
+    "lt": "<",
+    "gt": ">",
+    "amp": "&",
+    "quot": '"',
+    "apos": "'",
+}
 
 _COMMENT_START: Final[str] = "<!--"
 _COMMENT_END: Final[str] = "-->"
@@ -330,6 +364,22 @@ def _local_name(name: str) -> str:
     return name.rpartition(":")[2]
 
 
+def _xml_text_part(part: re.Match[str]) -> str:
+    if part["cdata"] is not None:
+        return part["cdata"]
+    if part["entity"] is not None:
+        return _XML_ENTITIES[part["entity"]]
+    code = int(part["decimal"]) if part["decimal"] is not None else int(part["hex"], 16)
+    return chr(code) if code <= sys.maxunicode else part[0]
+
+
+def _xml_text(raw: str) -> str:
+    """*raw* XML text as the text it means: CDATA and references read."""
+    if "&" not in raw and "<" not in raw:
+        return raw
+    return _XML_TEXT_PART.sub(_xml_text_part, raw)
+
+
 def _attribute_spans(attrs: str, offset: int) -> tuple[list[tuple[int, int]], bool]:
     """The spans of the attribute values in *attrs* that are to be hidden.
 
@@ -347,7 +397,7 @@ def _attribute_spans(attrs: str, offset: int) -> tuple[list[tuple[int, int]], bo
         if _is_secret_name(_local_name(name)) and not _keeps(value):
             spans.append((start, end))
     pair_named = any(
-        (named := values.get(name_attr)) is not None and _is_secret_pair_name(named[0])
+        (named := values.get(name_attr)) is not None and _is_secret_pair_name(_xml_text(named[0]))
         for name_attr in _PAIR_NAME_ATTRS
     )
     pair_value = values.get("value")
@@ -418,7 +468,7 @@ def _close(
     if parent is not None:
         local = _local_name(element.name).lower()
         if local == "name" and end - element.text_start <= _KEPT_MAX_LENGTH:
-            name = text[element.text_start : end].strip()
+            name = _xml_text(text[element.text_start : end]).strip()
             parent.secret_name_child |= _is_secret_pair_name(name)
         elif local == "value" and _hides(text, element.text_start, end):
             parent.value_spans.append((element.text_start, end))
@@ -462,18 +512,27 @@ def _element_spans(
     return spans
 
 
-def _hide_xml(text: str) -> str:
-    spans = _element_spans(text)
-    if not spans:
-        return text
-    parts: list[str] = []
+def _merged_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """*spans* in order, without the spans that start inside an earlier one."""
+    merged: list[tuple[int, int]] = []
     cursor = 0
     for start, end in sorted(spans, key=lambda span: (span[0], -span[1])):
         if start < cursor:
             continue
+        merged.append((start, end))
+        cursor = end
+    return merged
+
+
+def _hide_xml(text: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for start, end in _merged_spans(_element_spans(text)):
         parts.append(text[cursor:start])
         parts.append(SECRET_FIELD_MARKER)
         cursor = end
+    if not parts:
+        return text
     parts.append(text[cursor:])
     return "".join(parts)
 
@@ -488,20 +547,50 @@ def _is_json_collection(text: str) -> bool:
     return True
 
 
+def _decode_json_string(raw: str) -> tuple[str, list[int]]:
+    """*raw* (the inside of a JSON string) as text, and where each character starts in *raw*.
+
+    The list has one more entry, the length of *raw*. Each escape, also each
+    half of a ``\\u`` surrogate pair, is one character of the text.
+    """
+    if "\\" not in raw:
+        return raw, list(range(len(raw) + 1))
+    chars: list[str] = []
+    starts: list[int] = []
+    index = 0
+    while index < len(raw):
+        starts.append(index)
+        if raw[index] != "\\":
+            chars.append(raw[index])
+            index += 1
+        elif raw[index + 1] == "u":
+            chars.append(chr(int(raw[index + 2 : index + 6], 16)))
+            index += 6
+        else:
+            chars.append(_JSON_ESCAPES[raw[index + 1]])
+            index += 2
+    starts.append(len(raw))
+    return "".join(chars), starts
+
+
 def _hide_xml_in_json_strings(text: str) -> str:
-    """*text* (a JSON text) with the XML step run on each of its strings on its own."""
+    """*text* (a JSON text) with the XML step run on each of its strings on its own.
+
+    Each string is read as text first, so the quotes of an attribute may be
+    escaped. Only the value spans become the marker; the rest of the string
+    keeps its escapes, so the text stays JSON.
+    """
     parts: list[str] = []
     cursor = 0
     for token in _JSON_STRING.finditer(text):
         start, end = token.start() + 1, token.end() - 1
-        if text.find("<", start, end) == -1:
+        if text.find("<", start, end) == -1 and not _JSON_ESCAPED_LT.search(text, start, end):
             continue
-        hidden = _hide_xml(text[start:end])
-        if hidden == text[start:end]:
-            continue
-        parts.append(text[cursor:start])
-        parts.append(hidden)
-        cursor = end
+        decoded, starts = _decode_json_string(text[start:end])
+        for span_start, span_end in _merged_spans(_element_spans(decoded)):
+            parts.append(text[cursor : start + starts[span_start]])
+            parts.append(SECRET_FIELD_MARKER)
+            cursor = start + starts[span_end]
     if not parts:
         return text
     parts.append(text[cursor:])
@@ -511,11 +600,11 @@ def _hide_xml_in_json_strings(text: str) -> str:
 def hide_secret_xml(text: str) -> str:
     """Return *text* with secret-named values in its XML tags hidden.
 
-    In a JSON text each string is read on its own, so a start tag and a
-    closing tag in two different strings are no element, and the JSON
-    between them stays.
+    In a JSON text each string is read on its own, with its escapes read
+    first, so a start tag and a closing tag in two different strings are
+    no element, and the JSON between them stays.
     """
-    if "<" not in text:
+    if "<" not in text and not _JSON_ESCAPED_LT.search(text):
         return text
     if _is_json_collection(text):
         return _hide_xml_in_json_strings(text)

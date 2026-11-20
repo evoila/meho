@@ -86,7 +86,8 @@ _LOADER: Final[Any] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 #: is not run on it. Each name the shared name rule marks has one of them
 #: (``password``, ``pwd``, ``secret``, ``token``, ``credential``, ``psk``,
 #: ``kubeconfig``, ``community``, ``connection_string`` and every ``*key``
-#: pair). A backslash may start an escape that spells a name.
+#: pair). A backslash may start an escape that spells a name, and so may
+#: ``&#`` (an XML character reference) for the XML step.
 _MAY_HOLD_SECRET_NAME: Final[re.Pattern[str]] = re.compile(
     r"pass|pwd|secret|token|key|cred|psk|communit|connection|kubeconfig|\\",
     re.IGNORECASE,
@@ -374,7 +375,7 @@ def _hide_yaml(text: str, depth: int) -> str:
 def _hide_text(text: str, depth: int) -> str:
     try:
         hidden = _hide_yaml(scrub_secret_fields_in_text(text), depth)
-        if "<" in hidden and _MAY_HOLD_SECRET_NAME.search(hidden):
+        if _MAY_HOLD_SECRET_NAME.search(hidden) or "&#" in hidden:
             return hide_secret_xml(hidden)
     except RecursionError:
         # Too deep to read: hide the whole text rather than show it unread.

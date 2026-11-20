@@ -557,21 +557,30 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     quoted-pair text step, then a YAML read that replaces each secret value
     in place; a YAML file inside a JSON note is read too). Two more steps
     (`redaction/secret_markup.py`) hide what the YAML read does not see:
-    a comment line such as `# dbPassword: ...` in a YAML text, every
+    a comment line such as `# dbPassword: ...` in a YAML text (with the
+    comment lines below it whose text after the `#` is indented deeper:
+    a commented-out block value or a value over more lines), every
     `key: value` line of a text that does not read as YAML (the key bare
     or in quotes; the lines below a secret-named key that are indented
     deeper are hidden with the value; a quoted value ends at its closing
     quote, also when it holds an escaped quote (`\"` or `''`); a note after
     the value such as `# rotate monthly` stays, and so does a comment line
     below the key that is not part of a block value or of a quoted value
-    that is still open, with its own secret-named value hidden), and XML text: the text of a secret-named
+    that is still open, with its own secret-named value hidden; a byte
+    order mark at the start of the text is skipped), and XML text: the text of a secret-named
     element (`<password>...</password>`, child elements and CDATA
     included; a closing tag closes the nearest open element with its
     name, tags inside CDATA are text, and the text of an XML comment is
-    read on its own), a secret-named attribute (`dbPassword="..."`), and
-    the `value` attribute of an element whose `name` or `key` attribute
-    is a secret name (`<add key="DbPassword" value="..."/>`). These steps
-    write the marker without quotes. An element with no closing tag is not touched, and
+    read on its own, in one pass, as comments do not nest), a
+    secret-named attribute (`dbPassword="..."`), the `value` attribute and
+    the text of an element whose `name` or `key` attribute is a secret
+    name (`<add key="DbPassword" value="..."/>`), and the `<value>` child
+    of an element whose `<name>` child is a secret name (the name/value
+    form of many Java and Hadoop configuration files). In a JSON text each
+    string is read on its own, so a start tag and a closing tag in two
+    different strings are no element. These steps
+    write the marker without quotes. A step that is too deep to read hides
+    the whole text. An element with no closing tag is not touched, and
     text without a secret-named field comes back unchanged. The YAML read
     uses the same rules as the key-name walk: a bare `community` in an SNMP
     place, and the `value` of a secret-named pair also when it is a list

@@ -87,7 +87,7 @@ from typing import Final
 
 __all__ = ["COMMAND_SECRET", "CommandSecretFinder"]
 
-_PLACEHOLDER: Final = re.compile(r"""\[REDACTED:[^\]\s'"]+\]""")
+_PLACEHOLDER: Final = re.compile(r"""\[REDACTED:[^\[\]\s'"]+\]""")
 
 #: A run of bare value characters (no white space, quote, backslash or operator).
 _BARE: Final = re.compile(r"""[^\s'"\\;|&<>()]+""")

@@ -882,6 +882,8 @@ _LONG_LINE: Final = 200_000
         "\\\\",
         "a",
         "/",
+        "[REDACTED:",
+        "Server=db;Pwd=[REDACTED:",
     ],
 )
 def test_a_200000_character_line_is_read_in_under_a_second(unit: str) -> None:

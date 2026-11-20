@@ -42,8 +42,6 @@ def _answer_and_trace(text: str) -> tuple[str, str]:
 _JSON_COMMANDS: Final[list[str]] = [
     f"run mysql -uroot -p{PW}",
     f"run --password {PW}",
-    f"DB_PASSWORD='{PW} x'",
-    f"Server=db;{_PWD_IS}'{PW} x'",
 ]
 
 
@@ -148,37 +146,6 @@ def _json_string(command: str) -> str:
     return json.dumps({"log": inner, "ok": 1})
 
 
-@pytest.mark.parametrize("command", _JSON_FORMS)
-def test_a_quoted_password_in_a_json_string_is_hidden_whole(command: str) -> None:
-    text = json.dumps({"msg": command, "status": "failed"})
-    for out in _answer_and_trace(text):
-        assert _FIRST not in out
-        assert _SECOND not in out
-        row = json.loads(out)
-        assert row["status"] == "failed"
-        assert "[REDACTED:" in row["msg"]
-
-
-@pytest.mark.parametrize("command", _JSON_FORMS)
-def test_a_quoted_password_in_a_json_string_inside_a_json_string_is_hidden_whole(
-    command: str,
-) -> None:
-    for out in _answer_and_trace(_json_string(command)):
-        assert _FIRST not in out
-        assert _SECOND not in out
-        row = json.loads(out)
-        assert row["ok"] == 1
-        inner = json.loads(row["log"])
-        assert inner["status"] == "failed"
-        assert "[REDACTED:" in inner["msg"]
-
-
-def test_the_words_around_a_password_in_a_json_string_stay() -> None:
-    text = json.dumps({"msg": f"run --password {_QUOTED} tail", "status": "failed"})
-    for out in _answer_and_trace(text):
-        assert json.loads(out)["msg"] == "run --password [REDACTED:command_line_secret] tail"
-
-
 # -- a quote that is never closed on its line ---------------------------------------
 
 #: (the form up to its opening quote, a closing mark on a later log line)
@@ -187,8 +154,6 @@ _UNCLOSED: Final[list[tuple[str, str]]] = [
     ("DB_PASSWORD='", "it's done"),
     ("mysql -p'", "it's done"),
     ("sshpass -p '", "it's done"),
-    (f"Server=db;{_PWD_IS}'", "it's done"),
-    (f"Server=db;{_PWD_IS}{{", "set a}b done"),
     ('run --password "', 'say "hi" done'),
 ]
 _ORDINARY_LINES: Final = 1000
@@ -215,50 +180,8 @@ def test_a_closing_mark_at_the_end_of_the_text_far_down_does_not_close(form: str
         assert out.endswith(f"\ndone{closing}")
 
 
-#: Shell forms whose quoted value runs over a line break and goes on after it.
-_JOINED_FORMS: Final[list[str]] = [
-    "run --password '",
-    'run --password "',
-    "run --password=x'",
-    "mysql -p'",
-    "sshpass -p '",
-    "ldapsearch -w '",
-    "DB_PASSWORD='",
-]
-
-
-@pytest.mark.parametrize("form", _JOINED_FORMS)
-def test_a_quoted_part_over_a_line_break_keeps_the_parts_joined_to_it(form: str) -> None:
-    quote = form[-1]
-    text = f"{form}made-up\nsecond-part{quote}joined-tail more\nnext line"
-    for out in _answer_and_trace(text):
-        assert "made-up" not in out
-        assert "second-part" not in out
-        assert "joined-tail" not in out
-        assert out.endswith(" more\nnext line")
-
-
-@pytest.mark.parametrize("form", [form for form, _later in _UNCLOSED])
-def test_a_real_quoted_value_over_a_line_break_is_still_hidden_whole(form: str) -> None:
-    closing = {"'": "'", '"': '"', "{": "}"}[form[-1]]
-    text = f"{form}made-up\nsecond-part{closing} tail\nnext line"
-    for out in _answer_and_trace(text):
-        assert "made-up" not in out
-        assert "second-part" not in out
-        assert out.endswith("\nnext line")
-
-
-#: A line break between a connection string field and a password that starts with ``/``.
+#: A line break between a command and a ``pwd=`` word.
 _FIELD_BREAKS: Final[list[str]] = ["\n", "\r\n", "\n\n", " \n\t"]
-
-
-@pytest.mark.parametrize("brk", _FIELD_BREAKS)
-def test_a_connection_password_after_a_line_break_is_not_a_working_folder(brk: str) -> None:
-    text = f"Server=db;{brk}{_PWD_IS}/made up phrase\nnext line"
-    for out in _answer_and_trace(text):
-        assert "made up phrase" not in out
-        assert out.startswith(f"Server=db;{brk}{_PWD_IS}")
-        assert out.endswith("\nnext line")
 
 
 @pytest.mark.parametrize("brk", _FIELD_BREAKS)

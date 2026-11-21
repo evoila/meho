@@ -16,7 +16,8 @@ A part id starting with "s" is a secret value; "p" is a plain word. A
 difference is one of:
   shown:<part>   the base hides the part, the head shows it
   hidden:<part>  a plain part the base shows is now hidden
-  text           the answer changed in another way, no secret newly hidden
+  text           the answer changed in another way; when a secret is newly
+                 hidden, the answer without its secrets ("rest") is compared
   removed        the base has the input, the head snapshot does not
 A secret part that the base showed and the head hides passes: that is a fix.
 """
@@ -54,8 +55,12 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
                 newly_hidden_secret = True
             else:
                 found.append((*key, f"hidden:{part}"))
-        only_text = not any(f[:2] == key for f in found) and not newly_hidden_secret
-        if only_text and old["sha"] != new["sha"]:
+        if any(f[:2] == key for f in found):
+            continue
+        # A newly hidden secret changes the whole answer, so compare the answer
+        # without its secrets ("rest") instead: any other change still counts.
+        field = "rest" if newly_hidden_secret else "sha"
+        if old.get(field) is None or old.get(field) != new.get(field):
             found.append((*key, "text"))
     return found
 

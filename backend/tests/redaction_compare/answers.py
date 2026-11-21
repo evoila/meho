@@ -4,16 +4,21 @@
 """Run the fixed inputs through each secret-hiding step and record what happens.
 
 For each input and step, the record lists the planted parts that the answer
-no longer holds (``hidden``) and the ones it still holds (``shown``), and a
-hash of the whole answer. ``scripts/ci/redaction_compare.py`` writes these
-records to ``tests/snapshots/redaction_compare.jsonl`` and judges two such
-files against each other.
+no longer holds (``hidden``) and the ones it still holds (``shown``), a
+hash of the whole answer (``sha``), and a hash of the answer without its
+secrets (``rest``). For ``rest``, every planted secret value and every
+hiding marker becomes one ``<hidden>`` token, so a fix that only hides a
+secret keeps ``rest`` the same, and any other change of the answer does not.
+``scripts/ci/redaction_compare.py`` writes these records to
+``tests/snapshots/redaction_compare.jsonl`` and judges two such files
+against each other.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -27,6 +32,12 @@ from meho_backplane.redaction.resolver import get_default_policy
 from tests.redaction_compare.inputs import CompareInput, secret_inputs
 
 _OP_ID = "compare.read"
+
+#: The markers the steps put in place of a hidden value.
+_MARKER = re.compile(r"\*\*\*REDACTED\*\*\*|\[(?:MEHO-)?REDACTED:[^\]]*\]")
+_HIDDEN = "<hidden>"
+#: Two or more hidden tokens split only by spaces: one value with a space may become one marker.
+_HIDDEN_RUN = re.compile(rf"{_HIDDEN}(?:\s+{_HIDDEN})+")
 
 
 def _dict_step(step: Callable[[dict[str, Any]], Any]) -> Callable[[Any], Any]:
@@ -56,6 +67,17 @@ def answer_text(answer: Any) -> str:
     return json.dumps(answer, sort_keys=True, ensure_ascii=False, default=str)
 
 
+def rest_text(text: str, secrets: list[str]) -> str:
+    """*text* with each secret value and each hiding marker as one ``<hidden>`` token."""
+    for secret in sorted(secrets, key=len, reverse=True):
+        text = text.replace(secret, _HIDDEN)
+    return _HIDDEN_RUN.sub(_HIDDEN, _MARKER.sub(_HIDDEN, text))
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def _fresh(payload: Any) -> Any:
     """A copy of the payload, so a step that changes it in place cannot touch the next step."""
     return payload if isinstance(payload, str) else json.loads(json.dumps(payload))
@@ -64,6 +86,7 @@ def _fresh(payload: Any) -> Any:
 def records(items: list[CompareInput] | None = None) -> Iterator[dict[str, Any]]:
     """One record per input and step, sorted by id and step."""
     for item in items if items is not None else secret_inputs():
+        secrets = [p.value for p in item.parts if p.pid.startswith("s")]
         for path in sorted(item.paths):
             text = answer_text(STEPS[path](_fresh(item.payload)))
             yield {
@@ -71,7 +94,8 @@ def records(items: list[CompareInput] | None = None) -> Iterator[dict[str, Any]]
                 "path": path,
                 "hidden": sorted(p.pid for p in item.parts if p.value not in text),
                 "shown": sorted(p.pid for p in item.parts if p.value in text),
-                "sha": hashlib.sha256(text.encode()).hexdigest(),
+                "sha": _sha(text),
+                "rest": _sha(rest_text(text, secrets)),
             }
 
 

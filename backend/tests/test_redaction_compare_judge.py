@@ -30,13 +30,16 @@ def _load_script() -> ModuleType:
 judge_module = _load_script()
 
 
-def _record(hidden: list[str], shown: list[str], sha: str = "a") -> dict[str, object]:
+def _record(
+    hidden: list[str], shown: list[str], sha: str = "a", rest: str = "r"
+) -> dict[str, object]:
     return {
         "id": "form.plain.password.bare",
         "path": "redact",
         "hidden": hidden,
         "shown": shown,
         "sha": sha,
+        "rest": rest,
     }
 
 
@@ -82,6 +85,22 @@ def test_a_text_change_with_the_same_parts_fails(
 
 def test_a_secret_part_that_is_newly_hidden_passes(tmp_path: Path) -> None:
     assert _judge(tmp_path, _record([], ["p0", "s2"], "a"), _record(["s2"], ["p0"], "b")) == 0
+
+
+def test_a_newly_hidden_secret_with_another_text_change_fails(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base = _record([], ["p0", "s2"], "a", "r")
+    head = _record(["s2"], ["p0"], "b", "r-without-quotes")
+    assert _judge(tmp_path, base, head) == 1
+    assert "form.plain.password.bare redact: text" in capfd.readouterr().out
+
+
+def test_a_newly_hidden_secret_with_another_text_change_can_be_approved(tmp_path: Path) -> None:
+    approved = _APPROVED_SHOWN.replace("part: s2", "part: text")
+    base = _record([], ["p0", "s2"], "a", "r")
+    head = _record(["s2"], ["p0"], "b", "r-without-quotes")
+    assert _judge(tmp_path, base, head, approved) == 0
 
 
 def test_no_difference_passes(tmp_path: Path) -> None:

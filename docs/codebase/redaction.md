@@ -1019,7 +1019,10 @@ before a reviewer reads the pull request.
   (`backend/tests/redaction_compare/answers.py`).
 - **The snapshot.** `backend/tests/snapshots/redaction_compare.jsonl` has
   one line for each input and step: the parts the step hides, the parts it
-  shows, and a hash of the whole answer.
+  shows, a hash of the whole answer (`sha`), and a hash of the answer
+  without its secrets (`rest`). For `rest`, each planted secret value and
+  each hiding marker becomes one `<hidden>` token. A test checks that each
+  planted part, labels too, stands in its input with the same spelling.
   `backend/tests/test_redaction_compare_snapshot.py` fails when the code's
   answers differ from it. The same file checks three properties on main: a
   text with no secret comes back unchanged, hiding twice gives the answer
@@ -1034,7 +1037,9 @@ before a reviewer reads the pull request.
   base is missing from the pull request's snapshot (an empty snapshot
   fails for every input). A secret part that
   the base showed and the pull request hides passes: that is the purpose
-  of a fix.
+  of a fix. When a secret is newly hidden, the job still compares `rest`,
+  so another change of the same answer (lost quotes, a dropped field)
+  fails as `text`.
 - **A wanted difference.** List it in
   `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
   the step, the part id (or `text`, or `removed` for a dropped input) and

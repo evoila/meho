@@ -5,7 +5,8 @@
 
 ``tests/snapshots/redaction_compare.jsonl`` records, for about 1,500 made-up
 inputs and each secret-hiding step, which planted parts the step hides and
-which it shows, and a hash of the whole answer. The CI job "Secret hiding
+which it shows, a hash of the whole answer, and a hash of the answer
+without its secrets. The CI job "Secret hiding
 compared with the base branch" judges this file of a pull request against
 the same file of the base branch. This test keeps the file true to the code.
 
@@ -34,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from tests.redaction_compare.answers import STEPS, answer_text, snapshot_lines
+from tests.redaction_compare.answers import STEPS, answer_text, rest_text, snapshot_lines
 from tests.redaction_compare.inputs import CompareInput, plain_inputs, secret_inputs
 
 _SNAPSHOT = Path(__file__).parent / "snapshots" / "redaction_compare.jsonl"
@@ -62,6 +63,29 @@ def test_input_set_is_about_fifteen_hundred_and_stable() -> None:
     assert [(i.id, i.payload) for i in first] == [(i.id, i.payload) for i in second]
     assert len({i.id for i in first}) == len(first)
     assert 1_400 <= len(first) <= 1_700
+
+
+@pytest.mark.parametrize("build", [secret_inputs, plain_inputs], ids=["secret", "plain"])
+def test_every_planted_part_is_in_its_input(build: Callable[[], list[CompareInput]]) -> None:
+    missing = [
+        f"{item.id} {part.pid}={part.value!r}"
+        for item in build()
+        for part in item.parts
+        if part.value not in answer_text(item.payload)
+    ]
+    assert not missing, f"{len(missing)} part(s) not in their input, first: {missing[:20]}"
+
+
+def test_the_rest_text_is_the_same_when_only_a_secret_is_hidden() -> None:
+    before = rest_text('host=plain0 password="Ab3 Cd4" port=443', ["Ab3", "Cd4"])
+    assert before == rest_text('host=plain0 password="[REDACTED:password]" port=443', [])
+    assert before == rest_text('host=plain0 password="***REDACTED***" port=443', [])
+
+
+def test_the_rest_text_differs_when_more_than_the_secret_changes() -> None:
+    before = rest_text("host=plain0 password='Ab3' port=443", ["Ab3"])
+    assert before != rest_text("host=plain0 password=[REDACTED:password] port=443", [])
+    assert before != rest_text("host=plain0 password='[REDACTED:password]'", [])
 
 
 def _every_step(items: list[CompareInput]) -> list[tuple[CompareInput, str]]:

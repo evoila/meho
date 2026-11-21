@@ -75,9 +75,10 @@ class _Builder:
         self.parts.append(Part(f"p{len(self.parts)}", value))
         return value
 
-    def label(self, label: str) -> str:
-        self.parts.append(Part(f"p{len(self.parts)}", label))
-        return label
+    def label(self, text: str) -> str:
+        """Record *text* as a plain part, spelled exactly as it goes into the input."""
+        self.parts.append(Part(f"p{len(self.parts)}", text))
+        return text
 
     def value(self, style: str) -> str:
         """The value text in *style*; secret parts when the input is a secret one."""
@@ -118,7 +119,7 @@ def _yaml_line(b: _Builder, label: str, style: str) -> str:
 
 
 def _env(b: _Builder, label: str, style: str) -> str:
-    return f"export {b.label(label).upper()}={_quote(b.value(style), style)}\necho {b.plain()}\n"
+    return f"export {b.label(label.upper())}={_quote(b.value(style), style)}\necho {b.plain()}\n"
 
 
 def _url(b: _Builder, label: str, style: str) -> str:
@@ -130,7 +131,7 @@ def _url(b: _Builder, label: str, style: str) -> str:
 
 def _connection(b: _Builder, label: str, style: str) -> str:
     host, user = b.plain(), b.plain()
-    return f"Server={host};User Id={user};{b.label(label).title()}={b.value(style)};Port=1433;"
+    return f"Server={host};User Id={user};{b.label(label.title())}={b.value(style)};Port=1433;"
 
 
 def _header(b: _Builder, label: str, style: str) -> str:
@@ -228,10 +229,10 @@ def _command_inputs(labels: tuple[str, ...], secret: bool) -> Iterator[CompareIn
             f"tool --{b.label(lab)}={_quote(b.value(st), st)} --name {b.plain()}"
         ),
         "env_prefix": lambda b, lab, st: (
-            f"{b.label(lab).upper()}={_quote(b.value(st), st)} run {b.plain()}"
+            f"{b.label(lab.upper())}={_quote(b.value(st), st)} run {b.plain()}"
         ),
         "sh_c": lambda b, lab, st: (
-            f"sh -c '{b.label(lab).upper()}={_quote(b.value(st), st)}; echo {b.plain()}'"
+            f"sh -c '{b.label(lab.upper())}={_quote(b.value(st), st)}; echo {b.plain()}'"
         ),
         "user_pw": lambda b, lab, st: (
             f"curl -u {b.plain()}:{b.value(st)} https://{b.plain()}.example/"
@@ -239,7 +240,7 @@ def _command_inputs(labels: tuple[str, ...], secret: bool) -> Iterator[CompareIn
     }
     script_forms: dict[str, Callable[[_Builder, str, str], str]] = {
         "script_export": lambda b, lab, st: (
-            f"set -e\nexport {b.label(lab).upper()}={_quote(b.value(st), st)}\necho {b.plain()}\n"
+            f"set -e\nexport {b.label(lab.upper())}={_quote(b.value(st), st)}\necho {b.plain()}\n"
         ),
         "script_sshpass": lambda b, lab, st: (
             f"sshpass -p {_quote(b.value(st), st)} ssh {b.plain()}\nmkdir -p /tmp/{b.plain()}\n"

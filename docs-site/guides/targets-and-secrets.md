@@ -438,9 +438,8 @@ when you leave it out.
     agent's call, or a call with an API token). The warning is on the
     approval card, so the approver sees it before approving. It is in the
     result again after the approval.
-  - A settings file import lists the warning in its preview and its
-    result, with the path of the target entry. The target itself waits
-    for a person's approval, and its approval card shows the warning too.
+  - A settings file import writes at once. Its preview and its result
+    both list the warning, with the path of the target entry.
   - Each later write on that target also shows the warning on its
     approval card.
 - `meho doctor` lists the Keycloak targets MEHO refuses. A platform

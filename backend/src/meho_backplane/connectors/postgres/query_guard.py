@@ -31,13 +31,16 @@ it. So ``postgres.query`` adds three checks:
   be built from pieces too.
 
 * :func:`assert_no_secret_catalogs` refuses, before a connection is opened,
-  any statement that names one of the server catalogs in
-  :data:`DENIED_RELATIONS`. Each of them can hold a stored password, a
-  connection string with a password, or the SQL text of other sessions
-  (which can hold a password). It uses the same word scan and the same
-  refusal of Unicode-escaped identifiers. A login with enough rights (a
-  superuser, or a member of ``pg_read_all_stats``) can read them, so the
-  check holds for every login, also on a target that allows a superuser.
+  any statement that names one of the server catalogs, views or functions
+  in :data:`DENIED_RELATIONS`. Each of them can show a stored password, a
+  connection string with a password, the SQL text of other sessions, a
+  server setting or sampled column values. It uses the same word scan and
+  the same refusal of Unicode-escaped identifiers. It also refuses
+  ``SHOW ALL`` and a ``SHOW`` of a setting in
+  :data:`CONNECTION_TEXT_SETTINGS`. The check holds for every login, also
+  on a target that allows a superuser. Settings are read with the curated
+  ``postgres.settings``, which puts a fixed mark in place of a connection
+  text.
 
 * :func:`assert_not_superuser` refuses to run the statement when the login
   role is a superuser, unless the target sets
@@ -60,8 +63,10 @@ pinned to the PostgreSQL 16 pages "System Catalogs"
 System" (https://www.postgresql.org/docs/16/monitoring-stats.html), the
 information schema view ``user_mapping_options``
 (https://www.postgresql.org/docs/16/infoschema-user-mapping-options.html)
-and the ``pg_stat_statements`` extension
-(https://www.postgresql.org/docs/16/pgstatstatements.html).
+the ``pg_stat_statements`` extension
+(https://www.postgresql.org/docs/16/pgstatstatements.html), the ``SHOW``
+command (https://www.postgresql.org/docs/16/sql-show.html) and the setting
+functions of "System Administration Functions".
 """
 
 from __future__ import annotations
@@ -72,10 +77,14 @@ from typing import Any
 
 import asyncpg
 
-from meho_backplane.connectors.postgres.session import PostgresReadOnlyError
+from meho_backplane.connectors.postgres.session import (
+    PostgresReadOnlyError,
+    first_significant_keyword,
+)
 
 __all__ = [
     "ALLOW_SUPERUSER_QUERY_EXTRA",
+    "CONNECTION_TEXT_SETTINGS",
     "DENIED_FUNCTIONS",
     "DENIED_FUNCTION_PREFIXES",
     "DENIED_RELATIONS",
@@ -169,9 +178,10 @@ DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "database_to_xml",
 )
 
-#: Server catalogs (lower case, no schema) that ``postgres.query`` refuses.
-#: Each can show a stored password, a connection string with a password, or
-#: the SQL text of other sessions. ``pg_roles``, ``pg_user``,
+#: Server catalogs, views and functions (lower case, no schema) that
+#: ``postgres.query`` refuses. Each can show a stored password, a connection
+#: string with a password, the SQL text of other sessions, a server setting
+#: or sampled column values. ``pg_roles``, ``pg_user``,
 #: ``pg_stat_ssl``, ``pg_stat_subscription`` and ``pg_stat_wal_receiver``
 #: (its connection string hides the password) stay allowed.
 DENIED_RELATIONS: frozenset[str] = frozenset(
@@ -195,14 +205,39 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
         # one unit.
         "pg_stat_statements",
         "pg_stat_statements_info",
+        # Server settings. A setting can hold a connection string with a
+        # password; postgres.settings hides such a value.
+        "pg_settings",
+        "pg_file_settings",
+        "pg_show_all_settings",
+        "pg_show_all_file_settings",
+        "current_setting",
+        # Column statistics: sampled values of table columns.
+        "pg_statistic",
+        "pg_stats",
+        "pg_stats_ext",
+        "pg_stats_ext_exprs",
+        "pg_statistic_ext_data",
     }
 )
+
+#: Settings (lower case) whose value is a connection text. ``postgres.query``
+#: refuses a ``SHOW`` of them, and ``postgres.settings`` puts a fixed mark in
+#: place of their value.
+CONNECTION_TEXT_SETTINGS: frozenset[str] = frozenset({"primary_conninfo"})
+
+_SETTINGS_OP = "postgres.settings"
 
 #: The curated operation to use instead, for a denied catalog that has one.
 _CURATED_INSTEAD: dict[str, str] = {
     "pg_stat_activity": "postgres.activity",
     "pg_stat_get_activity": "postgres.activity",
     "pg_stat_get_backend_activity": "postgres.activity",
+    "pg_settings": _SETTINGS_OP,
+    "pg_file_settings": _SETTINGS_OP,
+    "pg_show_all_settings": _SETTINGS_OP,
+    "pg_show_all_file_settings": _SETTINGS_OP,
+    "current_setting": _SETTINGS_OP,
 }
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -270,12 +305,32 @@ def assert_no_admin_functions(sql: str) -> None:
         )
 
 
+def _refuse_show_of_secret_settings(sql: str) -> None:
+    """Refuse ``SHOW ALL`` and a ``SHOW`` of a connection-text setting.
+
+    Every identifier-like word of a ``SHOW`` statement is checked, so a
+    comment, double quotes or upper case do not hide ``all`` or a name.
+    """
+    if first_significant_keyword(sql) != "SHOW":
+        return
+    for match in _IDENTIFIER_RE.finditer(sql):
+        word = match.group(0).lower()
+        if word == "all" or word in CONNECTION_TEXT_SETTINGS:
+            raise PostgresReadOnlyError(
+                "postgres.query refuses SHOW ALL and a SHOW of a setting that "
+                f"holds a connection text. Use {_SETTINGS_OP} instead."
+            )
+
+
 def assert_no_secret_catalogs(sql: str) -> None:
     """Raise :class:`PostgresReadOnlyError` when *sql* names a denied catalog.
 
-    Runs before a connection is opened, for every login and every target.
+    Also refuses ``SHOW ALL`` and a ``SHOW`` of a setting in
+    :data:`CONNECTION_TEXT_SETTINGS`. Runs before a connection is opened, for
+    every login and every target.
     """
     _refuse_unicode_escapes(sql)
+    _refuse_show_of_secret_settings(sql)
     name = denied_relation_in(sql)
     if name is None:
         return
@@ -283,8 +338,9 @@ def assert_no_secret_catalogs(sql: str) -> None:
     hint = f" Use {instead} instead." if instead else ""
     raise PostgresReadOnlyError(
         f"postgres.query refuses the statement: it names {name!r}, a server "
-        "catalog that can hold a stored password, a connection string or the "
-        f"SQL text of other sessions.{hint}"
+        "catalog, view or function that can show a stored password, a "
+        "connection string, the SQL text of other sessions, a server setting "
+        f"or sampled column values.{hint}"
     )
 
 

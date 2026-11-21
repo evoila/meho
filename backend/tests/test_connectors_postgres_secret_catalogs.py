@@ -5,7 +5,10 @@
 
 * Each name in ``DENIED_RELATIONS`` is refused before a connection opens: in
   upper case, in double quotes, with the ``pg_catalog.`` prefix, inside a
-  comment and inside a sub-query.
+  comment, inside a sub-query and as a text value.
+* ``SHOW ALL`` and a ``SHOW`` of a connection-text setting are refused, and
+  the refusal of settings names ``postgres.settings``.
+* The upgrade row and the connector page name every refused name.
 * The refusal holds through the dispatcher for a person, an agent login and
   a service login, with and without a standing grant, on a target that
   allows a superuser login.
@@ -17,8 +20,10 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -32,6 +37,7 @@ from meho_backplane.connectors.postgres import PostgresConnector, PostgresReadOn
 from meho_backplane.connectors.postgres import connector as connector_module
 from meho_backplane.connectors.postgres.query_guard import (
     ALLOW_SUPERUSER_QUERY_EXTRA,
+    CONNECTION_TEXT_SETTINGS,
     DENIED_RELATIONS,
     assert_no_secret_catalogs,
     denied_relation_in,
@@ -251,6 +257,11 @@ def test_a_unicode_escaped_identifier_is_refused() -> None:
         ("pg_stat_activity", "Use postgres.activity instead."),
         ("pg_stat_get_activity", "Use postgres.activity instead."),
         ("pg_stat_get_backend_activity", "Use postgres.activity instead."),
+        ("pg_settings", "Use postgres.settings instead."),
+        ("pg_file_settings", "Use postgres.settings instead."),
+        ("pg_show_all_settings", "Use postgres.settings instead."),
+        ("pg_show_all_file_settings", "Use postgres.settings instead."),
+        ("current_setting", "Use postgres.settings instead."),
     ],
 )
 def test_the_refusal_for_sessions_names_the_curated_operation(name: str, hint: str) -> None:
@@ -271,7 +282,9 @@ def test_the_refusal_for_sessions_names_the_curated_operation(name: str, hint: s
         "SELECT * FROM pg_subscription_rel",
         "SELECT * FROM pg_stat_wal_receiver",
         "SELECT * FROM pg_stat_database",
-        "SELECT name, setting FROM pg_settings",
+        "SHOW statement_timeout",
+        "SHOW work_mem",
+        "SELECT * FROM my_pg_stats_copy",
         "SELECT * FROM pg_stat_user_tables",
         "SELECT srvname FROM pg_foreign_server",
         "SELECT * FROM my_pg_stat_activity_copy",
@@ -284,6 +297,72 @@ def test_reads_that_show_no_secret_pass(sql: str) -> None:
 
 def test_deny_list_entries_are_lower_case() -> None:
     assert all(name == name.lower() for name in DENIED_RELATIONS)
+    assert all(name == name.lower() for name in CONNECTION_TEXT_SETTINGS)
+
+
+def _show_spellings(word: str) -> list[str]:
+    """The ways a ``SHOW`` statement can name *word* that the guard must still see."""
+    return [
+        f"SHOW {word}",
+        f"show {word}",
+        f"SHOW {word.upper()}",
+        f'SHOW "{word}"',
+        f'SHOW "{word.upper()}"',
+        f"SHOW /* settings */ {word}",
+        f"-- settings\nSHOW {word}",
+        f"/* settings */ SHOW\n\t{word}",
+    ]
+
+
+_SHOW_CASES = [
+    pytest.param(sql, id=f"{word}-{i}")
+    for word in ["all", *sorted(CONNECTION_TEXT_SETTINGS)]
+    for i, sql in enumerate(_show_spellings(word))
+]
+
+
+@pytest.mark.parametrize("sql", _SHOW_CASES)
+def test_show_of_all_or_a_connection_text_setting_is_refused(sql: str) -> None:
+    with pytest.raises(PostgresReadOnlyError) as refused:
+        assert_no_secret_catalogs(sql)
+    assert str(refused.value).endswith("Use postgres.settings instead.")
+
+
+@pytest.mark.parametrize("sql", _SHOW_CASES)
+@pytest.mark.asyncio
+async def test_run_query_refuses_the_show_before_a_connection_opens(
+    monkeypatch: pytest.MonkeyPatch, sql: str
+) -> None:
+    mock, _ = _patch_connection(monkeypatch)
+    with pytest.raises(PostgresReadOnlyError, match=r"postgres\.settings"):
+        await PostgresConnector().run_query(_person(), _Target(), {"sql": sql})
+    mock.assert_not_awaited()
+
+
+_REPO = Path(__file__).resolve().parents[2]
+_UPGRADE_ROW = _REPO / "docs/upgrade-rows/v0.49.0/postgres-query-refuses-secret-catalogs.md"
+_CONNECTOR_PAGE = _REPO / "docs/codebase/connectors-postgres.md"
+
+#: Names in the upgrade row that are refused through another list.
+_OTHER_REFUSED_NAMES = {"table_to_xml", "schema_to_xml", "database_to_xml"}
+
+
+def _code_names(text: str) -> set[str]:
+    return set(re.findall(r"`([a-z_][a-z0-9_]*)`", text))
+
+
+def test_the_upgrade_row_names_every_refused_name() -> None:
+    note = _UPGRADE_ROW.read_text(encoding="utf-8").split("## Action")[0]
+    names = _code_names(note)
+    assert names >= DENIED_RELATIONS
+    assert names >= CONNECTION_TEXT_SETTINGS
+    assert names - DENIED_RELATIONS - CONNECTION_TEXT_SETTINGS == _OTHER_REFUSED_NAMES
+
+
+def test_the_connector_page_names_every_refused_name() -> None:
+    names = _code_names(_CONNECTOR_PAGE.read_text(encoding="utf-8"))
+    assert names >= DENIED_RELATIONS
+    assert names >= CONNECTION_TEXT_SETTINGS
 
 
 _LOGINS = [_person, _agent, _service]

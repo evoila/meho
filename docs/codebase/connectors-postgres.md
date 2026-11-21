@@ -79,7 +79,7 @@ Ops:
 | `postgres.tables` | `pg_stat_user_tables` + size helpers | vacuum/analyze stats + total/table/index bytes |
 | `postgres.indexes` | `pg_stat_user_indexes` + `pg_relation_size` | scan counters + index size |
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
-| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides |
+| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **a connection text is hidden** (the value of `primary_conninfo` is the fixed mark `[REDACTED:param_name]`) |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
 | `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions and secret catalogs denied + no superuser role + server read-only; row-capped |
 
@@ -144,8 +144,7 @@ role's rights. So the free-form op adds three checks:
    hide a later call; a false hit (a column named `pg_sleep`) only gives a
    clear refusal. Unicode-escaped identifiers (`U&"..."`) are refused as a
    whole. The prefixes cover no catalog view or role name
-   (`pg_file_settings`, `pg_replication_origin_status`, `pg_read_all_data`
-   stay allowed). The table-dumping functions are on the list because they
+   (`pg_replication_origin_status`, `pg_read_all_data` stay allowed). The table-dumping functions are on the list because they
    read every row of a table or schema chosen by a value, and the statement
    can build that value from pieces, so a denied catalog name (next check)
    would not show in the text.
@@ -164,8 +163,19 @@ role's rights. So the free-form op adds three checks:
      can hold a password;
    - `pg_stat_statements`, `pg_stat_statements_info` — the extension that
      keeps the SQL text of past statements (its info view goes with it).
+   - `pg_settings`, `pg_file_settings`, `pg_show_all_settings`,
+     `pg_show_all_file_settings`, `current_setting` — MEHO refuses these
+     reads of server settings and points to `postgres.settings`.
+   - `pg_statistic`, `pg_stats`, `pg_stats_ext`, `pg_stats_ext_exprs`,
+     `pg_statistic_ext_data` — MEHO refuses these reads of column
+     statistics, which hold sampled column values.
 
-   The refusal for sessions names `postgres.activity`, which reads the same
+   The check also refuses `SHOW ALL` and a `SHOW` of a setting in
+   `CONNECTION_TEXT_SETTINGS` (`primary_conninfo`), in any case, in double
+   quotes or after a comment. The refusal for settings names
+   `postgres.settings`, which puts the fixed mark `[REDACTED:param_name]` in
+   place of the value of such a setting, for every caller. The refusal for
+   sessions names `postgres.activity`, which reads the same
    view without the `query` column. Views that show no secret value stay
    allowed: `pg_roles` and `pg_user` (the password is shown as stars),
    `pg_stat_ssl`, `pg_stat_subscription` (no connection string), and
@@ -186,7 +196,7 @@ role's rights. So the free-form op adds three checks:
    as any role, including the trust-auth default `postgres`.
 
    A superuser login that a target allows can still read every other table
-   and catalog, and every setting. A login that is not a superuser, with
+   and catalog. A login that is not a superuser, with
    read rights only on the tables the operator wants to show (and
    `pg_monitor` or `pg_read_all_stats` only when needed), is the right
    choice for `postgres.query`.

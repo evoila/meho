@@ -130,6 +130,9 @@ from meho_backplane.connectors.keycloak._paths import _GROUP_PATH, fill_path
 from meho_backplane.connectors.keycloak.ops_group_meho_access_guard import (
     register_group_meho_access_checks,
 )
+from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+    register_meho_own_login_checks,
+)
 from meho_backplane.connectors.keycloak.ops_write_current_state import (
     with_current_group,
     with_current_roles,
@@ -663,6 +666,7 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder("keycloak.user.delete", _user_delete_preview)
     register_preview_builder("keycloak.group.delete", _group_delete_preview)
     register_group_meho_access_checks()
+    register_meho_own_login_checks()
     register_preview_builder("keycloak.client.delete", _client_delete_preview)
     register_preview_builder("keycloak.realm.delete", _realm_delete_preview)
 

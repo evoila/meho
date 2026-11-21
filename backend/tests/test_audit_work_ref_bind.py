@@ -622,3 +622,36 @@ def test_extract_work_ref_header_parsing() -> None:
     # Bytes that are not valid UTF-8 still land, read as latin-1.
     latin1 = {"headers": [(b"meho-work-ref", "CHG-ß1".encode("latin-1"))]}
     assert _extract_work_ref(latin1) == "CHG-ß1"  # type: ignore[arg-type]
+
+
+_SESSION_ID = uuid.UUID("11111111-2222-4333-8444-555555555555")
+
+
+@pytest.mark.usefixtures("_http_settings_env")
+async def test_session_header_is_stored_on_the_row(
+    isolated_audit_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = _hit_health(monkeypatch, **{"Meho-Session-Id": str(_SESSION_ID)})
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert [r.agent_session_id for r in rows] == [_SESSION_ID]
+
+
+@pytest.mark.usefixtures("_http_settings_env")
+async def test_missing_session_header_leaves_the_column_empty(
+    isolated_audit_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = _hit_health(monkeypatch)
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert [r.agent_session_id for r in rows] == [None]
+
+
+@pytest.mark.usefixtures("_http_settings_env")
+async def test_session_header_that_is_not_a_uuid_is_ignored(
+    isolated_audit_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = _hit_health(monkeypatch, **{"Meho-Session-Id": "not-a-uuid"})
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert [r.agent_session_id for r in rows] == [None]

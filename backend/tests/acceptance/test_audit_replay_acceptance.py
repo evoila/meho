@@ -1089,31 +1089,40 @@ async def test_unit_edge_depth_cap_truncates_deep_chain(sqlite_session: AsyncSes
     assert node.children == []
 
 
-def test_unit_edge_query_audit_tree_foreign_session_returns_invalid_params() -> None:
-    """``query_audit(shape="tree")`` self-session-only: a foreign id → -32602.
+@pytest.mark.asyncio
+async def test_unit_edge_query_audit_tree_shows_only_rows_of_the_caller(
+    sqlite_session: AsyncSession,
+) -> None:
+    """``query_audit(shape="tree")`` replays with the caller's ``sub`` as ``owner_sub``.
 
-    The ``shape="tree"`` path on the operator-role ``query_audit`` tool
-    replays ONLY the caller's own bound MCP session, enforced by
-    :func:`~meho_backplane.mcp.tools.audit._resolve_self_session_id`. A
-    request naming a different ``agent_session_id`` than the caller's bound
-    MCP session id is rejected with ``McpInvalidParamsError`` (JSON-RPC
-    -32602) — even though the flat path would return other in-tenant
-    principals' rows. Exercised directly (no DB / Operator) since the
-    self-session gate is a pure contextvar + arguments check.
+    A session with rows of two logins replays only the caller's row. A
+    session with no row of the caller replays as empty, the same as a
+    session that does not exist.
     """
-    import structlog
+    tenant_id = uuid.uuid4()
+    sess = uuid.uuid4()
+    own = await _seed_sqlite_anchor(
+        sqlite_session, tenant_id=tenant_id, second=0, agent_session_id=sess
+    )
+    await seed_audit_row(
+        sqlite_session,
+        tenant_id=tenant_id,
+        occurred_at=_BASE + timedelta(seconds=1),
+        principal_sub="someone-else",
+        op_id="vsphere.vm.list",
+        op_class="read",
+        agent_session_id=sess,
+    )
+    await sqlite_session.commit()
 
-    from meho_backplane.mcp.server import McpInvalidParamsError
-    from meho_backplane.mcp.tools.audit import _resolve_self_session_id
+    async def replay(sub: str) -> list[uuid.UUID]:
+        roots = await replay_session(
+            sess, tenant_id=tenant_id, session=sqlite_session, owner_sub=sub
+        )
+        return [node.id for node in roots]
 
-    own_session = uuid.uuid4()
-    foreign_session = uuid.uuid4()
-    # Bind the caller's own MCP session id the way the transport would.
-    with (
-        structlog.contextvars.bound_contextvars(mcp_session_id=str(own_session)),
-        pytest.raises(McpInvalidParamsError, match="own session"),
-    ):
-        _resolve_self_session_id({"agent_session_id": str(foreign_session)})
+    assert await replay("op") == [own]
+    assert await replay("nobody") == []
 
 
 # ---------------------------------------------------------------------------

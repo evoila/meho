@@ -101,7 +101,11 @@ are per-database); tables/indexes accept an optional `schema` filter.
    opened**. It first refuses a statement in which a block comment holds the
    start of another block comment (`assert_no_nested_block_comment`).
    PostgreSQL nests block comments, so with that refusal the first keyword
-   the gate reads is the one the server reads. `WITH`/`EXPLAIN` are admitted at the keyword level; a
+   the gate reads is the one the server reads. White space and the end of a
+   `--` line comment (a line feed or a carriage return) follow the PostgreSQL
+   SQL scanner. The gate also checks a second reading that ends a line
+   comment only at a line feed, and refuses the statement when either reading
+   starts with a word that is not on the list. `WITH`/`EXPLAIN` are admitted at the keyword level; a
    data-modifying CTE or `EXPLAIN ANALYZE <write>` that slips past is still
    caught by the server-side backstop.
 
@@ -181,13 +185,15 @@ role's rights. So the free-form op adds three checks:
 
    The check also refuses `SHOW ALL` and a `SHOW` of a setting in
    `CONNECTION_TEXT_SETTINGS` (`primary_conninfo`), in any case, in double
-   quotes or after a comment. The refusal for settings names
+   quotes or after a comment, under both readings of the first keyword. The
+   refusal for settings names
    `postgres.settings`. For every caller, it reads the value of such a setting
    with the rules of libpq (the PostgreSQL pages "Connection Strings" and
    "Parameter Key Words") and puts the fixed mark `[REDACTED:param_name]` in
    place of each secret value: the value of `password`, `sslpassword` and
    `oauth_client_secret` (any case) in the key word form and in the query part
-   of the address form, and the password of the address. Every other
+   of the address form, and the password of the address. In the address form,
+   white space is part of a value, as libpq reads it. Every other
    character stays as the server sent it. A value that libpq cannot read is
    hidden whole when it holds a secret name or an address password; else it
    stays as it is. The refusal for

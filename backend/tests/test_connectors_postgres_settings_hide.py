@@ -256,11 +256,11 @@ async def test_settings_keep_a_quoted_value_of_another_key_word() -> None:
 @pytest.mark.asyncio
 async def test_settings_hide_only_the_secret_parts_of_an_address() -> None:
     value = (
-        "postgresql://replicator:made-up-pw-0815@standby.example.test:5433/postgres"
+        "postgresql://repl:made-up-pw-0815@db.example.test:5433/postgres"  # trufflehog:ignore
         "?sslmode=require&password=made-up-param-0815&application_name=walreceiver"
     )
     expected = (
-        f"postgresql://replicator:{SECRET_FIELD_MARKER}@standby.example.test:5433/postgres"
+        f"postgresql://repl:{SECRET_FIELD_MARKER}@db.example.test:5433/postgres"
         f"?sslmode=require&password={SECRET_FIELD_MARKER}&application_name=walreceiver"
     )
     assert await _hidden(value) == expected

@@ -58,6 +58,12 @@ rules:
     action: redact
     reason: "user part and signature / credential / token query values of a URL"
 
+  # Before api_key: this rule reads a value the way a shell does.
+  - name: strip-command-line-secret
+    pattern: command_line_secret
+    action: redact
+    reason: "password or token on a command line"
+
   - name: strip-api-key
     pattern: api_key
     action: redact

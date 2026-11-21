@@ -76,6 +76,9 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+#: A complete hide mark right after the name, and the value ends there.
+_NOT_A_MARK: Final = r"(?!\[REDACTED:[^\[\]\s'\"]+\](?![^\s'\"]))"
+
 #: Regex patterns whose appearance in captured test output is treated as
 #: a credential leak. The list is intentionally short and conservative —
 #: every pattern is paid for in false-positive risk and review attention.
@@ -92,21 +95,25 @@ SECRET_LEAK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"Bearer\s+[A-Za-z0-9_\-\.=]{20,}"),
     # ``password=`` / ``password:`` style key-value pairs. Catches the
     # accidental ``logger.info("login attempt", password=value)`` shape.
-    re.compile(r"\bpassword\s*[=:]", re.IGNORECASE),
+    # The four name patterns accept the name only when a complete hide mark
+    # (``[REDACTED:<name>]``) follows the ``=`` or ``:`` directly and the
+    # value ends there (white space, a quote or the end). A half-written
+    # mark, or a value after the mark, still fails the sweep.
+    re.compile(r"\bpassword\s*[=:]" + _NOT_A_MARK, re.IGNORECASE),
     # ``secret=`` / ``secret:`` style key-value pairs. Same shape.
     # The word boundary on the left avoids matching ``federation_health_secret``
     # event-name substrings; the regex insists on ``secret`` followed by
     # ``=`` or ``:`` with optional whitespace.
-    re.compile(r"\bsecret\s*[=:]", re.IGNORECASE),
+    re.compile(r"\bsecret\s*[=:]" + _NOT_A_MARK, re.IGNORECASE),
     # ``token=`` / ``token:`` style key-value pairs. Watches for
     # accidental ``client_token=hvs.*`` log emissions from the Vault
     # forward-auth path. Word-bounded to avoid tripping on
     # ``missing_token`` / ``invalid_token`` / ``client_token_revoked``
     # event-name strings (which contain ``token`` but never followed by
     # ``=`` or ``:`` in our log shape).
-    re.compile(r"\btoken\s*[=:]", re.IGNORECASE),
+    re.compile(r"\btoken\s*[=:]" + _NOT_A_MARK, re.IGNORECASE),
     # ``api_key`` / ``api-key`` / ``apikey`` followed by an assignment.
-    re.compile(r"\bapi[_-]?key\s*[=:]", re.IGNORECASE),
+    re.compile(r"\bapi[_-]?key\s*[=:]" + _NOT_A_MARK, re.IGNORECASE),
     # The full ``Authorization: Bearer <anything>`` shape — catches
     # request-header values rendered into a log dict literal.
     re.compile(r"Authorization\s*:\s*Bearer\s+\S+", re.IGNORECASE),

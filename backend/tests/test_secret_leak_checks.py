@@ -851,6 +851,25 @@ def test_operator_repr_excludes_raw_jwt() -> None:
     assert op.raw_jwt == sentinel
 
 
+def _sweep_matches(text: str) -> bool:
+    return any(pattern.search(text) for pattern in SECRET_LEAK_PATTERNS)
+
+
+@pytest.mark.parametrize("name", ["password", "secret", "token", "api_key"])
+@pytest.mark.parametrize("sep", ["=", ":"])
+def test_sweep_accepts_a_name_only_when_the_hide_mark_follows(name: str, sep: str) -> None:
+    """A hidden value passes the sweep; a made-up value after the same name fails it."""
+    assert not _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line_secret] ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}made-up-value ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep} [REDACTED:command_line_secret] ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED] ok")
+    assert not _sweep_matches(f'log "{name}{sep}[REDACTED:command_line_secret]"')
+    # A half-written mark, or a value after a complete mark, fails it.
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line_secret]made-up ok")
+    assert _sweep_matches(f"mysql -h db {name}{sep}[REDACTED:command_line_secret];made-up ok")
+
+
 # ---------------------------------------------------------------------------
 # The autouse sweep sees structured log lines in a parallel run too (#6608)
 # ---------------------------------------------------------------------------

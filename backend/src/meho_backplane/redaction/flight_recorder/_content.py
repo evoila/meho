@@ -104,6 +104,15 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "action": "redact",
                 "reason": "user part and signature / credential / token query values of a URL",
             },
+            # Before api_key: this rule reads a value the way a shell does
+            # (quotes, escaped spaces); the api_key rule stops at the first
+            # space or quote and would leave the tail.
+            {
+                "name": "fr-command-line-secret",
+                "pattern": "command_line_secret",
+                "action": "redact",
+                "reason": "password or token on a command line",
+            },
             {
                 "name": "fr-api-key",
                 "pattern": "api_key",

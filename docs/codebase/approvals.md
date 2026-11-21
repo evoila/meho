@@ -3231,7 +3231,9 @@ row. `keycloak.role_mapping.assign` populates
 names). Further connectors register their own builders as needed.
 
 For a person the `k8s.apply` preview also has `run_commands`: one entry
-per container (init, main and ephemeral, at any depth) with the object,
+per container (init, main and ephemeral, at any depth, and every other
+object with a `command` or `args` list, under any field, such as the
+`container`, `script` or `steps` of a custom kind) with the object,
 the container name, the image, the `command` and `args`, and in
 `exec_commands` the `exec` command of each lifecycle hook (`postStart`,
 `preStop`) and exec probe (`startupProbe`, `livenessProbe`,

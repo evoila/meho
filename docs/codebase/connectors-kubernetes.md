@@ -36,16 +36,17 @@ agent grant and no run approval covers them
   is not plain, or a manifest MEHO cannot read. The plain objects are the
   table `PLAIN_OBJECTS` in `op_classes.py`, one `(API group, kind,
   plural)` per entry:
-  - core group: `ConfigMap`, `Service`, `Namespace`, `ServiceAccount`,
+  - core group: `Service`, `Namespace`, `ServiceAccount`,
     `PersistentVolumeClaim`, `LimitRange`, `ResourceQuota`;
-  - `networking.k8s.io`: `Ingress`, `IngressClass`, `NetworkPolicy`;
+  - `networking.k8s.io`: `NetworkPolicy`;
   - `policy`: `PodDisruptionBudget`;
   - `autoscaling`: `HorizontalPodAutoscaler`;
   - `scheduling.k8s.io`: `PriorityClass`.
 
   A plain object cannot run a pod, give rights, make or read a Secret,
   or change how the cluster checks requests. Each entry of the table
-  says why in a comment. Every other object waits: a `Secret`, a pod or
+  says why in a comment. Every other object waits: a `Secret`, a
+  `ConfigMap`, an `Ingress`, an `IngressClass`, a pod or
   a workload, a role or a binding, a webhook or an admission policy, an
   API service, a CRD, a certificate signing request, and every custom
   kind of a CRD (for example a Helm chart, a workflow, a pipeline run or
@@ -54,10 +55,10 @@ agent grant and no run approval covers them
 
   Two plain kinds are plain only when their object passes a check
   (`_PLAIN_ONLY_IF`): a `Namespace` with a label or an annotation waits,
-  because a label can change how the cluster checks the pods in it. An
-  `Ingress` with an annotation, a label or a TLS entry waits, because a
-  TLS entry makes the controller read a Secret and an annotation can make
-  a controller make one.
+  because a label can change how the cluster checks the pods in it. A
+  `Service` is plain only when its type is `ClusterIP` or not set and it
+  has no `externalIPs`; every other `Service` waits, because it opens
+  the pods to other networks.
 
   MEHO reads the API group from `apiVersion` (`v1` is the core group,
   `<group>/<version>` otherwise) and compares it as written; the table
@@ -78,7 +79,10 @@ says in one line why the call waits; only a person reads that line. The
 card of a `k8s.apply` also names, for a person only, what each container
 runs: the object, the container, the image, the `command` and `args`, and
 the `exec` commands of its lifecycle hooks and probes, with secret values
-hidden (`run_commands`, see `approvals.md`). It does so also when the dry
+hidden (`run_commands`, see `approvals.md`). A container here is also any
+other object with a `command` or `args` list, under any field of a
+custom kind, so every command line the manifest echo shows only by size
+is named. It does so also when the dry
 run fails. The list keeps at most 16 KB. It always keeps room for the
 name of every later container: an entry that is too large keeps
 the start of what it runs, and its `cut` field says so.
@@ -102,10 +106,13 @@ pod, open a proxy or a port forward, or make a token get the same rule.
 So does every write (`POST`, `PUT`, `PATCH`) of an object that is not
 plain: MEHO reads the API group and the plural from the path and looks
 them up in the same `PLAIN_OBJECTS` table. MEHO does not read the body of
-such a call, so a write of an `Ingress` always waits (`PLAIN_PLURALS`
-leaves out the kinds of `_PLAIN_ONLY_IF`). A `/status` or `/scale`
-subresource and a write of a cluster-wide core object (a node, a
-namespace, a volume) keep their rules. A path can have any prefix in
+such a call, so a write of a `Namespace` or a `Service` always waits
+(`PLAIN_PLURALS` leaves out the kinds of `_PLAIN_ONLY_IF`). The same
+rule holds for a cluster-wide core object (`/api/v1/<plural>`, for
+example a node or a volume): its write waits unless its plural is in
+`PLAIN_PLURALS`. A trailing `/` counts the same as none. A `/status` or
+`/scale` subresource, and the `status` and `finalize` subresources of a
+Namespace, keep their rules. A path can have any prefix in
 front, for example the base path of a proxy
 (`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
 

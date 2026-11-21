@@ -164,8 +164,9 @@ and no run approval covers it.
   `attach`), opens a port forward or a proxy, or makes a ServiceAccount
   token, and every write (`POST`, `PUT`, `PATCH`) of an object that is
   not one of the plain objects of `k8s.apply` (read by API group and
-  plural; an `Ingress` always waits here, as MEHO does not read the
-  body), an ephemeral container, or the approval of a certificate
+  plural, also for a cluster-wide core object; a `Namespace` and a
+  `Service` always wait here, as MEHO does not read the body), an
+  ephemeral container, or the approval of a certificate
   signing request. A path can have any prefix in front.
 - A connector can also tell from the params of one call that it writes a
   credential: `declare_credential_check` (`op_classes.py`). Today two
@@ -176,7 +177,7 @@ and no run approval covers it.
     (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`). The
     plain objects are the table `PLAIN_OBJECTS` in the same file (see
     [connectors-kubernetes.md](connectors-kubernetes.md)); a `Namespace`
-    or an `Ingress` is plain only when it passes the check of
+    or a `Service` is plain only when it passes the check of
     `_PLAIN_ONLY_IF` there. So a grant, an
     agent grant or a run approval on `k8s.apply` covers only an apply of
     plain objects.

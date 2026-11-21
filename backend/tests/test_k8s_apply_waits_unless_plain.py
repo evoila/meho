@@ -29,7 +29,11 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks import runner as sensor_runner
 from meho_backplane.checks.service import SensorRequiresNoPersonError, _require_read
 from meho_backplane.connectors.kubernetes.ingested_paths import ingested_op_is_credential_call
-from meho_backplane.connectors.kubernetes.op_classes import PLAIN_OBJECTS, manifest_needs_a_person
+from meho_backplane.connectors.kubernetes.op_classes import (
+    PLAIN_OBJECTS,
+    PLAIN_PLURALS,
+    manifest_needs_a_person,
+)
 from meho_backplane.connectors.kubernetes.ops_write_preview import (
     MANIFEST_ECHO_MAX_BYTES,
     apply_run_commands,
@@ -77,6 +81,9 @@ __all__ = ["_settings_env"]
 #: cluster checks requests: ``(apiVersion, kind, plural, namespaced)``. The
 #: last one is a made-up custom kind.
 _WAITING: list[tuple[str, str, str, bool]] = [
+    ("v1", "ConfigMap", "configmaps", True),
+    ("networking.k8s.io/v1", "Ingress", "ingresses", True),
+    ("networking.k8s.io/v1", "IngressClass", "ingressclasses", False),
     ("helm.cattle.io/v1", "HelmChart", "helmcharts", True),
     ("helm.cattle.io/v1", "HelmChartConfig", "helmchartconfigs", True),
     ("argoproj.io/v1alpha1", "Workflow", "workflows", True),
@@ -143,8 +150,8 @@ _WAITING_IDS = [f"{api_version.split('/')[0]}-{kind}" for api_version, kind, _, 
 _PLAIN_IDS = [f"{group or 'core'}-{kind}" for group, kind, _ in PLAIN_OBJECTS]
 
 #: The plain objects whose write through an ingested API file keeps its rules:
-#: all but an Ingress, whose body MEHO does not read there.
-_PATH_PLAIN = [entry for entry in PLAIN_OBJECTS if entry[1] != "Ingress"]
+#: all but a Namespace and a Service, whose body MEHO does not read there.
+_PATH_PLAIN = [entry for entry in PLAIN_OBJECTS if (entry[0], entry[2]) in PLAIN_PLURALS]
 _PATH_PLAIN_IDS = [f"{group or 'core'}-{kind}" for group, kind, _ in _PATH_PLAIN]
 
 #: Plain kinds whose object waits because of one of its fields.
@@ -152,17 +159,21 @@ _FIELDS_THAT_WAIT: list[tuple[str, str, dict[str, Any]]] = [
     ("v1", "Namespace", {"labels": {"pod-security.kubernetes.io/enforce": "baseline"}}),
     ("v1", "Namespace", {"labels": {"team": "a"}}),
     ("v1", "Namespace", {"annotations": {"note": "a"}}),
-    ("networking.k8s.io/v1", "Ingress", {"annotations": {"cert-manager.io/issuer": "a"}}),
-    ("networking.k8s.io/v1", "Ingress", {"labels": {"team": "a"}}),
-    ("networking.k8s.io/v1", "Ingress", {"spec": {"tls": [{"secretName": "a"}]}}),
+    ("v1", "Service", {"spec": {"type": "NodePort"}}),
+    ("v1", "Service", {"spec": {"type": "LoadBalancer"}}),
+    ("v1", "Service", {"spec": {"type": "ExternalName", "externalName": "a.example.test"}}),
+    ("v1", "Service", {"spec": {"externalIPs": ["an-outside-address"]}}),
+    ("v1", "Service", {"spec": {"type": "ClusterIP", "externalIPs": ["an-outside-address"]}}),
 ]
 _FIELDS_THAT_WAIT_IDS = [
     "namespace-pod-security-label",
     "namespace-other-label",
     "namespace-annotation",
-    "ingress-issuer-annotation",
-    "ingress-label",
-    "ingress-tls",
+    "service-node-port",
+    "service-load-balancer",
+    "service-external-name",
+    "service-external-ips",
+    "service-cluster-ip-with-external-ips",
 ]
 
 
@@ -237,7 +248,7 @@ def test_an_apply_of_a_plain_object_keeps_its_rules(group: str, kind: str, plura
 @pytest.mark.parametrize(
     ("api_version", "kind", "fields"), _FIELDS_THAT_WAIT, ids=_FIELDS_THAT_WAIT_IDS
 )
-def test_a_namespace_or_ingress_with_a_field_that_can_change_checks_waits(
+def test_a_namespace_or_service_with_a_field_that_can_change_checks_waits(
     api_version: str, kind: str, fields: dict[str, Any]
 ) -> None:
     doc = _with_fields(api_version, kind, fields)
@@ -252,12 +263,12 @@ def test_a_namespace_or_ingress_with_a_field_that_can_change_checks_waits(
     "doc",
     [
         _object("v1", "Namespace") | {"metadata": "a"},
-        _object("networking.k8s.io/v1", "Ingress") | {"metadata": ["a"]},
-        _object("networking.k8s.io/v1", "Ingress") | {"spec": "a"},
+        _object("v1", "Service") | {"spec": "a"},
+        _object("v1", "Service") | {"spec": ["a"]},
     ],
-    ids=["namespace-metadata-not-a-map", "ingress-metadata-not-a-map", "ingress-spec-not-a-map"],
+    ids=["namespace-metadata-not-a-map", "service-spec-not-a-map", "service-spec-a-list"],
 )
-def test_a_namespace_or_ingress_meho_cannot_read_waits(doc: dict[str, Any]) -> None:
+def test_a_namespace_or_service_meho_cannot_read_waits(doc: dict[str, Any]) -> None:
     assert manifest_needs_a_person({"manifest": yaml.safe_dump(doc)}) is True
 
 
@@ -266,12 +277,17 @@ def test_a_namespace_or_ingress_meho_cannot_read_waits(doc: dict[str, Any]) -> N
     [
         _object("v1", "Namespace") | {"metadata": {"name": "a", "labels": {}}},
         {"apiVersion": "v1", "kind": "Namespace"},
-        _object("networking.k8s.io/v1", "Ingress")
-        | {"spec": {"tls": [], "rules": [{"host": "a.example.test"}]}},
+        _object("v1", "Service") | {"spec": {"type": "ClusterIP", "ports": [{"port": 80}]}},
+        _object("v1", "Service") | {"spec": {"ports": [{"port": 80}], "externalIPs": []}},
     ],
-    ids=["namespace-empty-labels", "namespace-no-metadata", "ingress-rules-without-tls"],
+    ids=[
+        "namespace-empty-labels",
+        "namespace-no-metadata",
+        "service-cluster-ip",
+        "service-no-type-no-external-ips",
+    ],
 )
-def test_a_bare_namespace_or_ingress_keeps_its_rules(doc: dict[str, Any]) -> None:
+def test_a_bare_namespace_or_cluster_ip_service_keeps_its_rules(doc: dict[str, Any]) -> None:
     assert manifest_needs_a_person({"manifest": yaml.safe_dump(doc)}) is False
 
 
@@ -289,12 +305,16 @@ def test_a_list_in_any_case_holding_a_pod_waits(kind: str) -> None:
 @pytest.mark.parametrize(
     "doc",
     [
-        {"apiVersion": "v1", "kind": "list", "items": [_object("v1", "ConfigMap")]},
-        {"apiVersion": "v1", "kind": "ConfigMapList", "items": [_object("v1", "ConfigMap")]},
+        {"apiVersion": "v1", "kind": "list", "items": [_object("v1", "ServiceAccount")]},
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccountList",
+            "items": [_object("v1", "ServiceAccount")],
+        },
         {"apiVersion": "v1", "kind": "List", "items": []},
         {"apiVersion": "v1", "kind": "List"},
     ],
-    ids=["lower-case-list", "config-map-list", "empty-list", "list-without-items"],
+    ids=["lower-case-list", "service-account-list", "empty-list", "list-without-items"],
 )
 def test_a_list_of_plain_objects_keeps_its_rules(doc: dict[str, Any]) -> None:
     assert manifest_needs_a_person({"manifest": yaml.safe_dump(doc)}) is False
@@ -303,19 +323,19 @@ def test_a_list_of_plain_objects_keeps_its_rules(doc: dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     "doc",
     [
-        _object("v1", "ConfigMap") | {"apiVersion": None},
-        _object("v1", "ConfigMap") | {"apiVersion": "v2"},
-        _object("v1", "ConfigMap") | {"apiVersion": "/v1"},
-        _object("v1", "ConfigMap") | {"apiVersion": "a/b/c"},
-        _object("v1", "ConfigMap") | {"apiVersion": 1},
-        _object("v1", "ConfigMap") | {"kind": ""},
-        _object("v1", "ConfigMap") | {"kind": None},
-        _object("Networking.k8s.io/v1", "Ingress"),
-        _object("networking.k8s.io/v1", "ConfigMap"),
-        _object("v1", "Ingress"),
+        _object("v1", "ServiceAccount") | {"apiVersion": None},
+        _object("v1", "ServiceAccount") | {"apiVersion": "v2"},
+        _object("v1", "ServiceAccount") | {"apiVersion": "/v1"},
+        _object("v1", "ServiceAccount") | {"apiVersion": "a/b/c"},
+        _object("v1", "ServiceAccount") | {"apiVersion": 1},
+        _object("v1", "ServiceAccount") | {"kind": ""},
+        _object("v1", "ServiceAccount") | {"kind": None},
+        _object("Networking.k8s.io/v1", "NetworkPolicy"),
+        _object("networking.k8s.io/v1", "ServiceAccount"),
+        _object("v1", "NetworkPolicy"),
         _object("widgets.example.test/v1", "WidgetList", items=[]),
         _object("apps/v1", "DeploymentList", items=[]),
-        {"apiVersion": "v1", "kind": "List", "items": [{"kind": "ConfigMap"}]},
+        {"apiVersion": "v1", "kind": "List", "items": [{"kind": "ServiceAccount"}]},
         {"apiVersion": "v1", "kind": "List", "items": "not-a-list"},
     ],
     ids=[
@@ -340,7 +360,9 @@ def test_an_object_meho_cannot_match_to_a_plain_kind_waits(doc: dict[str, Any]) 
 
 
 def test_a_second_document_that_is_not_plain_waits() -> None:
-    manifest = _manifest("v1", "ConfigMap") + "---\n" + _manifest("helm.cattle.io/v1", "HelmChart")
+    manifest = (
+        _manifest("v1", "ServiceAccount") + "---\n" + _manifest("helm.cattle.io/v1", "HelmChart")
+    )
     assert manifest_needs_a_person({"manifest": manifest}) is True
 
 
@@ -395,15 +417,33 @@ def test_an_api_write_of_a_plain_object_keeps_its_rules(op_id: str) -> None:
     assert ingested_op_is_credential_call(op_id) is False
 
 
-@pytest.mark.parametrize("prefix", ["", _PREFIX], ids=["no-prefix", "prefix"])
-def test_an_api_write_of_an_ingress_waits(prefix: str) -> None:
-    for op_id in (
-        f"POST:{prefix}{_plain_path('networking.k8s.io', 'ingresses')}",
-        f"PUT:{prefix}{_plain_path('networking.k8s.io', 'ingresses', name=True)}",
-        f"PATCH:{prefix}{_plain_path('networking.k8s.io', 'ingresses', name=True)}",
-    ):
-        assert ingested_op_is_credential_call(op_id) is True, op_id
-        assert credential_grant_reason(op_id) is not None
+#: Writes whose body MEHO does not read: a Namespace, a Service, and the
+#: cluster-wide core objects that are not plain.
+_BODY_NOT_READ: list[tuple[str, bool]] = [
+    ("namespaces", False),
+    ("persistentvolumes", False),
+    ("nodes", False),
+    ("services", True),
+]
+
+
+def _body_not_read_writes() -> list[str]:
+    ops = []
+    for plural, namespaced in _BODY_NOT_READ:
+        for prefix in ("", _PREFIX):
+            ops.append(f"POST:{prefix}{_write_path('v1', plural, namespaced)}")
+            ops.append(f"PUT:{prefix}{_write_path('v1', plural, namespaced, name=True)}")
+            ops.append(f"PATCH:{prefix}{_write_path('v1', plural, namespaced, name=True)}")
+    return ops
+
+
+@pytest.mark.parametrize("op_id", _body_not_read_writes())
+def test_an_api_write_whose_body_meho_does_not_read_waits(
+    op_id: str,
+) -> None:
+    assert ingested_op_is_credential_call(op_id) is True
+    assert ingested_op_is_credential_call(op_id + "/") is True
+    assert credential_grant_reason(op_id) is not None
 
 
 @pytest.mark.parametrize(
@@ -415,13 +455,12 @@ def test_an_api_write_of_an_ingress_waits(prefix: str) -> None:
         "PATCH:/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
         f"PUT:{_PREFIX}/apis/apps/v1/namespaces/{{namespace}}/statefulsets/{{name}}/status",
         "PUT:/api/v1/namespaces/{name}/finalize",
-        "PATCH:/api/v1/namespaces/{name}/status",
-        "PATCH:/api/v1/nodes/{name}",
-        "POST:/api/v1/persistentvolumes",
-        "PUT:/api/v1/namespaces/{name}",
+        f"PATCH:{_PREFIX}/api/v1/namespaces/{{name}}/status/",
+        "GET:/api/v1/namespaces/{name}",
+        "GET:/api/v1/nodes",
     ],
 )
-def test_reads_status_and_scale_writes_and_cluster_wide_core_writes_keep_their_rules(
+def test_reads_and_status_scale_and_finalize_writes_keep_their_rules(
     op_id: str,
 ) -> None:
     assert ingested_op_is_credential_call(op_id) is False
@@ -483,7 +522,7 @@ async def test_a_k8s_apply_of_a_plain_object_keeps_its_grant(
 @pytest.mark.parametrize(
     ("api_version", "kind", "fields"), _FIELDS_THAT_WAIT, ids=_FIELDS_THAT_WAIT_IDS
 )
-async def test_a_k8s_apply_of_a_namespace_or_ingress_with_such_a_field_waits_for_every_login(
+async def test_a_k8s_apply_of_a_namespace_or_service_with_such_a_field_waits_for_every_login(
     api_version: str, kind: str, fields: dict[str, Any]
 ) -> None:
     rows = await _register_all()
@@ -541,11 +580,12 @@ async def test_an_api_write_of_an_object_that_is_not_plain_waits_for_every_login
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prefix", ["", _PREFIX], ids=["no-prefix", "prefix"])
-async def test_an_api_write_of_an_ingress_waits_for_every_login(prefix: str) -> None:
-    op_id = f"POST:{prefix}{_plain_path('networking.k8s.io', 'ingresses')}"
+@pytest.mark.parametrize("op_id", _body_not_read_writes())
+async def test_an_api_write_whose_body_meho_does_not_read_waits_for_every_login(
+    op_id: str,
+) -> None:
     row = await _store(op_id)
-    params = {"namespace": "apps", "cluster": "c-1"}
+    params = {"namespace": "apps", "name": "a", "cluster": "c-1"}
     await _assert_waits_with_and_without_a_grant(row, params)
     for operator in (_service(), _agent()):
         assert await _step_waits(operator, op_id, params), operator.principal_kind
@@ -570,7 +610,14 @@ _HELM_CHART_WRITE = "POST:/apis/helm.cattle.io/v1/namespaces/{namespace}/helmcha
 _WEBHOOK_WRITE = (
     f"PUT:{_PREFIX}/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations/{{name}}"
 )
-_WAITING_WRITES = [_HELM_CHART_WRITE, _WEBHOOK_WRITE]
+_WAITING_WRITES = [
+    _HELM_CHART_WRITE,
+    _WEBHOOK_WRITE,
+    "PATCH:/api/v1/namespaces/{name}",
+    f"POST:{_PREFIX}/api/v1/persistentvolumes/",
+    "PUT:/api/v1/nodes/{name}",
+    "PUT:/api/v1/namespaces/{namespace}/services/{name}",
+]
 
 
 @pytest.mark.asyncio
@@ -710,3 +757,46 @@ def test_the_card_counts_the_containers_left_out_when_their_names_do_not_fit() -
     )
     assert shown[-1]["omitted_containers"] == 12 - (len(shown) - 1)
     assert len(json.dumps(shown).encode("utf-8")) <= MANIFEST_ECHO_MAX_BYTES
+
+
+def test_the_card_names_every_command_of_a_custom_kind() -> None:
+    secret = "made-up" + "-token-7"
+    doc = _object(
+        "argoproj.io/v1alpha1",
+        "WorkflowTemplate",
+        spec={
+            "templates": [
+                {"name": "build", "container": {"image": "img-a", "command": ["make", "all"]}},
+                {
+                    "name": "check",
+                    "script": {"image": "img-b", "command": ["python"], "source": "print(1)"},
+                },
+            ],
+            "task": {
+                "steps": [
+                    {"name": "push", "image": "img-c", "args": ["push", "--token", secret]},
+                ],
+            },
+        },
+    )
+
+    shown = apply_run_commands(yaml.safe_dump(doc), redact=_no_redaction)
+
+    lines = {json.dumps(entry.get("command") or entry.get("args")) for entry in shown}
+    assert len(shown) == 3
+    assert {'["make", "all"]', '["python"]'} <= lines
+    (step,) = [entry for entry in shown if entry["container"] == "push"]
+    assert step["args"][:2] == ["push", "--token"]
+    assert secret not in json.dumps(shown)
+
+
+def test_the_card_names_a_probe_command_once() -> None:
+    probe = {"exec": {"command": ["check", "--ready"]}}
+    containers = [{"name": "web", "image": "img", "command": ["serve"], "readinessProbe": probe}]
+
+    shown = apply_run_commands(
+        _manifest("v1", "Pod", spec={"containers": containers}), redact=_no_redaction
+    )
+
+    assert len(shown) == 1
+    assert shown[0]["exec_commands"] == {"readinessProbe": ["check", "--ready"]}

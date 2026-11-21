@@ -122,6 +122,7 @@ _DEPLOYMENT = _manifest(
     "Deployment", "apps/v1", spec={"template": {"metadata": {}, "spec": _POD_SPEC}}
 )
 _CONFIG_MAP = _manifest("ConfigMap", data={"mode": "fast"})
+_SERVICE_ACCOUNT = _manifest("ServiceAccount")
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +242,8 @@ def test_a_list_or_a_second_document_with_a_deployment_waits() -> None:
 @pytest.mark.parametrize(
     ("kind", "api_version"),
     [
-        ("ConfigMap", "v1"),
         ("Service", "v1"),
         ("Namespace", "v1"),
-        ("Ingress", "networking.k8s.io/v1"),
         ("ServiceAccount", "v1"),
         ("NetworkPolicy", "networking.k8s.io/v1"),
     ],
@@ -309,7 +308,7 @@ def test_a_kubernetes_api_call_that_handles_a_credential_waits(op_id: str) -> No
         "PATCH:/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
         "PUT:/apis/apps/v1/namespaces/{namespace}/deployments/{name}/status",
         "DELETE:/api/v1/namespaces/{namespace}/pods/{name}",
-        "POST:/api/v1/namespaces/{namespace}/configmaps",
+        "POST:/api/v1/namespaces/{namespace}/serviceaccounts",
         "GET:/apis/rbac.authorization.k8s.io/v1/clusterroles",
         "GET:/api/v1/repos/{owner}/{repo}/actions/secrets",
         "k8s.pod.list",
@@ -412,11 +411,11 @@ async def test_a_k8s_apply_of_a_pod_rights_or_secret_kind_waits_for_every_login(
 
 
 @pytest.mark.asyncio
-async def test_a_k8s_apply_of_a_config_map_keeps_its_grant() -> None:
+async def test_a_k8s_apply_of_a_service_account_keeps_its_grant() -> None:
     rows = await _register_all()
     apply_row = _row(rows, "k8s.apply")
     await _name_in_every_grant([apply_row])
-    verdict, reason = await _verdict(_service(), apply_row, {"manifest": _CONFIG_MAP})
+    verdict, reason = await _verdict(_service(), apply_row, {"manifest": _SERVICE_ACCOUNT})
     assert verdict is PermissionVerdict.AUTO_EXECUTE, reason
 
 

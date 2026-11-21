@@ -18,16 +18,17 @@ it (:func:`~meho_backplane.op_classes.declare_credential_capable_match`).
   the plain objects of ``k8s.apply`` that need no check of their body
   (:data:`~meho_backplane.connectors.kubernetes.op_classes.PLAIN_PLURALS`),
   read by API group and plural: a pod or a workload, a role or a binding, a
-  webhook, an Ingress, a custom resource and every other kind. Also an
-  ephemeral container and the approval of a certificate signing request.
+  webhook, a ConfigMap, an Ingress, a Service, a Namespace, a node, a
+  volume, a custom resource and every other kind, namespaced or
+  cluster-wide. Also an ephemeral container and the approval of a
+  certificate signing request.
 
 A path segment in braces or with a value counts the same, so the names of
 the path params in the API file do not matter. A path can have any prefix
 in front, for example the base path of a proxy: each rule is read from
 every ``/`` of the path on. A ``/status`` or ``/scale`` subresource keeps
-its rules: it does not change what runs. A write of a cluster-wide core
-object (``/api/v1/<plural>``: a node, a namespace, a volume) keeps its
-rules too: such an object runs no pod by itself.
+its rules: it does not change what runs. So do the ``status`` and
+``finalize`` subresources of a Namespace.
 """
 
 from __future__ import annotations
@@ -62,10 +63,8 @@ _NAMESPACE_SUBRESOURCE: Final[re.Pattern[str]] = re.compile(
     rf"/api/v1/namespaces/{_SEG}/(?:status|finalize)"
 )
 
-#: A namespaced core object or a list of them.
-_CORE_OBJECT: Final[re.Pattern[str]] = re.compile(
-    rf"/api/v1/namespaces/{_SEG}/(?P<plural>{_SEG})(?:/{_SEG})?"
-)
+#: A core object, namespaced or cluster-wide, or a list of them.
+_CORE_OBJECT: Final[re.Pattern[str]] = re.compile(rf"/api/v1{_NS}/(?P<plural>{_SEG})(?:/{_SEG})?")
 
 #: An object of an API group, namespaced or cluster-wide, or a list of them.
 _GROUP_OBJECT: Final[re.Pattern[str]] = re.compile(

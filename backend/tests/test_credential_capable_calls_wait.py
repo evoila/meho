@@ -95,6 +95,13 @@ metadata:
 data:
   mode: fast
 """
+_SERVICE_ACCOUNT = """
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  namespace: apps
+"""
 _TOKEN_SECRET = """
 apiVersion: v1
 kind: Secret
@@ -476,7 +483,7 @@ async def test_a_k8s_apply_of_other_kinds_keeps_its_grant() -> None:
     apply_row = _row(rows, "k8s.apply")
     await _name_in_every_grant([apply_row])
 
-    today, reason, _ = await _gate(_service(), apply_row, {"manifest": _CONFIG_MAP})
+    today, reason, _ = await _gate(_service(), apply_row, {"manifest": _SERVICE_ACCOUNT})
 
     assert today is PermissionVerdict.AUTO_EXECUTE, reason
     assert "auto-granted by standing grant" in reason
@@ -523,7 +530,7 @@ async def test_a_step_that_applies_a_secret_waits_and_other_kinds_keep_their_gra
     assert waiting is not None
     assert waiting.status == "awaiting_approval", waiting.error
     if operator.principal_kind is PrincipalKind.SERVICE:
-        assert await _step(_CONFIG_MAP) is None
+        assert await _step(_SERVICE_ACCOUNT) is None
 
 
 # ---------------------------------------------------------------------------
@@ -538,9 +545,9 @@ async def test_a_step_that_applies_a_secret_waits_and_other_kinds_keep_their_gra
         ("k8s.exec", {"pod": "web", "namespace": "apps", "command": ["id"]}, True),
         ("proxmox.api.write", {"path": "nodes/a/qemu/1/config", "method": "PUT"}, True),
         ("k8s.apply", {"manifest": _SECRET}, True),
-        ("k8s.apply", {"manifest": _CONFIG_MAP}, False),
+        ("k8s.apply", {"manifest": _SERVICE_ACCOUNT}, False),
     ],
-    ids=["exec", "proxmox-write", "apply-secret", "apply-config-map"],
+    ids=["exec", "proxmox-write", "apply-secret", "apply-service-account"],
 )
 async def test_the_approval_card_says_why_the_call_waits(
     op_id: str, params: dict[str, Any], line: bool

@@ -62,15 +62,14 @@ CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
 #: The objects whose ``k8s.apply`` keeps the rules of ``k8s.apply``: one
 #: ``(API group, kind, plural)`` per entry, the core group as ``""``. An apply
 #: of any other object waits for a person, also a custom kind of a CRD. Each
-#: entry says why its objects cannot run a pod, give rights, make or read a
-#: Secret, or change how the cluster checks requests. Add no kind without
-#: such a reason.
+#: entry says why its objects cannot change what runs, give rights, make or
+#: read a Secret, change how the cluster checks requests, or send requests
+#: somewhere else. Add no kind without such a reason.
 PLAIN_OBJECTS: Final[tuple[tuple[str, str, str], ...]] = (
-    # Plain settings as text. A pod reads it only when its own manifest
-    # mounts it, and that manifest waits.
-    ("", "ConfigMap", "configmaps"),
-    # Picks pods by label and gives them one address. It starts no pod and
-    # reads no Secret.
+    # Picks pods by label and gives them one address inside the cluster. It
+    # starts no pod and reads no Secret. A Service of another type or with
+    # an outside address opens the pods to other networks, so it waits
+    # (_PLAIN_ONLY_IF).
     ("", "Service", "services"),
     # A name for a group of objects. It holds no workload and no rights. A
     # label or an annotation can change how the cluster checks the pods in
@@ -84,13 +83,6 @@ PLAIN_OBJECTS: Final[tuple[tuple[str, str, str], ...]] = (
     # Limits and quotas only cap what the pods of a namespace may use.
     ("", "LimitRange", "limitranges"),
     ("", "ResourceQuota", "resourcequotas"),
-    # Routes outside traffic to a Service. It starts no pod and gives no
-    # rights in the cluster. A TLS entry makes the controller read a Secret,
-    # and an annotation can make a controller make one, so an Ingress with
-    # either waits (_PLAIN_ONLY_IF).
-    ("networking.k8s.io", "Ingress", "ingresses"),
-    # Names the controller that serves an Ingress. It starts no controller.
-    ("networking.k8s.io", "IngressClass", "ingressclasses"),
     # Limits which pods may talk to each other.
     ("networking.k8s.io", "NetworkPolicy", "networkpolicies"),
     # Limits how many pods a voluntary stop may take down at once.
@@ -118,22 +110,23 @@ def _metadata_is_bare(doc: Mapping[str, Any]) -> bool:
     return not metadata.get("labels") and not metadata.get("annotations")
 
 
-def _ingress_is_plain(doc: Mapping[str, Any]) -> bool:
-    """True when the Ingress *doc* has no annotations, no labels and no TLS entry."""
+def _service_is_plain(doc: Mapping[str, Any]) -> bool:
+    """True when the Service *doc* is of type ``ClusterIP`` or no type, with no ``externalIPs``."""
     spec = doc.get("spec")
     if spec is None:
-        return _metadata_is_bare(doc)
+        return True
     if not isinstance(spec, Mapping):
         return False
-    return _metadata_is_bare(doc) and not spec.get("tls")
+    return spec.get("type") in (None, "ClusterIP") and not spec.get("externalIPs")
 
 
 #: The plain kinds that are plain only when their object passes a check. The
 #: key is ``(API group, kind in lower case)``. Their write through an ingested
-#: API file waits: MEHO does not read the body of such a call.
+#: API file waits on every call, as they are left out of
+#: :data:`PLAIN_PLURALS`: MEHO does not read the body of such a call.
 _PLAIN_ONLY_IF: Final[Mapping[tuple[str, str], Callable[[Mapping[str, Any]], bool]]] = {
     ("", "namespace"): _metadata_is_bare,
-    ("networking.k8s.io", "ingress"): _ingress_is_plain,
+    ("", "service"): _service_is_plain,
 }
 
 #: ``(API group, plural)`` of the :data:`PLAIN_OBJECTS` that need no check of

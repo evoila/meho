@@ -38,6 +38,9 @@ The same list limits what a hosted agent reads back:
 * **A stored request.** :func:`stored_request_outside_limit` tells the
   reveal fetch when a stored approval request is for a connector, or a
   target of a connector, outside the list.
+* **Targets.** :func:`targets_within_limit` keeps only the targets whose
+  connector is in the list. ``list_targets`` and the near-match targets of
+  a ``no_target`` or ``ambiguous_target`` answer use it.
 
 Outside an agent run with a connector list, the limit is unset and
 ``dispatch`` behaves as without this module.
@@ -47,7 +50,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -71,6 +74,7 @@ __all__ = [
     "stored_request_outside_limit",
     "stored_result_within_limit",
     "target_picks_other_connector",
+    "targets_within_limit",
 ]
 
 #: The connector ids a hosted agent may use, or ``None`` for no limit.
@@ -290,3 +294,23 @@ async def stored_request_outside_limit(operator: Operator, request: ApprovalRequ
     # connectors first, as the run step does for such an op.
     cls = await _picked_connector_class(target, ingested=True)
     return cls is None or connector_id_of(cls) not in allowed
+
+
+async def targets_within_limit[T](targets: Iterable[T]) -> list[T]:
+    """The *targets* whose connector the bound limit allows, in their order.
+
+    Without a bound limit every target is kept. With one, a target is kept
+    only when it picks one connector and that connector is in the list. A
+    target that picks no single connector is left out.
+    """
+    allowed = allowed_connectors_var.get()
+    if allowed is None:
+        return list(targets)
+    kept: list[T] = []
+    for target in targets:
+        # A target may use a connector built from a saved API file, so load
+        # those first, as the run step does.
+        cls = await _picked_connector_class(target, ingested=True)
+        if cls is not None and connector_id_of(cls) in allowed:
+            kept.append(target)
+    return kept

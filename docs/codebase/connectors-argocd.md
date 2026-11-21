@@ -296,6 +296,29 @@ and the approval and audit records treat them as writes. `app.refresh` is
 an HTTP GET, but it makes ArgoCD reconcile the app. `app.delete` and the
 two `appproject` writes are classed `write` by their op-id suffix.
 
+**Writes that wait for a person on every call.** Some writes choose what
+the cluster runs later, or who gets rights. Such a call is a credential
+call: a person approves each one, also for a person's own call, and no
+standing grant, no agent grant and no run approval covers it
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+`op_classes.py` marks them:
+
+- `argocd.app.set`, every call (`declare_credential_capable`). The spec
+  names the source and the cluster, and ArgoCD then creates what that
+  source holds.
+- `argocd.appproject.create` and `argocd.appproject.update`, every call
+  (`declare_credential_capable`). A project sets which sources, clusters,
+  namespaces and kinds its apps may deploy: it gives rights.
+- `argocd.app.sync` when it names a `revision` (`declare_credential_check`
+  with `sync_sets_a_revision`). The check uses the same test as the
+  handler: a revision is sent when the value is not empty.
+
+A sync without a revision and `argocd.app.rollback` start what the app
+already defines, so they keep their rules: a standing grant still covers
+them. The approval card of `argocd.app.set` and `argocd.appproject.update`
+shows the spec before and after. The card of `argocd.app.sync` shows its
+params (the generic params echo), so a person reads the revision.
+
 Writes go through the connector's `_write_json` helper (POST/PUT/DELETE,
 **not** retried — a side-effecting verb must not silently re-fire on a 5xx),
 which the base `HttpConnector._request_json` deliberately refuses for

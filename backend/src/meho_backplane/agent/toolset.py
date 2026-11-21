@@ -62,7 +62,8 @@ can grow without a migration — the T2 design constraint):
   registers no tools.
 * ``connectors`` — an optional allow-list of ``connector_id`` values the
   agent may reach through ``call_operation`` (and inspect through
-  ``preview_operation``). ``meho_connector_list`` shows only these
+  ``preview_operation``, ``list_operation_groups`` and
+  ``search_operations``). ``meho_connector_list`` shows only these
   connectors, so the agent finds the ones it may use (#4233). Omitted /
   ``null`` means "no connector-level restriction beyond what dispatch
   already enforces" (the tenant boundary + per-op RBAC still apply). An
@@ -71,8 +72,11 @@ can grow without a migration — the T2 design constraint):
   list is bound around every tool call
   (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`):
   the dispatcher checks the connector each target picks, every stored
-  result keeps the list, and ``result_query`` reads only results stored
-  under a list inside the agent's own. With the
+  result keeps the list, ``result_query`` reads only results stored
+  under a list inside the agent's own, and ``list_targets`` and the
+  near-match targets of a ``no_target`` or ``ambiguous_target`` answer
+  name only targets of connectors in the list. Memory, knowledge and the
+  broadcast stay shared: the list does not limit them. With the
   ``agent_topology_off_with_connector_list`` setting on (off by default),
   ``query_topology`` is not registered for an agent with a list
   (``outside_connector_list``): the topology links objects of every
@@ -219,11 +223,13 @@ _log = structlog.get_logger(__name__)
 #: check and the schema stay in lock-step.
 _CONNECTOR_ID_ARG = "connector_id"
 
-#: Meta-tools that name a connector to run (or preview) an operation on. The
-#: spec's ``connectors`` allow-list is checked for these before the handler
-#: runs, so ``preview_operation`` cannot look at a connector the agent may
-#: not call.
-_CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_operation"})
+#: Meta-tools that name a connector in ``connector_id``: to run or preview an
+#: operation on it, or to list or search its operations. The spec's
+#: ``connectors`` allow-list is checked for these before the handler runs, so
+#: the agent cannot look at a connector it may not call.
+_CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset(
+    {"call_operation", "preview_operation", "list_operation_groups", "search_operations"}
+)
 
 #: Meta-tools an agent with a ``connectors`` list does not get when the
 #: ``agent_topology_off_with_connector_list`` setting is on: their answers
@@ -687,9 +693,10 @@ def _make_meta_tool(
     not admit; the re-check makes sure a tool call can never run under an
     identity the floor refuses (#3737).
 
-    For ``call_operation`` and ``preview_operation`` with a connector
-    allow-list, the wrapper performs a pre-dispatch connector check and
-    raises :class:`ModelRetry` — an agent-reasonable structured error, not a
+    For ``call_operation``, ``preview_operation``, ``list_operation_groups``
+    and ``search_operations`` with a connector allow-list, the wrapper
+    checks the ``connector_id`` before the handler runs and raises
+    :class:`ModelRetry` — an agent-reasonable structured error, not a
     crash — when the requested connector is outside the spec's
     ``connectors`` list. With a list, every tool binds it
     (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`):
@@ -810,9 +817,10 @@ def resolve_agent_toolset(
     register it).
 
     The spec's ``connectors`` allow-list (when present) is threaded into the
-    ``call_operation`` and ``preview_operation`` tools so a request to a
-    connector outside the list is rejected with a structured,
-    agent-reasonable error before it reaches the dispatcher.
+    ``call_operation``, ``preview_operation``, ``list_operation_groups`` and
+    ``search_operations`` tools so a request to a connector outside the list
+    is rejected with a structured, agent-reasonable error before it reaches
+    the handler.
 
     Args:
         toolset: the definition's toolset spec (``AgentDefinition.toolset``),

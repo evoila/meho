@@ -14,7 +14,7 @@ A YAML file with one key, ``questions``. Each question has:
   sent as JSON.
 
 The loader refuses a missing field, an unknown field, an id used twice and
-filters that cannot be sent as JSON. Test tooling only: nothing here is
+filters that cannot be sent as JSON (also NaN and infinity). Test tooling only: nothing here is
 read by MEHO itself.
 """
 
@@ -76,12 +76,7 @@ def _parse_entry(entry: object, index: int) -> Question:
         raise QuestionFileError(f"{where}: must be a mapping")
     if isinstance(entry.get("id"), str):
         where = f"question {entry['id']}"
-    missing = sorted(_REQUIRED - set(entry))
-    if missing:
-        raise QuestionFileError(f"{where}: missing field {', '.join(missing)}")
-    unknown = sorted(set(entry) - _REQUIRED - _OPTIONAL)
-    if unknown:
-        raise QuestionFileError(f"{where}: unknown field {', '.join(unknown)}")
+    _check_field_names(entry, where)
     for name in ("id", "question", "expect"):
         if not isinstance(entry[name], str) or not entry[name].strip():
             raise QuestionFileError(f"{where}: {name} must be a text that is not empty")
@@ -91,13 +86,7 @@ def _parse_entry(entry: object, index: int) -> Question:
     kind = entry.get("kind", "meaning")
     if kind not in KINDS:
         raise QuestionFileError(f"{where}: kind must be one of {', '.join(KINDS)}")
-    filters = entry.get("filters") or {}
-    if not isinstance(filters, dict):
-        raise QuestionFileError(f"{where}: filters must be a mapping")
-    try:
-        json.dumps(filters)
-    except (TypeError, ValueError) as exc:
-        raise QuestionFileError(f"{where}: filters cannot be sent as JSON: {exc}") from exc
+    filters = _parse_filters(entry.get("filters") or {}, where)
     return Question(
         id=entry["id"],
         question=entry["question"],
@@ -106,3 +95,22 @@ def _parse_entry(entry: object, index: int) -> Question:
         kind=kind,
         filters=filters,
     )
+
+
+def _check_field_names(entry: dict[Any, Any], where: str) -> None:
+    missing = sorted(_REQUIRED - set(entry))
+    if missing:
+        raise QuestionFileError(f"{where}: missing field {', '.join(missing)}")
+    unknown = sorted(str(name) for name in set(entry) - _REQUIRED - _OPTIONAL)
+    if unknown:
+        raise QuestionFileError(f"{where}: unknown field {', '.join(unknown)}")
+
+
+def _parse_filters(filters: object, where: str) -> dict[str, Any]:
+    if not isinstance(filters, dict):
+        raise QuestionFileError(f"{where}: filters must be a mapping")
+    try:
+        json.dumps(filters, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise QuestionFileError(f"{where}: filters cannot be sent as JSON: {exc}") from exc
+    return filters

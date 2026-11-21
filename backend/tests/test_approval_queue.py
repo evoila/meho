@@ -3693,6 +3693,91 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
 
 
 @pytest.mark.asyncio
+async def test_decision_rows_of_a_cli_parked_request_keep_the_client_mark(
+    session: AsyncSession,
+) -> None:
+    """Approve and expiry rows of a CLI-parked request say the session came from the CLI.
+
+    The decision rows are written on the approver's task (no header, or the
+    approver's own CLI session) or by the expiry sweep, so they must take the
+    mark from the stored request. A request parked by an agent session gets
+    decision rows without the mark.
+    """
+    from meho_backplane.operations._audit import (
+        SESSION_FROM_CLIENT_KEY,
+        agent_session_id_var,
+        client_session_id_var,
+    )
+
+    requester = _make_operator(sub="cli-requester")
+    cli_session = uuid.uuid4()
+    past = datetime.now(UTC) - timedelta(minutes=5)
+
+    async def _park(op_id: str, *, expires_at: datetime | None = None) -> ApprovalRequest:
+        return await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id=op_id,
+            target=None,
+            params={},
+            params_hash=compute_params_hash({}),
+            expires_at=expires_at,
+        )
+
+    token = client_session_id_var.set(cli_session)
+    try:
+        console_approved = await _park("vault.kv.cli-console")
+        cli_approved = await _park("vault.kv.cli-cli")
+        expired = await _park("vault.kv.cli-expired", expires_at=past)
+    finally:
+        client_session_id_var.reset(token)
+    agent_session = uuid.uuid4()
+    agent_token = agent_session_id_var.set(agent_session)
+    try:
+        agent_parked = await _park("vault.kv.agent")
+    finally:
+        agent_session_id_var.reset(agent_token)
+    await session.commit()
+
+    reviewer = _make_operator(sub="console-reviewer", role=TenantRole.TENANT_ADMIN)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, console_approved.id, operator=reviewer)
+        await approve_request(s, agent_parked.id, operator=reviewer)
+        await s.commit()
+    reviewer_token = client_session_id_var.set(uuid.uuid4())
+    try:
+        async with get_sessionmaker()() as s:
+            await approve_request(
+                s,
+                cli_approved.id,
+                operator=_make_operator(sub="cli-reviewer", role=TenantRole.TENANT_ADMIN),
+            )
+            await s.commit()
+    finally:
+        client_session_id_var.reset(reviewer_token)
+    async with get_sessionmaker()() as s:
+        await expire_stale_requests(s, operator=reviewer)
+        await s.commit()
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    by_request = {row.payload["approval_request_id"]: row for row in rows}
+    for request in (console_approved, cli_approved, expired):
+        row = by_request[str(request.id)]
+        assert row.agent_session_id == cli_session
+        assert row.payload[SESSION_FROM_CLIENT_KEY] is True
+    assert by_request[str(expired.id)].payload["decision"] == "expired"
+    agent_row = by_request[str(agent_parked.id)]
+    assert agent_row.agent_session_id == agent_session
+    assert SESSION_FROM_CLIENT_KEY not in agent_row.payload
+
+
+@pytest.mark.asyncio
 async def test_cli_session_park_approve_resume_stays_a_client_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

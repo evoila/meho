@@ -681,7 +681,9 @@ operation runs, `resume_dispatch_after_approval()` binds that id to
 `client_session_id_var`, not to `agent_session_id_var`. So the audit rows
 of the run carry the requester's CLI session, and the run is not an agent
 session: the coordination hints add nothing to its answer. The approver's
-own CLI session never labels the requester's run.
+own CLI session never labels the requester's run. The approve, reject and
+expiry rows of such a request also store `session_from_client: true`,
+written by `_write_audit_row`.
 
 `ApprovalRequestView` has `agent_session_id` next to `work_ref`.
 `meho approvals list` shows two more columns: `WORK-REF` and `SESSION`

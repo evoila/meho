@@ -120,6 +120,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.op_classes import hidden_stored_param
 from meho_backplane.operations._audit import (
+    SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
     client_session_id_var,
     parent_audit_id_var,
@@ -1488,6 +1489,12 @@ async def _write_audit_row(
             payload["step_id"] = step_id
     if extra_payload:
         payload.update(extra_payload)
+    # A request parked from the CLI stores the CLI login session as its
+    # session id. The decision rows are written later, on the approver's or
+    # the expiry sweep's task, so the listener that marks CLI rows does not
+    # see them: mark them here from the stored flag.
+    if request.session_from_client:
+        payload[SESSION_FROM_CLIENT_KEY] = True
     # The reviewer's name next to ``reviewed_by`` on an approve or reject row.
     if principal_name and payload.get("reviewed_by") == operator.sub:
         payload["reviewed_by_name"] = principal_name

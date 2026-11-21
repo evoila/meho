@@ -335,8 +335,11 @@ def _mark_client_session(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) 
     The row gets ``payload["session_from_client"] = True`` when no agent run
     or MCP session is bound and its session id is the one the CLI sent in
     ``Meho-Session-Id``. Registered after :func:`_note_classified_record`,
-    so it also sees a session id that listener filled in. Every writer is
-    covered, so readers that count agent sessions can skip CLI rows.
+    so it also sees a session id that listener filled in. It marks the rows
+    written in the request that sent the header. The decision rows of a
+    parked request are written later, so ``_write_audit_row`` in
+    :mod:`meho_backplane.operations.approval_queue` sets the key itself from
+    ``request.session_from_client``.
     """
     if not session_is_from_client():
         return

@@ -147,8 +147,11 @@ and no run approval covers it.
 - Some operations can read, write or make any credential, because the
   caller says what they do. A connector marks them with
   `declare_credential_capable` (`op_classes.py`; today `k8s.exec`,
-  `proxmox.api.write`, `argocd.app.set`, `argocd.appproject.create` and
-  `argocd.appproject.update`). Their class stays as it is, so the approval card
+  `k8s.apply`, `proxmox.api.write`, `argocd.app.set`,
+  `argocd.appproject.create` and `argocd.appproject.update`). Every
+  `k8s.apply` counts, for every kind of object: there is no list of kinds
+  that keep the rules of `k8s.apply` (see
+  [connectors-kubernetes.md](connectors-kubernetes.md)). Their class stays as it is, so the approval card
   and the feed still show the call. `credential_grant_reason` and
   `credential_call_waits` count them as credential calls, so every rule
   in this list holds for them: each call waits for a person, grant
@@ -163,23 +166,19 @@ and no run approval covers it.
   Kubernetes API file (`connectors/kubernetes/ingested_paths.py`): every
   call that reads or writes a Secret, runs a command in a pod (`exec`,
   `attach`), opens a port forward or a proxy, or makes a ServiceAccount
-  token, and every write (`POST`, `PUT`, `PATCH`) of a pod or an object
-  that runs one, an ephemeral container, a role or a binding, an object
-  of External Secrets, Sealed Secrets or cert-manager, or a certificate
-  signing request.
+  token, and every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path
+  of an object or of a collection of objects, of every kind, namespaced
+  or cluster-wide, of an ephemeral container, or of the approval of a
+  certificate signing request. A path can have any prefix in front. A
+  `/status` or `/scale` subresource keeps the rules of the operation.
+  The match reads the path of every operation made from an ingested API
+  file, whatever the product: an API file of another product whose paths
+  have the same form (`/api/v1/namespaces/...`,
+  `/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+  gets the same rule. The method is read without case.
 - A connector can also tell from the params of one call that it writes a
-  credential: `declare_credential_check` (`op_classes.py`). Today four
+  credential: `declare_credential_check` (`op_classes.py`). Today three
   operations use it:
-  - `k8s.apply`: a manifest that holds (in any document, or any item of a
-    list object such as `kind: List`) a `Secret`, an object that runs a
-    pod (`Pod`, `Deployment`, `StatefulSet`, `DaemonSet`, `ReplicaSet`,
-    `ReplicationController`, `Job`, `CronJob`, `PodTemplate`), an object
-    that gives rights (`Role`, `ClusterRole`, `RoleBinding`,
-    `ClusterRoleBinding`) or an object that makes or reads a Secret
-    (`ExternalSecret`, `ClusterExternalSecret`, `SecretStore`,
-    `ClusterSecretStore`, `PushSecret`, `SealedSecret`, `Certificate`), or
-    a manifest MEHO cannot read, makes the call a credential call
-    (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`).
   - `proxmox.api.get`: a path that reads inside a guest, opens a console
     or returns a stored secret
     (`connectors/proxmox/op_classes.py::path_reads_guest_or_secret`, see
@@ -198,10 +197,9 @@ and no run approval covers it.
   `requires_approval` and `credential_call` on the row of that call, and
   `descriptor_credential_reason` and `descriptor_credential_waits` read
   it. So such a call waits for a person, and no grant and no run approval
-  covers it. Grant create still takes `k8s.apply`, `proxmox.api.get`,
-  `argocd.app.sync` and `linux.sysctl.write`: an apply of other kinds, a
-  plain read, a sync without a revision and a plain kernel tuning value
-  keep their rules.
+  covers it. Grant create still takes `proxmox.api.get`,
+  `argocd.app.sync` and `linux.sysctl.write`: a plain read, a sync
+  without a revision and a plain kernel tuning value keep their rules.
 - The rule for writes: a write that chooses what a system runs later, or
   who gets rights, waits for a person on every call. A write that only
   starts what is already defined keeps its rules, because the definition

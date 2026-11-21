@@ -31,38 +31,27 @@ agent grant and no run approval covers them
 - every `k8s.exec` call: a command in a container can read or write any
   credential the container holds. Grant create, agent grant create and
   run approval create refuse `k8s.exec`.
-- a `k8s.apply` whose manifest holds, in any document or any item of a
-  list object (`kind: List` or `<Kind>List`), one of these kinds, or a
-  manifest MEHO cannot read:
-  - a `Secret` (also a ServiceAccount token Secret);
-  - an object that runs a pod: `Pod`, `Deployment`, `StatefulSet`,
-    `DaemonSet`, `ReplicaSet`, `ReplicationController`, `Job`, `CronJob`,
-    `PodTemplate`. A pod runs any command its manifest names, with every
-    Secret of its namespace it mounts, so such an apply is a credential
-    call like `k8s.job.create`;
-  - an object that gives rights: `Role`, `ClusterRole`, `RoleBinding`,
-    `ClusterRoleBinding`;
-  - an object that makes a Secret, reads one out of the cluster or reaches
-    a secret store: `ExternalSecret`, `ClusterExternalSecret`,
-    `SecretStore`, `ClusterSecretStore`, `PushSecret`, `SealedSecret`,
-    `Certificate`. MEHO reads the kind only, not the API group.
-
-  MEHO reads the kind in lower case.
-  MEHO reads the manifest when the call is made. It reads each object
-  and each `items` array once, also when YAML aliases name them many
-  times. It reads at most 10,000 objects (each document and each entry
-  of an `items` array counts); a larger manifest counts as one MEHO
-  cannot read. The `items` field of any other kind (for example a
-  custom resource) is not read. An apply of other kinds keeps the rules
-  of `k8s.apply`.
+- every `k8s.apply` call, for every kind of object, in every document of
+  a manifest and every item of a list object, and also a manifest MEHO
+  cannot read. What an apply does to an object depends on the object as
+  it is on the cluster and on the fields other writers own, not only on
+  the manifest. So there is no list of kinds that keep the rules of
+  `k8s.apply`. Grant create, agent grant create and run approval create
+  refuse `k8s.apply`. A person's own call waits for approval, as every
+  `k8s.apply` call does.
 
 Both are declared in `op_classes.py` of the connector. The approval card
 says in one line why the call waits; only a person reads that line. The
 card of a `k8s.apply` also names, for a person only, what each container
 runs: the object, the container, the image, the `command` and `args`, and
 the `exec` commands of its lifecycle hooks and probes, with secret values
-hidden (`run_commands`, see `approvals.md`). It does so also when the dry
-run fails.
+hidden (`run_commands`, see `approvals.md`). A container here is also any
+other object with a `command` or `args` list, under any field of a
+custom kind, so every command line the manifest echo shows only by size
+is named. It does so also when the dry
+run fails. The list keeps at most 16 KB. It always keeps room for the
+name of every later container: an entry that is too large keeps
+the start of what it runs, and its `cut` field says so.
 The stored request of a `k8s.apply` of a Secret keeps its manifest only
 in the encrypted one-time handoff of the run, as a credential write does.
 The row of the request keeps no copy, also not when the request is
@@ -79,9 +68,24 @@ template of the CronJob.
 
 An operator can also ingest a Kubernetes API file as a generic connector.
 The operations it makes that read or write a Secret, run a command in a
-pod, open a proxy or a port forward, make a token, or write a pod, a role
-or a binding get the same rule
+pod, open a proxy or a port forward, or make a token get the same rule.
+So does every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path of an
+object or of a collection of objects, of every kind: `/api/v1/...` and
+`/apis/<group>/<version>/...`, namespaced or cluster-wide (for the core
+group: a namespace, a node, a persistent volume or a component status).
+There is no list of kinds that keep their rules. A trailing `/` counts
+the same as none. A path can have any prefix in front, for example the
+base path of a proxy. A read, a `/status` or `/scale` subresource, and
+the `status` and `finalize` subresources of a Namespace keep the rules
+of the operation
 (`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The rule reads the path of every operation made from an ingested API
+file, whatever the product. So an API file of another product whose
+paths have the same form (`/api/v1/namespaces/...`,
+`/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+gets the same rule: its writes wait for a person on every call, and
+grant create refuses them. The method is read without case: `post:`
+counts the same as `POST:`.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 

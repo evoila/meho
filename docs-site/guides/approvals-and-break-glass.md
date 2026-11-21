@@ -407,7 +407,9 @@ and for the approval of a waiting request:
 - In MEHO's own login realm, a write that can change the sign-in MEHO asks
   for before an approval never runs alone, also not for a platform admin
   with a fresh sign-in. It waits, and a second platform admin approves it:
-  the login that asked never does. Such a write is a change of the clients
+  the login that asked never does, and for a request of an agent no person
+  behind the agent does. MEHO counts a client as one of these clients unless
+  it read that client from Keycloak. Such a write is a change of the clients
   of the approval sign-in or of the console login, a protocol mapper of the
   `acr`, `amr`, `auth_time` or `azp` claim or of the sign-in level, and a
   realm change of other settings than names, mail, events and languages.

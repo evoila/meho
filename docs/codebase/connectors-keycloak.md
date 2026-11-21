@@ -506,7 +506,9 @@ For such a write:
   or the console login client, a protocol mapper on them or of a sign-in
   claim, a scope mapper of a sign-in claim, a `realm.update` of other keys
   than names, mail, events and languages) never runs alone there, and the
-  login that asked never approves it;
+  login that asked never approves it, nor a person behind it. A card names
+  the client only as Keycloak returned it; a failed read leaves the card
+  without a client, and the write counts as one on an approval client;
 - a standing grant, an older grant row and a run approval never cover it:
   each call that waits needs its own approval;
 - no operation setting turns its approval off. An edit that tries is

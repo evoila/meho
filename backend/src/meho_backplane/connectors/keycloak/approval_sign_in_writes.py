@@ -22,7 +22,9 @@ alone in the web console and the login that asked never approves them
   (the realm holds the level map and the login flows).
 
 The checks read the params and the approval card. When neither says which
-client, mapper or keys the write changes, the check passes.
+client, mapper or keys the write changes, the check passes. The card names
+a client only after MEHO read it from Keycloak; a card without a client
+counts as a write on a sign-in client.
 """
 
 from __future__ import annotations

@@ -309,6 +309,99 @@ async def test_a_platform_admin_s_update_of_the_approval_client_writes_nothing(
     assert await _run_rows() == []
 
 
+class _UnreadableClientKeycloak(_FakeKeycloak):
+    """The fake Keycloak, whose client reads fail."""
+
+    def connector(self) -> KeycloakConnector:
+        connector = super().connector()
+        read = connector._get_admin_json
+
+        async def _get_admin_json(
+            target: Any, path: str, *, operator: Any, params: Any = None
+        ) -> dict[str, Any]:
+            if "/clients/" in path:
+                raise TimeoutError("the client read timed out")
+            answer: dict[str, Any] = await read(target, path, operator=operator, params=params)
+            return answer
+
+        connector._get_admin_json = _get_admin_json  # type: ignore[method-assign]
+        return connector
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "representation"),
+    [
+        ("keycloak.client.update", {"authenticationFlowBindingOverrides": {"browser": ""}}),
+        ("keycloak.protocol_mapper.create", _mapper("team")),
+    ],
+)
+async def test_a_failed_client_read_never_trusts_the_client_id_of_the_params(
+    keycloak: KeycloakConnector,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    representation: dict[str, Any],
+) -> None:
+    fake = _UnreadableClientKeycloak()
+    fake.realm = _REALM
+    params = {"id": _CLIENT_UUID, "client_id": "example-app", "representation": representation}
+    ctx: PreviewContext = _ctx(op_id, params, realm=_REALM, connector=fake.connector())
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview"]["client_id"] is None
+    assert effect["preview"]["id"] == _CLIENT_UUID
+
+    request = ApprovalRequest(
+        id=uuid.uuid4(),
+        tenant_id=_TENANT_ID,
+        principal_sub="platform-admin-a",
+        op_id=op_id,
+        connector_id=_CONNECTOR_ID,
+        params=params,
+        proposed_effect=effect,
+    )
+    assert approval_sign_in_check(request) is True
+
+    monkeypatch.setattr(
+        "meho_backplane.operations.approval_object_check.live_card",
+        AsyncMock(return_value=effect),
+    )
+    descriptor = await lookup_descriptor(
+        tenant_id=_TENANT_ID,
+        product="keycloak",
+        version="26.x",
+        impl_id="keycloak-admin",
+        op_id=op_id,
+    )
+    assert descriptor is not None
+    verdict, _reason = await policy_gate(
+        operator=_login(),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_CONNECTOR_ID,
+        params=params,
+    )
+    assert verdict.value == "needs-approval"
+
+    async with get_sessionmaker()() as session:
+        parked = await create_pending_request(
+            session,
+            operator=_login(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            proposed_effect=effect,
+        )
+        await session.commit()
+        request_id = parked.id
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(request_id, _login())
+    assert _SIGN_IN_TEXT in exc.value.reason_text
+    assert (await _row(request_id)).status == ApprovalRequestStatus.PENDING.value
+
+
 # -- the login that asked never approves it --------------------------------------
 
 

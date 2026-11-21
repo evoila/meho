@@ -102,6 +102,12 @@ be a trivially-bypassable flag, not a safety boundary. An operator who wants a
 non-parked offline/online on a throwaway role uses the same approval path
 (a human still decides).
 
+**When `wsfc.groups.move` waits for approval.** The op is `caution` and has no
+approval flag of its own. The general rule of #5764 (see "Op surface") decides:
+a call with a token, from the CLI, MCP or an agent waits for approval. A person
+in the web console runs it at once. So the tier and the gate agree: the tier says
+how risky the op is, and the rule says who may run it without approval.
+
 ## Key types
 
 - **`WsfcConnector`** (`connector.py`) — `SshConnector` subclass. Class

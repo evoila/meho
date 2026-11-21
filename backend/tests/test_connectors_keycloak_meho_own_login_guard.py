@@ -1103,6 +1103,25 @@ async def test_a_mapper_change_is_refused_on_run_when_meho_cannot_read_the_clien
     assert written == []
 
 
+async def test_a_mapper_change_on_a_scope_that_differs_only_in_letter_case_runs(
+    kc: KeycloakConnector,  # noqa: F811
+) -> None:
+    params = _scope_mapper_update(_OTHER_SCOPE_UUID)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _LOGIN_REALM)
+        api.scopes[_OTHER_SCOPE_UUID]["name"] = _OWN_SCOPE.upper()
+        api.clients[_OTHER_UUID]["defaultClientScopes"] = ["basic"]
+        call = await _call(_SCOPE_MAPPER_UPDATE, params)
+        assert call["status"] == "awaiting_approval", call
+        result = await _run(_SCOPE_MAPPER_UPDATE, params)
+        writes = _writes(mock)
+    assert result["status"] == "ok", result
+    assert writes == [
+        f"PUT /admin/realms/{_LOGIN_REALM}/client-scopes/{_OTHER_SCOPE_UUID}"
+        f"/protocol-mappers/models/{_MAPPER_UUID}"
+    ]
+
+
 @pytest.mark.parametrize(
     ("op_id", "params", "written"),
     [

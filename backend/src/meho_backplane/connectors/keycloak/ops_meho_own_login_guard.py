@@ -405,7 +405,10 @@ def refuse_login_realm_write(realm: str, stored: Any, requested: dict[str, Any])
 
 
 def _scopes_of(client: dict[str, Any]) -> set[str] | None:
-    """The names (lower case) of the default and optional scopes; ``None`` for an odd shape."""
+    """The exact names of the default and optional scopes; ``None`` for an odd shape.
+
+    Keycloak tells scope names apart by letter case, so MEHO keeps the case.
+    """
     names: set[str] = set()
     for key in ("defaultClientScopes", "optionalClientScopes"):
         value = client.get(key)
@@ -413,7 +416,7 @@ def _scopes_of(client: dict[str, Any]) -> set[str] | None:
             continue
         if not isinstance(value, list):
             return None
-        names.update(name.casefold() for name in map(_text, value) if name is not None)
+        names.update(name for name in map(_text, value) if name is not None)
     return names
 
 
@@ -439,7 +442,7 @@ async def _own_client_uses_scope(
             scopes = _scopes_of(row)
             if scopes is None:
                 unsure = True
-            elif scope_name.casefold() in scopes:
+            elif scope_name in scopes:
                 return True
     return None if unsure else False
 

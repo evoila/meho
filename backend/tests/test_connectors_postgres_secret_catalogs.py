@@ -39,8 +39,11 @@ from meho_backplane.connectors.postgres.query_guard import (
     ALLOW_SUPERUSER_QUERY_EXTRA,
     CONNECTION_TEXT_SECRET_KEYWORDS,
     CONNECTION_TEXT_SETTINGS,
+    DENIED_FUNCTIONS,
     DENIED_RELATIONS,
+    assert_no_admin_functions,
     assert_no_secret_catalogs,
+    denied_function_in,
     denied_relation_in,
 )
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -359,12 +362,58 @@ async def test_a_show_after_nested_block_comments_is_refused(
     mock.assert_not_awaited()
 
 
+def _function_spellings(name: str) -> list[str]:
+    """The ways a statement can call *name* that the function check must still see."""
+    return [
+        f"SELECT * FROM {name}('orders', 0)",
+        f"SELECT * FROM {name.upper()}('orders', 0)",
+        f"SELECT * FROM \"{name}\"('orders', 0)",
+        f"SELECT * FROM public.{name}('orders', 0)",
+        f"SELECT 1 /* {name} */",
+        f"SELECT n FROM (SELECT length({name}('pg_' || 'x', 0)) AS n) AS s",
+        f"WITH s AS (SELECT * FROM {name}('orders', 0)) SELECT count(*) FROM s",
+    ]
+
+
+_STORED_ROW_FUNCTIONS = ["get_raw_page", "pg_get_wal_block_info"]
+
+_FUNCTION_CASES = [
+    pytest.param(sql, name, id=f"{name}-{i}")
+    for name in _STORED_ROW_FUNCTIONS
+    for i, sql in enumerate(_function_spellings(name))
+]
+
+
+def test_stored_row_readers_are_on_the_function_list() -> None:
+    assert set(_STORED_ROW_FUNCTIONS) <= DENIED_FUNCTIONS
+
+
+@pytest.mark.parametrize(("sql", "name"), _FUNCTION_CASES)
+@pytest.mark.asyncio
+async def test_a_stored_row_reader_is_refused_before_a_connection_opens(
+    monkeypatch: pytest.MonkeyPatch, sql: str, name: str
+) -> None:
+    assert denied_function_in(sql) == name
+    with pytest.raises(PostgresReadOnlyError, match=name):
+        assert_no_admin_functions(sql)
+    mock, _ = _patch_connection(monkeypatch)
+    with pytest.raises(PostgresReadOnlyError, match=name):
+        await PostgresConnector().run_query(_person(), _Target(), {"sql": sql})
+    mock.assert_not_awaited()
+
+
 _REPO = Path(__file__).resolve().parents[2]
 _UPGRADE_ROW = _REPO / "docs/upgrade-rows/v0.49.0/postgres-query-refuses-secret-catalogs.md"
 _CONNECTOR_PAGE = _REPO / "docs/codebase/connectors-postgres.md"
 
 #: Names in the upgrade row that are refused through another list.
-_OTHER_REFUSED_NAMES = {"table_to_xml", "schema_to_xml", "database_to_xml"}
+_OTHER_REFUSED_NAMES = {
+    "table_to_xml",
+    "schema_to_xml",
+    "database_to_xml",
+    "get_raw_page",
+    "pg_get_wal_block_info",
+}
 
 
 def _code_names(text: str) -> set[str]:

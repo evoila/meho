@@ -28,7 +28,13 @@ it. So ``postgres.query`` adds three checks:
   the word scan cannot see. For the same reason it holds the functions that
   read every row of a table or schema chosen by a value (``table_to_xml``,
   ``schema_to_xml``, ``database_to_xml`` and their variants): the value can
-  be built from pieces too.
+  be built from pieces too. It also holds the two extension functions that
+  read the stored rows of a table without naming the table in the statement:
+  ``get_raw_page`` (``pageinspect``) takes the table name as a text value and
+  returns its stored page, and ``pg_get_wal_block_info`` (``pg_walinspect``)
+  returns the stored row data of the WAL records. The other functions of
+  these extensions read a page that ``get_raw_page`` returns, or show WAL
+  records without their row data.
 
 * :func:`assert_no_secret_catalogs` refuses, before a connection is opened,
   any statement that names one of the server catalogs, views or functions
@@ -58,7 +64,10 @@ XML") and "Text Search Functions and Operators"
 (https://www.postgresql.org/docs/16/functions-textsearch.html); plus the
 ``dblink`` and ``postgres_fdw`` extension functions that open remote
 connections and the ``tablefunc`` extension functions that run SQL text
-(https://www.postgresql.org/docs/16/tablefunc.html). Catalog names are
+(https://www.postgresql.org/docs/16/tablefunc.html), the ``pageinspect``
+extension (https://www.postgresql.org/docs/16/pageinspect.html) and the
+``pg_walinspect`` extension
+(https://www.postgresql.org/docs/16/pgwalinspect.html). Catalog names are
 pinned to the PostgreSQL 16 pages "System Catalogs"
 (https://www.postgresql.org/docs/16/catalogs.html), "System Views"
 (https://www.postgresql.org/docs/16/views.html), "The Cumulative Statistics
@@ -159,6 +168,13 @@ DENIED_FUNCTIONS: frozenset[str] = frozenset(
         "ts_stat",
         "ts_rewrite",
         "connectby",
+        # Extension functions that read the stored rows of a table by a name
+        # in a text value, which a statement can build from pieces.
+        # pageinspect: the stored page of a table named by a text value.
+        "get_raw_page",
+        # pg_walinspect: the stored row data of the WAL records
+        # (block_data, block_fpi_data), for any table.
+        "pg_get_wal_block_info",
     }
 )
 

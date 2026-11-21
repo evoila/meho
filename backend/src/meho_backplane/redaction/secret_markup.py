@@ -120,6 +120,9 @@ _LOADER: Final[Any] = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 #: end of the line.
 _YAML_COMMENT: Final[re.Pattern[str]] = re.compile(r"(?:^|(?<=[ \t]))#[^\r\n]*+", re.MULTILINE)
 
+#: A comment right after the byte order marks at the start of a text.
+_FIRST_COMMENT: Final[re.Pattern[str]] = re.compile(r"\ufeff++(#[^\r\n]*+)")
+
 #: The indicator of a YAML block value, such as ``|``, ``>-`` or ``|2+``.
 _BLOCK_INDICATOR: Final[re.Pattern[str]] = re.compile(r"[|>][0-9+\-]{0,2}")
 
@@ -617,7 +620,9 @@ def _yaml_nodes(text: str) -> Iterator[tuple[int, int, bool, bool]]:
 
     Raises :class:`yaml.YAMLError` when *text* is no YAML.
     """
-    shift = 1 if text.startswith("\ufeff") else 0
+    # The C parser skips byte order marks without counting them in its
+    # positions, so all marks at the start are taken off in one step.
+    shift = len(text) - len(text.lstrip("\ufeff"))
     #: For each open collection: (it is a mapping, its next node is a key).
     levels: list[list[bool]] = []
     for event in yaml.parse(text[shift:], Loader=_LOADER):
@@ -673,6 +678,9 @@ def _yaml_value_spans(text: str) -> list[tuple[int, int]] | None:
 def _hide_xml_in_yaml_values(text: str, values: list[tuple[int, int]]) -> str:
     """*text* (a YAML text) with the XML step run on each value and each comment on its own."""
     pieces: list[tuple[int, int]] = []
+    first = _FIRST_COMMENT.match(text)
+    if first is not None:
+        pieces.append(first.span(1))
     cursor = 0
     for start, end in [*values, (len(text), len(text))]:
         if start > cursor:

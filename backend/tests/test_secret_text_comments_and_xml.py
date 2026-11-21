@@ -635,6 +635,29 @@ def test_many_byte_order_marks_before_a_secret_key_hide_only_the_value() -> None
     assert shown == f'{marks}key: value\npassword: "{_MARKER}"\n'
 
 
+@pytest.mark.parametrize("count", [3, 5_000], ids=["three-marks", "many-marks"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "# <password>\nhost: db\nport: 5432\n# </password>\n",
+        "start: <password>\nhost: db\nend: </password>\n",
+    ],
+    ids=["comment-lines", "plain-values"],
+)
+def test_xml_tags_in_two_lines_after_many_byte_order_marks_keep_the_lines_between(
+    count: int, body: str
+) -> None:
+    text = "\ufeff" * count + body
+    assert hide_secret_text(text) == text
+
+
+@pytest.mark.parametrize("count", [1, 5_000], ids=["one-mark", "many-marks"])
+def test_comment_right_after_the_byte_order_marks_is_read_as_a_comment(count: int) -> None:
+    marks = "\ufeff" * count
+    text = f"{marks}# <password>{_FAKE_ELEMENT}</password>\nhost: db\n"
+    assert hide_secret_text(text) == f"{marks}# <password>{_MARKER}</password>\nhost: db\n"
+
+
 def test_too_deep_step_hides_the_whole_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from meho_backplane.redaction import secret_text
 

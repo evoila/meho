@@ -319,11 +319,11 @@ _SETTING_VALUE_COLUMNS: tuple[str, ...] = ("setting", "boot_val", "reset_val")
 
 
 def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
-    """Put the fixed hide mark in place of the values of a connection-text setting."""
+    """Put the fixed hide mark in place of the non-empty values of a connection-text setting."""
     if str(row.get("name", "")).lower() not in CONNECTION_TEXT_SETTINGS:
         return row
     for column in _SETTING_VALUE_COLUMNS:
-        if row.get(column) is not None:
+        if row.get(column):
             row[column] = SECRET_FIELD_MARKER
     return row
 
@@ -333,7 +333,8 @@ async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> d
 
     The value of a setting in
     :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
-    is replaced by the fixed hide mark, for every caller.
+    is replaced by the fixed hide mark, for every caller. An empty value
+    stays empty.
     """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)

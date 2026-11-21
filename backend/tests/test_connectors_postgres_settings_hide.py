@@ -26,6 +26,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.postgres import PostgresConnector
 from meho_backplane.connectors.postgres import connector as connector_module
+from meho_backplane.connectors.postgres.queries import fetch_settings
 from meho_backplane.connectors.postgres.query_guard import CONNECTION_TEXT_SETTINGS
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -184,3 +185,19 @@ async def test_settings_put_the_hide_mark_in_place_of_a_connection_text(
     assert audit
     for row in [*traces, *await _rows(EventOutbox), *audit]:
         assert _CONNECTION_TEXT not in _row_text(row), type(row).__name__
+
+
+class _EmptyConn:
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        row = _setting_row(_SETTING, "")
+        row["boot_val"] = None
+        return [row]
+
+
+@pytest.mark.asyncio
+async def test_settings_keep_an_empty_connection_text_setting_as_it_is() -> None:
+    result = await fetch_settings(_EmptyConn(), [_SETTING])  # type: ignore[arg-type]
+    row = result["settings"][0]
+    assert row["setting"] == ""
+    assert row["reset_val"] == ""
+    assert row["boot_val"] is None

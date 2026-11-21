@@ -20,6 +20,11 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
 4. If step 1 or 2 returns more than one row (defensive — the unique index
    prevents it under normal conditions), raise :exc:`AmbiguousTargetError`.
 
+A hosted agent with a ``connectors`` list sees only the targets of those
+connectors in both answers: the near-misses of :exc:`TargetNotFoundError`
+and the hits of :exc:`AmbiguousTargetError` leave out every other target
+(:func:`_summaries_the_caller_may_see`). The lookup itself does not change.
+
 Every clause filters ``deleted_at IS NULL`` so soft-deleted targets
 (G0.14-T4 #1145) are invisible to the resolver. The DELETE handler
 stamps ``deleted_at`` and lets the row stay queryable from the
@@ -115,10 +120,21 @@ class AmbiguousTargetError(HTTPException):
         )
 
 
-# code-quality-allow: function-size — linear three-phase resolver
-# (exact → alias → near-miss) where each phase consumes the prior's None
-# result and the trailing bind requires the resolved row; decomposition
-# forces sentinel returns or raise-mid-helper.
+async def _summaries_the_caller_may_see(rows: list[TargetORM]) -> list[TargetSummary]:
+    """Project the *rows* an error answer may name.
+
+    A hosted agent with a ``connectors`` list may see only the targets of
+    those connectors. Outside such a run every row is kept.
+    """
+    # Imported here: the operations package imports this module.
+    from meho_backplane.operations._target_connector_limit import targets_within_limit
+
+    return [project_target_to_summary(t) for t in await targets_within_limit(rows)]
+
+
+# code-quality-allow: function-size — linear three-phase resolver (exact →
+# alias → near-miss); each phase consumes the prior's None result and the
+# trailing bind needs the resolved row, so a split forces sentinel returns.
 async def resolve_target(
     session: AsyncSession,
     tenant_id: UUID,
@@ -172,7 +188,7 @@ async def resolve_target(
     if len(exact_hits) == 1:
         target = exact_hits[0]
     elif len(exact_hits) > 1:
-        summaries = [project_target_to_summary(t) for t in exact_hits]
+        summaries = await _summaries_the_caller_may_see(exact_hits)
         _log.warning(
             "ambiguous_exact_name",
             tenant_id=str(tenant_id),
@@ -189,7 +205,7 @@ async def resolve_target(
         if len(alias_hits) == 1:
             target = alias_hits[0]
         elif len(alias_hits) > 1:
-            summaries = [project_target_to_summary(t) for t in alias_hits]
+            summaries = await _summaries_the_caller_may_see(alias_hits)
             _log.warning(
                 "ambiguous_target",
                 tenant_id=str(tenant_id),
@@ -201,7 +217,7 @@ async def resolve_target(
     if target is None:
         # Step 3: near-miss for 404 detail.
         near = await _near_misses(session, tenant_id, query)
-        summaries = [project_target_to_summary(t) for t in near]
+        summaries = await _summaries_the_caller_may_see(near)
         _log.info(
             "target_not_found",
             tenant_id=str(tenant_id),

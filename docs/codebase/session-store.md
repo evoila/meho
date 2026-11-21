@@ -31,8 +31,10 @@ for example MinIO. The customer brings its own.
 - A person uploads the sessions of a laptop with `meho sessions push`.
   See "Laptop uploader" below.
 
-Not in this part: the link from audit rows to a session, and a review
-page.
+- An audit row of a call that is part of a stored session links to that
+  session. See "Links from audit rows" below.
+
+Not in this part: a review page.
 
 The code is in `backend/src/meho_backplane/session_store/` and
 `backend/src/meho_backplane/api/v1/sessions.py`. The CLI is in
@@ -107,8 +109,11 @@ is two separate sessions.
 | `PreparedUpload` | `prepare.py` | What the worker process returns: the new file states, the conflicts, and the archive of the checked tails |
 | `AgentSessionEvent` | `models.py` | One saved event of a hosted agent run: kind, checked data, quarantine flag, `seq` |
 | `RunEventLog` | `hosted_runs.py` | Saves the events of one hosted run, in order, when they happen |
+| `AgentSessionLink` | `models.py` | One MCP session whose calls are in an uploaded session, with the newest work reference (ticket id) of those calls |
+| `StoredSessionLink` | `audit_links.py` | The stored session of one audit row: its id, and whether it is a hosted run |
 
-The tables come from migrations `0152` and `0162` (`agent_session_event`).
+The tables come from migrations `0152`, `0162` (`agent_session_event`) and
+`0181` (`agent_session_link`).
 
 ## Control flow
 
@@ -405,6 +410,64 @@ The run detail page (`/ui/agents/runs/{handle}`) lists the events. The run
 console follows them live through `GET /ui/agents/runs/{handle}/events`
 (`docs/codebase/ui-agent-run-console.md`).
 
+## Links from audit rows
+
+An operator who looks at an audit row can open the session the call came
+from. The code is in `session_store/audit_links.py`.
+
+**Which rows link.** A row links when its `agent_session_id` belongs to a
+stored session:
+
+- **A hosted run.** Its tool calls write audit rows with the run id as
+  `agent_session_id` (`operations/_audit.py`). The session record of the
+  run has the same id, so no extra row is needed. A child run (one agent
+  starts another) has its own run id and no session, so its rows do not
+  link.
+- **An uploaded session.** At each upload with new bytes, the worker
+  process also finds the MCP tool calls in the checked tails of the
+  `.jsonl` files (`tool_calls.py`): content blocks
+  `{"type": "tool_use", "name": "mcp__<server>__<tool>", "input": {...}}`.
+  At most 2000 per upload. Then, in the same transaction as the upload,
+  MEHO looks for the audit row of each call: the same tenant, the same
+  person (`operator_sub` = the uploader), an MCP tool call row
+  (`method = 'MCP'`), the same tool name (`payload.op_id`) and the same
+  arguments hash (`payload.params_hash`, the keyed hash of
+  `compute_audit_params_hash`), from 5 minutes before `started_at` to 5
+  minutes after `ended_at` (when they are set). Each `agent_session_id` it
+  finds is the MCP session of the call. It is stored as one
+  `agent_session_link` row, with the newest `work_ref` of those audit
+  rows. Every audit row of that MCP session then links to the uploaded
+  session, also the rows of calls whose transcript line did not match.
+  The upload's audit row says how many MCP sessions were new
+  (`linked_mcp_sessions`). `GET /api/v1/sessions/{session_id}` lists them
+  in `mcp_sessions`, and `meho sessions show` prints them.
+
+  The hash is made from the checked arguments. A secret-named value
+  (`password`, `api_key`, ...) does not change the hash, because the audit
+  hash masks those values too. A call whose other arguments the secret
+  check changed gets no match; other calls of the same MCP session still
+  link it.
+- **A CLI call** (its session id is the `meho login` session, payload key
+  `session_from_client`) never links. One login session spans many agent
+  sessions, so it does not name one of them.
+
+**Who sees the link.** Only a person with the `read` right of the store
+(`may_read_sessions`: `operator` and up, not an agent, service or runner
+login). For anyone else MEHO does not look the session up, so the answer is
+the same as for a row with no stored session.
+
+**Where it shows.**
+
+- `GET /api/v1/audit/show/{audit_id}` returns `stored_session_id`
+  (`AuditEntryDetail` in `api/v1/audit_models.py`). The list, query and
+  replay answers, and the MCP audit tools, do not have the field.
+- The console's audit drawer shows a "Stored session" part. For a hosted
+  run it links to the run page (`/ui/agents/runs/{run id}`). For an
+  uploaded session it shows the session id and `meho sessions show <id>`.
+- `meho audit show` prints `stored_session: <id> (meho sessions show <id>)`.
+
+Deleting a session (by hand or by the cleanup job) deletes its link rows.
+
 ## Dependencies
 
 - `boto3` / `botocore` for the object storage. Path-style addressing and
@@ -438,9 +501,12 @@ console follows them live through `GET /ui/agents/runs/{handle}/events`
   `backend/tests/test_session_store_units.py`,
   `backend/tests/test_session_store_worker.py`,
   `backend/tests/test_session_store_week_read.py`,
+  `backend/tests/test_session_audit_links.py`,
+  `backend/tests/test_ui_audit_drawer.py` (the "Stored session" part),
   `cli/internal/cmd/sessions/sessions_test.go`,
   `cli/internal/cmd/sessions/get_test.go`,
-  `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.
+  `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`,
+  `backend/tests/migrations/test_migration_0181_create_agent_session_link.py`.
 - boto3 S3 client: <https://docs.aws.amazon.com/boto3/latest/reference/services/s3.html>
 - botocore `Config`: <https://docs.aws.amazon.com/botocore/latest/reference/config.html>
 - Go `os.Root`: <https://pkg.go.dev/os#Root>

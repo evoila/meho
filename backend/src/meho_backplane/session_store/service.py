@@ -26,6 +26,7 @@ from meho_backplane.session_store.audit import add_audit_row, write_audit_row
 from meho_backplane.session_store.config import SessionStoreConfig
 from meho_backplane.session_store.models import (
     AgentSessionEvent,
+    AgentSessionLink,
     AgentSessionRecord,
     AgentSessionRetention,
     AgentSessionUpload,
@@ -36,6 +37,7 @@ from meho_backplane.session_store.schemas import (
     SessionDetail,
     SessionFileState,
     SessionListResponse,
+    SessionMcpLink,
     SessionRetention,
     summary_of,
     upload_part_of,
@@ -151,6 +153,13 @@ async def read_session(operator: Operator, session_id: str, *, path: str) -> Ses
                 .order_by(AgentSessionUpload.seq)
             )
         )
+        links = list(
+            await session.scalars(
+                select(AgentSessionLink)
+                .where(AgentSessionLink.record_id == record.id)
+                .order_by(AgentSessionLink.linked_at, AgentSessionLink.mcp_session_id)
+            )
+        )
         add_audit_row(
             session,
             operator,
@@ -164,6 +173,10 @@ async def read_session(operator: Operator, session_id: str, *, path: str) -> Ses
         **summary_of(record).model_dump(),
         files={p: SessionFileState(**state) for p, state in record.files.items()},
         uploads=[upload_part_of(upload) for upload in uploads],
+        mcp_sessions=[
+            SessionMcpLink(mcp_session_id=link.mcp_session_id, work_ref=link.work_ref)
+            for link in links
+        ],
     )
 
 
@@ -244,10 +257,11 @@ async def delete_session(
 
 
 async def delete_record_rows(session: AsyncSession, record_id: uuid.UUID) -> None:
-    """Delete one record, its upload rows and its saved events in *session* (the caller commits)."""
+    """Delete one record with its upload rows, saved events and links (the caller commits)."""
     await session.execute(
         delete(AgentSessionUpload).where(AgentSessionUpload.record_id == record_id)
     )
+    await session.execute(delete(AgentSessionLink).where(AgentSessionLink.record_id == record_id))
     await session.execute(delete(AgentSessionEvent).where(AgentSessionEvent.record_id == record_id))
     await session.execute(delete(AgentSessionRecord).where(AgentSessionRecord.id == record_id))
 

@@ -20,7 +20,8 @@ The steps of :func:`upload_session`:
    storage (under ``quarantine/`` when the check was not sure), then
    commit the index row, the upload row and the audit row in one
    transaction. When the commit fails, the archive is deleted again, so a
-   session is stored complete or not at all.
+   session is stored complete or not at all. The same transaction stores
+   the MCP sessions of the new tool calls (:mod:`.audit_links`).
 
 Every upload, also a refused or unchanged one, writes an audit row.
 """
@@ -40,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
+from meho_backplane.session_store.audit_links import link_mcp_sessions
 from meho_backplane.session_store.config import SessionStoreConfig
 from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP
 from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
@@ -317,6 +319,7 @@ async def upload_session(
         _apply_meta(record, meta)
         record.state = new_state
         record.last_seen_at = now
+        linked = await link_mcp_sessions(session, record, prepared.tool_calls, now=now)
         outcome = "created" if created else ("appended" if stored else "state_changed")
         call.audit(
             session,
@@ -328,6 +331,7 @@ async def upload_session(
                 "archive_sha256": stored.sha256 if stored else None,
                 "quarantined": stored.quarantined if stored else False,
                 "redactions": stored.redactions if stored else 0,
+                "linked_mcp_sessions": linked,
             },
         )
         await _commit(session, call, stored)

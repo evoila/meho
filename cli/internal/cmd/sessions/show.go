@@ -111,4 +111,15 @@ func printDetail(cmd *cobra.Command, s *api.SessionDetail) {
 			u.Seq, u.UploadedAt.UTC().Format(time.RFC3339), u.ArchiveBytes, u.Redactions, mark)
 	}
 	_ = tw.Flush()
+
+	// The MCP sessions of the session's calls. Their audit rows link here.
+	if s.McpSessions == nil || len(*s.McpSessions) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\nmcp sessions (%d):\n", len(*s.McpSessions))
+	tw = tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, link := range *s.McpSessions {
+		fmt.Fprintf(tw, "  %s\twork ref %s\n", link.McpSessionId.String(), output.SafeText(orNone(link.WorkRef)))
+	}
+	_ = tw.Flush()
 }

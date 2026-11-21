@@ -29,7 +29,11 @@ MEHO keeps:
 - one index row per session: tenant, session id, who uploaded it,
   project, app, start and end time, state (`open`, `ended` or
   `unfinished`) and the file hashes;
-- one audit row for each upload, read and delete.
+- one audit row for each upload, read and delete;
+- the MCP sessions of the session's MEHO calls. MEHO finds them in its
+  audit log at upload time: the same person, the same tool and the same
+  arguments. So the audit row of each such call links to the session
+  (see "From an audit row to its session" below).
 
 MEHO never keeps:
 
@@ -301,6 +305,20 @@ use the session routes.
 
 Every call sees only the caller's tenant. A session of another tenant
 answers `404 session_not_found`.
+
+## From an audit row to its session
+
+An audit row of a call that is part of a stored session names that
+session. A person with the right to read sessions sees it:
+
+- `meho audit show <audit-id>` prints `stored_session: <id>`;
+- `GET /api/v1/audit/show/{audit_id}` returns `stored_session_id`;
+- the console's audit drawer shows a "Stored session" part. For a run that
+  MEHO started itself, it links to the run page.
+
+Read the session with `meho sessions show <id>`. A reader without the
+right, and a row with no stored session, get no link. A call made with the
+`meho` CLI gets no link either.
 
 ## Retention per tenant
 

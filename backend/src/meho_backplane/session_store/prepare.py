@@ -15,12 +15,13 @@ worker process starts fast.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from meho_backplane.session_store.archive import read_archive, write_archive
 from meho_backplane.session_store.plan import FileState, plan_upload, sha256_hex
 from meho_backplane.session_store.secret_check import check_part, ends_inside_private_key
+from meho_backplane.session_store.tool_calls import MAX_TOOL_CALLS, ToolCall, tool_calls_in
 
 __all__ = ["CheckedArchive", "PreparedUpload", "prepare_upload"]
 
@@ -46,6 +47,8 @@ class PreparedUpload:
     new_bytes: int
     archive: CheckedArchive | None
     """``None`` when the upload has no new bytes or has conflicts."""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    """The MCP tool calls in the checked tails of the ``.jsonl`` files."""
 
 
 def prepare_upload(
@@ -71,6 +74,7 @@ def prepare_upload(
     meta: dict[str, Any] = {}
     redactions = 0
     unclear = False
+    tool_calls: list[ToolCall] = []
     for path, (offset, tail) in plan.tails.items():
         # The upload holds the whole file, so a key that starts in an
         # earlier upload is seen in the stored part before the tail.
@@ -79,6 +83,9 @@ def prepare_upload(
         redactions += sum(part.redactions.values())
         unclear = unclear or part.unclear
         meta[path] = {"offset": offset, "added": len(tail), **plan.states[path].as_json()}
+        if path.endswith(".jsonl"):
+            limit = MAX_TOOL_CALLS - len(tool_calls)
+            tool_calls.extend(tool_calls_in(part.content, limit=limit))
     packed = write_archive(checked)
     archive = CheckedArchive(packed, sha256_hex(packed), unclear, redactions, meta)
-    return PreparedUpload(plan.states, plan.conflicts, plan.new_bytes, archive)
+    return PreparedUpload(plan.states, plan.conflicts, plan.new_bytes, archive, tool_calls)

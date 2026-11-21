@@ -166,6 +166,13 @@ More rules:
   - When the agent names a target that MEHO does not find, or a name
     that fits more than one target, the answer lists close target names.
     It lists only targets of connectors in the list.
+  - A target of a connector outside the list counts as a target that
+    does not exist. When the agent names it, by its name or by an alias,
+    MEHO answers "no target" (`no_target`), in the same form as for a
+    name that no target has. This holds for `call_operation`,
+    `preview_operation`, the `target` filter of `meho_connector_list` and
+    the docs tools. When a name fits more than one target and none of
+    them is in the list, the answer is "no target" too.
   - `result_query` reads only results that were stored under the list.
   - With the setting `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` on, an agent
     with a `connectors` list does not get `query_topology`. The setting is

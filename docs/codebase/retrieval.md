@@ -333,11 +333,14 @@ means the arguments or the question file are wrong.
 **Question file.** A YAML file with `questions:`. Each question has `id`
 (used once), `question`, `expect` (the page path), and optionally `repo`,
 `kind` (`meaning` or `exact`, default `meaning`) and `filters` (a mapping
-that can be sent as JSON). A missing or unknown field stops the run. The
+that can be sent as JSON, with no NaN or infinity). A missing or unknown
+field stops the run. The
 example `agent_search_questions_example.yaml` is made up; a real set is
 kept with the team's knowledge repo.
 
-**Hit rule.** The expected page is at place *n* when hit *n* is a
+**Hit rule.** The runner looks at every hit MEHO returns, also after
+place 10 (MEHO can add knowledge repo hits after ten store hits). The
+expected page is at place *n* when hit *n* is a
 knowledge repo hit (`source: wiki`) whose `document_id`, or the path after
 `blob/<commit>/` in its `source_url`, equals `expect`; or a store hit whose
 provenance `relative_path` equals `expect`. When the question names `repo`
@@ -349,9 +352,9 @@ name, so `repo` does not limit them.
 when the knowledge repo was not searched). Then three summary lines: all
 questions, `meaning` and `exact`. Each has the count of expected pages in
 the top 3, the share found in the top 10, and MRR (the mean of 1 divided
-by the place, 0 when not found). Then the count per `wiki.reason`, the
-count of `partial` answers and the count of failed calls. A failed call is
-never counted as a miss.
+by the real place, also after place 10, and 0 when not found). Then the
+count per `wiki.reason`, the count of `partial` answers and the count of
+failed calls. A failed call is never counted as a miss.
 
 **Report.** `--report` writes Markdown: the summary lines, a table with id,
 kind, result, place and reason, the knowledge search switch values from

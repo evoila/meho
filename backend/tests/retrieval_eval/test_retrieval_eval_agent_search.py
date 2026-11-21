@@ -49,10 +49,13 @@ def test_places_one_four_ten_and_not_found() -> None:
     assert runner.score_answer(expected, missing).place is None
 
 
-def test_hit_after_place_ten_is_not_found() -> None:
+def test_hit_after_place_ten_keeps_its_place_but_is_not_in_top_ten() -> None:
     hits = [other(n) for n in range(1, 11)] + [wiki_hit("a/page.md")]
     outcome = runner.score_answer(Question("q", "t", "a/page.md"), runner.Answer(hits, None, None))
-    assert outcome.place is None
+    assert outcome.place == 11
+    summary = runner.summarize("all", [outcome])
+    assert (summary.top3, summary.found10) == (0, 0)
+    assert summary.mrr == pytest.approx(1 / 11)
 
 
 def test_summary_numbers_and_kinds_are_counted_apart() -> None:
@@ -246,6 +249,15 @@ def test_missing_token_exits_two(
         (
             "questions:\n  - {id: a, question: q, expect: e, filters: [1]}\n",
             "filters must be a mapping",
+        ),
+        ("questions:\n  - {id: a, question: q, expect: e, 123: x}\n", "unknown field 123"),
+        (
+            "questions:\n  - {id: a, question: q, expect: e, filters: {score: .nan}}\n",
+            "cannot be sent as JSON",
+        ),
+        (
+            "questions:\n  - {id: a, question: q, expect: e, filters: {score: [.inf]}}\n",
+            "cannot be sent as JSON",
         ),
         ("other: 1\n", "exactly one key"),
         ("questions: []\n", "at least one"),

@@ -99,11 +99,11 @@ def hit_matches(hit: dict[str, Any], question: Question, wiki: dict[str, Any] | 
 
 
 def score_answer(question: Question, answer: Answer) -> Outcome:
-    """Find the place of the expected page in the first ten hits."""
+    """Find the place of the expected page among all hits the agent got."""
     place = next(
         (
             number
-            for number, hit in enumerate(answer.hits[:SEARCH_LIMIT], start=1)
+            for number, hit in enumerate(answer.hits, start=1)
             if hit_matches(hit, question, answer.wiki)
         ),
         None,
@@ -220,7 +220,7 @@ def summarize(label: str, outcomes: list[Outcome]) -> Summary:
         label=label,
         total=len(places),
         top3=sum(1 for p in places if p is not None and p <= TOP_N),
-        found10=sum(1 for p in places if p is not None),
+        found10=sum(1 for p in places if p is not None and p <= SEARCH_LIMIT),
         mrr=sum(1 / p for p in places if p) / len(places) if places else 0.0,
     )
 

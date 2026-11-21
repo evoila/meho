@@ -152,3 +152,53 @@ def test_yaml_quoted_merge_name_is_a_plain_key() -> None:
     shown = hide_secret_text(text)
     assert _FAKE_MERGE not in shown
     assert yaml.safe_load(shown) == {"credentials": _MARKER, "other": {"<<": _MARKER}}
+
+
+_FAKE_MARKUP = "FAKE" + "-made-up-markup-4062"
+_MANY = 100_000
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "".join(f"# key_{i}: value {i}\nkey_{i}: {i}\n" for i in range(_MANY))
+        + f"# dbPassword: {_FAKE_MARKUP}\n",
+        "bad: [\n"
+        + "".join(f"key_{i}: value\n" for i in range(_MANY))
+        + f"dbPassword: {_FAKE_MARKUP}\n",
+        "bad: [\n"
+        + "".join(f"{'  ' * (i % 50)}dbSecret:\n" for i in range(_MANY))
+        + f"  {_FAKE_MARKUP}\n",
+        "<config>"
+        + "".join(f'<key_{i} name="n" value="v">{i}</key_{i}>' for i in range(_MANY))
+        + f"<dbPassword>{_FAKE_MARKUP}</dbPassword></config>",
+        "".join(f"<apiKey{i}><token>" for i in range(_MANY)) + f'<db password="{_FAKE_MARKUP}"/>',
+        '<a x="' + "<b " * _MANY + f'"> <c token="{_FAKE_MARKUP}"/>',
+        f"# dbPassword: {_FAKE_MARKUP}" + " " * 300_000 + f"{_FAKE_MARKUP}\nhost: db\n",
+        f"bad: [\ndbPassword: {_FAKE_MARKUP}" + "\t" * 300_000 + f"{_FAKE_MARKUP}\n",
+    ],
+    ids=[
+        "yaml-comments",
+        "broken-yaml",
+        "broken-yaml-nested-blocks",
+        "xml-elements",
+        "xml-unclosed-secret-elements",
+        "xml-open-quote",
+        "yaml-comment-long-white-space",
+        "broken-yaml-long-white-space",
+    ],
+)
+def test_large_comment_broken_yaml_and_xml_texts_are_hidden_in_time(text: str) -> None:
+    started = time.monotonic()
+    shown = _shown_text(text)
+    assert time.monotonic() - started < _TIME_LIMIT_S
+    assert _FAKE_MARKUP not in shown
+    assert _MARKER in shown
+
+
+def test_yaml_text_after_many_byte_order_marks_is_hidden_in_time() -> None:
+    marks = "\ufeff" * 300_000
+    started = time.monotonic()
+    shown = _shown_text(f"{marks}key: value\npassword: {_FAKE}\n")
+    assert time.monotonic() - started < _TIME_LIMIT_S
+    assert shown == f'{marks}key: value\npassword: "{_MARKER}"\n'

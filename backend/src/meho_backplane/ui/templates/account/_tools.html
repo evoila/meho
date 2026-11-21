@@ -9,10 +9,13 @@
   form field ``tool``). The whole card is swapped, so the result line
   ``tools_result`` shows at its top.
 
-  Each row: the tool kind, its login client and the last use from the
-  person's newest 500 audit rows of the last 90 days (LAST_USE_MAX_ROWS
-  and LAST_USE_WINDOW in ``auth/tool_sign_out.py``; a test pins the words). The web console has no button:
-  the "Active sessions" card signs out a browser.
+  Each row: the tool kind, its login client and the last use: the
+  person's newest audit row for that client in the last 90 days
+  (LAST_USE_WINDOW in ``auth/tool_sign_out.py``; a test pins the words).
+  When that read fails after a sign-out, the row says the last use is
+  unknown, and the result line still shows.
+  The web console has no button: the "Active sessions" card signs out a
+  browser.
 
   The CSRF header comes from the enclosing ``<section hx-headers>`` of the
   page. The buttons open and close the confirm box through
@@ -29,8 +32,8 @@
     <p class="text-xs opacity-60">
       Each tool signs in with its own login. Sign out one tool to stop it.
       Your other tools keep working. A signed-out tool stops when its last
-      access token ends: within the access token lifetime (about five
-      minutes on MEHO's built-in Keycloak). Signing out is not a block: the
+      access token ends: within the access token lifetime (about five and a
+      half minutes on MEHO's built-in Keycloak). Signing out is not a block: the
       tool can sign in again and then gets a new login.
     </p>
 
@@ -52,10 +55,12 @@
           <div class="text-xs opacity-60">
             login client <span class="font-mono">{{ t.client_id }}</span>
             &middot; last use
-            {% if t.last_used_at is not none %}
+            {% if not t.last_use_known %}
+              <span data-field="last-use">unknown: MEHO could not read the audit log</span>
+            {% elif t.last_used_at is not none %}
               <span data-field="last-use" title="{{ t.last_used_at.isoformat() }}">{{ t.last_used_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
             {% else %}
-              <span data-field="last-use">none in your newest 500 audit rows of the last 90 days</span>
+              <span data-field="last-use">none in the last 90 days</span>
             {% endif %}
           </div>
         </div>
@@ -74,7 +79,7 @@
               <h3 class="text-lg font-semibold">Sign out {{ t.label }}?</h3>
               <p class="py-2 text-sm opacity-80">
                 {{ t.label }} stops within the access token lifetime (about
-                five minutes on MEHO's built-in Keycloak). Your other tools
+                five and a half minutes on MEHO's built-in Keycloak). Your other tools
                 keep working. If it signs in again, it gets a new login.
               </p>
               <div class="modal-action">

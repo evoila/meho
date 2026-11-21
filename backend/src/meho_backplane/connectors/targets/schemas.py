@@ -75,8 +75,10 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Dialable host or IP. Screened by the SSRF guard: a "
                 "non-public destination (private / loopback / link-local / "
                 "metadata / CGNAT) is rejected unless the operator "
-                "allowlist exempts it."
+                "allowlist exempts it. An address MEHO connects to, so every "
+                "call waits for a person's approval."
             ),
+            "x-meho-caller-address": True,
         },
         "aliases": {
             "type": "array",
@@ -104,6 +106,7 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional fully-qualified domain name. Screened by the same SSRF guard as `host`."
             ),
+            "x-meho-caller-address": True,
         },
         "secret_ref": {
             "type": ["string", "null"],
@@ -158,7 +161,10 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "extras": {
             "type": "object",
-            "description": "Optional free-form connector-specific metadata.",
+            "description": (
+                "Optional free-form connector-specific metadata. A connector can "
+                "read rules from it, so the approval card shows every key and value."
+            ),
         },
         "notes": {
             "type": ["string", "null"],

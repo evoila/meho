@@ -342,6 +342,22 @@ shared resume check and in the re-run (`object_changed`). The Keycloak
 writes that use it are listed in
 [connectors-keycloak.md](connectors-keycloak.md#writes-that-are-changes-of-rights).
 
+## Making or changing a target always waits for a person
+
+`targets.register` and `targets.update` both need approval
+(`requires_approval`), and their `host` and `fqdn` carry the address
+marker (`x-meho-caller-address: true`). So every call of them waits until
+a person with `tenant_admin` approves it, whoever makes it: an agent (also
+with an agent grant), a service login (also with a standing grant, or in a
+run with a run approval) and a person with a token. Only a person in
+the web console writes a target at once. A settings file that adds or
+changes a target is applied only in the web console
+([settings.md](settings.md)). The approval card shows the
+values the person must see: for a new target every sent field, also each
+`extras` key and value; for a change the old and the new value of each
+sent field. Values under a secret-like name are hidden. Details:
+[targets.md](targets.md).
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:

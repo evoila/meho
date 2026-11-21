@@ -147,9 +147,11 @@ and no run approval covers it.
 - Some operations can read, write or make any credential, because the
   caller says what they do. A connector marks them with
   `declare_credential_capable` (`op_classes.py`; today `k8s.exec`,
-  `k8s.apply` and `proxmox.api.write`). Every `k8s.apply` counts, for
-  every kind of object: there is no list of kinds that keep the rules of
-  `k8s.apply` (see [connectors-kubernetes.md](connectors-kubernetes.md)). Their class stays as it is, so the approval card
+  `k8s.apply`, `proxmox.api.write`, `argocd.app.set`,
+  `argocd.appproject.create` and `argocd.appproject.update`). Every
+  `k8s.apply` counts, for every kind of object: there is no list of kinds
+  that keep the rules of `k8s.apply` (see
+  [connectors-kubernetes.md](connectors-kubernetes.md)). Their class stays as it is, so the approval card
   and the feed still show the call. `credential_grant_reason` and
   `credential_call_waits` count them as credential calls, so every rule
   in this list holds for them: each call waits for a person, grant
@@ -170,12 +172,19 @@ and no run approval covers it.
   certificate signing request. A path can have any prefix in front. A
   `/status` or `/scale` subresource keeps the rules of the operation.
 - A connector can also tell from the params of one call that it writes a
-  credential: `declare_credential_check` (`op_classes.py`). Today one
-  operation uses it:
+  credential: `declare_credential_check` (`op_classes.py`). Today three
+  operations use it:
   - `proxmox.api.get`: a path that reads inside a guest, opens a console
     or returns a stored secret
     (`connectors/proxmox/op_classes.py::path_reads_guest_or_secret`, see
     [connectors-proxmox.md](connectors-proxmox.md)).
+  - `argocd.app.sync`: a sync that names its own `revision`
+    (`connectors/argocd/op_classes.py::sync_sets_a_revision`, see
+    [connectors-argocd.md](connectors-argocd.md)).
+  - `linux.sysctl.write`: a key or a value that can make the kernel run a
+    program or write a file
+    (`connectors/linux/op_classes.py::sysctl_write_can_run_a_program`, see
+    [connectors-linux.md](connectors-linux.md)).
 
   The
   dispatcher, the preview and a step of a multi-step operation check the
@@ -183,8 +192,16 @@ and no run approval covers it.
   `requires_approval` and `credential_call` on the row of that call, and
   `descriptor_credential_reason` and `descriptor_credential_waits` read
   it. So such a call waits for a person, and no grant and no run approval
-  covers it. Grant create still takes `proxmox.api.get`: a plain read
-  keeps its rules.
+  covers it. Grant create still takes `proxmox.api.get`,
+  `argocd.app.sync` and `linux.sysctl.write`: a plain read, a sync
+  without a revision and a plain kernel tuning value keep their rules.
+- The rule for writes: a write that chooses what a system runs later, or
+  who gets rights, waits for a person on every call. A write that only
+  starts what is already defined keeps its rules, because the definition
+  had to pass this rule when it was written. Examples that keep their
+  rules: `k8s.cronjob.run`, `k8s.scale`, `k8s.rollout.restart`,
+  `linux.service.control`, `argocd.app.sync` without a revision and
+  `argocd.app.rollback`.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
   (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
@@ -265,6 +282,12 @@ lowest role that makes grants, so a caller that does not pass it is held to
 the floor. REST answers 403 `role_floor_required: <op> needs the
 tenant_admin role; your role is operator`. The console passes the
 session's role; its grant writes need `tenant_admin` anyway.
+
+**No grant makes or changes a target.** `targets.register` and
+`targets.update` mark `host` and `fqdn` as addresses MEHO connects to, so
+grant create refuses a grant on them and a grant row never clears a call
+(`caller_address_grant_reason`). Every new target and every change of a
+target waits for a person ([targets.md](targets.md)).
 
 The **target scope** is one of three shapes:
 

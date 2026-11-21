@@ -3559,15 +3559,15 @@
 
 
 <h1 id="register-targets-and-secrets">Register targets and secrets<a class="headerlink" href="#register-targets-and-secrets" title="Permanent link">&para;</a></h1>
-<p>A <strong>target</strong> is one system MEHO operates against — a Kubernetes API
+<p>A <strong><a href="../../reference/words/#target">target</a></strong> is one system MEHO operates against — a Kubernetes API
 server, a vCenter, a Vault, a firewall. Registration gives the
 backplane three things: the coordinates to reach the system (<code>host</code>,
-<code>port</code>, TLS trust), the <code>product</code> token that selects which connector
+<code>port</code>, TLS trust), the <code>product</code> token that selects which <a href="../../reference/words/#connector">connector</a>
 serves it, and a <code>secret_ref</code> — a <em>reference</em> into your credential
 store. MEHO never stores the credential itself; it resolves the
 reference at dispatch time, under an identity your store can audit.</p>
 <p>Until at least one target is registered and its probe is green, an
-agent session can discover operations but cannot act on anything —
+agent session can discover <a href="../../reference/words/#operation">operations</a> but cannot act on anything —
 which is why this is the first guide.</p>
 <div class="admonition note">
 <p class="admonition-title">Prerequisites and roles</p>
@@ -3615,7 +3615,7 @@ gets <code>403 human_principal_required</code>, also with the <strong>tenant_adm
 role. It registers a target with the <code>targets.register</code> operation,
 changes one with <code>targets.update</code> and removes one with <code>targets.remove</code>
 (connector <code>targets-registry-1.x</code>). MEHO checks them against the
-approval rules.</p>
+<a href="../../reference/words/#approval">approval</a> rules.</p>
 <p><strong>The CLI and REST wait for approval.</strong> A change made with your login
 token (<code>meho targets add</code>, <code>update</code>, <code>delete</code>, <code>import</code>, or a script on
 REST) waits until a person approves it. The command prints the approval
@@ -3623,7 +3623,7 @@ id and exits 0; approving the request makes the change. Find it with
 <code>meho approvals list</code>, or in the console under approvals. A change you
 make in the operator console runs at once.</p>
 <p><strong>Register targets on the operator surfaces above.</strong> Registration is an
-operator-trust decision. For agents, the default MCP tools only read
+operator-trust decision. For agents, the default <a href="../../reference/words/#mcp">MCP</a> tools only read
 targets (<code>list_targets</code>). A session that asked for the <code>mcp:admin</code>
 scope also has <code>meho_targets_register</code> and <code>meho_targets_update</code>
 (tenant_admin only). Through <code>call_operation</code>, the connector
@@ -3668,7 +3668,7 @@ refuses <code>product: vmware</code> with 422 <code>unknown_product</code>.</p>
   <code>extras</code> JSON column, and the importer prints a warning for each one.
   To carry your own annotations without the warning, put them under an
   <code>extras:</code> block.</li>
-<li><strong><code>fingerprint</code> is server-managed</strong> and dropped with a warning; the
+<li><strong><a href="../../reference/words/#detected-product-and-version"><code>fingerprint</code></a> is server-managed</strong> and dropped with a warning; the
   probe verb is its only writer.</li>
 <li><code>verify_tls: false</code> and <code>tls_ca_pin</code> are mutually exclusive (422):
   pin the CA <em>or</em> disable verification, never both.</li>
@@ -3897,7 +3897,7 @@ store it points at is decided by your deploy's credential backend
 <h3 id="vault-default-backend">Vault (default backend)<a class="headerlink" href="#vault-default-backend" title="Permanent link">&para;</a></h3>
 <p>The <code>secret_ref</code> is the <strong>logical KV-v2 path relative to the <code>secret</code>
 mount</strong> — never include the mount or the <code>/data/</code> segment. The
-canonical, enforced layout is per-tenant:</p>
+canonical, enforced layout is per-<a href="../../reference/words/#tenant">tenant</a>:</p>
 <div class="highlight"><pre><span></span><code>tenants/&lt;tenant-id&gt;/&lt;target-name&gt;
 </code></pre></div>
 <p>If you omit <code>secret_ref</code> at registration, <strong>the server derives exactly
@@ -3993,7 +3993,7 @@ what it means:</p>
   secret. A shared secret does not weaken them, and it does not make a
   change wait less. It does mean that an approved change on one target
   runs with an account that the other targets also use.</li>
-<li><strong>Audit.</strong> MEHO writes one audit row for each call. The row names the
+<li><strong>Audit.</strong> MEHO writes one <a href="../../reference/words/#audit-record">audit row</a> for each call. The row names the
   target and the person (or agent) who made the call, also when targets
   share a secret. The vendor sees only the one account, so the vendor's
   own log cannot tell the targets apart. Use one secret for each target
@@ -4071,7 +4071,7 @@ secret store), MEHO keeps using the old login until it expires.</p>
 <code>--host</code>, <code>--secret-ref</code>, or <code>--extra</code>) does the same: the next call
 logs in with the new values.</p>
 <p>The MEHO server that gets the update drops its login at once. Any
-other backplane server, and any satellite runner, drops its login on
+other backplane server, and any <a href="../../reference/words/#satellite-runner">satellite runner</a>, drops its login on
 its next call to that target.</p>
 <h2 id="import-and-verify">Import and verify<a class="headerlink" href="#import-and-verify" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><span class="c1"># 1. Preview — classifies every entry CREATE / UPDATE, writes nothing:</span>

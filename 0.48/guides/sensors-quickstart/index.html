@@ -3547,14 +3547,14 @@
 
 
 <h1 id="watch-your-estate-with-sensors">Watch your estate with sensors<a class="headerlink" href="#watch-your-estate-with-sensors" title="Permanent link">&para;</a></h1>
-<p>Everything so far was interactive: you asked, MEHO answered. Sensors
+<p>Everything so far was interactive: you asked, MEHO answered. <a href="../../reference/words/#sensor">Sensors</a>
 make the backplane watch on its own. A <strong>sensor</strong> pins one tuple —
-<em>operation + params + assertion + cadence + severity</em> — that a
+<em><a href="../../reference/words/#operation">operation</a> + params + assertion + cadence + severity</em> — that a
 built-in runner evaluates on a schedule, entirely deterministically
-(no LLM in the loop). <strong>Dashboards</strong> compose sensors into a single
+(no LLM in the loop). <strong><a href="../../reference/words/#dashboard">Dashboards</a></strong> compose sensors into a single
 rolled-up state, and an optional agent <strong>investigator</strong> can triage a
 dashboard the moment it goes red.</p>
-<p>This guide registers a sensor on the Kubernetes target from the
+<p>This guide registers a sensor on the Kubernetes <a href="../../reference/words/#target">target</a> from the
 previous guides, composes a dashboard, breaks something on purpose,
 and reads the result.</p>
 <div class="admonition note">
@@ -3572,7 +3572,7 @@ and reads the result.</p>
 </ul>
 </div>
 <h2 id="the-five-states">The five states<a class="headerlink" href="#the-five-states" title="Permanent link">&para;</a></h2>
-<p>Every sensor evaluation lands in exactly one of five states — the
+<p>Every sensor evaluation lands in exactly one of <a href="../../reference/words/#five-states">five states</a> — the
 same vocabulary everywhere (sensor projection, dashboard rollup, UI):</p>
 <table>
 <thead>
@@ -3605,7 +3605,7 @@ same vocabulary everywhere (sensor projection, dashboard rollup, UI):</p>
 </tbody>
 </table>
 <h2 id="step-1-pick-a-safe-operation">Step 1 — pick a safe operation<a class="headerlink" href="#step-1-pick-a-safe-operation" title="Permanent link">&para;</a></h2>
-<p>A sensor may only pin an operation whose <code>safety_level</code> is <strong><code>safe</code></strong>
+<p>A sensor may only pin an operation whose <a href="../../reference/words/#risk-level"><code>safety_level</code></a> is <strong><code>safe</code></strong>
 — the runner auto-executes on a schedule with nobody watching, so
 <code>caution</code>/<code>dangerous</code> ops are refused at create time (422
 <code>sensor_requires_safe_operation</code>). Find the op exactly as in the
@@ -3618,7 +3618,7 @@ call we want the runner to repeat is the one you already ran by hand:
 <code>k8s.pod.list</code> with <code>{"all_namespaces": true, "field_selector":
 "status.phase!=Running"}</code> — a healthy estate returns <code>total: 0</code>.</p>
 <h3 id="pick-the-connector-version-that-matches-the-target">Pick the connector version that matches the target<a class="headerlink" href="#pick-the-connector-version-that-matches-the-target" title="Permanent link">&para;</a></h3>
-<p>A connector can state the target versions its operations work on, for
+<p>A <a href="../../reference/words/#connector">connector</a> can state the target versions its operations work on, for
 example <code>vmware-rest-8.0</code> for vCenter 8.0.x and <code>vmware-rest-9.0</code> for
 vCenter 9.0.x. MEHO checks the target's version each time the sensor
 runs. When the version is outside the connector's range, MEHO does not
@@ -3629,7 +3629,7 @@ like this one:</p>
 </code></pre></div>
 <p>The text after <code>unqualified_target_version:</code> can differ between
 connectors. For an operation from an API file, MEHO first looks for the
-same operation on the connector version that matches the target, and
+same operation on the <a href="../../reference/words/#connector-version">connector version</a> that matches the target, and
 runs it there when it exists and is turned on.</p>
 <p>So pin the connector whose version matches the target. To see the
 target's version, run <code>meho targets describe &lt;name&gt;</code>. To move a sensor
@@ -3700,7 +3700,7 @@ this is fixed.
 <p><strong><code>meho sensor create</code></strong> refuses a sensor whose connector does not fit
   its target, with 422 <code>sensor_connector_mismatch</code> and the same warning.
   Use the connector the warning names. If you want this sensor anyway,
-  add <code>--force</code> (<code>force: true</code> in REST and MCP). The warning then stays
+  add <code>--force</code> (<code>force: true</code> in REST and <a href="../../reference/words/#mcp">MCP</a>). The warning then stays
   in the list.</p>
 </li>
 </ul>
@@ -3851,7 +3851,7 @@ and its real state stays visible.</p>
 for example from <code>degraded</code> to <code>critical</code>. Then the warnings come back:
 the advisory warns again, and when the sensor still fails at the end
 time, the dashboard's recipients get a mail that says the
-acknowledgement ended. MEHO writes an audit row when you acknowledge,
+acknowledgement ended. MEHO writes an <a href="../../reference/words/#audit-record">audit row</a> when you acknowledge,
 and when it ends.</p>
 <p>You need the <code>operator</code> role or higher, or the approver right (a person
 who may approve requests can acknowledge too, even with the <code>read_only</code>
@@ -4031,7 +4031,7 @@ MEHO can fire a <strong>diagnose-only</strong> agent investigation: affected
 sensors are correlated through the topology graph so one underlying
 cause produces exactly one investigation, known-noise verdicts are
 suppressed, and the agent writes a structured finding — verdict,
-evidence, recommended action — into tenant memory
+evidence, recommended action — into <a href="../../reference/words/#tenant">tenant</a> <a href="../../reference/words/#memory">memory</a>
 (<code>checks-noise-&lt;group-key&gt;</code>), retrievable via <code>search_memory</code>.</p>
 <p>It is off until you opt in, and it has real prerequisites:</p>
 <ul>
@@ -4039,7 +4039,7 @@ evidence, recommended action — into tenant memory
   tenant (the name is configurable deploy-side). The
   <a href="https://github.com/evoila/meho/tree/main/examples/checks-investigator">checks investigator example</a>
   shows it: a read-only toolset, and an agent login registered with
-  <code>--grants read-everything</code>, so writes wait for approval.</li>
+  <code>--grants read-everything</code>, so writes wait for <a href="../../reference/words/#approval">approval</a>.</li>
 <li>The agent runtime, which is <strong>experimental</strong> maturity — check the
   <a href="../../reference/maturity/">feature-maturity index</a> before leaning
   on it.</li>
@@ -4147,7 +4147,7 @@ in the scheduler guide.</p>
 <tr>
 <td>422 <code>sensor_operation_not_found</code></td>
 <td><code>(connector_id, op_id)</code> resolves to nothing — usually a bare product name as <code>connector_id</code>.</td>
-<td>Use the <code>&lt;impl_id&gt;-&lt;version&gt;</code> form (<code>k8s-1.x</code>), and an <code>op_id</code> from <code>meho operation search</code>.</td>
+<td>Use the <code>&lt;impl_id&gt;-&lt;version&gt;</code> form (<code>k8s-1.x</code>), and an <a href="../../reference/words/#op_id"><code>op_id</code></a> from <code>meho operation search</code>.</td>
 </tr>
 <tr>
 <td>409 <code>sensor_name_conflict</code></td>

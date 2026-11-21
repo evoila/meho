@@ -3391,27 +3391,27 @@
 
 
 <h1 id="run-your-first-operations">Run your first operations<a class="headerlink" href="#run-your-first-operations" title="Permanent link">&para;</a></h1>
-<p>MEHO does not expose one tool per vendor operation — a vCenter alone
-would be thousands. Instead, every connector publishes its operations
+<p>MEHO does not expose one tool per vendor <a href="../../reference/words/#operation">operation</a> — a vCenter alone
+would be thousands. Instead, every <a href="../../reference/words/#connector">connector</a> publishes its operations
 into one searchable catalog, and you (or your agent) reach them
 through a small, stable set of meta-tools: <strong>discover the connector,
-list its operation groups, search for the operation, preview it,
+list its <a href="../../reference/words/#operation-group">operation groups</a>, search for the operation, <a href="../../reference/words/#preview">preview</a> it,
 call it</strong>. This guide walks that ladder once, end to end, against a
 typed Kubernetes connector — the same flow applies to every connector,
 including ones ingested from an OpenAPI spec.</p>
-<p>Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
+<p>Most rungs exist twice: as an <a href="../../reference/words/#mcp">MCP</a> tool (for agents) and as a CLI verb
 (for operators), and where both surfaces exist they share one backplane
 rather than two implementations. The rung that <em>dispatches</em> — <code>call</code> —
 runs the full path: policy gate, credential resolution, result
 reduction, audit. Preview deliberately stops short of it: it resolves
-the request and hands it back, sending nothing and writing no audit row.
-It also tells you the risk level and what MEHO would do with the call
-for you — run it at once, wait for approval, or refuse it
+the request and hands it back, sending nothing and writing no <a href="../../reference/words/#audit-record">audit row</a>.
+It also tells you the <a href="../../reference/words/#risk-level">risk level</a> and what MEHO would do with the call
+for you — run it at once, wait for <a href="../../reference/words/#approval">approval</a>, or refuse it
 (<code>policy_verdict</code>, <code>policy_reason</code>).</p>
 <div class="admonition note">
 <p class="admonition-title">Prerequisites</p>
 <ul>
-<li>A registered, probe-green target —
+<li>A registered, probe-green <a href="../../reference/words/#target">target</a> —
   <a href="../targets-and-secrets/">Register targets and secrets</a>. The
   examples below use the <code>lab-rke2</code> Kubernetes target from that
   guide. On a GSM deployment with per-operator Workload Identity
@@ -3459,7 +3459,7 @@ for you — run it at once, wait for approval, or refuse it
 </tr>
 <tr>
 <td>Page a large result</td>
-<td><code>result_query</code></td>
+<td><a href="../../reference/words/#result_query"><code>result_query</code></a></td>
 <td><code>meho operation result-query &lt;handle_id&gt;</code></td>
 </tr>
 </tbody>
@@ -3475,9 +3475,9 @@ per target.</p>
 <p>A product with more than one implementation — a modern REST
 connector and a legacy one for older appliances — registers each as
 its own <code>connector_id</code>. Each target carries a product and version
-(a probe-derived fingerprint); each implementation advertises the
+(a probe-derived <a href="../../reference/words/#detected-product-and-version">fingerprint</a>); each implementation advertises the
 version ranges it supports; and the resolver matches the target's
-fingerprint to one implementation, with tenant or operator
+fingerprint to one implementation, with <a href="../../reference/words/#tenant">tenant</a> or operator
 preference breaking a tie. You address the operation by its
 <code>connector_id</code>, but you never hand-pick which implementation runs
 against a given target. The public connectors ship one
@@ -3515,7 +3515,7 @@ operations. Scope it to a group when you know one:</p>
 </code></pre></div>
 <p>Each hit carries the fields that matter before you call anything:</p>
 <ul>
-<li><strong><code>op_id</code></strong> — the handle you pass to call, e.g. <code>k8s.pod.list</code>.</li>
+<li><strong><a href="../../reference/words/#op_id"><code>op_id</code></a></strong> — the handle you pass to call, e.g. <code>k8s.pod.list</code>.</li>
 <li><strong><code>safety_level</code></strong> — <code>safe</code>, <code>caution</code>, <code>dangerous</code>, or <code>destructive</code>.</li>
 <li><strong><code>requires_approval</code></strong> — whether a call parks for a second pair of
   eyes instead of executing.</li>
@@ -3614,7 +3614,7 @@ meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"
 <h2 id="large-results-handles">Large results: handles<a class="headerlink" href="#large-results-handles" title="Permanent link">&para;</a></h2>
 <p>Set-shaped results are <strong>automatically reduced server-side</strong> above a
 threshold (more than 50 rows, or more than 4 KB serialized). You get
-a representative sample inline plus a <strong>result handle</strong> — never a
+a representative sample inline plus a <strong><a href="../../reference/words/#result-link">result handle</a></strong> — never a
 multi-megabyte payload in your context. This is not opt-in and cannot
 be opted out of per call.</p>
 <p>When a result was reduced, its <code>fetch_more.drill_in</code> block tells you
@@ -3772,7 +3772,7 @@ a one-VM drill becomes a cluster-wide incident.</p>
 <tr>
 <td><code>status: "denied"</code></td>
 <td>Policy refused the call for this principal — distinct from a missing approval.</td>
-<td>Inspect the reason in <code>extras</code>; this is a grants/policy conversation, not a retry.</td>
+<td>Inspect the reason in <code>extras</code>; this is a <a href="../../reference/words/#grant">grants</a>/policy conversation, not a retry.</td>
 </tr>
 <tr>
 <td><code>status: "awaiting_approval"</code> on what you expected to just run</td>

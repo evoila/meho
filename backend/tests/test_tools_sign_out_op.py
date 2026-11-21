@@ -34,6 +34,7 @@ import httpx
 import pytest
 import pytest_asyncio
 import respx
+import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -432,6 +433,22 @@ async def test_the_run_ends_one_tool_and_the_audit_row_names_both_people() -> No
     assert row.payload["username"] == "alice"
     assert row.payload["client_id"] == _DESKTOP
     assert row.payload["outcome"] == "signed_out"
+
+
+async def test_the_log_line_before_the_row_names_the_person_by_id_only() -> None:
+    """The log line before the audit row has ``for_user_id``, not the user name."""
+    with respx.mock(assert_all_called=False) as router, structlog.testing.capture_logs() as logs:
+        _FakeRealm(router)
+        result = await _run("alice")
+
+    assert result.status == "ok", result
+    (line,) = [e for e in logs if e["event"] == "tool_sign_out"]
+    assert line["for_user_id"] == _ALICE
+    assert line["operator_sub"] == "p-admin"
+    assert line["client_id"] == _DESKTOP
+    assert "username" not in line
+    assert "user_id" not in line
+    assert "alice" not in str(line)
 
 
 async def test_the_approved_run_signs_out_the_id_on_the_card() -> None:

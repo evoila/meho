@@ -288,7 +288,7 @@ async def test_a_platform_admin_s_update_of_the_approval_client_writes_nothing(
             json={
                 "id": _CLIENT_UUID,
                 "clientId": "meho-web-approve",
-                "authenticationFlowBindingOverrides": {"browser": "flow-1"},
+                "description": "Approval sign-in",
             },
         )
         put = mock.put(client_path).respond(204)
@@ -299,7 +299,7 @@ async def test_a_platform_admin_s_update_of_the_approval_client_writes_nothing(
             target=target,
             params={
                 "id": _CLIENT_UUID,
-                "representation": {"authenticationFlowBindingOverrides": {"browser": ""}},
+                "representation": {"description": "The approval sign-in of the web console"},
             },
         )
 

@@ -541,6 +541,7 @@
   "tests/test_connectors_postgres.py": 3.63,
   "tests/test_connectors_postgres_query_guard.py": 2.93,
   "tests/test_connectors_postgres_secret_catalogs.py": 10.5,
+  "tests/test_connectors_postgres_settings_hide.py": 3.5,
   "tests/test_connectors_profile_fingerprint_pagination.py": 4.74,
   "tests/test_connectors_profiled_auth.py": 4.23,
   "tests/test_connectors_profiled_tristate.py": 0.43,

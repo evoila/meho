@@ -20,11 +20,20 @@ from __future__ import annotations
 
 import datetime as _dt
 import ipaddress
+import re
 import uuid
 from decimal import Decimal
 from typing import Any
+from urllib.parse import unquote
 
 import asyncpg
+
+from meho_backplane.connectors.postgres.query_guard import (
+    CONNECTION_TEXT_SECRET_KEYWORDS,
+    CONNECTION_TEXT_SETTINGS,
+)
+from meho_backplane.redaction.command_line import _URL_PASSWORD
+from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER
 
 __all__ = [
     "CURATED_SETTINGS",
@@ -311,11 +320,199 @@ async def fetch_activity(conn: asyncpg.Connection) -> dict[str, Any]:
     return {"sessions": _rows(records)}
 
 
+#: The value columns of a ``pg_settings`` row.
+_SETTING_VALUE_COLUMNS: tuple[str, ...] = ("setting", "boot_val", "reset_val")
+
+#: The two start words of the address form of a connection text, compared in
+#: any case.
+_ADDRESS_PREFIXES: tuple[str, ...] = ("postgresql://", "postgres://")
+
+#: The white space of the key word form: C ``isspace`` in the C locale.
+_ASCII_SPACE = frozenset(" \t\n\r\v\f")
+
+#: A percent sign that libpq cannot decode: not followed by two hex digits,
+#: or the forbidden ``%00``.
+_BROKEN_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})|%00")
+
+#: One span ``(start, end)`` of a connection text.
+_Span = tuple[int, int]
+
+
+def _is_secret_name(name: str) -> bool:
+    return name.lower() in CONNECTION_TEXT_SECRET_KEYWORDS
+
+
+def _skip_space(text: str, i: int) -> int:
+    while i < len(text) and text[i] in _ASCII_SPACE:
+        i += 1
+    return i
+
+
+def _read_value(text: str, i: int) -> tuple[int, int, int] | None:
+    """Read one value of the key word form that starts at *i*, as libpq does.
+
+    Returns ``(start, end, next)``: the span of the value (between the quotes
+    for a quoted value) and the index after it. A backslash takes the next
+    character, whatever it is. Returns ``None`` for an unclosed quote.
+    """
+    n = len(text)
+    quoted = i < n and text[i] == "'"
+    start = i + 1 if quoted else i
+    i = start
+    while i < n and (text[i] != "'" if quoted else text[i] not in _ASCII_SPACE):
+        i += 2 if text[i] == "\\" else 1
+    if quoted:
+        return None if i >= n else (start, i, i + 1)
+    return start, min(i, n), min(i, n)
+
+
+def _keyword_secret_spans(text: str) -> list[_Span] | None:
+    """The spans of the secret values of a key word form text, as libpq reads it.
+
+    Follows ``conninfo_parse`` of libpq: only ASCII white space separates;
+    spaces may stand around ``=``; a name may follow the closing quote of the
+    value before it directly; a backslash takes the next character, whatever
+    it is, in a bare value and in a quoted one. The span of a quoted value is
+    the text between its quotes. Returns ``None`` when libpq cannot read the
+    text (a name with no ``=``, an empty name, an unclosed quote).
+    """
+    spans: list[_Span] = []
+    i, n = _skip_space(text, 0), len(text)
+    while i < n:
+        name_start = i
+        while i < n and text[i] != "=" and text[i] not in _ASCII_SPACE:
+            i += 1
+        name = text[name_start:i]
+        i = _skip_space(text, i)
+        if not name or i >= n or text[i] != "=":
+            return None
+        value = _read_value(text, _skip_space(text, i + 1))
+        if value is None:
+            return None
+        start, end, i = value
+        if _is_secret_name(name) and end > start:
+            spans.append((start, end))
+        i = _skip_space(text, i)
+    return spans
+
+
+def _address_secret_spans(text: str) -> list[_Span] | None:
+    """The spans of the secret values of an address form text, as libpq reads it.
+
+    Follows ``conninfo_uri_parse_options`` of libpq: the password of the user
+    part (read with ``_URL_PASSWORD``) and the whole value of each query
+    parameter whose name, after percent decoding, is a secret name. A query
+    parameter runs to the next ``&``. Returns ``None`` when libpq cannot read
+    the text (white space, a broken percent code, a query parameter without
+    exactly one ``=``).
+    """
+    if any(char in _ASCII_SPACE for char in text) or _BROKEN_PERCENT.search(text):
+        return None
+    spans: list[_Span] = []
+    password = _URL_PASSWORD.match(text)
+    if password is not None:
+        spans.append((password.end("head"), password.end() - 1))
+    after_prefix = text.index("://") + 3
+    at, slash = text.find("@", after_prefix), text.find("/", after_prefix)
+    host_start = at + 1 if at != -1 and (slash == -1 or at < slash) else after_prefix
+    question = text.find("?", host_start)
+    if question == -1:
+        return spans
+    i, n = question + 1, len(text)
+    while i < n:
+        amp = text.find("&", i)
+        end = n if amp == -1 else amp
+        name, equals, value = text[i:end].partition("=")
+        if not equals or "=" in value:
+            return None
+        if value and _is_secret_name(unquote(name)):
+            spans.append((end - len(value), end))
+        i = end + 1
+    return spans
+
+
+def _holds_secret_shape(text: str) -> bool:
+    """Whether a text that libpq cannot read holds a secret name or password.
+
+    That is one of :data:`CONNECTION_TEXT_SECRET_KEYWORDS` in any case, also
+    percent-encoded, or an address whose user part holds a ``:``.
+    """
+    lowered = unquote(text).lower()
+    if any(name in lowered for name in CONNECTION_TEXT_SECRET_KEYWORDS):
+        return True
+    if _URL_PASSWORD.search(text):
+        return True
+    if not text.lower().startswith(_ADDRESS_PREFIXES):
+        return False
+    rest = text[text.index("://") + 3 :]
+    at, slash = rest.find("@"), rest.find("/")
+    return at != -1 and (slash == -1 or at < slash) and ":" in rest[:at]
+
+
+def _connection_text_secret_spans(text: str) -> list[_Span] | None:
+    """The spans of the secret values of a connection text, read like libpq.
+
+    The address form (the text starts with ``postgresql://`` or
+    ``postgres://``, in any case) and the key word form follow the PostgreSQL
+    pages "Connection Strings" and "Parameter Key Words"
+    (https://www.postgresql.org/docs/16/libpq-connect.html). The value of
+    ``password``, ``sslpassword`` and ``oauth_client_secret`` (any case) is a
+    secret. Returns ``None`` when libpq cannot read the text.
+    """
+    if text.lower().startswith(_ADDRESS_PREFIXES):
+        return _address_secret_spans(text)
+    return _keyword_secret_spans(text)
+
+
+def _hide_connection_secrets(text: str) -> str:
+    """Put the hide mark in place of each secret value of one connection text.
+
+    Every other character stays as the server sent it. A text that libpq
+    cannot read becomes the mark as a whole when it holds a secret name or an
+    address password, and stays as it is otherwise.
+    """
+    spans = _connection_text_secret_spans(text)
+    if spans is None:
+        return SECRET_FIELD_MARKER if _holds_secret_shape(text) else text
+    parts: list[str] = []
+    last = 0
+    for start, end in spans:
+        parts.append(text[last:start])
+        parts.append(SECRET_FIELD_MARKER)
+        last = end
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
+    """Hide the secret values of a setting in :data:`CONNECTION_TEXT_SETTINGS`.
+
+    An empty value and a null value stay as they are.
+    """
+    if str(row.get("name", "")).lower() not in CONNECTION_TEXT_SETTINGS:
+        return row
+    for column in _SETTING_VALUE_COLUMNS:
+        value = row.get(column)
+        if isinstance(value, str) and value:
+            row[column] = _hide_connection_secrets(value)
+    return row
+
+
 async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> dict[str, Any]:
-    """Return curated (or caller-named) runtime settings from ``pg_settings``."""
+    """Return curated (or caller-named) runtime settings from ``pg_settings``.
+
+    The value of a setting in
+    :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
+    is read with the rules of libpq, for every caller. The fixed hide mark
+    stands in place of each secret value (``password``, ``sslpassword``,
+    ``oauth_client_secret`` and the password of an address); every other
+    character stays. A value that libpq cannot read becomes the mark as a
+    whole when it holds a secret name or an address password, and stays as
+    it is otherwise.
+    """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)
-    return {"settings": _rows(records)}
+    return {"settings": [_hide_connection_text(row) for row in _rows(records)]}
 
 
 async def run_select(conn: asyncpg.Connection, sql: str, max_rows: int) -> dict[str, Any]:

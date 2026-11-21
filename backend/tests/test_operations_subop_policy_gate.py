@@ -366,8 +366,8 @@ async def test_subop_resume_var_ignores_non_matching_subop(
     that does not match falls through to the normal gate and parks, and the
     var is left intact for the sub-op it does match. Inside a real resume
     ``composite_resume_scope_var`` is also set, and a second governed sub-op
-    reaching this park would instead fail closed — see
-    ``test_subop_resume_scope_guard_fails_closed_on_second_gate``.
+    reaching this park waits again — see
+    ``test_second_waiting_step_during_a_resume_waits_again``.
     """
     token = composite_resume_var.set(("POST:/vcenter/vm/{vm}/power?action=start", "deadbeef"))
     try:
@@ -392,25 +392,15 @@ async def test_subop_resume_var_ignores_non_matching_subop(
     assert result.status == "awaiting_approval"
 
 
-@pytest.mark.parametrize(
-    ("safety_level", "requires_approval"),
-    [("dangerous", True), ("destructive", False), ("destructive", True)],
-)
 @pytest.mark.asyncio
-async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
-    session: AsyncSession, safety_level: str, requires_approval: bool
-) -> None:
-    """A second governed gate during a resume fails closed, not re-parks (#3351 B1).
+async def test_second_waiting_step_during_a_resume_waits_again(session: AsyncSession) -> None:
+    """A second step that needs its own approval waits again during a resume.
 
-    ``composite_resume_scope_var`` stays set for the whole re-entry (it is not
-    consumed on the approved sub-op's match). When a sub-op *other* than the
-    approved one would park (``NEEDS_APPROVAL``) while the scope var is set,
-    ``enforce_subop_policy`` aborts with
-    ``composite_resume_multi_gate_unsupported`` — naming the composite and both
-    sub-ops — and writes **no** second :class:`ApprovalRequest`, rather than
-    parking a request whose resume would re-run the earlier legs. Since
-    #3980 only a ``destructive`` or ``requires_approval`` step reaches the
-    guard; the approval of the run covers every other step.
+    ``composite_resume_scope_var`` stays set for the whole re-entry, and the
+    approved sub-op already cleared. A later ``requires_approval`` sub-op
+    parks a second request instead of stopping the run. The steps this run
+    already did are stored with that request, so its own resume does not
+    send them again (``test_operations_composite_steps_resume.py``).
     """
     approved = ("POST:/vcenter/vm/{vm}/power?action=start", "approvedhash")
     before = await session.scalar(select(func.count()).select_from(ApprovalRequest))
@@ -423,8 +413,8 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
             operator=_operator(),
             connector_id=_CONNECTOR_ID,
             op_id=_SUB_OP_ID,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
+            safety_level="dangerous",
+            requires_approval=True,
             target=None,
             params=_SUB_PARAMS,
         )
@@ -434,14 +424,9 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
         composite_dispatch_var.reset(dispatch_token)
 
     assert result is not None
-    assert result.status == "error"
-    assert result.extras["error_code"] == "composite_resume_multi_gate_unsupported"
-    assert result.extras["composite_op_id"] == "vmware.composite.vm.create"
-    assert result.extras["approved_op_id"] == approved[0]
-    assert result.extras["blocked_op_id"] == _SUB_OP_ID
-    # No second park was written — the guard refused rather than queue.
+    assert result.status == "awaiting_approval"
     after = await session.scalar(select(func.count()).select_from(ApprovalRequest))
-    assert after == before
+    assert after == (before or 0) + 1
 
 
 # ===========================================================================
@@ -536,7 +521,7 @@ async def test_after_main_effect_step_may_wait_during_a_resume(session: AsyncSes
     """The relaxed guard: an ``after_main_effect`` step parks during a resume (#4217).
 
     The same situation as
-    ``test_subop_resume_scope_guard_fails_closed_on_second_gate``, but the
+    ``test_second_waiting_step_during_a_resume_waits_again``, but the
     second step runs after the main change and saved its state. Its own
     resume continues at this step, so it may wait for approval: a second
     row is written, carrying the state. The re-run runs as the reviewer,
@@ -1027,7 +1012,7 @@ async def test_resume_scope_covers_a_second_dangerous_subop(session: AsyncSessio
 
     The approved step already cleared. A token reviewer (no web session)
     would make the later step wait; the approval of the run covers it, so
-    the resume does not end with ``composite_resume_multi_gate_unsupported``.
+    the resume does not wait a second time.
     """
     approved = ("POST:/vcenter/vm/{vm}/power?action=start", "approvedhash")
     dispatch_token = composite_dispatch_var.set(("vmware.composite.vm.create", {"name": "vm-x"}))

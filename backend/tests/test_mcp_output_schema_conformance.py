@@ -66,6 +66,7 @@ from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
+from tests._register_runs_as_approved import person_register_runs_as_approved  # noqa: F401
 from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -1173,7 +1174,7 @@ async def test_topology_annotate_parked_branch_conforms(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("person_token_writes_run_at_once")
+@pytest.mark.usefixtures("person_token_writes_run_at_once", "person_register_runs_as_approved")
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 async def test_meho_targets_register_executed_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

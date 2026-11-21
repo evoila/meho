@@ -20,7 +20,13 @@ sides on the approval card:
   ``new_mapper`` is the mapper the request adds.
 
 The writes that make a new object (realm, client, client scope, user)
-have nothing to read yet: their card shows the new values only.
+have nothing to read yet: their card shows the new values only. For
+``keycloak.client.create`` and ``keycloak.client_scope.create`` this
+module builds that card (``new_values``).
+
+Each card of this module also carries the ``grant`` block of
+:mod:`.ops_write_platform_reach`: in MEHO's own login realm, whether the
+write can give platform admin rights, so a platform admin must approve it.
 
 Secret values are hidden on both sides: first by the Keycloak list of
 secret fields (a client ``secret``, an SMTP ``password``), then by the same
@@ -36,8 +42,9 @@ The approval request a person reads (the approval card and the approvals
 API) always shows these cards. What the caller gets back from
 ``preview_operation`` is behind the switch ``KEYCLOAK_RIGHTS_CHANGE_CARDS``
 (``Settings.keycloak_rights_change_cards``, off by default). Off, that
-preview of ``keycloak.client.update`` and
-``keycloak.protocol_mapper.create`` is the generic params echo, and the one
+preview of ``keycloak.client.update``, ``keycloak.protocol_mapper.create``,
+``keycloak.client.create`` and ``keycloak.client_scope.create`` is the
+generic params echo, and the one
 of ``keycloak.realm.update`` is the realm card of
 :mod:`.ops_write_realm_smtp` without ``current_values``. The MCP approval
 tools (``meho_approvals_get`` and ``meho_approvals_list``) give the caller
@@ -54,6 +61,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import with_platform_facts
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     REALM_UPDATE_OP_ID,
     _realm_label,
@@ -62,6 +70,7 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
 from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import (
+    PreviewBuilder,
     PreviewContext,
     _redact_echoed_params,
     register_person_only_preview_keys,
@@ -73,10 +82,17 @@ from meho_backplane.settings import get_settings
 if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 
-__all__ = ["CLIENT_UPDATE_OP_ID", "PROTOCOL_MAPPER_CREATE_OP_ID"]
+__all__ = [
+    "CLIENT_CREATE_OP_ID",
+    "CLIENT_SCOPE_CREATE_OP_ID",
+    "CLIENT_UPDATE_OP_ID",
+    "PROTOCOL_MAPPER_CREATE_OP_ID",
+]
 
 CLIENT_UPDATE_OP_ID = "keycloak.client.update"
 PROTOCOL_MAPPER_CREATE_OP_ID = "keycloak.protocol_mapper.create"
+CLIENT_CREATE_OP_ID = "keycloak.client.create"
+CLIENT_SCOPE_CREATE_OP_ID = "keycloak.client_scope.create"
 
 
 def _cards_on() -> bool:
@@ -244,11 +260,35 @@ async def _protocol_mapper_create_card(ctx: PreviewContext) -> dict[str, Any] | 
     return card
 
 
-register_preview_builder(CLIENT_UPDATE_OP_ID, _client_update_card)
-register_preview_builder(REALM_UPDATE_OP_ID, _realm_update_card)
-register_preview_builder(PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card)
-register_preview_builder_switch(CLIENT_UPDATE_OP_ID, _cards_on)
-register_preview_builder_switch(PROTOCOL_MAPPER_CREATE_OP_ID, _cards_on)
+def _new_object_card(resource: str) -> PreviewBuilder:
+    """Card for a write that makes a client or client scope: the realm and the new values."""
+
+    async def _card(ctx: PreviewContext) -> dict[str, Any] | None:
+        return {
+            "resource": resource,
+            "realm": _managed_realm(ctx),
+            "new_values": _hide(ctx, _representation(ctx)),
+        }
+
+    return _card
+
+
+def _register() -> None:
+    for op_id, builder in (
+        (CLIENT_UPDATE_OP_ID, _client_update_card),
+        (REALM_UPDATE_OP_ID, _realm_update_card),
+        (PROTOCOL_MAPPER_CREATE_OP_ID, _protocol_mapper_create_card),
+        (CLIENT_CREATE_OP_ID, _new_object_card("client")),
+        (CLIENT_SCOPE_CREATE_OP_ID, _new_object_card("client_scope")),
+    ):
+        register_preview_builder(op_id, with_platform_facts(op_id, builder, agent_switch=_cards_on))
+        if op_id != REALM_UPDATE_OP_ID:
+            register_preview_builder_switch(op_id, _cards_on)
+
+
+_register()
 register_person_only_preview_keys(
-    REALM_UPDATE_OP_ID, _cards_on, frozenset({"current_values", "current_values_available"})
+    REALM_UPDATE_OP_ID,
+    _cards_on,
+    frozenset({"current_values", "current_values_available", "grant"}),
 )

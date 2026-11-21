@@ -92,10 +92,8 @@ gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
 Four kinds of op are refused **before** any grant lookup, so even a stale grant
 row cannot auto-approve them: the `destructive` tier (the tier always
-parks for a human), an op that reads a credential (`classify_op` says
-`credential_read`; grant create refuses it with "A standing grant cannot
-cover OP: it shows a secret, so a person always approves it", and a wider
-grant never clears its wait; `credential_read_grant_reason`), an op with a parameter marked
+parks for a human), an op that reads, writes or makes a credential (see
+"Credential calls" below), an op with a parameter marked
 `x-meho-caller-address: true` (it connects to an address the caller
 gives; a grant never covers the address, so a person approves each call,
 and grant create refuses such a grant — `caller_address_grant_reason`), and an
@@ -106,10 +104,128 @@ change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
-holds: a credential read, per-call approval, a caller-address field,
+holds: a credential call, per-call approval, a caller-address field,
 always wait, a delete sign. The run approval gate uses the same function
 ([run-approvals.md](run-approvals.md)). Only a delete sign leaves room for
 a sandbox delete grant.
+
+### Credential calls
+
+One rule, in `service_grants.py`: a call that reads, writes or makes a
+credential always waits for a person. No standing grant, no agent grant
+and no run approval covers it.
+
+- The classes are `credential_read`, `credential_write` and
+  `credential_mint` (`CREDENTIAL_CLASSES`). The class comes from the class
+  stored on the row of an ingested operation first, then from the op id
+  (`resolve_op_class`: a connector's `declare_op_classes`, or the core
+  lists in `broadcast/events.py`). A step of a multi-step operation has
+  only its op id.
+- `credential_grant_reason` gives the reason: "A standing grant, an agent
+  grant or a run approval never covers 'OP': it reads, writes or makes a
+  credential, so a person approves each call." `never_covered_reason`
+  returns it with the kind `credential`.
+- Grant create refuses such an op by op id before the lookup, and by the
+  stored class after it. The answer is the reason plus "Leave it out."
+  (`credential_refusal`).
+- `credential_call_waits` says whether such a call waits: every
+  `credential_write` and `credential_mint` call, and a `credential_read`
+  call when its floor applies (a read marked in code as one that returns
+  no secret value runs at once; `vault.kv.read` waits only with
+  `reveal_secret`). The agent verdict and the run approval notes use it.
+- An install or tenant override that turns approval off does not turn it
+  off for an op that writes or makes a credential, when its code turns
+  approval on (`op_policy._with_floors`). So a person's own call of such
+  an op waits too. A `credential_read` op has its own floor for this.
+- A service call of such an op waits also at level `safe`
+  (`_service_safety_gate_reason` uses `credential_call_waits`), so the
+  read exceptions above still run at once.
+- When a service call of such an op waits, its reason ends with "the
+  operation reads, writes or makes a credential, so no standing grant, no
+  agent grant and no run approval covers it; a person approves each
+  call" (`_validate.CREDENTIAL_WAIT_NOTE`).
+- Some operations can read, write or make any credential, because the
+  caller says what they do. A connector marks them with
+  `declare_credential_capable` (`op_classes.py`; today `k8s.exec`,
+  `proxmox.api.write`, `argocd.app.set`, `argocd.appproject.create` and
+  `argocd.appproject.update`). Their class stays as it is, so the approval card
+  and the feed still show the call. `credential_grant_reason` and
+  `credential_call_waits` count them as credential calls, so every rule
+  in this list holds for them: each call waits for a person, grant
+  create, agent grant create and run approval create refuse them with
+  the same reason, and an override does not turn their approval off.
+  `raise_descriptor_for_params` sets `requires_approval` and
+  `credential_call` on the row of each of their calls, so a person's own
+  call waits too, also when the stored row asks for no approval.
+- For a family of op ids a connector gives a match function instead:
+  `declare_credential_capable_match` (`op_classes.py`). Today the
+  Kubernetes connector matches the operations an ingest makes from a
+  Kubernetes API file (`connectors/kubernetes/ingested_paths.py`): every
+  call that reads or writes a Secret, runs a command in a pod (`exec`,
+  `attach`), opens a port forward or a proxy, or makes a ServiceAccount
+  token, and every write (`POST`, `PUT`, `PATCH`) of a pod or an object
+  that runs one, an ephemeral container, a role or a binding, an object
+  of External Secrets, Sealed Secrets or cert-manager, or a certificate
+  signing request.
+- A connector can also tell from the params of one call that it writes a
+  credential: `declare_credential_check` (`op_classes.py`). Today four
+  operations use it:
+  - `k8s.apply`: a manifest that holds (in any document, or any item of a
+    list object such as `kind: List`) a `Secret`, an object that runs a
+    pod (`Pod`, `Deployment`, `StatefulSet`, `DaemonSet`, `ReplicaSet`,
+    `ReplicationController`, `Job`, `CronJob`, `PodTemplate`), an object
+    that gives rights (`Role`, `ClusterRole`, `RoleBinding`,
+    `ClusterRoleBinding`) or an object that makes or reads a Secret
+    (`ExternalSecret`, `ClusterExternalSecret`, `SecretStore`,
+    `ClusterSecretStore`, `PushSecret`, `SealedSecret`, `Certificate`), or
+    a manifest MEHO cannot read, makes the call a credential call
+    (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`).
+  - `proxmox.api.get`: a path that reads inside a guest, opens a console
+    or returns a stored secret
+    (`connectors/proxmox/op_classes.py::path_reads_guest_or_secret`, see
+    [connectors-proxmox.md](connectors-proxmox.md)).
+  - `argocd.app.sync`: a sync that names its own `revision`
+    (`connectors/argocd/op_classes.py::sync_sets_a_revision`, see
+    [connectors-argocd.md](connectors-argocd.md)).
+  - `linux.sysctl.write`: a key or a value that can make the kernel run a
+    program or write a file
+    (`connectors/linux/op_classes.py::sysctl_write_can_run_a_program`, see
+    [connectors-linux.md](connectors-linux.md)).
+
+  The
+  dispatcher, the preview and a step of a multi-step operation check the
+  params when the call is made (`operations/wait_when_set.py`). They set
+  `requires_approval` and `credential_call` on the row of that call, and
+  `descriptor_credential_reason` and `descriptor_credential_waits` read
+  it. So such a call waits for a person, and no grant and no run approval
+  covers it. Grant create still takes `k8s.apply`, `proxmox.api.get`,
+  `argocd.app.sync` and `linux.sysctl.write`: an apply of other kinds, a
+  plain read, a sync without a revision and a plain kernel tuning value
+  keep their rules.
+- The rule for writes: a write that chooses what a system runs later, or
+  who gets rights, waits for a person on every call. A write that only
+  starts what is already defined keeps its rules, because the definition
+  had to pass this rule when it was written. Examples that keep their
+  rules: `k8s.cronjob.run`, `k8s.scale`, `k8s.rollout.restart`,
+  `linux.service.control`, `argocd.app.sync` without a revision and
+  `argocd.app.rollback`.
+- The approval request of a credential call has `credential_wait` in its
+  proposed effect: one line that says why it waits
+  (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
+- A grant row that names such an op stays stored, but it never runs the
+  call. `meho service-principals grants list` shows it as before.
+- The child operation check (`governed_subops.classify_subop_grantability`)
+  marks such a step as not grantable, with the same reason.
+- A guard test (`tests/test_credential_class_guard.py`) goes over every
+  registered operation. An operation that stores or returns a secret value
+  must have one of the three classes. The test finds such an operation by
+  a secret tag (`secret-write`, `credential-mint`, ...), by a
+  secret-shaped parameter name on a write, or by a secret-shaped text
+  field in its answer that it did not declare plain.
+- The shadow evaluator marks such a call `credential` (no grant and no
+  run approval clears it, `policy/floors.py::NO_GRANT_MARKS`) and, when it
+  waits, `credential_waits` (the floor of the same name, for an agent
+  and a service login).
 A call that sets a param a connector marks with `declare_wait_when_set`
 (`op_classes.py`; today `secret_field_map` and `flight_recorder_capture`
 of `targets.register`) waits for a person too: the dispatcher marks that
@@ -173,6 +289,12 @@ lowest role that makes grants, so a caller that does not pass it is held to
 the floor. REST answers 403 `role_floor_required: <op> needs the
 tenant_admin role; your role is operator`. The console passes the
 session's role; its grant writes need `tenant_admin` anyway.
+
+**No grant makes or changes a target.** `targets.register` and
+`targets.update` mark `host` and `fqdn` as addresses MEHO connects to, so
+grant create refuses a grant on them and a grant row never clears a call
+(`caller_address_grant_reason`). Every new target and every change of a
+target waits for a person ([targets.md](targets.md)).
 
 The **target scope** is one of three shapes:
 

@@ -58,6 +58,7 @@ from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
     reject_request,
 )
+from tests._people_behind_helpers import give_known_person
 
 # ``pg_engine`` (imported for its side effect of being a discoverable
 # fixture) points the process sessionmaker at the testcontainer and seeds
@@ -102,6 +103,7 @@ async def _commit_pending(
 ) -> ApprovalRequest:
     """Insert + commit a pending request in Postgres and return the row."""
     requester = _operator(sub=requester_sub, kind=PrincipalKind.AGENT)
+    await give_known_person(requester)
     call_params = params if params is not None else {"path": "secret/agent"}
     async with get_sessionmaker()() as session:
         request = await create_pending_request(
@@ -113,6 +115,7 @@ async def _commit_pending(
             params=call_params,
             params_hash=compute_params_hash(call_params),
             expires_at=expires_at,
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request

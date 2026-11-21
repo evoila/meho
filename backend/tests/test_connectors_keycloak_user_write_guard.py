@@ -27,6 +27,7 @@ import respx
 import meho_backplane.connectors.keycloak as keycloak_package
 import meho_backplane.operations.typed_register as typed_register
 from meho_backplane.operations._park_check import _PARK_CHECKS
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
 from tests.test_connectors_keycloak_user_identity import (  # noqa: F401  (fixtures)
     _ACTIONS_PATH,
     _KC_BASE_URL,
@@ -51,6 +52,9 @@ from tests.test_connectors_keycloak_user_identity import (  # noqa: F401  (fixtu
 # whose module an earlier test imported first.
 for _module in pkgutil.iter_modules(keycloak_package.__path__):
     importlib.import_module(f"{keycloak_package.__name__}.{_module.name}")
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
 
 #: The other parameters each user write needs to reach the user check.
 _OTHER_PARAMS: dict[str, dict[str, Any]] = _USER_WRITE_PARAMS

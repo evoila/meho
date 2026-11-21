@@ -36,11 +36,9 @@ More rules:
   person approved. If either changed, MEHO sends nothing and the
   requester asks again.
 - As a rule, a second person must approve. For another person's
-  `dangerous` or `destructive` change, the approver must be a member of
-  the `MEHO-SA-Operators` group or an admin. A person may approve their
+  `dangerous` or `destructive` change, the approver must be an admin. A person may approve their
   own change in three cases only:
-    - A member of the `MEHO-SA-Operators` group or of the `MEHO-Admins`
-      group may approve their own change at every risk level, but never
+    - A member of the `MEHO-Admins` group may approve their own change at every risk level, but never
       a change of rights. Another admin approves a change of rights. See
       [Approvals and break-glass](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
     - An operator or an admin may approve their own `caution` change

@@ -109,6 +109,7 @@ from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_mani
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
+    register_person_only_preview_keys,
     register_preview_builder,
 )
 from meho_backplane.redaction.command_line import (
@@ -467,11 +468,146 @@ def apply_subject(applied: Any) -> str | None:
     return f"{shown} and {rest} more" if rest > 0 else shown
 
 
+#: The container lists of a pod spec, in the order Kubernetes starts them.
+_CONTAINER_LISTS = ("initContainers", "containers", "ephemeralContainers")
+
+#: The key of the ``k8s.apply`` preview that names what each pod runs. Only a
+#: person reads it (:func:`apply_run_commands`).
+RUN_COMMANDS_KEY = "run_commands"
+
+
+def _object_label(doc: dict[str, Any]) -> str:
+    """``<Kind>/<namespace>/<name>`` of a manifest document; parts it lacks are left out."""
+    raw_metadata = doc.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    parts = [doc.get("kind"), metadata.get("namespace"), metadata.get("name")]
+    return "/".join(str(part) for part in parts if part)
+
+
+def _containers_in(node: Any) -> list[dict[str, Any]]:
+    """Every container dict at any depth of *node*, each one once, in document order.
+
+    A YAML alias can name one object many times or name itself, so each
+    dict and list is walked once.
+    """
+    found: list[dict[str, Any]] = []
+    listed: set[int] = set()
+    walked: set[int] = set()
+    stack: list[Any] = [node]
+    while stack:
+        item = stack.pop()
+        if not isinstance(item, dict | list) or id(item) in walked:
+            continue
+        walked.add(id(item))
+        if isinstance(item, list):
+            stack.extend(reversed(item))
+            continue
+        for key in _CONTAINER_LISTS:
+            entries = item.get(key)
+            for entry in entries if isinstance(entries, list) else []:
+                if isinstance(entry, dict) and id(entry) not in listed:
+                    listed.add(id(entry))
+                    found.append(entry)
+        stack.extend(reversed(list(item.values())))
+    return found
+
+
+#: The lifecycle hooks and the probes of a container that can run a command.
+_EXEC_HOOKS = ("postStart", "preStop")
+_EXEC_PROBES = ("startupProbe", "livenessProbe", "readinessProbe")
+
+
+def _exec_command(handler: Any) -> list[Any] | None:
+    """The ``exec.command`` of a hook or probe *handler*, secret values hidden."""
+    if not isinstance(handler, dict) or not isinstance(handler.get("exec"), dict):
+        return None
+    return _hide_command_line(handler["exec"]).get("command")
+
+
+def _exec_commands(container: dict[str, Any]) -> dict[str, list[Any]]:
+    """The commands the hooks and probes of *container* run, keyed by where they run.
+
+    The keys are ``lifecycle.postStart``, ``lifecycle.preStop`` and the probe
+    names. A hook or probe without an ``exec`` command is left out.
+    """
+    lifecycle = container.get("lifecycle")
+    handlers = {
+        f"lifecycle.{hook}": lifecycle.get(hook) if isinstance(lifecycle, dict) else None
+        for hook in _EXEC_HOOKS
+    }
+    handlers.update({probe: container.get(probe) for probe in _EXEC_PROBES})
+    commands = {where: _exec_command(handler) for where, handler in handlers.items()}
+    return {where: command for where, command in commands.items() if command is not None}
+
+
+def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
+    """What one container runs: its image, its command line and the commands of
+    its hooks and probes, secret values hidden."""
+    entry: dict[str, Any] = {"object": label, "container": container.get("name")}
+    if "image" in container:
+        entry["image"] = container.get("image")
+    entry.update(_hide_command_line(container))
+    exec_commands = _exec_commands(container)
+    if exec_commands:
+        entry["exec_commands"] = exec_commands
+    return entry
+
+
+def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
+    """What each container of a ``k8s.apply`` manifest runs, safe to show a person.
+
+    One entry per container (init, main and ephemeral containers, at any
+    depth of each document): the object, the container name, the image, the
+    ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
+    each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
+    hidden the way the Job previews hide them (:func:`_hide_command_secrets`). Then *redact*,
+    the shared params redaction, runs over the entries. The entries count
+    toward :data:`MANIFEST_ECHO_MAX_BYTES`; the entries that do not fit are
+    counted in one closing entry. An empty list when no document runs a
+    container.
+
+    The ``manifest`` echo of the same preview shows only the size of each
+    command line. This list is for the person who approves: an agent never
+    reads it (:func:`_register_kubernetes_write_preview_builders`).
+    """
+    entries = [
+        _run_command_entry(_object_label(doc), container)
+        for doc in _parse_manifest(manifest)
+        for container in _containers_in(doc)
+    ]
+    shown: list[dict[str, Any]] = []
+    used = 0
+    redacted = redact(entries) if entries else []
+    for index, entry in enumerate(redacted):
+        size = _entry_bytes(entry)
+        if used + size > MANIFEST_ECHO_MAX_BYTES:
+            left = len(redacted) - index
+            shown.append(
+                {
+                    "omitted_containers": left,
+                    "echo_omitted": f"{left} more container(s) not shown; the list keeps "
+                    f"at most {MANIFEST_ECHO_MAX_BYTES} bytes",
+                }
+            )
+            break
+        shown.append(entry)
+        used += size
+    return shown
+
+
+def _run_commands_shown_to_agents() -> bool:
+    """The ``run_commands`` key of the ``k8s.apply`` preview is for a person only."""
+    return False
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
+    register_person_only_preview_keys(
+        "k8s.apply", _run_commands_shown_to_agents, frozenset({RUN_COMMANDS_KEY})
+    )
 
 
 _register_kubernetes_write_preview_builders()

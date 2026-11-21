@@ -20,11 +20,16 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.targets.schemas import TARGETS_REGISTER_RESPONSE_SCHEMA
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
+from tests._register_runs_as_approved import person_register_runs_as_approved  # noqa: F401
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+)
+
+pytestmark = pytest.mark.usefixtures(
+    "person_token_writes_run_at_once", "person_register_runs_as_approved"
 )
 
 

@@ -251,14 +251,9 @@ meho login https://meho.example.com
     login to see which backplane you talk to.
 
 The CLI prints a verification URL and a code. You approve it in a
-browser. The install made two users with temporary passwords: the first
-admin (`admin`, in `MEHO-Admins`) and an approver (`approver`, in
-`MEHO-SA-Operators`). The approver is not an admin. The approver can
-approve the admin's risky changes, but not a change of rights: a change
-of rights needs a second admin. See
-[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
-Both logins are in the Secret `meho-core-first-login`. Read the
-admin's login with:
+browser. The install made one Admin login with a temporary password
+(`admin`, in `MEHO-Admins` and `MEHO-Platform-Admins`). It is in the
+Secret `meho-core-first-login`. Read the admin's login with:
 
 ```bash
 kubectl -n meho get secret meho-core-first-login \

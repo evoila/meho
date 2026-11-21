@@ -139,6 +139,15 @@ def _clean_caches() -> Any:
     reset_dispatcher_caches()
 
 
+async def _first_sighting(recorder: _Recorder, target: Any) -> None:
+    """The first sighting records the version and drops what is kept.
+
+    Each test then starts with an empty record of drops.
+    """
+    assert await forget_target_if_changed(target) is True
+    recorder.calls.clear()
+
+
 def _recorder() -> _Recorder:
     # Registered here, not in a fixture: the registry fixture of the target
     # helpers empties the registry before each test body.
@@ -153,7 +162,7 @@ def _recorder() -> _Recorder:
 async def test_a_probe_with_the_same_result_drops_nothing() -> None:
     recorder = _recorder()
     before = _Target()
-    assert await forget_target_if_changed(before) is False  # first sighting
+    await _first_sighting(recorder, before)
 
     # A probe: a new ``updated_at`` and a new probe time, the same product and version.
     after = replace(
@@ -169,7 +178,7 @@ async def test_a_probe_with_the_same_result_drops_nothing() -> None:
 async def test_a_probe_that_finds_the_target_not_reachable_drops_nothing() -> None:
     recorder = _recorder()
     before = _Target()
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
 
     after = replace(
         before,
@@ -184,7 +193,7 @@ async def test_a_probe_that_finds_the_target_not_reachable_drops_nothing() -> No
 async def test_a_probe_that_moves_the_target_to_another_connector_drops() -> None:
     recorder = _recorder()
     before = _Target()
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
 
     after = replace(before, updated_at=_PROBE_TIME, version="2.0")
     assert await forget_target_if_changed(after) is True
@@ -195,7 +204,7 @@ async def test_a_probe_that_moves_the_target_to_another_connector_drops() -> Non
 async def test_a_probe_that_finds_a_new_version_on_the_same_connector_drops_nothing() -> None:
     recorder = _recorder()
     before = _Target()
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
 
     after = replace(before, updated_at=_PROBE_TIME, version="1.1")
     assert await forget_target_if_changed(after) is False
@@ -206,7 +215,7 @@ async def test_a_probe_that_finds_a_new_version_on_the_same_connector_drops_noth
 async def test_a_probe_that_finds_another_product_drops_once() -> None:
     recorder = _recorder()
     before = _Target(fingerprint={"product": "probe-demo", "version": "1.0"})
-    assert await forget_target_if_changed(before) is False
+    await _first_sighting(recorder, before)
 
     after = replace(
         before,
@@ -225,7 +234,7 @@ async def test_a_probe_that_finds_another_product_drops_once() -> None:
 async def test_a_second_process_sees_a_probe_that_found_another_product() -> None:
     recorder = _recorder()
     before = _Target(fingerprint={"product": "probe-demo", "version": "1.0"})
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
     seen_by_other_process = dict(_SEEN_TARGET_VERSIONS)
 
     # The probing process records the new product and drops its own logins.
@@ -244,7 +253,7 @@ async def test_a_second_process_sees_a_probe_that_found_another_product() -> Non
 async def test_a_probe_with_the_same_product_and_a_new_version_drops_nothing() -> None:
     recorder = _recorder()
     before = _Target(fingerprint={"product": "probe-demo", "version": "1.0"})
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
     after = replace(
         before,
         updated_at=_PROBE_TIME,
@@ -264,7 +273,7 @@ async def test_an_object_fingerprint_is_read_like_a_dict() -> None:
         product: str | None
 
     before = _Target(fingerprint=_Fp("probe-demo"))
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
     assert await forget_target_if_changed(replace(before, fingerprint=_Fp("probe-demo"))) is False
     assert await forget_target_if_changed(replace(before, fingerprint=_Fp("x"))) is True
     assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
@@ -299,7 +308,7 @@ async def test_a_probe_that_moves_the_target_to_a_connector_with_the_same_class_
     _CONNECTOR_INSTANCE_CACHE[type("A", (), {})] = recorder  # type: ignore[index]
 
     before = _Target(product="same-name")
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
     after = replace(before, updated_at=_PROBE_TIME, version="2.0")
     assert await forget_target_if_changed(after) is True
     assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
@@ -319,7 +328,7 @@ async def test_a_row_without_connection_time_falls_back_to_updated_at() -> None:
     """An older gateway sends no ``connection_changed_at``."""
     recorder = _recorder()
     before = _Target(connection_changed_at=None)
-    await forget_target_if_changed(before)
+    await _first_sighting(recorder, before)
     after = replace(before, updated_at=_PROBE_TIME)
     assert await forget_target_if_changed(after) is True
     assert recorder.calls == ["invalidate_session", "invalidate_credentials"]
@@ -357,7 +366,7 @@ async def test_an_update_is_seen_by_a_second_process_also_with_the_same_values()
 
     # The second process saw the row before the updates.
     recorder = _recorder()
-    assert await forget_target_if_changed(first_seen) is False
+    await _first_sighting(recorder, first_seen)
     other_versions = dict(_SEEN_TARGET_VERSIONS)
 
     # A new secret reference.

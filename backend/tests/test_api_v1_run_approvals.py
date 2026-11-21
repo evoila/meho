@@ -35,6 +35,7 @@ from meho_backplane.settings import get_settings
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
+from ._people_behind_helpers import give_service_a_known_person
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
@@ -86,6 +87,13 @@ async def _descriptors(_settings_env: None) -> None:
                 )
             )
         await session.commit()
+
+
+@pytest.fixture(autouse=True)
+async def _known_person_behind(_settings_env: None) -> None:
+    """The service login has a known person behind it, who approves nothing here."""
+    for tenant_id in (_TENANT_A, _TENANT_B):
+        await give_service_a_known_person(tenant_id, _SERVICE_SUB)
 
 
 @pytest.fixture

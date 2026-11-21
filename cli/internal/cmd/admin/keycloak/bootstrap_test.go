@@ -833,10 +833,10 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		}
 	}
 
-	// Five role groups plus the platform group, one user, and the user
+	// Three role groups plus the platform group, one user, and the user
 	// is in MEHO-Admins and MEHO-Platform-Admins.
-	if len(fake.groups) != 6 {
-		t.Errorf("expected 6 groups, got %d", len(fake.groups))
+	if len(fake.groups) != 4 {
+		t.Errorf("expected 4 groups, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 1 {
 		t.Errorf("expected 1 user, got %d", len(fake.users))
@@ -959,7 +959,7 @@ func TestBootstrap_RefusesTrailingSlashOnMCPURI(t *testing.T) {
 	}
 }
 
-// Skipping the user step still creates the five groups: they carry the
+// Skipping the user step still creates the three groups: they carry the
 // tenant and the role for people who come from a directory.
 func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 	opts := fullOpts()
@@ -971,8 +971,8 @@ func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap with skip-user: %v", err)
 	}
-	if len(fake.groups) != 6 {
-		t.Errorf("expected the 5 role groups and the platform group "+
+	if len(fake.groups) != 4 {
+		t.Errorf("expected the 3 role groups and the platform group "+
 			"when the user step is skipped, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 0 {
@@ -1747,10 +1747,10 @@ func (f *fakeKeycloak) clientMappers(t *testing.T, clientID string) map[string]p
 	return nil
 }
 
-// The five groups carry the decided attributes: the tenant from
-// --tenant-id, the role per group, and approver=true only on
-// MEHO-Approvers.
-func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
+// The three groups carry the decided attributes: the tenant from
+// --tenant-id and the role per group. No SA-Operators or Approvers group
+// is made.
+func TestBootstrap_CreatesThreeRoleGroupsWithAttributes(t *testing.T) {
 	fake := newFakeKeycloak()
 	opts := fullOpts()
 	if _, _, err := runBootstrapOnce(t, fake, opts); err != nil {
@@ -1765,17 +1765,15 @@ func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
 		"MEHO-Operators": {
 			"tenant_id": tenant, "tenant_role": {"operator"}, "meho_tenant": mt("Operators"),
 		},
-		"MEHO-SA-Operators": {
-			"tenant_id": tenant, "tenant_role": {"operator"}, "meho_tenant": mt("SA-Operators"),
-		},
 		"MEHO-Admins": {
 			"tenant_id": tenant, "tenant_role": {"tenant_admin"}, "meho_tenant": mt("Admins"),
 		},
-		"MEHO-Approvers": {
-			"tenant_id": tenant, "tenant_role": {"read_only"}, "approver": {"true"},
-			"meho_tenant": mt("Approvers"),
-		},
 		"MEHO-Platform-Admins": {"platform_admin": {"true"}},
+	}
+	for _, name := range []string{"MEHO-SA-Operators", "MEHO-Approvers"} {
+		if fake.groupByName(name) != nil {
+			t.Errorf("group %s must not be made", name)
+		}
 	}
 	for name, attrs := range want {
 		g := fake.groupByName(name)
@@ -1799,7 +1797,7 @@ func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
 // tenant-id / tenant-role mappers on both clients and a `meho-admins`
 // group with the admin user in it. A run replaces the two fixed mappers
 // with User Attribute mappers, adds the approver mapper, creates the
-// five groups and puts the admin user in MEHO-Admins. Old groups are
+// three groups and puts the admin user in MEHO-Admins. Old groups are
 // left alone. A second run then changes nothing.
 func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
 	fake := newFakeKeycloak()
@@ -1894,7 +1892,7 @@ func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
 
 // A role group whose attributes were changed by hand is set back. Only
 // the three keys the command owns change: other attributes stay, and
-// `approver` is removed from groups other than MEHO-Approvers.
+// `approver` is removed from the three role groups.
 func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	fake := newFakeKeycloak()
 	fake.groups["uuid-ops"] = &groupRep{
@@ -1932,8 +1930,8 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	if n := fake.calls["PUT /groups/{uuid}"]; n != 2 {
 		t.Errorf("PUT /groups/{uuid} called %d times, want 2", n)
 	}
-	if n := fake.calls["POST /groups"]; n != 4 {
-		t.Errorf("POST /groups called %d times, want 4 (the missing groups)", n)
+	if n := fake.calls["POST /groups"]; n != 2 {
+		t.Errorf("POST /groups called %d times, want 2 (the missing groups)", n)
 	}
 	for name, change := range map[string]string{
 		"MEHO-Operators": "tenant_role: [tenant_admin] -> [operator]",
@@ -1951,7 +1949,7 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	}
 }
 
-// The dry run lists the five groups with their attributes.
+// The dry run lists the three groups with their attributes.
 func TestBootstrap_DryRunListsRoleGroups(t *testing.T) {
 	opts := fullOpts()
 	opts.DryRun = true
@@ -1959,10 +1957,35 @@ func TestBootstrap_DryRunListsRoleGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap dry-run: %v", err)
 	}
-	want := "MEHO-Approvers: tenant_id=" + opts.TenantID +
-		" tenant_role=read_only approver=true meho_tenant=" + opts.TenantID + ":main:Approvers"
+	want := "MEHO-Readers: tenant_id=" + opts.TenantID +
+		" tenant_role=read_only meho_tenant=" + opts.TenantID + ":main:Readers"
 	if !strings.Contains(stdout, want) {
 		t.Errorf("dry-run stdout missing %q; got:\n%s", want, stdout)
+	}
+	for _, name := range []string{"MEHO-SA-Operators", "MEHO-Approvers"} {
+		if strings.Contains(stdout, name) {
+			t.Errorf("dry-run stdout names %s; got:\n%s", name, stdout)
+		}
+	}
+}
+
+// A realm that has MEHO-SA-Operators and MEHO-Approvers groups keeps them
+// as they are: the command neither changes nor removes them.
+func TestBootstrap_LeavesOlderRoleGroupsAlone(t *testing.T) {
+	fake := newFakeKeycloak()
+	old := map[string][]string{"tenant_role": {"read_only"}, "approver": {"true"}}
+	fake.groups["uuid-appr"] = &groupRep{ID: "uuid-appr", Name: "MEHO-Approvers", Attributes: old}
+	fake.groups["uuid-sa"] = &groupRep{
+		ID: "uuid-sa", Name: "MEHO-SA-Operators", Attributes: map[string][]string{"tenant_role": {"operator"}},
+	}
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if g := fake.groups["uuid-appr"]; g == nil || !slices.Equal(g.Attributes["approver"], []string{"true"}) {
+		t.Errorf("MEHO-Approvers changed: %v", g)
+	}
+	if g := fake.groups["uuid-sa"]; g == nil || !slices.Equal(g.Attributes["tenant_role"], []string{"operator"}) {
+		t.Errorf("MEHO-SA-Operators changed: %v", g)
 	}
 }
 

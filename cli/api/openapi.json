@@ -58,7 +58,7 @@
           "health"
         ],
         "summary": "First Start",
-        "description": "The first-start list. No login: it shows the verdict lines only.",
+        "description": "No login: one fixed line that says how to sign in. Runs no check.",
         "operationId": "first_start_first_start_get",
         "responses": {
           "200": {
@@ -67,6 +67,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/first-start": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "First Start Signed In",
+        "description": "The first-start list for a person who is a tenant admin or a platform admin.",
+        "operationId": "first_start_signed_in_api_v1_first_start_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FirstStartResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1891,7 +1935,7 @@
           "settings"
         ],
         "summary": "Import Settings",
-        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes.",
+        "description": "Check the file and either show what it would change or apply it.\n\n``?preview=true`` changes nothing. Without it the import adds or updates\n(never deletes) in one transaction, or answers 422 with the mistakes and\nwrites nothing. A file that adds or changes a target applies only for a\nperson in the web console; a call with a token gets 403 and nothing is\nwritten, the same rule as the target routes. The same holds for a file\nthat turns on ``run_approval_target_kinds`` or turns off\n``announce_gate_enabled``.",
         "operationId": "import_settings_api_v1_settings_import_post",
         "parameters": [
           {
@@ -4588,7 +4632,7 @@
           "operations"
         ],
         "summary": "Cancel Operation Run",
-        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.",
+        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.\n\nA run that another login started is 403\n``operation_run_cancel_forbidden: <rule>``, and the run goes on. The\nrule says who may stop it: the login that started the run, or a person\nwith the ``tenant_admin`` role or a platform admin in the tenant. An\nagent or service login stops only its own runs.",
         "operationId": "cancel_operation_run_api_v1_operations_runs__handle__cancel_post",
         "parameters": [
           {
@@ -9766,7 +9810,7 @@
           "agents"
         ],
         "summary": "Cancel Run",
-        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.",
+        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.\n\nA run that another login started is 403\n``agent_run_cancel_forbidden: <rule>``, and the run goes on. The rule\nsays who may stop it: the login that started the run, or a person with\nthe ``tenant_admin`` role or a platform admin in the tenant. An agent or\nservice login stops only its own runs.",
         "operationId": "cancel_run_api_v1_agents_runs__handle__cancel_post",
         "parameters": [
           {
@@ -12027,7 +12071,7 @@
           "sensors"
         ],
         "summary": "Edit Sensor",
-        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
+        "description": "Change some fields of one sensor; keep its id, history and dashboards.\n\n``tenant_admin`` only. Only the fields in the body change. The changed\nsensor is checked like a new one: an invalid result is 422\n``sensor_edit_invalid``, an unknown or non-safe operation is 422, and a\nname that is taken is 409. A cross-tenant / absent id is 404\n``sensor_not_found``. After the change the sensor is due at once, so the\nrunner checks it on its next tick. The audit row of the request carries\n``before`` and ``after`` with the changed fields (secret-named values\nhidden).\n\nWhen the edit changes the connector, operation, params or check, and\nthe sensor runs as another person (not the editor, not ``__sensor__``),\nthe sensor's ``identity_sub`` becomes ``__sensor__``. ``before`` and\n``after`` show that change too.\n\n``status`` (``paused`` or ``active``), sent alone, pauses or resumes the\nsensor. A paused sensor is not run and keeps its id, history and\ndashboards. Pause and resume are safe to send twice.",
         "operationId": "edit_sensor_api_v1_sensors__sensor_id__patch",
         "parameters": [
           {
@@ -12194,6 +12238,71 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SensorResultListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensor_id}/run": {
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Run Sensor Now",
+        "description": "Run one sensor once now.\n\n``tenant_admin`` only. The call makes the sensor due at once. The\nrunner runs it at its next tick, with its normal login and rules, and\nthe result shows in the sensor's results. The call never runs the\noperation itself. A paused sensor is 409 ``sensor_paused``: resume it\nfirst. A cross-tenant / absent id is 404 ``sensor_not_found``. A sensor\nthat is already due is fine: the call answers 202 and changes nothing.",
+        "operationId": "run_sensor_now_api_v1_sensors__sensor_id__run_post",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRunAccepted"
                 }
               }
             }
@@ -13570,7 +13679,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(``targets.register`` and the ``topology.*`` writes need\n``tenant_admin``); below it the answer is 403 ``role_floor_required``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(the ``topology.*`` writes need ``tenant_admin``); below it the answer\nis 403 ``role_floor_required``. A grant for ``targets.register`` or\n``targets.update`` is refused, because a person approves each call of\nthese ops: 422, or 403 ``role_floor_required`` below ``tenant_admin``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -15281,6 +15390,110 @@
         "responses": {
           "302": {
             "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/ui/auth/approval-sign-in": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Approval Sign In",
+        "description": "Send the browser to the approval sign-in of the console's approval client.",
+        "operationId": "ui_auth_approval_sign_in_ui_auth_approval_sign_in_get",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Return To"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/auth/approval-callback": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Approval Callback",
+        "description": "Keep the approval sign-in on the session and send the person back.",
+        "operationId": "ui_auth_approval_callback_ui_auth_approval_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Error"
+            }
+          },
+          {
+            "name": "error_description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Error Description"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
@@ -27864,6 +28077,19 @@
             "nullable": true,
             "title": "Principal Kind"
           },
+          "people_behind": {
+            "items": {
+              "$ref": "#/components/schemas/PersonBehindView"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "People Behind"
+          },
+          "people_behind_known": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "People Behind Known"
+          },
           "op_id": {
             "type": "string",
             "title": "Op Id"
@@ -28297,6 +28523,15 @@
             "nullable": true,
             "title": "Sign In Level In Force"
           },
+          "web_sign_in": {
+            "$ref": "#/components/schemas/ApprovalSignInStatus",
+            "nullable": true
+          },
+          "web_sign_in_level_in_force": {
+            "type": "string",
+            "nullable": true,
+            "title": "Web Sign In Level In Force"
+          },
           "sign_in_level_warning": {
             "type": "string",
             "nullable": true,
@@ -28315,7 +28550,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``sign_in_level_warning`` is a short sentence whenever the level is not\nrequired in practice or the read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, a change of rights cannot be approved."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the\nconsole's approval client (#6282): ``auto`` reads each client's\nbinding, so the two can differ. ``sign_in_level_warning`` is a short\nsentence whenever the level is not required in practice for either\nclient or a read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, a change of rights cannot be approved."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -36932,6 +37167,16 @@
             },
             "type": "array",
             "title": "Changed Fields"
+          },
+          "identity_sub_before": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub Before"
+          },
+          "identity_sub_after": {
+            "type": "string",
+            "nullable": true,
+            "title": "Identity Sub After"
           }
         },
         "type": "object",
@@ -39782,6 +40027,35 @@
         ],
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
+      },
+      "PersonBehindView": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Name"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why"
+          },
+          "why_text": {
+            "type": "string",
+            "title": "Why Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "why",
+          "why_text"
+        ],
+        "title": "PersonBehindView",
+        "description": "One person behind the agent, service or runner login that asked."
       },
       "PolicyExplainBody": {
         "properties": {
@@ -43391,6 +43665,27 @@
         "title": "SensorResultRead",
         "description": "Response shape for one ``sensor_results`` evidence row (#2756).\n\nMirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the\nwire types the JSON renderer serialises: the raw ``(evaluated_at, state,\nvalue, evidence, reason)`` the runner computed, plus the owning\n``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after\nreturning it."
       },
+      "SensorRunAccepted": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Next Fire At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "next_fire_at"
+        ],
+        "title": "SensorRunAccepted",
+        "description": "Answer of the run route: the Sensor and when it is due."
+      },
       "SensorRunnerStatus": {
         "properties": {
           "seconds_since_last_tick": {
@@ -45341,7 +45636,7 @@
               "minLength": 1
             },
             "type": "object",
-            "maxProperties": 50,
+            "maxProperties": 100,
             "nullable": true,
             "title": "Secret Field Map"
           },

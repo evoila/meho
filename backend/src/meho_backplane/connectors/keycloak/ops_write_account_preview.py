@@ -130,6 +130,7 @@ async def _holders_after_remove(ctx: PreviewContext, names: list[str]) -> dict[s
             ctx.target,
             ctx.params,
             op_id="keycloak.role_mapping.client.remove",
+            check_login_user=False,
         )
         client_uuid = await connector._find_client_uuid(
             ctx.target, realm, str(ctx.params.get("client_id")).strip(), operator=ctx.operator
@@ -184,7 +185,12 @@ async def _current_user(ctx: PreviewContext) -> dict[str, Any] | None:
     try:
         row = (
             await read_user_for_write(
-                connector, ctx.operator, ctx.target, ctx.params, op_id="keycloak.user.update"
+                connector,
+                ctx.operator,
+                ctx.target,
+                ctx.params,
+                op_id="keycloak.user.update",
+                check_login_user=False,
             )
         ).user
     except Exception:
@@ -224,7 +230,7 @@ async def _credential_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
         return None
     op_id = "keycloak.user.credential.delete"
     uuid, username, realm = await resolve_user(
-        connector, ctx.operator, ctx.target, ctx.params, op_id=op_id
+        connector, ctx.operator, ctx.target, ctx.params, op_id=op_id, check_login_user=False
     )
     current = await read_credentials(connector, ctx.operator, ctx.target, realm=realm, user_id=uuid)
     matches = match_credentials(current, ctx.params, op_id=op_id)

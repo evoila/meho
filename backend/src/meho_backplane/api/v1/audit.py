@@ -160,11 +160,14 @@ from meho_backplane.flight_recorder import (
     load_trace,
     should_expose_to_agent,
 )
+from meho_backplane.flight_recorder.agent_view import agent_view_trace
 from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
+
+_log = structlog.get_logger(__name__)
 
 #: Module-level :class:`Depends` closure for the flat / self-scoped
 #: routes' RBAC gate (``operator`` minimum). Built once at import time to
@@ -443,6 +446,8 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
         not view.operator_sub or view.operator_sub != operator.sub
     ):
         return None
+    if is_agent:
+        return await _agent_copy(view)
     return view
 
 
@@ -455,6 +460,21 @@ async def _trace_asked_by(sub: str, audit_id: uuid.UUID, *, tenant_id: uuid.UUID
     async with get_sessionmaker()() as session:
         view = await load_trace(session, audit_id=audit_id, tenant_id=tenant_id)
     return view is not None and view.operator_sub == sub
+
+
+async def _agent_copy(view: TraceView) -> TraceView | None:
+    """The copy of *view* an agent login reads, or ``None`` when it cannot be made.
+
+    A Kubernetes span has its secret env values, command-line secrets and
+    annotation secrets hidden
+    (:mod:`meho_backplane.flight_recorder.agent_view`). When the copy fails,
+    the agent gets no trace.
+    """
+    try:
+        return await agent_view_trace(view)
+    except Exception:
+        _log.warning("audit_trace_agent_copy_failed", audit_id=str(view.audit_id), exc_info=True)
+        return None
 
 
 def _reads_own_traces_only(operator: Operator) -> bool:
@@ -510,6 +530,9 @@ async def search_traces(
             include_redaction_uncertain=not is_agent,
             limit=limit,
         )
+    if is_agent:
+        copies = [await _agent_copy(item) for item in items]
+        items = [item for item in copies if item is not None]
     structlog.contextvars.bind_contextvars(audit_row_count=len(items))
     return AuditTraceSearchResult(items=items)
 

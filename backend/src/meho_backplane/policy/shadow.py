@@ -115,8 +115,9 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
 def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.service_grants import (
-        credential_read_grant_reason,
         delete_grant_reason,
+        descriptor_credential_reason,
+        descriptor_credential_waits,
     )
 
     op_id = descriptor.op_id
@@ -124,10 +125,8 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     marks = {
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
-        "credential_read": credential_read_grant_reason(
-            op_id, getattr(descriptor, "op_class", None)
-        )
-        is not None,
+        "credential": descriptor_credential_reason(descriptor) is not None,
+        "credential_waits": descriptor_credential_waits(descriptor),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
     }
@@ -177,8 +176,15 @@ async def _service_lookups(
     connector_id: str | None,
     preview_hash: str | None,
     decide_only: bool,
+    params: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Read scope, standing grant and run approval of a service login. Writes nothing."""
+    """Read scope, standing grant and run approval of a service login. Writes nothing.
+
+    When the op's check by params says no grant may clear the call
+    (:func:`~meho_backplane.operations.grant_cover_check.grant_cover_refusal`),
+    neither is looked up, the same as in the policy gate.
+    """
+    from meho_backplane.operations.grant_cover_check import grant_cover_refusal
     from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
     from meho_backplane.operations.service_grants import consult_and_record_grant
     from meho_backplane.operations.service_read_scopes import read_scope_denial
@@ -188,6 +194,8 @@ async def _service_lookups(
     }
     if connector_id is None:
         return found
+    if await grant_cover_refusal(operator, descriptor, target, connector_id, params) is not None:
+        return {**found, "standing_grant": None, "run_approval": None}
     # A real destructive call uses a delete grant only with the hash of its
     # preview; without one, today's gate never uses the grant.
     if decide_only or descriptor.safety_level != "destructive" or preview_hash is not None:
@@ -219,6 +227,7 @@ async def evaluate_call(
     connector_id: str | None,
     preview_hash: str | None = None,
     decide_only: bool = False,
+    params: dict[str, Any] | None = None,
 ) -> Decision:
     """Do the lookups for one call and return the evaluator's decision. Writes nothing."""
     from meho_backplane.sandbox_mode import sandbox_mode_active
@@ -246,6 +255,7 @@ async def evaluate_call(
                 connector_id=connector_id,
                 preview_hash=preview_hash,
                 decide_only=decide_only,
+                params=params,
             )
         )
     return evaluate(asker, asked, Lookups(**found))
@@ -272,6 +282,7 @@ async def shadow_call(
     today: tuple[PermissionVerdict, str | None],
     preview_hash: str | None = None,
     decide_only: bool = False,
+    params: dict[str, Any] | None = None,
 ) -> None:
     """Compare the evaluator with today's verdict *today* for one call. Never raises.
 
@@ -290,6 +301,7 @@ async def shadow_call(
             connector_id=connector_id,
             preview_hash=preview_hash,
             decide_only=decide_only,
+            params=params,
         )
         keep_rule(_shadow_stamp(decision))
         today_verdict, today_reason = today
@@ -321,11 +333,14 @@ async def shadow_call(
 def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk:
     """The :class:`ApprovalAsk` of *request*, as *operator* would see it."""
     from meho_backplane.db.models import ApprovalRequestStatus
-    from meho_backplane.operations.approval_queue import ApprovalRoleFloorError
+    from meho_backplane.operations.approval_queue import (
+        ApprovalRoleFloorError,
+        approval_risk_level,
+    )
     from meho_backplane.operations.grant_approval import check_grant_approval, is_rights_change
+    from meho_backplane.operations.people_behind import behind_subs, people_behind_unknown
 
     effect = request.proposed_effect or {}
-    level = effect.get("safety_level")
     waits_because = effect.get("waits_because")
     grant_refusal: str | None = None
     try:
@@ -335,12 +350,14 @@ def approval_ask_of(operator: Operator, request: ApprovalRequest) -> ApprovalAsk
     return ApprovalAsk(
         requester_sub=request.principal_sub,
         op_id=request.op_id,
-        risk=level if isinstance(level, str) else None,
+        risk=approval_risk_level(request),
         pending=request.status == ApprovalRequestStatus.PENDING.value,
         waits_because=waits_because if isinstance(waits_because, str) else None,
         rights_change=is_rights_change(request),
         grant_refusal=grant_refusal,
         break_glass=get_settings().approval_allow_self_approval,
+        people_behind=behind_subs(request.people_behind),
+        requester_unknown=people_behind_unknown(request.principal_kind, request.people_behind),
     )
 
 

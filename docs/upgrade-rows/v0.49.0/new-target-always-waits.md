@@ -1,0 +1,5 @@
+## Note
+Making a new target always waits for a person, like changing one. Every `targets.register` call (MCP, `call_operation`, REST `POST /api/v1/targets` with a token, `meho targets add`, a multi-step operation, the scheduler) makes an approval request, also for a service login with a standing grant, a service login in a run with a run approval, and an agent with a grant. The approval card shows the target's values, also each `extras` key and value. Only a person in the web console makes a target at once.
+
+## Action
+A service login that registers targets by itself (an inventory sync, a plan that registers systems while it runs) now waits for a person on every new target. The request shows in the console under Approvals and in `meho approvals list`. A person approves each request, or a person registers the target in the web console. A standing grant on `targets.register` does not let a call run; you can delete it.

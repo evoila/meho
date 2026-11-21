@@ -104,6 +104,7 @@ from meho_backplane.auth.client_identity import bind_request_client
 from meho_backplane.auth.conventions_drift_login import reject_conventions_drift_only_elsewhere
 from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.jwt import verify_jwt
+from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.metrics import HTTP_REQUEST_DURATION_SECONDS, HTTP_REQUESTS_TOTAL
@@ -564,6 +565,10 @@ async def verify_jwt_and_bind(
     be speculative and would risk masking a real empty-table state
     after a DB reset.
 
+    The same session notes the login id of an agent, service or runner
+    login (:func:`~meho_backplane.auth.machine_logins.note_machine_login`),
+    so such a login never counts as a person behind another login.
+
     Returns:
         The same :class:`Operator` that ``verify_jwt`` produced — the
         wrapper is transparent to the route handler.
@@ -583,4 +588,5 @@ async def verify_jwt_and_bind(
     reject_conventions_drift_only_elsewhere(operator, request)
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
+        await note_machine_login(session, operator)
     return operator

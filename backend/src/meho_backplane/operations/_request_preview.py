@@ -85,7 +85,10 @@ from meho_backplane.operations._errors import (
     result_target_required,
     result_unqualified_target_version,
 )
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.operations._ingested_owner import (
     INGESTED_OPS_NOT_ACCEPTED,
     accepts_ingested_operations,
@@ -115,6 +118,8 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.preview_needs_switch import preview_needs_switch
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import apply_connector_boundary_redaction
@@ -283,8 +288,9 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
 
     The last two rules hold only while the ``PREVIEW_TYPED_WRITES`` switch
     is on. Off (the default), a typed op previews as before: when it is
-    destructive, or when it carries ``requires_approval`` and is not a
-    credential-class op.
+    destructive, or when it carries ``requires_approval``, is not a
+    credential-class op and is not listed in
+    :mod:`~meho_backplane.operations.preview_needs_switch`.
     """
     if descriptor.source_kind == "ingested":
         return True
@@ -292,7 +298,9 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
         return True
     if not get_settings().preview_typed_writes:
         return (
-            descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            descriptor.requires_approval
+            and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            and not preview_needs_switch(descriptor.op_id)
         )
     if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
         return has_preview_builder(descriptor.op_id)
@@ -364,7 +372,7 @@ async def _resolve_descriptor(
     when the target's connector cannot run the op (#5948); like
     ``dispatch``, this comes right after the target check, so it is never
     hidden by the catalog choice or by the op's check before the wait for
-    approval. Right after it comes the ``connector_not_allowed`` envelope
+    approval. Right before it comes the ``connector_not_allowed`` envelope
     of a hosted agent whose connector list does not hold the target's
     connector (:mod:`._target_connector_limit`). Returns the ``denied``
     envelope when the target's connector is outside the session's MCP
@@ -439,16 +447,16 @@ async def _target_check_envelope(
     *, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> dict[str, Any] | None:
     """The first refusal of the target checks, in the order ``dispatch`` runs them."""
-    mismatch = mismatch_preview_envelope(
-        descriptor=descriptor, connector_id=connector_id, target=target
-    )
-    if mismatch is not None:
-        return mismatch
     not_allowed = await not_allowed_preview_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )
     if not_allowed is not None:
         return not_allowed
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
     return version_range_preview_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )
@@ -536,7 +544,7 @@ def _validate_params_envelope(
     """Dispatch Step 3: the ``invalid_params`` / ``invalid_op_schema`` envelope, or ``None``."""
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
     try:
-        validation_errors = validate_params(descriptor.parameter_schema, params)
+        validation_errors = validate_params(schema_for_checks(descriptor), params)
     except InvalidOpSchemaError as exc:
         return _invalid_op_schema_envelope(
             op_id=op_id,
@@ -814,6 +822,8 @@ async def _build_ingested_preview(
             "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
         }
     connector_instance = get_or_create_connector_instance(cls)
+    if target is not None:
+        await forget_target_if_changed(target)
 
     # The literal request, resolved through the SAME code path
     # ``dispatch_ingested`` sends through -- no drift.

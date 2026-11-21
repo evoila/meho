@@ -60,6 +60,7 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, Aud
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 from tests._time_limits import check_time_limit
 
 pytestmark = pytest.mark.asyncio
@@ -255,6 +256,7 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
     )
 
     operator = _make_operator(sub="agent-resume-acceptance")
+    await give_agent_a_known_person(_TENANT_ID, "agent-resume-acceptance")
     call_arguments: dict[str, Any] = {
         "connector_id": "apprestest-1.x",
         "op_id": "apprestest.op",
@@ -407,6 +409,7 @@ async def test_resume_stamps_parent_audit_id_so_chain_replays_as_one_subtree(
     )
 
     operator = _make_operator(sub="agent-lineage-requester")
+    await give_agent_a_known_person(_TENANT_ID, "agent-lineage-requester")
     call_arguments: dict[str, Any] = {
         "connector_id": "appres2test-1.x",
         "op_id": "appres2test.op",

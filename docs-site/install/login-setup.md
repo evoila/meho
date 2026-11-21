@@ -3,7 +3,7 @@
 MEHO trusts its own Keycloak. People can log in with their company
 account, because Keycloak sends them on to your login system.
 
-The page [Company login](login/index.md) has the five role groups, the
+The page [Company login](login/index.md) has the three role groups, the
 rules, and one recipe for each system:
 
 - [Local users](login/local-users.md)

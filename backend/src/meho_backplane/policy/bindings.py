@@ -4,14 +4,15 @@
 """Bindings: which login group is which team.
 
 The ``bindings`` section of a tenant's policy file gives a login group one
-of today's five group kinds (``Readers``, ``Operators``, ``SA-Operators``,
-``Admins``, ``Approvers``) and a set of categories:
+one of three group kinds (``Readers``, ``Operators``, ``Admins``) and a
+set of categories. The old kinds ``SA-Operators`` and ``Approvers`` are
+still accepted: MEHO reads them as ``Operators`` and ``Readers``:
 
 .. code-block:: yaml
 
     bindings:
       - match: {group: /MEHO-Operators/Network}
-        kind: SA-Operators
+        kind: Operators
         categories: [network]
       - match: {attribute: tenant-a-storage}
         kind: Operators
@@ -51,17 +52,15 @@ The rules (:func:`bind`):
   every category. They count only for a login without a tenant list
   (``meho_tenants``). The ``groups`` claim is not per tenant, so for a
   login with a list the list entry of the tenant decides, as with the
-  switch off. A shipped operator group next to the shipped self-approval
-  group gives ``SA-Operators``, as today. Next to another shipped group the
-  self-approval group does not count for the kind: that group's kind stays,
-  as with the switch off.
+  switch off. The old self-approval group counts as ``Operators``. Next to
+  another shipped group it does not count for the kind: that group's kind
+  stays, as with the switch off.
 * A shipped binding counts only when its kind gives the same ``approver``
-  and ``self_approver`` flags as the token gives today. Else it is left
-  out and logged. So a person in the shipped approver group whose token
-  has no ``approver`` claim gets no approve right, and a person with
-  ``approver: true`` in the shipped readers group keeps it, as with the
-  switch off. A stored binding is the tenant's own choice: there the
-  group alone gives the flags of its kind.
+  and ``self_approver`` flags as the login has today. Else it is left
+  out and logged. MEHO does not read an ``approver`` claim of the token,
+  and no shipped group gives the flag, so a shipped group alone never
+  gives or takes a right to approve. A stored binding is the tenant's
+  own choice: there the group alone gives the flags of its kind.
 * A ``groups`` claim that is not a list of texts matches no binding.
 
 The import refuses a binding of an agent or a service to a kind that may
@@ -92,7 +91,7 @@ from meho_backplane.auth.operator import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantPolicy
 from meho_backplane.policy.classification import Scope, Taxonomy
-from meho_backplane.policy.document import ALL_CATEGORIES, GROUP_KINDS
+from meho_backplane.policy.document import ACCEPTED_KINDS, ALL_CATEGORIES, GROUP_KINDS, read_kind
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
@@ -167,6 +166,10 @@ class BindingEntry:
     attribute: str | None = None
     principal: str = "person"
 
+    def __post_init__(self) -> None:
+        # An old kind is read as the new one (SA-Operators as Operators).
+        object.__setattr__(self, "kind", RoleGroup(read_kind(self.kind.value)))
+
     def matches(self, principal: str, paths: frozenset[str], attributes: frozenset[str]) -> bool:
         """True when the login is of the binding's kind and has its group."""
         if principal != self.principal:
@@ -189,7 +192,7 @@ def _entry(raw: Any, ref: str) -> BindingEntry:
     if (group is None) == (attribute is None) or (group is not None and group[:1] != "/"):
         raise ValueError(f"{ref}: `match` needs a full group path or an attribute.")
     try:
-        kind = RoleGroup(raw.get("kind"))
+        kind = RoleGroup(read_kind(str(raw.get("kind"))))
     except ValueError as exc:
         raise ValueError(f"{ref}: `kind` is not a group kind.") from exc
     return BindingEntry(
@@ -220,9 +223,9 @@ def bindings_from_document(document: Mapping[str, Any] | None) -> list[BindingEn
 def _kind_of_name(name: str) -> str | None:
     """The group kind a group name ends with (``MEHO-SA-Operators`` → ``SA-Operators``)."""
     key = name.casefold()
-    for kind in sorted(GROUP_KINDS, key=len, reverse=True):
+    for kind in sorted(ACCEPTED_KINDS, key=len, reverse=True):
         if key == kind.casefold() or key.endswith("-" + kind.casefold()):
-            return kind
+            return read_kind(kind)
     return None
 
 
@@ -231,8 +234,8 @@ def shipped_binding_documents(settings: Settings) -> list[dict[str, Any]]:
 
     Each group of ``JWT_ROLE_GROUPS`` whose name ends with a group kind
     gets that kind; the group of ``JWT_SELF_APPROVER_GROUP`` gets
-    ``SA-Operators``. Each is matched by its top-level full path and gets
-    every category.
+    ``Operators`` (MEHO reads the old group as Operators). Each is matched by
+    its top-level full path and gets every category.
     """
     kinds: dict[str, str] = {}
     for name in settings.jwt_role_groups:
@@ -241,7 +244,7 @@ def shipped_binding_documents(settings: Settings) -> list[dict[str, Any]]:
             kinds["/" + name.strip("/")] = kind
     self_approver = settings.jwt_self_approver_group.strip("/")
     if self_approver:
-        kinds["/" + self_approver] = RoleGroup.SA_OPERATORS.value
+        kinds["/" + self_approver] = RoleGroup.OPERATORS.value
     return [
         {"match": {"group": path}, "kind": kind, "categories": [ALL_CATEGORIES]}
         for path, kind in kinds.items()
@@ -309,16 +312,15 @@ def bind(
     kinds = sorted({entry.kind for entry in matched}, key=lambda kind: GROUP_KINDS.index(kind))
     if (
         len(kinds) == 2
-        and RoleGroup.SA_OPERATORS in kinds
+        and RoleGroup.OPERATORS in kinds
         and all(e.ref.startswith(_SHIPPED) for e in matched)
     ):
-        # Only shipped bindings match: one role group and a self-approval
-        # group that is not a role group (two role groups are refused before
-        # this). With the switch off the role group decides the kind, so the
-        # shipped bindings keep that. Next to an operator group the person is
-        # an operator who may self-approve, as today: SA-Operators.
-        other = next(kind for kind in kinds if kind is not RoleGroup.SA_OPERATORS)
-        keep = RoleGroup.SA_OPERATORS if other is RoleGroup.OPERATORS else other
+        # Only shipped bindings match: one role group and the old
+        # self-approval group, which MEHO reads as Operators and which may not
+        # be a role group (two role groups are refused before this). With the
+        # switch off the role group decides the kind, so the shipped bindings
+        # keep that.
+        keep = next(kind for kind in kinds if kind is not RoleGroup.OPERATORS)
         kinds = [keep]
         matched = [entry for entry in matched if entry.kind is keep]
     if len(kinds) > 1:
@@ -447,7 +449,7 @@ def binding_mistakes(document: Mapping[str, Any], *, scope: Scope, taxonomy: Tax
                 f"`bindings[{index}]`: a runner cannot get a role. A runner only runs "
                 "what MEHO has already decided."
             )
-        elif principal != "person" and raw.get("kind") in _APPROVING_KINDS:
+        elif principal != "person" and read_kind(str(raw.get("kind"))) in _APPROVING_KINDS:
             mistakes.append(
                 f"`bindings[{index}]` gives an agent or a service a group kind that may "
                 "approve. Only a person approves, with a click in the web interface or a "

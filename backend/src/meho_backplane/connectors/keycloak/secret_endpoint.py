@@ -102,6 +102,15 @@ routed by :func:`build_keycloak_secret_endpoint`:
   Any other field on a ``clients/`` ref is rejected with a value-free
   error.
 
+The user this target signs in with
+==================================
+
+The sink refuses the user its target signs in with (when the ref's realm is
+the realm the target signs in to), before approval
+(:meth:`KeycloakCredentialSecretEndpoint.refuse_before_approval`) and again
+before the write, as ``keycloak.user.reset_password`` does
+(:mod:`~meho_backplane.connectors.keycloak.ops_user_login_guard`).
+
 No secret in logs / response / audit
 ====================================
 
@@ -130,14 +139,35 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+from meho_backplane.connectors.keycloak.ops_meho_access_lock import (
+    meho_access_check_only,
+    meho_access_scope,
+)
+from meho_backplane.connectors.keycloak.ops_user_login_guard import (
+    SECRET_SINK_ACTION,
+    park_refusal_for_login_user,
+    refuse_login_user_in_realm,
+)
+from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import (
+    MehoAccessRefusedError,
+    is_meho_login_realm,
+)
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
+from meho_backplane.connectors.keycloak.ops_write_delete_lookup import KeycloakDeleteRefusedError
 from meho_backplane.connectors.keycloak.secret_move_target import check_approved_keycloak_target
-from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
+from meho_backplane.connectors.keycloak.session import KeycloakTargetLike, resolve_realm_config
 from meho_backplane.connectors.secret.endpoints import SecretMaterial, register_secret_endpoint
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.targets.required_extras import realm_name_problem
-from meho_backplane.targets.resolver import resolve_target
+from meho_backplane.targets.resolver import (
+    AmbiguousTargetError,
+    TargetNotFoundError,
+    resolve_target,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -170,6 +200,7 @@ _SOURCE_FIELD = "secret"
 #: ref ``<target>/<realm>/<username>`` (three) — so a user literally named
 #: ``clients`` still routes to the sink (three segments).
 _CLIENTS_SEGMENT = "clients"
+_MOVE_OP_ID = "secret.move"
 
 
 class KeycloakSecretRefError(ValueError):
@@ -304,6 +335,7 @@ class KeycloakCredentialSecretEndpoint:
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
         check_approved_keycloak_target("sink", self._target_name, row)
+        await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
     async def check_target(self, operator: Operator) -> None:
@@ -312,6 +344,60 @@ class KeycloakCredentialSecretEndpoint:
         ``secret.move`` calls this before it reads the source.
         """
         await self._resolve_target(operator)
+
+    def _in_sign_in_realm(self, target: KeycloakTargetLike) -> bool:
+        return self._realm == resolve_realm_config(target).admin_realm
+
+    def _guarded(self, target: KeycloakTargetLike) -> bool:
+        """The realm the target signs in to, or a realm of MEHO's own login."""
+        return self._in_sign_in_realm(target) or is_meho_login_realm(self._realm)
+
+    async def _refuse_login_user(
+        self,
+        connector: KeycloakConnector,
+        operator: Operator,
+        target: KeycloakTargetLike,
+        uuid: str,
+    ) -> None:
+        if self._guarded(target):
+            await refuse_login_user_in_realm(
+                connector,
+                operator,
+                target,
+                realm=self._realm,
+                user_id=uuid,
+                op_id=_MOVE_OP_ID,
+                action=SECRET_SINK_ACTION,
+            )
+
+    async def refuse_before_approval(self, operator: Operator) -> str | None:
+        """The check before approval: the reason to refuse the sign-in user, or ``None``.
+
+        In MEHO's own login realm it also refuses a password that takes
+        MEHO's own access away. Calls Keycloak only in the realm the target
+        signs in to and in MEHO's login realm. A target or user that is not
+        found is left to the run. The reason names no user.
+        """
+        connector = get_or_create_connector_instance(KeycloakConnector)
+        if not isinstance(connector, KeycloakConnector):  # pragma: no cover -- registry invariant
+            return None
+        try:
+            target = await self._resolve_target(operator)
+            if not self._guarded(target):
+                return None
+            uuid = await connector._find_user_uuid(
+                target, self._realm, self._username, operator=operator
+            )
+            if uuid is not None:
+                async with meho_access_check_only():
+                    await self._refuse_login_user(connector, operator, target, uuid)
+        except (TargetNotFoundError, AmbiguousTargetError):
+            return None
+        except MehoAccessRefusedError as exc:
+            return exc.reason
+        except KeycloakDeleteRefusedError:
+            return park_refusal_for_login_user(_MOVE_OP_ID, SECRET_SINK_ACTION)
+        return None
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:
         """Unsupported — keycloak credentials are write-only.
@@ -327,6 +413,11 @@ class KeycloakCredentialSecretEndpoint:
         )
 
     async def write_secret(self, operator: Operator, material: SecretMaterial) -> None:
+        """Set the addressed user's password; one such write at a time per login realm."""
+        async with meho_access_scope():
+            await self._write_password(operator, material)
+
+    async def _write_password(self, operator: Operator, material: SecretMaterial) -> None:
         """Set the addressed user's password from *material* server-side.
 
         Resolves the target (tenant-scoped, by name) and the user's UUID,
@@ -357,6 +448,7 @@ class KeycloakCredentialSecretEndpoint:
                 f"keycloak secret sink: no user with username={self._username!r} "
                 f"in realm {self._realm!r} on target {self._target_name!r}"
             )
+        await self._refuse_login_user(connector, operator, target, uuid)
 
         # Read the value exactly once, here, on the write path; strip the
         # trailing-newline artifact as the existing reset-password path does.
@@ -413,6 +505,7 @@ class KeycloakClientSecretSourceEndpoint:
         async with sessionmaker() as session:
             row = await resolve_target(session, operator.tenant_id, self._target_name)
         check_approved_keycloak_target("source", self._target_name, row)
+        await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
     async def read_secret(self, operator: Operator) -> SecretMaterial:

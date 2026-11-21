@@ -23,7 +23,6 @@ value. A sensor never runs such a call.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -38,8 +37,14 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.checks import runner as sensor_runner
 from meho_backplane.checks.service import SensorRequiresNoPersonError, _require_read
 from meho_backplane.connectors.argocd.op_classes import sync_sets_a_revision
+from meho_backplane.connectors.linux import ops_write
 from meho_backplane.connectors.linux.op_classes import sysctl_write_can_run_a_program
-from meho_backplane.connectors.linux.ops_host import SYSCTL_KEY_PATTERN, validate_sysctl_key
+from meho_backplane.connectors.linux.ops_host import (
+    _SYSCTL_READ_OP,
+    linux_sysctl_read,
+    validate_sysctl_key,
+)
+from meho_backplane.connectors.linux.ops_write import _SYSCTL_WRITE_OP, linux_sysctl_write
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.op_classes import call_always_waits, is_credential_capable
 from meho_backplane.operations._audit import work_ref_var
@@ -193,14 +198,61 @@ def test_a_key_that_names_a_program_or_a_file_waits(key: str) -> None:
     assert call_always_waits("linux.sysctl.write", params) is True
 
 
-@pytest.mark.parametrize("key", ["--load", "-p", "--system", "-a", "-"])
+_OPTION_KEYS = ["--load", "-p", "--system", "-a", "-"]
+
+#: The ``key`` schema of ``linux.sysctl.read`` and ``linux.sysctl.write`` as
+#: an agent reads it. The refusal of a key that starts with ``-`` lives in
+#: ``validate_sysctl_key``, so this schema stays the same.
+_PUBLISHED_KEY_SCHEMA_PATTERN = r"^[A-Za-z0-9._/-]+$"
+
+
+@pytest.mark.parametrize("op", [_SYSCTL_READ_OP, _SYSCTL_WRITE_OP], ids=lambda op: op.op_id)
+def test_the_published_key_schema_stays_the_same(op: Any) -> None:
+    key_schema = op.parameter_schema["properties"]["key"]
+    assert key_schema["type"] == "string"
+    assert key_schema["minLength"] == 1
+    assert key_schema["pattern"] == _PUBLISHED_KEY_SCHEMA_PATTERN
+
+
+@pytest.mark.parametrize("key", _OPTION_KEYS)
 def test_a_key_that_sysctl_reads_as_an_option_waits_and_is_refused(key: str) -> None:
     params = {"key": key, "value": "settings.conf"}
     assert sysctl_write_can_run_a_program(params) is True
     assert call_always_waits("linux.sysctl.write", params) is True
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="starts with '-'"):
         validate_sysctl_key(key)
-    assert re.fullmatch(SYSCTL_KEY_PATTERN, key) is None
+
+
+class _NoCommandConnector:
+    """A connector that fails the test when a handler runs a command."""
+
+    async def _run_command(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the handler ran a command")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", _OPTION_KEYS)
+async def test_the_read_handler_refuses_an_option_key_before_any_command(key: str) -> None:
+    with pytest.raises(ValueError, match="starts with '-'"):
+        await linux_sysctl_read(_NoCommandConnector(), SimpleNamespace(), {"key": key})  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", _OPTION_KEYS)
+async def test_the_write_handler_refuses_an_option_key_before_any_command(
+    key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _no_call(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the handler went past the key check")
+
+    monkeypatch.setattr(ops_write, "_resolve_sudo_password", _no_call)
+    monkeypatch.setattr(ops_write, "run_remote_bash_with_sudo", _no_call)
+    with pytest.raises(ValueError, match="starts with '-'"):
+        await linux_sysctl_write(
+            _NoCommandConnector(),  # type: ignore[arg-type]
+            SimpleNamespace(),  # type: ignore[arg-type]
+            {"key": key, "value": "1"},
+        )
 
 
 def test_a_key_with_a_dash_inside_is_still_a_key() -> None:

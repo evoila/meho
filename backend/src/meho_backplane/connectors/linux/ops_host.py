@@ -72,9 +72,8 @@ UNIT_NAME_PATTERN: str = r"^[A-Za-z0-9:._@-]+$"
 _UNIT_NAME_RE: re.Pattern[str] = re.compile(UNIT_NAME_PATTERN)
 
 #: sysctl key charset. Covers dotted (``net.ipv4.ip_forward``) and slashed
-#: (``net/ipv4/ip_forward``) spellings; no shell metacharacters. The key
-#: never starts with ``-``, so ``sysctl`` never reads it as an option.
-SYSCTL_KEY_PATTERN: str = r"^[A-Za-z0-9._/][A-Za-z0-9._/-]*$"
+#: (``net/ipv4/ip_forward``) spellings; no shell metacharacters.
+SYSCTL_KEY_PATTERN: str = r"^[A-Za-z0-9._/-]+$"
 _SYSCTL_KEY_RE: re.Pattern[str] = re.compile(SYSCTL_KEY_PATTERN)
 
 #: Exit code the service-status command uses when the host has no
@@ -133,9 +132,15 @@ def validate_unit_name(unit: Any) -> str:
 
 
 def validate_sysctl_key(key: Any) -> str:
-    """Return *key* if it matches the sysctl-key charset, else raise."""
+    """Return *key* if it matches the sysctl-key charset, else raise.
+
+    A key that starts with ``-`` is refused too: ``sysctl`` reads it as an
+    option, not as a parameter name.
+    """
     if not isinstance(key, str) or not _SYSCTL_KEY_RE.fullmatch(key):
         raise ValueError(f"key {key!r} is not a valid sysctl key")
+    if key.startswith("-"):
+        raise ValueError(f"key {key!r} starts with '-', so it is not a sysctl parameter name")
     return key
 
 

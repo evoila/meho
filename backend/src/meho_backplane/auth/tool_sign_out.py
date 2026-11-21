@@ -10,10 +10,10 @@ Keycloak can end the logins of one (person, client) pair, and the
 person's other tools keep working.
 
 * :func:`tool_kinds` -- the tool kinds MEHO knows, with their login client.
-* :func:`last_use_by_client` -- the last audit row of the person per login
-  client, among the person's newest :data:`LAST_USE_MAX_ROWS` rows. Audit
-  rows name the client only while ``AUDIT_CLIENT_IDENTITY`` is on, so
-  with it off no tool has a last use.
+* :func:`last_use_by_client` -- the newest audit row of the person per
+  login client, in the last :data:`LAST_USE_WINDOW`. Audit rows name the
+  client only while ``AUDIT_CLIENT_IDENTITY`` is on, so with it off no
+  tool has a last use.
 * :func:`end_tool_logins` -- the Keycloak part. It ends both kinds of
   login of the person for one client:
 
@@ -29,16 +29,20 @@ person's other tools keep working.
 * :func:`sign_out_tool` -- runs :func:`end_tool_logins` and then writes the
   audit row ``auth.tool_sign_out``. A failed Keycloak call writes a row
   too (status 502): it says what ended before the failure, if anything,
-  and which error stopped it. A tenant admin can also sign out a tool of
-  another person (``tools.sign_out``, :mod:`meho_backplane.connectors.tools`):
+  and which error stopped it. Before each row, a log line says the same,
+  so the event is not lost when the row cannot be written. Then
+  :class:`ToolSignOutAuditError` reaches the caller. A tenant admin can
+  also sign out a tool of another person (``tools.sign_out``,
+  :mod:`meho_backplane.connectors.tools`):
   then the row's ``operator_sub`` is the admin who ran the call (the
   approver), and its payload names the admin who asked (``requested_by``)
   and the person (``user_id``, ``username``).
 
 The tool's last access token keeps working until it expires: the access
-token lifetime of the realm (about five minutes on MEHO's built-in
-Keycloak). Signing out is not a block: the tool can sign in again and gets
-a new login.
+token lifetime of the realm (about five and a half minutes on MEHO's
+built-in Keycloak: 300 seconds, plus 30 seconds that MEHO allows for
+clock differences). Signing out is not a block: the tool can sign in
+again and gets a new login.
 
 The web console is listed for its last use, but it has no sign-out button
 here: the "Active sessions" card of the same page signs out a browser.
@@ -65,18 +69,18 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakConsentNotFoundError,
 )
 from meho_backplane.auth.realm_users import RealmUser
-from meho_backplane.db.models import AuditEventClass, AuditLog
+from meho_backplane.db.models import AUDIT_LOG_CLIENT_AZP, AuditEventClass, AuditLog
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.settings import Settings
 
 __all__ = [
-    "LAST_USE_MAX_ROWS",
     "LAST_USE_WINDOW",
     "OTHER_MCP_CLIENT_ID",
     "TOOL_SIGN_OUT_AUDIT_PATH",
     "ToolKind",
     "ToolLoginsEnded",
+    "ToolSignOutAuditError",
     "ToolSignOutIncompleteError",
     "end_tool_logins",
     "last_use_by_client",
@@ -91,9 +95,6 @@ TOOL_SIGN_OUT_AUDIT_PATH: Final[str] = "auth.tool_sign_out"
 
 #: How far back :func:`last_use_by_client` looks.
 LAST_USE_WINDOW: Final[timedelta] = timedelta(days=90)
-
-#: The most audit rows :func:`last_use_by_client` reads on one page load.
-LAST_USE_MAX_ROWS: Final[int] = 500
 
 #: The shared login client of MCP clients that have no client of their own.
 OTHER_MCP_CLIENT_ID: Final[str] = "meho-mcp"
@@ -140,30 +141,28 @@ async def last_use_by_client(
 ) -> dict[str, datetime]:
     """Return the newest audit row time of *operator_sub* per login client.
 
-    Reads only the person's own rows of the last :data:`LAST_USE_WINDOW`,
-    in every tenant (a login is per person, not per tenant), newest first,
-    and at most :data:`LAST_USE_MAX_ROWS` of them. The index
-    ``audit_log_operator_sub_occurred_at_idx`` serves this read, so a page
-    load reads at most that many rows. A client with no row among them is
-    missing from the answer.
+    One read per client: the person's newest row of the last
+    :data:`LAST_USE_WINDOW` whose ``client`` block names that client, in
+    every tenant (a login is per person, not per tenant). The index
+    ``audit_log_operator_sub_client_azp_occurred_at_idx`` serves each
+    read, so it finds that row directly, however many rows the person
+    has. A client with no such row is missing from the answer.
     """
-    wanted = set(client_ids)
-    if not wanted:
-        return {}
-    azp = AuditLog.payload[("client", "azp")].as_string()
-    stmt = (
-        select(azp, AuditLog.occurred_at)
-        .where(
-            AuditLog.operator_sub == operator_sub,
-            AuditLog.occurred_at >= now - LAST_USE_WINDOW,
-        )
-        .order_by(AuditLog.occurred_at.desc())
-        .limit(LAST_USE_MAX_ROWS)
-    )
     last_use: dict[str, datetime] = {}
-    for client, occurred_at in (await db_session.execute(stmt)).all():
-        if client in wanted and client not in last_use:
-            last_use[str(client)] = occurred_at
+    for client_id in dict.fromkeys(client_ids):
+        stmt = (
+            select(AuditLog.occurred_at)
+            .where(
+                AuditLog.operator_sub == operator_sub,
+                AUDIT_LOG_CLIENT_AZP == client_id,  # noqa: SIM300 -- a SQL expression
+                AuditLog.occurred_at >= now - LAST_USE_WINDOW,
+            )
+            .order_by(AuditLog.occurred_at.desc())
+            .limit(1)
+        )
+        occurred_at = (await db_session.execute(stmt)).scalar_one_or_none()
+        if occurred_at is not None:
+            last_use[client_id] = occurred_at
     return last_use
 
 
@@ -182,6 +181,19 @@ class ToolLoginsEnded:
 
 
 _NOTHING_ENDED: Final[ToolLoginsEnded] = ToolLoginsEnded(False, 0, ())
+
+
+class ToolSignOutAuditError(Exception):
+    """The audit row of a sign-out could not be written.
+
+    Keycloak may already have ended logins: ``ended`` says which. A log
+    line with the same facts was written before the row. The failed write
+    is the ``__cause__``.
+    """
+
+    def __init__(self, ended: ToolLoginsEnded) -> None:
+        super().__init__("The audit row of the tool sign-out could not be written")
+        self.ended = ended
 
 
 class ToolSignOutIncompleteError(KeycloakAdminError):
@@ -279,6 +291,9 @@ async def sign_out_tool(
       reaches the caller;
     * no login at all ("nothing to sign out"), or only shared logins:
       nothing ended and no row is written (``audit_id`` is ``None``).
+
+    When a row cannot be written, :class:`ToolSignOutAuditError` reaches
+    the caller instead of the result or the Keycloak error.
     """
     started = time.monotonic()
     try:
@@ -317,14 +332,6 @@ async def sign_out_tool(
         for_user=for_user,
         requested_by=requested_by,
     )
-    _log.info(
-        "tool_sign_out",
-        operator_sub=operator_sub,
-        tenant_id=str(tenant_id),
-        client_id=kind.client_id,
-        sessions_ended=ended.sessions_ended,
-        for_user_id=for_user.id if for_user else None,
-    )
     return replace(ended, audit_id=audit_id)
 
 
@@ -340,7 +347,11 @@ async def _write_sign_out_row(
     for_user: RealmUser | None = None,
     requested_by: str | None = None,
 ) -> uuid.UUID:
-    """Write one ``auth.tool_sign_out`` row: status 200, or 502 with *error*."""
+    """Write one ``auth.tool_sign_out`` row: status 200, or 502 with *error*.
+
+    Logs the same facts first, so they are kept when the write fails. A
+    failed write raises :class:`ToolSignOutAuditError`.
+    """
     payload: dict[str, object] = {
         "client_id": kind.client_id,
         "tool": kind.key,
@@ -356,15 +367,33 @@ async def _write_sign_out_row(
         payload["username"] = for_user.username
     if requested_by is not None:
         payload["requested_by"] = requested_by
-    return await write_internal_audit_row(
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+    _log.info(
+        "tool_sign_out",
         operator_sub=operator_sub,
-        actor_sub=resolve_actor_sub(),
-        tenant_id=tenant_id,
-        method=INTERNAL_METHOD,
-        path=TOOL_SIGN_OUT_AUDIT_PATH,
-        status_code=200 if error is None else 502,
-        request_id=current_request_id(),
-        duration_ms=(time.monotonic() - started) * 1000,
-        payload=payload,
+        tenant_id=str(tenant_id),
+        for_user_id=for_user.id if for_user else None,
+        **{k: v for k, v in payload.items() if k not in ("user_id", "username")},
     )
+    try:
+        return await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+            operator_sub=operator_sub,
+            actor_sub=resolve_actor_sub(),
+            tenant_id=tenant_id,
+            method=INTERNAL_METHOD,
+            path=TOOL_SIGN_OUT_AUDIT_PATH,
+            status_code=200 if error is None else 502,
+            request_id=current_request_id(),
+            duration_ms=(time.monotonic() - started) * 1000,
+            payload=payload,
+        )
+    except Exception as exc:
+        # The writer passes on any database error as it is. Whatever the
+        # cause, the sign-out must not count as done without its row.
+        _log.error(
+            "tool_sign_out_audit_failed",
+            operator_sub=operator_sub,
+            client_id=kind.client_id,
+            reason=type(exc).__name__,
+        )
+        raise ToolSignOutAuditError(ended) from exc

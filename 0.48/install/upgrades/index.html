@@ -4004,6 +4004,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>An agent that reads the trace of a Kubernetes call gets a copy. In it, env values are hidden by the same secret rules as in the direct answer of an operation, and the secret values on container command lines and scripts and in annotations are hidden (the last-applied annotation is cleaned like the object). Plain env values, env names and references, and managedFields stay. A person and a service login read the stored trace as it is.</td>
+<td>None.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>MEHO decides from what a Keycloak group gives whether a change of the group can give platform admin rights, not from the group's name. In MEHO's own login realm, <code>keycloak.group.member.add</code> and <code>keycloak.group.update_attributes</code> need a platform admin as approver when the group or a parent group has the attribute <code>platform_admin=true</code>, when its path is under <code>/MEHO-Platform-Admins/</code>, when it gives the realm role in <code>JWT_PLATFORM_ADMIN_ROLE_NAME</code> (when set), or when the new attributes set <code>platform_admin</code>. When MEHO cannot read the group, a platform admin must approve too. Right before an approved change runs, MEHO reads the group again with the same rule.</td>
 <td>Some of these approvals now need a platform admin, where a tenant admin was enough. Make sure a platform admin can approve them. No schema action.</td>
 </tr>

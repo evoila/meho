@@ -15,12 +15,16 @@ first people log in.
       may approve their own. Anyone else needs a second person: an
       admin.
     - **Create a user** (Step 4) and **add a person to a group**
-      (Step 5): these are changes of rights. An admin (a tenant admin or
-      a platform admin) approves them with a click in the web console,
-      and may be the person who asked. An Operator cannot approve them.
+      (Step 5): these are changes of rights. An admin approves them with
+      a click in the web console. In MEHO's own login realm only a
+      platform admin approves them, and the person who asked approves
+      only a request they asked in the web console. Outside it a tenant
+      admin or a platform admin approves them, and may be the person who
+      asked. An Operator cannot approve them.
       See [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
 
-    For Steps 4 and 5, an admin approves each change in the web console.
+    For Steps 4 and 5, an admin approves each change in the web console
+    (in MEHO's own login realm, a platform admin).
     No setup below changes that.
 
     For the group step, pick one of these before you start:
@@ -73,7 +77,8 @@ each change is approved and stored in the audit log.
 - An `operator` or `tenant_admin` login in your current tenant.
 - For the group step: a second person who can approve, unless you
   approve it yourself as in the box above. For the user and group
-  member steps: an admin who is not the person who asked. Step 8 needs
+  member steps: an admin who is not the person who asked (in MEHO's own
+  login realm, a platform admin). Step 8 needs
   a `tenant_admin` approver in the new tenant too, because an approval
   belongs to one tenant. Step 8 explains the choices.
 - This guide gives each person one tenant. For a person who works in
@@ -167,7 +172,8 @@ meho keycloak user create --target keycloak-main -f alice.json \
 
 This step waits for approval too (risk level `dangerous`). Creating a
 user is a change of rights, so an admin (a tenant admin or a platform
-admin) approves it with a click in the web console. See
+admin) approves it with a click in the web console. In MEHO's own login
+realm only a platform admin approves it. See
 [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
 
 ## Step 5: Put each person in exactly one group
@@ -178,7 +184,8 @@ meho keycloak group member add --target keycloak-main \
 ```
 
 Adding a person to a group is a change of rights. An admin approves it
-with a click in the web console. Check the members:
+with a click in the web console (in MEHO's own login realm, a platform
+admin). Check the members:
 
 ```bash
 meho keycloak group member list --target keycloak-main --id <group-id>

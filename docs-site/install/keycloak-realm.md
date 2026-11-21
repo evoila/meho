@@ -409,9 +409,11 @@ managed realm), adds the name `meho-approve` (level 2) to the realm's
 sign-in levels, and makes the flow the browser flow of `meho-cli-approve`. It waits
 for approval
 ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
-It is a change of rights: an admin (a tenant admin or a platform admin)
-approves it with a click in the web console, and may be the person who
-asked (see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
+It is a change of rights. In MEHO's own login realm a platform admin
+makes it alone in the web console, after a fresh sign-in, or approves it
+there; outside it an admin (a tenant admin or a platform admin) approves
+it with a click in the web console, and may be the person who asked
+(see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
 With the built-in Keycloak, `helm upgrade` adds the flow without this call.
 
 ```bash
@@ -584,9 +586,11 @@ Keycloak reads the chart's realm file only when it makes the realm.
 The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 `keycloak.authflow.ensure_approval_touch` instead. It waits for
-approval. It is a change of rights: an admin (a tenant admin or a
-platform admin) approves it with a click in the web console, and may be
-the person who asked (see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
+approval. It is a change of rights. In MEHO's own login realm a platform admin
+makes it alone in the web console, after a fresh sign-in, or approves it
+there; outside it an admin (a tenant admin or a platform admin) approves
+it with a click in the web console, and may be the person who asked
+(see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch \

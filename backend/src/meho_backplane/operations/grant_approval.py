@@ -17,13 +17,16 @@ For these, MEHO checks when a person approves:
   in, but never a ``secret.move`` that sets the password of their own
   login (:data:`FOR_LOGIN`). Outside MEHO's own login realm, the admin may
   also approve a change they asked for themselves.
-* In MEHO's own login realm, the change needs a tenant admin. It needs a
-  platform admin when the change can give platform admin rights: the
-  connector decides this from what the group or role gives
-  (``platform_admin``), not from its name. No self-approval rule covers it.
-  The refusal and the approval card say why (:func:`platform_admin_reason`).
-  There the person who asked never approves the change. A person behind
-  the agent, service or runner login that asked may approve it.
+* In MEHO's own login realm, every change of rights needs a platform
+  admin, also one that sets only harmless keys. When the change can give
+  platform admin rights (the connector decides this from what the group
+  or role gives, ``platform_admin``, not from its name), the refusal and
+  the approval card say why (:func:`platform_admin_reason`). There the
+  login that asked approves the change only when it asked for it in the
+  web console (:data:`ASKED_IN_WEB_CONSOLE`) and approves it there too. A
+  request made with a token, the command line, MCP or by an agent is
+  never approved by the login that asked. A person behind the agent,
+  service or runner login that asked may approve it.
 * An operation registered with ``applies`` is a change of rights here only
   when its params pass that check (``secret.move`` with a Keycloak side).
 * An operation registered with ``per_call=False`` is checked here too, but
@@ -102,13 +105,14 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.op_classes import declare_per_call_approval
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
+    "ASKED_IN_WEB_CONSOLE",
     "FOR_LOGIN",
     "GRANT_REASON_CHANGED",
     "GRANT_REASON_OLD_CARD",
@@ -119,6 +123,7 @@ __all__ = [
     "RIGHTS_CHANGE_CONSOLE_ONLY",
     "RIGHTS_CHANGE_REFUSAL",
     "GrantFacts",
+    "asked_in_web_console",
     "check_grant_approval",
     "check_rights_change_approval",
     "grant_audit_fields",
@@ -126,12 +131,12 @@ __all__ = [
     "grant_facts",
     "is_rights_change",
     "is_rights_change_op",
+    "may_make_alone",
     "platform_admin_reason",
     "register_grant_op",
     "register_harmless_keys_rule",
     "register_rights_change_check",
     "register_rights_change_op",
-    "who_may_make_refusal",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -180,6 +185,11 @@ HARMLESS_KEYS_ONLY: Final[str] = "harmless_keys_only"
 #: ``secret.move`` that sets a user's password). Then that login never
 #: approves the request, and an unknown login cannot be approved.
 FOR_LOGIN: Final[str] = "for_login"
+
+#: The key of ``proposed_effect`` that is ``True`` when a person asked for
+#: this change of rights with a click in the web console. The approval
+#: queue sets it on every change of rights it parks.
+ASKED_IN_WEB_CONSOLE: Final[str] = "asked_in_web_console"
 
 
 @dataclass(frozen=True)
@@ -367,8 +377,9 @@ def check_rights_change_approval(operator: Operator, request: ApprovalRequest) -
     Only an admin approves it, and only with a click in the web console
     (:attr:`~meho_backplane.auth.operator.Operator.web_session`). The admin
     may be the person who asked, or a person behind the agent, service or
-    runner login that asked (in MEHO's own login realm only the latter:
-    :func:`check_grant_approval`).
+    runner login that asked. In MEHO's own login realm the person who asked
+    approves it only when they asked in the web console
+    (:func:`check_grant_approval`).
     """
     if not is_rights_change(request):
         return
@@ -435,25 +446,6 @@ def _check_who_the_change_is_for(
         )
 
 
-_PLATFORM_ADMIN_CHANGE: Final[str] = (
-    "it changes who has rights in MEHO's own login realm "
-    "(a group or role that gives platform admin rights, or one MEHO could not read)"
-)
-_LOGIN_REALM_CHANGE: Final[str] = "it changes who has rights in MEHO's own login realm"
-
-
-def _login_realm_need(operator: Operator, facts: GrantFacts) -> tuple[str, str] | None:
-    """``(what the change does, the role it needs)`` when *operator* lacks that role, else ``None``.
-
-    In the login realm: a tenant admin; a platform admin when it gives platform admin.
-    """
-    if facts.platform_admin:
-        return None if operator.platform_admin else (_PLATFORM_ADMIN_CHANGE, "a platform admin")
-    if operator.tenant_role != TenantRole.TENANT_ADMIN:
-        return _LOGIN_REALM_CHANGE, "a tenant admin"
-    return None
-
-
 #: Why a platform admin must approve, when the card does not say it.
 PLATFORM_ADMIN_REASON_DEFAULT: Final[str] = (
     "It can give platform admin rights in MEHO's own login realm, or MEHO could not "
@@ -462,7 +454,7 @@ PLATFORM_ADMIN_REASON_DEFAULT: Final[str] = (
 
 
 def platform_admin_reason(request: ApprovalRequest) -> str | None:
-    """Why only a platform admin may approve *request*; ``None`` when a tenant admin may.
+    """Why *request* can give platform admin rights; ``None`` when it cannot.
 
     The text comes from the approval card (``platform_admin_reason`` in the
     ``grant`` block), or is :data:`PLATFORM_ADMIN_REASON_DEFAULT` when the
@@ -474,55 +466,48 @@ def platform_admin_reason(request: ApprovalRequest) -> str | None:
     return _text(_stamp(request).get("platform_admin_reason")) or PLATFORM_ADMIN_REASON_DEFAULT
 
 
+def asked_in_web_console(request: ApprovalRequest) -> bool:
+    """True when a person asked for *request* with a click in the web console."""
+    return (request.proposed_effect or {}).get(ASKED_IN_WEB_CONSOLE) is True
+
+
 def _check_login_realm_approver(
     operator: Operator, request: ApprovalRequest, facts: GrantFacts
 ) -> None:
-    """In the login realm: a tenant admin; a platform admin when it gives platform admin.
+    """In the login realm: a platform admin approves every change of rights.
 
-    The approver is never the login that asked. A person behind the agent,
-    service or runner login that asked may approve it.
+    The login that asked approves it only when it asked in the web console
+    and approves there too. A person behind the agent, service or runner
+    login that asked may approve it.
     """
-    if facts.platform_admin:
-        if not operator.platform_admin:
-            why = platform_admin_reason(request) or PLATFORM_ADMIN_REASON_DEFAULT
-            raise _refusal(
-                request,
-                operator,
-                "it changes who has rights in MEHO's own login realm. "
-                "A second person who is a platform admin must approve it. "
-                f"Why: {why.rstrip('.')}",
-            )
-    elif operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise _refusal(
-            request,
-            operator,
+    if not operator.platform_admin:
+        denial = (
             "it changes who has rights in MEHO's own login realm. "
-            "A second person who is a tenant admin must approve it",
+            "A second person who is a platform admin must approve it"
         )
-    if _same_login(request.principal_sub, operator.sub):
-        role = "a platform admin" if facts.platform_admin else "a tenant admin"
+        why = platform_admin_reason(request)
+        if why is not None:
+            denial = f"{denial}. Why: {why.rstrip('.')}"
+        raise _refusal(request, operator, denial)
+    own = _same_login(request.principal_sub, operator.sub)
+    if own and not (operator.web_session and asked_in_web_console(request)):
         raise _refusal(
             request,
             operator,
-            "it changes who has rights in MEHO's own login realm, and you asked for it. "
-            f"A second person who is {role} must approve it",
+            "it changes who has rights in MEHO's own login realm, and you asked for it "
+            "with a token, the command line, MCP or an agent. A second person who is a "
+            "platform admin must approve it",
         )
 
 
-def who_may_make_refusal(operator: Operator, request: ApprovalRequest) -> str | None:
-    """Why *operator* may not make the change of rights *request* at once, or ``None``.
+def may_make_alone(operator: Operator, request: ApprovalRequest) -> bool:
+    """True when *operator* may make the change of rights *request* alone in the web console.
 
-    The same rule of who may as :func:`check_grant_approval`, for a change
-    that runs at once in the web console and so has no request to approve.
+    The same rule of who may as :func:`check_grant_approval`: in MEHO's own
+    login realm only a platform admin.
     """
     facts = grant_facts(request)
-    if facts is None or not facts.login_realm:
-        return None
-    need = _login_realm_need(operator, facts)
-    if need is None:
-        return None
-    change, role = need
-    return f"You cannot make this change: {change}. Only {role} may make this change."
+    return facts is None or not facts.login_realm or operator.platform_admin
 
 
 def _refusal(request: ApprovalRequest, operator: Operator, denial: str) -> Exception:

@@ -521,6 +521,7 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_AUDIT_VALUE,
+    CONSOLE_RUN_POLICY_RULE,
     CONSOLE_RUN_REASON,
     take_console_run_sign_in,
 )
@@ -4516,6 +4517,7 @@ async def _dispatch_now(
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
+                policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
                 structlog.contextvars.bind_contextvars(
                     audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE,
                     audit_approval_auth=(

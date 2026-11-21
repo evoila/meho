@@ -175,6 +175,7 @@ from meho_backplane.operations.approved_reveal import (
     without_secret_values,
 )
 from meho_backplane.operations.grant_approval import (
+    ASKED_IN_WEB_CONSOLE,
     RIGHTS_CHANGE_REFUSAL,
     check_grant_approval,
     check_rights_change_approval,
@@ -1875,6 +1876,15 @@ async def create_pending_request(
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
+        # Who asked where: in MEHO's own login realm only a request asked
+        # with a click in the web console is approved by the login that asked.
+        asked_in_console = (
+            requester is None and operator.web_session and is_human_principal(operator)
+        )
+        request.proposed_effect = {
+            **(request.proposed_effect or {}),
+            ASKED_IN_WEB_CONSOLE: asked_in_console,
+        }
     try:
         await stamp_approver_set(
             session, request, category=category, install_category=install_category

@@ -490,16 +490,18 @@ For such a write:
   (`operations/rights_change_console.py`), after a fresh sign-in and the
   checks of who may make it. A write that reads, writes or makes a
   credential (`realm.update`, `user.create`, `user.reset_password`) still
-  waits, and so does a write that does not change one login or group (one
-  that is not in `GRANT_OPS`);
+  waits. Outside MEHO's own login realm a write that does not change one
+  login or group (one that is not in `GRANT_OPS`) waits too; in the login
+  realm a platform admin makes it alone;
 - every other call waits: a token call (command line, REST, MCP), also the
   admin's own token, an agent's call and an Operator's call;
 - only an admin (a tenant admin or a platform admin) approves a waiting
   call, with a click in the web console; the admin may be the requester,
   or a person behind the agent that asked. An Operator cannot. In MEHO's
   own login realm only a platform admin makes such a write alone in the
-  web console; a tenant admin's call waits, and the login that asked
-  never approves the request;
+  web console, or approves it; a tenant admin's call waits. There the
+  login that asked approves the request only when it asked in the web
+  console;
 - a standing grant, an older grant row and a run approval never cover it:
   each call that waits needs its own approval;
 - no operation setting turns its approval off. An edit that tries is
@@ -572,10 +574,14 @@ fact is unknown and a platform admin must approve. The run reads the group
 again with the same rule (`ops_write_grant_platform.py`).
 
 **Every Keycloak write in the login realm needs a platform admin.**
-In MEHO's own login realm, a platform admin approves every Keycloak write,
-unless every key it sets is on a short list of keys that cannot touch
-sign-in or rights. The list is `HARMLESS_KEYS` in
-`ops_write_login_realm_rule.py`, and it is the only place.
+In MEHO's own login realm, a platform admin approves every Keycloak write.
+The card asks for a platform admin with its own reason unless every key
+the write sets is on a short list of keys that cannot touch sign-in or
+rights. The list is `HARMLESS_KEYS` in `ops_write_login_realm_rule.py`,
+and it is the only place. The three writes of that list are changes of
+rights, and in the login realm every change of rights needs a platform
+admin (`_check_login_realm_approver` in `operations/grant_approval.py`),
+so a write of harmless keys needs one too.
 
 The same rule holds in `master` (Keycloak's admin realm) and in the
 target's `admin_realm`. A Keycloak admin in `master` can change every realm,

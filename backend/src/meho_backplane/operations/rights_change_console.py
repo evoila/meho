@@ -33,18 +33,20 @@ The call still waits when:
 
 :func:`console_check` makes the call wait when the console session lacks
 the sign-in a console approve needs, or when the approval card, built
-against the live system, does not build or does not say who the change
-gives rights to. Then it runs the checks of who may make the change
-(:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`,
-the same rule as the approve): in MEHO's own login realm the admin must
-be a tenant admin, and a platform admin when the change can give platform
-admin rights. When the admin lacks that role, the call waits, and a
-second person with that role approves it. A call that the op's own check
-refuses does not run.
+against the live system, does not build. Outside MEHO's own login realm
+the call also waits when the card does not say which one login or group
+the change gives rights to. Then it runs the check of who may make the
+change (:func:`~meho_backplane.operations.grant_approval.may_make_alone`,
+the same rule as the approve): in MEHO's own login realm only a platform
+admin makes a change of rights alone. Every other admin's call waits, and
+a platform admin approves it. A call that the op's own check refuses does
+not run.
 
 The audit row of such a run carries ``rights_change_run`` with the value
 :data:`CONSOLE_RUN_AUDIT_VALUE`: a change of rights that an admin ran at
-once in the web console. It also carries ``approval_auth``, the sign-in
+once in the web console. Its ``policy_rule`` column says the same
+(:data:`CONSOLE_RUN_POLICY_RULE`), so a reader of the main columns sees
+that no second person approved. It also carries ``approval_auth``, the sign-in
 proof of the run, in the form of the decision row of a console approve
 (:meth:`~meho_backplane.auth.approval_sign_in.ApprovalAuth.audit_payload`):
 among others the sign-in level (``acr``) and the sign-in time
@@ -65,8 +67,9 @@ from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.operations.grant_approval import (
     grant_facts,
     is_rights_change_op,
-    who_may_make_refusal,
+    may_make_alone,
 )
+from meho_backplane.policy.stamp import RuleStamp
 
 if TYPE_CHECKING:
     from meho_backplane.auth.approval_sign_in import ApprovalAuth
@@ -74,6 +77,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONSOLE_RUN_AUDIT_VALUE",
+    "CONSOLE_RUN_POLICY_RULE",
     "CONSOLE_RUN_REASON",
     "ConsoleCheck",
     "console_check",
@@ -94,6 +98,14 @@ CONSOLE_RUN_REASON: Final[str] = (
 
 #: The value of ``rights_change_run`` on the audit row of such a run.
 CONSOLE_RUN_AUDIT_VALUE: Final[str] = "admin_in_web_console"
+
+#: The ``policy_rule`` column of the audit row of such a run.
+CONSOLE_RUN_POLICY_RULE: Final[RuleStamp] = RuleStamp(
+    source="default",
+    rule_id=f"rights_change.{CONSOLE_RUN_AUDIT_VALUE}",
+    text=CONSOLE_RUN_REASON,
+    decided=True,
+)
 
 
 #: op_id -> a check of the call's params: True when they carry a credential.
@@ -196,18 +208,22 @@ def _card_built(card: dict[str, Any] | None) -> bool:
 
 
 def _card_names_who(request: ApprovalRequest) -> bool:
-    """True when the card names the one login or group the change gives rights to."""
+    """True when the card says who the change gives rights to.
+
+    A change of one login or group names that login or group. In MEHO's own
+    login realm every other change of rights needs only the card's facts
+    of the realm, since only a platform admin makes it alone there.
+    """
     if request.op_id in _NO_LOGIN_REALM_OPS:
         return True
     facts = grant_facts(request)
-    if facts is None or not (facts.for_login or facts.for_group):
-        return False
     preview = (request.proposed_effect or {}).get("preview")
-    return (
-        isinstance(preview, dict)
-        and isinstance(preview.get("grant"), dict)
-        and not (facts.for_login and facts.user_id is None)
-        and not (facts.for_group and facts.group_id is None)
+    if facts is None or not (isinstance(preview, dict) and isinstance(preview.get("grant"), dict)):
+        return False
+    if not (facts.for_login or facts.for_group):
+        return facts.login_realm
+    return not (facts.for_login and facts.user_id is None) and not (
+        facts.for_group and facts.group_id is None
     )
 
 
@@ -231,15 +247,14 @@ async def console_check(
       approval window ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, and the approval
       sign-in level where ``APPROVAL_SIGN_IN_LEVEL`` asks for it);
     * the call waits when its approval card does not build against the
-      live system, or the card does not name the one login or group the
-      change gives rights to. Only an operation registered with
-      :func:`register_no_login_realm_op` needs no such facts;
+      live system. Outside MEHO's own login realm it also waits when the
+      card does not name the one login or group the change gives rights
+      to. Only an operation registered with :func:`register_no_login_realm_op`
+      needs no such facts;
     * the call waits when the admin may not make the change alone
-      (:func:`~meho_backplane.operations.grant_approval.who_may_make_refusal`):
-      in MEHO's own login realm the admin must be a tenant admin, and a
-      platform admin when the change can give platform admin rights, or
-      when MEHO could not read whether it can. The approve then needs a
-      second person with that role.
+      (:func:`~meho_backplane.operations.grant_approval.may_make_alone`):
+      in MEHO's own login realm only a platform admin does. The approve
+      then needs a platform admin.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._park_check import park_check_refusal
@@ -282,8 +297,7 @@ async def console_check(
     if not _card_built(card) or not _card_names_who(request):
         _log.info("rights_change_console_waits_for_card", op_id=op_id, operator_sub=operator.sub)
         return ConsoleCheck(waits=True)
-    refusal = who_may_make_refusal(operator, request)
-    if refusal is not None:
+    if not may_make_alone(operator, request):
         _log.info("rights_change_console_waits_for_role", op_id=op_id, operator_sub=operator.sub)
         return ConsoleCheck(waits=True)
     return ConsoleCheck(sign_in=sign_in)

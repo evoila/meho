@@ -57,8 +57,9 @@
         <p class="text-xs [overflow-wrap:anywhere]">
           This adds a protocol mapper to the client. It is
           <span class="font-semibold">a change of rights</span>, because a mapper
-          decides what goes into the login token. Confirming makes a request
-          that waits for approval.
+          decides what goes into the login token. In MEHO's own login realm, a
+          platform admin with a fresh sign-in runs it at once. Every other
+          confirm makes a request that waits for approval.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-error badge-sm" data-write-safety>safety: dangerous</span>
@@ -141,7 +142,7 @@
         </button>
         <button type="submit" data-action="create" class="btn btn-warning btn-sm gap-1">
           {{ icon("zap", class="size-4") }}
-          Add (request approval)
+          Add
         </button>
       </div>
     </form>

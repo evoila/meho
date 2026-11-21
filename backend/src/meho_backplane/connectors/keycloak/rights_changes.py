@@ -9,11 +9,13 @@ has which role, who may sign in, or how strong a sign-in is, is a change
 of rights. For each such write:
 
 * an admin's call in the web console runs at once, after the checks of
-  :mod:`~meho_backplane.operations.rights_change_console`; a write that
+  :mod:`~meho_backplane.operations.rights_change_console`. In MEHO's own
+  login realm only a platform admin's call does. Outside it, a write that
   does not change one login or group always waits;
-* every other call waits, and only an admin (a tenant admin or a platform
-  admin) approves it, in the web console; the admin may be the one who
-  asked;
+* every other call waits, and only an admin approves it, in the web
+  console (in MEHO's own login realm only a platform admin). The admin
+  may be the one who asked; in the login realm only when they asked in
+  the web console;
 * a standing grant, a stored grant row and a run approval never cover it,
   so each call that waits needs its own approval. An agent's call waits too.
 

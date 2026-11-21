@@ -198,6 +198,21 @@ async def _requests() -> list[ApprovalRequest]:
         return list((await session.execute(select(ApprovalRequest))).scalars())
 
 
+async def _run_main_columns() -> list[tuple[str | None, str | None]]:
+    """``policy_decision`` and ``policy_rule`` of the audit rows of a console run."""
+    async with get_sessionmaker()() as session:
+        rows = (
+            await session.execute(
+                select(AuditLog.payload, AuditLog.policy_decision, AuditLog.policy_rule)
+            )
+        ).all()
+    return [
+        (decision, rule)
+        for payload, decision, rule in rows
+        if payload.get("rights_change_run") is not None
+    ]
+
+
 async def _run_rows() -> list[dict[str, Any]]:
     async with get_sessionmaker()() as session:
         rows = (await session.execute(select(AuditLog.payload))).scalars().all()
@@ -376,6 +391,20 @@ async def test_the_audit_row_of_a_direct_run_records_the_sign_in(
     assert proof["acr"] == operator.acr == "1"
     assert proof["auth_time"] == operator.auth_time
     assert proof["level_in_force"] == "observe"
+
+
+@pytest.mark.asyncio
+async def test_the_main_columns_of_the_audit_row_say_an_admin_ran_it_alone(
+    keycloak: KeycloakConnector,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, group=_PLAIN_GROUP)
+        result = await _add(_person(platform_admin=True))
+
+    assert result["status"] == "ok", result
+    assert await _run_main_columns() == [
+        ("auto-execute", "default:rights_change.admin_in_web_console")
+    ]
 
 
 def _approval_sign_in(*, acr: str) -> Operator:
@@ -726,10 +755,23 @@ async def _create_mapper(operator: Operator) -> tuple[dict[str, Any], respx.Rout
 
 
 @pytest.mark.asyncio
-async def test_a_platform_admin_s_protocol_mapper_in_the_login_realm_waits(
+async def test_a_platform_admin_s_protocol_mapper_in_the_login_realm_runs_at_once(
     keycloak: KeycloakConnector,
 ) -> None:
     dumped, post = await _create_mapper(_person(platform_admin=True))
+
+    assert dumped["status"] == "ok", dumped
+    assert post.called
+    assert await _requests() == []
+    (row,) = await _run_rows()
+    assert row["rights_change_run"] == CONSOLE_RUN_AUDIT_VALUE
+
+
+@pytest.mark.asyncio
+async def test_a_platform_admin_s_protocol_mapper_with_an_old_sign_in_waits(
+    keycloak: KeycloakConnector,
+) -> None:
+    dumped, post = await _create_mapper(_person(platform_admin=True, sign_in_age=_OLD_SIGN_IN_AGE))
 
     assert dumped["status"] == "awaiting_approval", dumped
     assert not post.called

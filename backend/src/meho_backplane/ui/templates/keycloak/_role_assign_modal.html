@@ -56,7 +56,9 @@
         <p class="text-xs">
           Assigning a realm role is a privilege grant: it gives the user every
           permission the role carries. It is a change of rights. Confirming runs
-          it at once, after MEHO checks that you may make it.
+          it at once when you may make it alone: in MEHO's own login realm only
+          a platform admin may, after a fresh sign-in. Otherwise it makes a
+          request that waits for approval.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-error badge-sm" data-keycloak-safety>safety: dangerous</span>

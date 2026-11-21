@@ -1308,13 +1308,17 @@ The group rule (`_check_approver_group`, used by `approve_request` and
 - when the login or the group the change is for is unknown (the lookup
   failed when the request was parked). Nobody can approve such a request;
   the requester sends a new one;
-- in the login realm, when the approver is not a tenant admin;
-- in the login realm, when the approver is not a platform admin and the
-  change can give platform admin rights (a group or role that gives them;
-  see "How MEHO decides that a group change gives platform admin rights"
-  and "Every Keycloak write in the login realm needs a platform admin"
-  in [connectors-keycloak.md](connectors-keycloak.md));
-- in the login realm, when the approver is the login that asked;
+- in the login realm, when the approver is not a platform admin, for
+  every change of rights there; the text says why when the change can
+  give platform admin rights (a group or role that gives them; see "How
+  MEHO decides that a group change gives platform admin rights" and
+  "Every Keycloak write in the login realm needs a platform admin" in
+  [connectors-keycloak.md](connectors-keycloak.md));
+- in the login realm, when the approver is the login that asked, unless
+  it asked in the web console (`asked_in_web_console` in
+  `proposed_effect`, set by `create_pending_request` on every change of
+  rights it parks, `ASKED_IN_WEB_CONSOLE`) and approves in the web
+  console too;
 - when the change is a `secret.move` that sets the password of the
   approver's own login (`FOR_LOGIN`).
 
@@ -1343,8 +1347,10 @@ it.
 
 An admin may approve a change of their own login and a change of a group
 they are in, except a `secret.move` that sets the password of their own
-login (`FOR_LOGIN`). In the login realm the approver is never the login
-that asked (`principal_sub`); a person behind the agent, service or
+login (`FOR_LOGIN`). In the login realm the approver is the login that
+asked (`principal_sub`) only when that login asked in the web console; a
+request asked with a token, the command line, MCP or by an agent waits
+for a second platform admin. A person behind the agent, service or
 runner login that asked may approve it. A request without the `grant`
 block, or with a group MEHO could not read, gets the strict rule. The decision audit row carries `grant_user_id`,
 `grant_group_id` (when the change names a group), `grant_for_approver`,
@@ -1467,18 +1473,20 @@ as every other change of rights does, when:
   id is `Operator.web_session_id`;
 - the approval card, built against the live system (`live_card`), does
   not build, or does not say who the change gives rights to: a
-  `register_grant_op` operation needs the `grant` block with the login
-  and group it names. Only an operation registered with
-  `register_no_login_realm_op` (`policy.apply`, `policy.classify`) needs
-  no such block.
+  `register_grant_op` operation needs the `grant` block. Outside the login
+  realm the block must name the one login or group of the change; in the
+  login realm the block's realm facts are enough. Only an operation
+  registered with `register_no_login_realm_op` (`policy.apply`,
+  `policy.classify`) needs no such block.
 
-Then `who_may_make_refusal` runs the check of who may make the change on
-that card, the same rule as `check_grant_approval` on approve. When the
-admin may not make it alone (in the login realm: a tenant admin who is not
-a platform admin, for a change that can give platform admin rights), the
-call waits, and a second person with the right role approves it. The
-dispatcher marks the audit row of a call that runs at once with `rights_change_run: admin_in_web_console`
-(an `audit_*` context key). The policy evaluator has the same rule
+Then `may_make_alone` runs the check of who may make the change on that
+card, the same rule as `check_grant_approval` on approve. When the admin
+may not make it alone (in the login realm: an admin who is not a platform
+admin), the call waits, and a platform admin approves it. The dispatcher
+marks the audit row of a call that runs at once with `rights_change_run: admin_in_web_console`
+(an `audit_*` context key), and sets its `policy_rule` column to
+`default:rights_change.admin_in_web_console` (`CONSOLE_RUN_POLICY_RULE`),
+so the main columns show that no second person approved. The policy evaluator has the same rule
 (`admin_console_rights_change`, mark `rights_change`, lookups
 `rights_change_refusal` and `rights_change_waits`).
 

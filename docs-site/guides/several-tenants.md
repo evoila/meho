@@ -24,10 +24,11 @@ one login. At the end:
     dangerous risk level (decision record:
     [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
 
-    - **Putting a person in a group** is a change of rights. An admin
-      (a tenant admin or a platform admin) does it in the web console,
-      where it runs at once, or approves a waiting request there. An
-      Operator cannot approve it. See
+    - **Putting a person in a group** is a change of rights. The role
+      groups are in MEHO's own login realm, so only a platform admin does
+      it in the web console, where it runs at once after a fresh sign-in,
+      or approves a waiting request there. A tenant admin who is not a
+      platform admin and an Operator cannot approve it. See
       [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
     - **Taking a person out of a group** only takes rights away. A
       MEHO-Admin may approve their own; anyone else
@@ -62,7 +63,7 @@ The design is in the
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- An admin in the web console, each time you put a person in a group (see
+- A platform admin in the web console, each time you put a person in a group (see
   [Changes of rights](approvals-and-break-glass.md#changes-of-rights)).
 
 ## Step 1: Add the tenant in Keycloak
@@ -312,12 +313,12 @@ meho keycloak group member add --target keycloak-main \
   --username alice@example.com --group-name MEHO-team-b-Operators
 ```
 
-Each command waits for approval. It is a change of rights, so another
-admin approves it, never the person who asked:
+Each command waits for approval. It is a change of rights in MEHO's own
+login realm, so a second person who is a platform admin approves it in
+the web console, never the person who asked with the command line:
 
 ```bash
 meho approvals list
-meho approvals approve <approval-id>
 ```
 
 The rules:

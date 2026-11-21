@@ -290,16 +290,21 @@ manages, not only in MEHO's own login realm:
   a fresh sign-in, it runs at once. No request waits. MEHO asks for the
   same sign-in as for an approval in the web console. Without it, and
   when MEHO cannot show on the approval card who the change gives rights
-  to, the call waits for an approval. The audit row of the call says that
-  it was a change of rights that an admin ran at once in the web
-  console (`rights_change_run: admin_in_web_console`).
+  to, the call waits for an approval. In MEHO's own login realm only a
+  platform admin makes a change of rights alone (see below). The audit
+  row of the call says that it was a change of rights that an admin ran
+  at once in the web console, also in its main columns
+  (`policy_rule: default:rights_change.admin_in_web_console` and
+  `rights_change_run: admin_in_web_console`), so no second person
+  approved it.
 - **Every other call waits.** A call with a token waits: the command
   line, REST and MCP, also the admin's own token. A call of an agent, a
   service account or a hosted agent run waits. An Operator's call waits
   too, also in the web console.
 - **Only an admin approves a waiting change of rights, and only with a
   click in the web console.** The admin may be the person who asked.
-  MEHO then records it as a self-approval. The command line and REST do
+  MEHO then records it as a self-approval. In MEHO's own login realm
+  stricter rules hold (see below). The command line and REST do
   not approve a change of rights.
 - **A change of rights asked by an agent follows the rule of the person
   behind it.** An admin who stands behind the agent, add-on or runner
@@ -319,9 +324,10 @@ password, a new user, or the realm settings with the mail password), a
 change whose values carry a credential (for example a client update
 with a new client secret), a `destructive` change, a change with the "always wait" mark (from an
 override or a classification rule), a `secret.move` with a
-`keycloak:` side, and a Keycloak write that does not change one login or
-group (for example a new client scope or protocol mapper, a change of a
-realm or a client, or turning a login on).
+`keycloak:` side, and, outside MEHO's own login realm, a Keycloak write
+that does not change one login or group (for example a new client scope
+or protocol mapper, a change of a realm or a client, or turning a login
+on).
 
 When you may not approve such a change, MEHO answers "This is a change
 of rights. Only an admin may approve it." On the command line and over
@@ -360,9 +366,9 @@ and for the approval of a waiting request:
 - MEHO must know which login and which group the change is for. When a
   user name or a group name could not be looked up, the change cannot
   run and the request cannot be approved. Send a new one.
-- In MEHO's own login realm, the change needs a tenant admin. A change
-  that can give platform admin rights, or a role of Keycloak's
-  `realm-management` client, needs a platform admin. For a group, MEHO
+- In MEHO's own login realm, the change needs a platform admin. The
+  approval card says why when the change can give platform admin rights,
+  or a role of Keycloak's `realm-management` client. For a group, MEHO
   checks what the group gives, not its name: the attribute
   `platform_admin=true` on the group or a parent group, a place under
   `/MEHO-Platform-Admins/`, or the realm role in
@@ -372,12 +378,11 @@ and for the approval of a waiting request:
   that reads from or writes to one of these realms. A Keycloak admin in
   `master` can change every realm. The target's admin realm holds the
   login MEHO uses for that target. So the same rule holds there.
-  The one exception is a write that sets only keys from a short list that
+  This holds also for a write that sets only keys from a short list that
   cannot touch sign-in or rights: the display name of the realm
   (`keycloak.realm.update`), the name and description of a client
   (`keycloak.client.update`), and the first and last name of a user
-  (`keycloak.user.update`). Such a write needs a tenant admin, unless it
-  is for a login with platform admin rights. When a param names the realm,
+  (`keycloak.user.update`). When a param names the realm,
   MEHO reads that realm from Keycloak and judges the name Keycloak answers
   with. When MEHO cannot read which realm a write changes, it counts as the
   login realm. The name of a new realm (`keycloak.realm.create`) may hold
@@ -390,13 +395,21 @@ and for the approval of a waiting request:
   and no run approval clears such a write: each call waits for a person.
   A person never approves a `secret.move` that sets the password of their
   own login.
-- In MEHO's own login realm, a platform admin makes such a change alone
-  in the web console, after a fresh sign-in. Without a fresh sign-in the
-  change waits. A tenant admin who is not a platform admin cannot make
-  it alone: the change waits, and only a platform admin approves it.
-- In MEHO's own login realm, a change that waits is never approved by
-  the login that asked. A change asked with a token (the command line,
-  REST, MCP) waits for a second person who is a platform admin. A change
+- In MEHO's own login realm, a platform admin makes every change of
+  rights alone in the web console, after a fresh sign-in (the approval
+  sign-in level, inside the approval window). This holds for every
+  Keycloak write that is a change of rights there, also one that does not
+  change one login or group, such as a protocol mapper, a client or realm
+  change, turning a login on, or setting up the approval sign-in. Without
+  a fresh sign-in the change waits. A tenant admin who is not a platform
+  admin never makes such a change alone and never approves it: the change
+  waits, and only a platform admin approves it.
+- In MEHO's own login realm, a platform admin who asked for a change in
+  the web console may approve it there, after a fresh sign-in, when it
+  waits (for example because it reads, writes or makes a credential). A
+  change asked with a token (the command line, REST, MCP) or by an agent
+  is never approved by the login that asked, also not in the web
+  console: a second person who is a platform admin approves it. A change
   asked by an agent, an add-on or a runner may be approved by a platform
   admin who stands behind that login, in the web console, after a fresh
   sign-in.

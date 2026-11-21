@@ -61,6 +61,7 @@ __all__ = [
     "assert_read_only_sql",
     "connect_read_only",
     "first_significant_keyword",
+    "first_significant_keywords",
     "nested_block_comment_in",
 ]
 
@@ -126,25 +127,27 @@ class PostgresReadOnlyError(ValueError):
     """
 
 
-def first_significant_keyword(sql: str) -> str:
-    """Return the upper-cased first keyword of *sql*, skipping comments/whitespace.
+#: The white space of the PostgreSQL SQL scanner (``space`` in ``scan.l``), plus
+#: ``\v``. A server that does not read ``\v`` as white space refuses the
+#: statement with a syntax error.
+_SQL_SPACE = frozenset(" \t\n\r\f\v")
 
-    Leading whitespace, SQL line comments (``-- …`` to end of line), C-style
-    block comments (``/* … */``), and wrapping ``(`` characters are stepped
-    over so a query like ``/* audit */ (SELECT 1)`` resolves to ``SELECT``.
-    Returns ``""`` when no alphabetic keyword is found (an empty or
-    punctuation-only statement), which :func:`assert_read_only_sql` treats as
-    a rejection.
-    """
+#: The characters that end a ``--`` line comment in the PostgreSQL SQL scanner
+#: (``newline`` in ``scan.l``).
+_SQL_NEWLINE = frozenset("\n\r")
+
+
+def _first_keyword(sql: str, *, server_rules: bool) -> str:
     i, n = 0, len(sql)
     while i < n:
         ch = sql[i]
-        if ch.isspace() or ch == "(":
+        if (ch in _SQL_SPACE if server_rules else ch.isspace()) or ch == "(":
             i += 1
             continue
         if sql.startswith("--", i):
-            newline = sql.find("\n", i)
-            i = n if newline == -1 else newline + 1
+            i += 2
+            while i < n and (sql[i] not in _SQL_NEWLINE if server_rules else sql[i] != "\n"):
+                i += 1
             continue
         if sql.startswith("/*", i):
             end = sql.find("*/", i + 2)
@@ -153,6 +156,32 @@ def first_significant_keyword(sql: str) -> str:
         break
     match = _KEYWORD_RE.match(sql, i)
     return match.group(0).upper() if match else ""
+
+
+def first_significant_keyword(sql: str) -> str:
+    """Return the upper-cased first keyword of *sql*, skipping comments/whitespace.
+
+    White space, SQL line comments (``-- …`` to the next line feed or
+    carriage return), C-style block comments (``/* … */``), and wrapping ``(``
+    characters are stepped over so a query like ``/* audit */ (SELECT 1)``
+    resolves to ``SELECT``. White space and the end of a line comment follow
+    the PostgreSQL SQL scanner (``scan.l``). Returns ``""`` when no alphabetic
+    keyword is found (an empty or punctuation-only statement), which
+    :func:`assert_read_only_sql` treats as a rejection.
+    """
+    return _first_keyword(sql, server_rules=True)
+
+
+def first_significant_keywords(sql: str) -> frozenset[str]:
+    """Return the first keyword of *sql* under two readings.
+
+    One is :func:`first_significant_keyword`. The other ends a line comment
+    only at a line feed and skips any Unicode white space. A guard that
+    checks both refuses every statement that either reading refuses.
+    """
+    return frozenset(
+        {_first_keyword(sql, server_rules=True), _first_keyword(sql, server_rules=False)}
+    )
 
 
 def nested_block_comment_in(sql: str) -> bool:
@@ -194,7 +223,8 @@ def assert_read_only_sql(sql: str) -> None:
     """Raise :class:`PostgresReadOnlyError` unless *sql* begins with a read verb.
 
     The first significant keyword (comments and wrapping parens skipped) must
-    be one of :data:`ALLOWED_FIRST_KEYWORDS`. This is the transport-free half
+    be one of :data:`ALLOWED_FIRST_KEYWORDS`, under both readings of
+    :func:`first_significant_keywords`. This is the transport-free half
     of the double read-only enforcement; the server-side
     ``default_transaction_read_only`` session flag is the backstop for
     anything that begins with an allowed keyword but still tries to mutate
@@ -203,10 +233,10 @@ def assert_read_only_sql(sql: str) -> None:
     first (:func:`assert_no_nested_block_comment`).
     """
     assert_no_nested_block_comment(sql)
-    keyword = first_significant_keyword(sql)
-    if keyword not in ALLOWED_FIRST_KEYWORDS:
+    refused = sorted(first_significant_keywords(sql) - ALLOWED_FIRST_KEYWORDS)
+    if refused:
         allowed = ", ".join(sorted(ALLOWED_FIRST_KEYWORDS))
-        shown = keyword or "(none)"
+        shown = refused[-1] or "(none)"
         raise PostgresReadOnlyError(
             f"postgres connector is read-only: statement begins with {shown!r}, "
             f"which is not an allowed read verb ({allowed}). Rephrase as a "

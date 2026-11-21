@@ -91,7 +91,7 @@ import asyncpg
 from meho_backplane.connectors.postgres.session import (
     PostgresReadOnlyError,
     assert_no_nested_block_comment,
-    first_significant_keyword,
+    first_significant_keywords,
 )
 
 __all__ = [
@@ -342,10 +342,11 @@ def _refuse_show_of_secret_settings(sql: str) -> None:
     Every identifier-like word of a ``SHOW`` statement is checked, so a
     comment, double quotes or upper case do not hide ``all`` or a name. A
     statement with nested block comments is refused first, so the first
-    keyword is the one the server reads.
+    keyword is the one the server reads. The check runs when either reading
+    of :func:`first_significant_keywords` starts with ``SHOW``.
     """
     assert_no_nested_block_comment(sql)
-    if first_significant_keyword(sql) != "SHOW":
+    if "SHOW" not in first_significant_keywords(sql):
         return
     for match in _IDENTIFIER_RE.finditer(sql):
         word = match.group(0).lower()

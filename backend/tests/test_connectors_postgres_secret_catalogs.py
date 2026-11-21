@@ -314,6 +314,8 @@ def _show_spellings(word: str) -> list[str]:
         f'SHOW "{word.upper()}"',
         f"SHOW /* settings */ {word}",
         f"-- settings\nSHOW {word}",
+        f"-- settings\rSHOW {word}",
+        f"-- settings\rSHOW {word} /*\nSELECT */",
         f"/* settings */ SHOW\n\t{word}",
     ]
 
@@ -338,7 +340,7 @@ async def test_run_query_refuses_the_show_before_a_connection_opens(
     monkeypatch: pytest.MonkeyPatch, sql: str
 ) -> None:
     mock, _ = _patch_connection(monkeypatch)
-    with pytest.raises(PostgresReadOnlyError, match=r"postgres\.settings"):
+    with pytest.raises(PostgresReadOnlyError, match=r"postgres\.settings|not an allowed read verb"):
         await PostgresConnector().run_query(_person(), _Target(), {"sql": sql})
     mock.assert_not_awaited()
 

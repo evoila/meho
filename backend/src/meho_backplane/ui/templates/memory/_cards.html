@@ -39,6 +39,8 @@
       DOM nesting -- HTML5 standard form-association
       (https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input#form).
 -#}
+
+{% from "_components.html" import badge %}
 <section
   id="memory-cards"
   aria-label="Memory card grid"
@@ -147,7 +149,7 @@
                   >{{ entry.slug }}</a>
                 </h2>
               </div>
-              <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+              {{ badge(entry.scope, variant="outline", class="shrink-0") }}
             </div>
             {% if entry.countdown %}
               <div
@@ -169,7 +171,7 @@
               <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
                 {% for tag in entry.tags %}
                   <li>
-                    <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                    {{ badge(tag, variant="quiet") }}
                   </li>
                 {% endfor %}
               </ul>
@@ -238,7 +240,7 @@
                     >{{ entry.slug }}</a>
                   </h3>
                 </div>
-                <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+                {{ badge(entry.scope, variant="outline", class="shrink-0") }}
               </div>
               <div
                 class="text-xs"
@@ -250,7 +252,7 @@
                 <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
                   {% for tag in entry.tags %}
                     <li>
-                      <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                      {{ badge(tag, variant="quiet") }}
                     </li>
                   {% endfor %}
                 </ul>

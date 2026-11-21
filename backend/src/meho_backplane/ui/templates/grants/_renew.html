@@ -1,3 +1,4 @@
+{% from "_components.html" import button %}
 {% set values = values | default({}) %}
 <form class="space-y-4 rounded-box border border-warning p-4" hx-post="/ui/grants/service/renew-delete-grants" hx-target="#grants-renew-container" hx-swap="innerHTML" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' hx-confirm="Renew every live delete grant of this service principal with the new expiry?" hx-disabled-elt="find button[type=submit]" aria-labelledby="renew-delete-grants-heading" data-renew-delete-grants>
   <div>
@@ -20,5 +21,5 @@
     <span class="text-sm font-medium">Reason (optional)</span>
     <textarea name="reason" class="textarea textarea-bordered w-full" maxlength="2048" rows="2" placeholder="Leave blank to keep each grant's recorded reason">{{ values.get('reason', '') }}</textarea>
   </label>
-  <div><button type="submit" class="btn btn-warning btn-sm">Renew delete grants</button></div>
+  <div>{{ button("Renew delete grants", variant="warning", type="submit") }}</div>
 </form>

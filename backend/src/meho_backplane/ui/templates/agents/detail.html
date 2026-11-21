@@ -14,6 +14,8 @@
   HTMX wiring: the page-level ``hx-headers`` directive echoes the CSRF
   token for the edit / toggle / delete state-changing requests.
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Agent: {{ agent.name }} &middot; MEHO Operator Console{% endblock %}
@@ -59,7 +61,7 @@
         </p>
         <div class="modal-action">
           <form method="dialog">
-            <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+            {{ button("Cancel", variant="quiet", type="submit") }}
           </form>
           <button
             type="button"

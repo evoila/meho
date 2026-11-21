@@ -15,6 +15,8 @@
     than one target (the unique index normally prevents this). The colliding
     names are listed so the operator disambiguates.
 -#}
+
+{% from "_components.html" import badge %}
 <div
   data-test="refresh-not-found"
   data-target-name="{{ target_name }}"
@@ -37,7 +39,7 @@
       <span class="opacity-70">Did you mean:</span>
       <ul class="mt-1 flex flex-wrap gap-1">
         {% for miss in near_misses %}
-          <li><span class="badge badge-outline badge-sm font-mono">{{ miss.name }}</span></li>
+          <li>{{ badge(miss.name, variant="outline", class="font-mono") }}</li>
         {% endfor %}
       </ul>
     </div>

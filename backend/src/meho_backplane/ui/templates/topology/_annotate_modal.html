@@ -19,6 +19,8 @@
   ``from_kind`` -- the BFF never posts a raw ``from`` JSON key; it builds the
   ``NodeRef`` server-side.
 -#}
+
+{% from "_components.html" import badge %}
 <div
   id="topology-edge-modal"
   class="card bg-base-100 border-base-300 border shadow-md"
@@ -52,7 +54,7 @@
         </p>
         <ul class="mt-1 flex flex-wrap gap-1">
           {% for k in ambiguous_kinds %}
-            <li><span class="badge badge-outline badge-sm font-mono">{{ k }}</span></li>
+            <li>{{ badge(k, variant="outline", class="font-mono") }}</li>
           {% endfor %}
         </ul>
       </div>

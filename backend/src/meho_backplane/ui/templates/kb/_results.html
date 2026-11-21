@@ -28,6 +28,8 @@
     * Empty query: table of slug + kind + indexed_at for browsing.
     * Empty state: friendly empty-state card.
 -#}
+
+{% from "_components.html" import button %}
 <div id="kb-results" class="space-y-3">
   {% if query %}
     {# ---------- Search results ---------- #}
@@ -76,9 +78,7 @@
                 >
                   Preview
                 </button>
-                <a href="/ui/kb/{{ hit.slug }}" class="btn btn-primary btn-xs">
-                  View
-                </a>
+                {{ button("View", variant="primary", size="xs", href="/ui/kb/{{ hit.slug }}") }}
               </div>
             </div>
           </li>

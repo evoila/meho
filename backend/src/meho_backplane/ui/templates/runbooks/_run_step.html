@@ -35,6 +35,8 @@
   ``csrf_token``; the handler refreshes the matching ``meho_csrf`` cookie on
   the same response (the #1693 desync footgun).
 -#}
+
+{% from "_components.html" import badge, button %}
 <div id="runbook-run-step" class="space-y-4">
 
   {#- Inline alert: not-the-assignee / reassigned-away, empty-reason guard,
@@ -127,13 +129,13 @@
           <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
           {% if verify.type == "confirm" %}
             <p class="text-sm">
-              <span class="badge badge-sm badge-outline mr-1">confirm</span>
+              {{ badge("confirm", variant="outline", class="mr-1") }}
               {{ verify.prompt }}
             </p>
           {% else %}
             <div class="space-y-1 text-sm">
               <p>
-                <span class="badge badge-sm badge-outline mr-1">operation_call</span>
+                {{ badge("operation_call", variant="outline", class="mr-1") }}
                 <code class="font-mono">{{ verify.op_id }}</code>
               </p>
               {% if verify.params %}
@@ -205,7 +207,7 @@
                 <option value="escalate">Escalate — fail and flag</option>
               </select>
             </label>
-            <button type="submit" class="btn btn-primary btn-sm">Advance</button>
+            {{ button("Advance", variant="primary", type="submit") }}
           </form>
         {% else %}
           <form
@@ -216,9 +218,7 @@
             hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
           >
             <input type="hidden" name="verify_type" value="operation_call" />
-            <button type="submit" class="btn btn-primary btn-sm">
-              Advance (run verify)
-            </button>
+            {{ button("Advance (run verify)", variant="primary", type="submit") }}
           </form>
         {% endif %}
       {% endif %}
@@ -249,7 +249,7 @@
               </select>
             </label>
           {% endif %}
-          <button type="submit" class="btn btn-primary btn-sm">Try this step again</button>
+          {{ button("Try this step again", variant="primary", type="submit") }}
         </form>
       {% endif %}
 
@@ -317,7 +317,7 @@
             >
               Cancel
             </button>
-            <button type="submit" class="btn btn-error btn-sm">Abort run</button>
+            {{ button("Abort run", variant="danger", type="submit") }}
           </div>
         </form>
       </div>
@@ -363,7 +363,7 @@
               >
                 Cancel
               </button>
-              <button type="submit" class="btn btn-primary btn-sm">Reassign</button>
+              {{ button("Reassign", variant="primary", type="submit") }}
             </div>
           </form>
         </div>

@@ -46,6 +46,7 @@
     previewable      -- bool: True for an HTTP-ingested or destructive op
     csrf_token       -- str: minted double-submit token for the preview POST
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <dialog id="operations-drawer" class="modal" aria-label="Operation detail">
   <div class="modal-box max-w-2xl">
@@ -88,16 +89,16 @@
       <div class="flex flex-wrap items-center gap-2">
         {% set safety = descriptor.safety_level %}
         {% if safety == "destructive" %}
-          <span class="badge badge-error badge-sm" title="Destructive — deletes something that cannot be undone">{{ safety }}</span>
+          {{ badge(safety, variant="error", title="Destructive — deletes something that cannot be undone") }}
         {% elif safety == "dangerous" %}
-          <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
+          {{ badge(safety, variant="error", title="Dangerous — irreversible or high-impact") }}
         {% elif safety == "caution" %}
-          <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ safety }}</span>
+          {{ badge(safety, variant="warning", title="Caution — state-changing") }}
         {% else %}
-          <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ safety }}</span>
+          {{ badge(safety, variant="quiet", title="Safe — read or non-impacting") }}
         {% endif %}
         {% if descriptor.requires_approval %}
-          <span class="badge badge-outline badge-sm" title="Requires approval">requires approval</span>
+          {{ badge("requires approval", variant="outline", title="Requires approval") }}
         {% endif %}
         {% if descriptor.group_key %}
           <span class="badge badge-ghost badge-sm">group: {{ descriptor.group_key }}</span>
@@ -183,7 +184,7 @@
             <button type="submit" class="btn btn-outline btn-sm gap-1" data-action="preview">
               {{ icon("search", class="size-4") }}
               Preview request
-              <span class="badge badge-ghost badge-xs">no dispatch</span>
+              {{ badge("no dispatch", variant="quiet", size="xs") }}
             </button>
           </form>
           {#- Swap target for the rendered preview fragment. Empty until the

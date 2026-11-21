@@ -18,6 +18,7 @@
   incurs provider cost -- the form surfaces the agent's turn budget so the
   operator sees the cost ceiling before pressing Run.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <div id="agent-run-console" class="space-y-4">
   <nav class="text-sm" aria-label="Breadcrumb">
@@ -88,7 +89,7 @@
 
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span class="text-xs opacity-70" aria-live="polite">
-          Turn budget: <span class="badge badge-outline badge-sm font-mono">{{ turn_budget }}</span>
+          Turn budget: {{ badge(turn_budget, variant="outline", class="font-mono") }}
           &mdash; the maximum model turns this run may take.
         </span>
         <button

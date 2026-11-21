@@ -45,6 +45,7 @@
     chain         -- dict | None: {work_ref, step, total} when the parked
                      request is step k of N in its change ticket (#3596)
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "vault/_envelope_error.html" import vault_envelope_error %}
 
@@ -161,7 +162,7 @@
         these three keys; the value never reaches this template. -#}
     <div class="space-y-2" data-vault-write-status="ok" data-vault-move-result>
       <div class="flex items-center gap-2">
-        <span class="badge badge-success badge-sm">moved</span>
+        {{ badge("moved", variant="success") }}
       </div>
       <dl class="space-y-1 text-xs">
         <div class="flex gap-2">
@@ -187,7 +188,7 @@
         success; the put response carries no secret value. -#}
     <div class="space-y-2" data-vault-write-status="ok">
       <div class="flex items-center gap-2">
-        <span class="badge badge-success badge-sm">executed</span>
+        {{ badge("executed", variant="success") }}
         {% if envelope.get("duration_ms") is not none %}
           <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
         {% endif %}

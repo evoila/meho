@@ -25,6 +25,8 @@
   ``is_fragment`` is false so the OOB head is not double-emitted. A
   full-page load and the last swap therefore agree on the head markup.
 -#}
+
+{% from "_components.html" import badge %}
 {% if is_fragment %}
   {% with oob = true %}{% include "topology/_table_head.html" %}{% endwith %}
 {% endif %}
@@ -61,7 +63,7 @@
           <span class="font-mono text-sm">{{ node.name }}</span>
         </td>
         <td>
-          <span class="badge badge-ghost badge-sm">{{ node.kind }}</span>
+          {{ badge(node.kind, variant="quiet") }}
         </td>
         <td>
           {% if node.last_seen %}

@@ -1,3 +1,4 @@
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 {% from "_references.html" import subject %}
 {% macro page_url(service, agent) -%}
@@ -65,7 +66,7 @@
               <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
               {% if can_write %}
-                <td class="text-right"><form hx-post="/ui/grants/service/{{ grant.id }}/revoke" hx-confirm="Revoke this service-principal grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
+                <td class="text-right"><form hx-post="/ui/grants/service/{{ grant.id }}/revoke" hx-confirm="Revoke this service-principal grant?">{{ button("Revoke", variant="danger", size="xs", type="submit") }}</form></td>
               {% endif %}
             </tr>
           {% else %}
@@ -111,7 +112,7 @@
                 <td><span class="badge badge-sm badge-outline">{{ grant.effect }}</span></td>
                 <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
                 <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
-                <td class="text-right"><form hx-post="/ui/grants/agent/{{ grant.id }}/revoke" hx-confirm="Revoke this agent grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
+                <td class="text-right"><form hx-post="/ui/grants/agent/{{ grant.id }}/revoke" hx-confirm="Revoke this agent grant?">{{ button("Revoke", variant="danger", size="xs", type="submit") }}</form></td>
               </tr>
             {% else %}
               <tr><td colspan="7" class="py-8 text-center opacity-70">No agent grants match this filter.</td></tr>

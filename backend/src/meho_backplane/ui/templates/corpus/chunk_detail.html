@@ -40,6 +40,8 @@
     * ``read_handle`` / ``read_action`` / ``csrf_token`` -- the "Show more"
       form's handle, target and double-submit token (read POST only).
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Cited source &middot; {{ collection.collection_key }} &middot; MEHO Operator Console{% endblock %}
@@ -113,7 +115,7 @@
               <input type="hidden" name="read_handle" value="{{ read_handle }}">
               <input type="hidden" name="cursor" value="{{ read.next }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="btn btn-ghost btn-xs px-1">Show more</button>
+              {{ button("Show more", variant="quiet", size="xs", class="px-1", type="submit") }}
             </form>
           {% endif %}
         {% endif %}

@@ -21,6 +21,7 @@
   Context: ``error`` (str|None), ``envelope`` (dict|None), ``mount``,
   ``path``, ``target``.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "vault/_envelope_error.html" import vault_envelope_error %}
 
@@ -61,7 +62,7 @@
                 <td class="font-mono">
                   {{ vnum }}
                   {% if current is not none and vnum | string == current | string %}
-                    <span class="badge badge-primary badge-xs ml-1">current</span>
+                    {{ badge("current", variant="primary", size="xs", class="ml-1") }}
                   {% endif %}
                 </td>
                 <td class="font-mono text-xs opacity-70">{{ meta.get("created_time") or "—" }}</td>

@@ -9,6 +9,8 @@
   error message in the standard chrome so the operator stays in the
   topology surface rather than bouncing to a global error page.
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
@@ -22,9 +24,7 @@
         The requested overlay anchor could not be resolved.
       </p>
     </div>
-    <a class="btn btn-sm btn-ghost" href="/ui/topology?view=graph">
-      Back to full graph
-    </a>
+    {{ button("Back to full graph", variant="quiet", href="/ui/topology?view=graph") }}
   </header>
 
   <div

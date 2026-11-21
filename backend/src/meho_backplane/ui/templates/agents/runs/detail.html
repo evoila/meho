@@ -17,6 +17,8 @@
   tool result and the final answer or error, in order. A run that stopped
   without a final event shows "unfinished" and its last saved event.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Agent run &middot; MEHO Operator Console{% endblock %}
@@ -40,7 +42,7 @@
       {% if run.agent_name %}
         {# The producing agent's back-link (#2472); absent for an ad-hoc run
            or a definition deleted after the run. #}
-        <span class="badge badge-outline badge-sm">{{ run.agent_name }}</span>
+        {{ badge(run.agent_name, variant="outline") }}
       {% endif %}
     </h1>
   </header>

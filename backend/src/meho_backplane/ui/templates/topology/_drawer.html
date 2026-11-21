@@ -31,6 +31,8 @@
     * The server-side ``tenant_admin`` gate on those routes is the
       authority; the soft-hidden button is UX only.
 -#}
+
+{% from "_components.html" import badge %}
 {#-
   Per-curated-edge Remove control. Confirm-gated via ``hx-confirm`` (the
   destructive-removal confirm the issue requires: unannotate is a hard
@@ -65,7 +67,7 @@
     <header class="flex items-start justify-between gap-2">
       <div>
         <h2 class="card-title text-base">
-          <span class="badge badge-ghost badge-sm">{{ node.kind }}</span>
+          {{ badge(node.kind, variant="quiet") }}
           <span class="font-mono">{{ node.name }}</span>
         </h2>
         <p class="text-xs opacity-70">Node detail</p>
@@ -201,10 +203,10 @@
         <ul class="space-y-1 text-sm">
           {% for edge in outgoing_edges %}
             <li id="topology-edge-row-{{ edge.id }}" class="flex items-center gap-2">
-              <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
+              {{ badge(edge.kind, variant="outline", size="xs") }}
               <span class="opacity-60">&rarr;</span>
               <span class="font-mono">{{ edge.to_endpoint.name }}</span>
-              <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
+              {{ badge(edge.to_endpoint.kind, variant="quiet", size="xs") }}
               <span class="text-xs opacity-50">({{ edge.source }})</span>
               {% if is_tenant_admin and edge.source == "curated" %}
                 {{ _edge_remove_control(edge, csrf_token) }}
@@ -227,9 +229,9 @@
           {% for edge in incoming_edges %}
             <li id="topology-edge-row-{{ edge.id }}" class="flex items-center gap-2">
               <span class="font-mono">{{ edge.from_endpoint.name }}</span>
-              <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
+              {{ badge(edge.from_endpoint.kind, variant="quiet", size="xs") }}
               <span class="opacity-60">&rarr;</span>
-              <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
+              {{ badge(edge.kind, variant="outline", size="xs") }}
               <span class="text-xs opacity-50">({{ edge.source }})</span>
               {% if is_tenant_admin and edge.source == "curated" %}
                 {{ _edge_remove_control(edge, csrf_token) }}
@@ -254,7 +256,7 @@
               <time class="text-xs opacity-70" datetime="{{ op.occurred_at.isoformat() }}">
                 {{ op.occurred_at.isoformat() }}
               </time>
-              <span class="badge badge-outline badge-xs">{{ op.method }}</span>
+              {{ badge(op.method, variant="outline", size="xs") }}
               <span class="font-mono text-xs">{{ op.path }}</span>
               <span class="text-xs opacity-50">{{ op.status_code }}</span>
             </li>

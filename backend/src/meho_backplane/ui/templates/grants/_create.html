@@ -1,3 +1,4 @@
+{% from "_components.html" import button %}
 {% set values = values | default({}) %}
 {% set errors = errors | default({}) %}
 {%- macro error_for(field) -%}
@@ -75,7 +76,7 @@
         {{ error_for('expires_at') }}
         <span class="block text-xs opacity-60">Leave blank for a standing grant. Use a future ISO-8601 timestamp with its UTC offset.</span>
       </label>
-      <div class="modal-action"><button type="button" class="btn btn-ghost" onclick="document.getElementById('grants-create-modal').close()">Cancel</button><button type="submit" class="btn btn-primary">Issue grant</button></div>
+      <div class="modal-action"><button type="button" class="btn btn-ghost" onclick="document.getElementById('grants-create-modal').close()">Cancel</button>{{ button("Issue grant", variant="primary", size="md", type="submit") }}</div>
     </form>
   </div>
   <form method="dialog" class="modal-backdrop"><button>Close</button></form>

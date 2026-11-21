@@ -34,6 +34,8 @@
   would 403 the start POST (``value_mismatch``). On the typed-error
   re-render the token is re-minted + cookie refreshed so the retry matches.
 -#}
+
+{% from "_components.html" import button %}
 <dialog id="runbook-run-start-modal" class="modal">
   <div class="modal-box max-w-2xl">
     <h3 class="font-semibold text-lg" id="runbook-run-start-modal-title">Start a run</h3>
@@ -174,9 +176,7 @@
         >
           Cancel
         </button>
-        <button type="submit" class="btn btn-sm btn-primary">
-          Start run
-        </button>
+        {{ button("Start run", variant="primary", type="submit") }}
       </div>
     </form>
   </div>

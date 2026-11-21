@@ -33,6 +33,8 @@
     * ``content`` — overrides the base.html main pane.
     * ``scripts`` — no extra JS (Alpine is loaded by base.html vendor).
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Upload · Knowledge &middot; MEHO Operator Console{% endblock %}
@@ -57,9 +59,7 @@
       </p>
     </div>
     <div>
-      <a href="/ui/kb" class="btn btn-ghost btn-sm">
-        View all entries
-      </a>
+      {{ button("View all entries", variant="quiet", href="/ui/kb") }}
     </div>
   </header>
 

@@ -681,6 +681,47 @@ def test_every_change_to_an_answer_is_a_secret_value_replaced_by_the_mark() -> N
     assert wrong == {}
 
 
+#: (form, value): each form with ``{}`` where the value stands, at the end.
+#: A single-quoted value is hidden with its quotes. ``--password=`` is left
+#: out: the api_key rule hides that value and what follows it, as on main.
+_LINE_END_FORMS: Final = (
+    *(
+        (form.split("{}")[0] + "{}", PW)
+        for form in _QUOTE_FORMS
+        if not form.startswith("run --password=")
+    ),
+    ("run --password {}", "'" + PW + "'"),
+)
+#: What follows the value in the line: a line end and more words, a line end
+#: at the end of the JSON string, a tab and a word, a carriage return and a
+#: line end, and two line ends. In a JSON string each is an escape.
+_LINE_END_TAILS: Final = ("\nnext line", "\n", "\tnext", "\r\nnext line", "\n\nnext line")
+#: (line, its secret value, JSON levels): inside a JSON string an escaped line
+#: end or tab ends the value, so the words after it stay as on main.
+_LINE_ENDS_IN_JSON: Final[list[tuple[str, str, int]]] = [
+    (form.format(value) + tail, value, levels)
+    for form, value in _LINE_END_FORMS
+    for tail in _LINE_END_TAILS
+    for levels in (1, 2)
+] + [
+    ('echo "{\\"msg\\": \\"run --password ' + PW + tail + 'more\\"}" | app', PW, levels)
+    for tail in ("\\n", "\\t", "\\r\\n")
+    for levels in (0, 1, 2)
+]
+
+
+@pytest.mark.parametrize(("line", "secret", "levels"), _LINE_ENDS_IN_JSON)
+def test_an_escaped_line_end_or_tab_in_a_json_string_ends_the_value(
+    line: str, secret: str, levels: int
+) -> None:
+    text = _in_json(line, levels)
+    value = _as_json(secret, levels)
+    for policy in (get_default_policy(), _content_policy()):
+        assert _changes_besides(text, (value,), policy) == []
+        on_main = redact(text, _without_command_rule(policy)).redacted
+        assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
+
+
 #: A Windows path in quotes: ``\\u`` there is no Unicode escape.
 _WINDOWS_PATH: Final = 'copy "C:\\users\\public\\file.txt" backup'
 

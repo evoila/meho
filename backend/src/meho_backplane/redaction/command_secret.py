@@ -36,9 +36,11 @@ escaped double quote belongs to the value, as in a shell word. Only
 inside a JSON string or a double-quoted command does a run of
 backslashes that a double quote follows end the value, before the
 backslashes: in a JSON string inside a JSON string that is the escaped
-closing quote. A form that stands in a quoted command or in a JSON
-string, also a double-quoted string inside a single-quoted command, ends
-at the closing quote of that string, so a JSON log line still parses.
+closing quote. There an escaped line end or tab (backslashes before
+``n``, ``r`` or ``t``) also ends the value, before the backslashes. A
+form that stands in a quoted command or in a JSON string, also a
+double-quoted string inside a single-quoted command, ends at the closing
+quote of that string, so a JSON log line still parses.
 
 A value that an earlier step hid already stays: a ``[REDACTED...]`` mark,
 an older mark (``***REDACTED***``, ``<redacted>``) or only the characters a
@@ -128,7 +130,8 @@ def _value_end(text: str, start: int, size: int | None = None, *, in_string: boo
     that is quoted inside a longer command (``sh -c "mysql -px"``).
     *in_string* is true when the word stands inside a double-quoted string
     (a JSON string or a quoted command). Only there does ``\\"`` end the
-    word; in plain text it is an escaped quote and part of the word.
+    word, and so do ``\\n``, ``\\r`` and ``\\t`` (an escaped line end or
+    tab); in plain text they are escaped characters and part of the word.
     """
     size = len(text) if size is None else size
     pos = start
@@ -141,8 +144,9 @@ def _value_end(text: str, start: int, size: int | None = None, *, in_string: boo
         if char == "\\":
             run = _BACKSLASHES.match(text, pos, size)
             run_end = size if run is None else run.end()
-            if in_string and run_end < size and text[run_end] == '"':
-                # ``\"`` closes a JSON string inside a JSON string.
+            if in_string and run_end < size and text[run_end] in '"nrt':
+                # ``\"`` closes a JSON string inside a JSON string; ``\n``,
+                # ``\r`` and ``\t`` are a line end or a tab in a JSON string.
                 return pos
             # Pairs are plain backslashes; an odd one takes the next character.
             pos = min(run_end + (run_end - pos) % 2, size)

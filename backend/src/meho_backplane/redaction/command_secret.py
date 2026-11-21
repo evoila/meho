@@ -31,11 +31,14 @@ at an operator (``; | & < > ( )``) that is not quoted or escaped. Quoted
 parts, escaped characters and several parts joined together are one
 value. A closing quote counts only on the line of the opening quote. A
 quote that is never closed is a plain character inside a value; a value
-that starts with one runs to the end of its line. A run of backslashes
-that a double quote follows ends the value before the backslashes: in a
-JSON string inside a JSON string that is the escaped closing quote. A
-form that stands in a quoted command or in a JSON string ends at the
-closing quote of that string, so a JSON log line still parses.
+that starts with one runs to the end of its line. In plain text an
+escaped double quote belongs to the value, as in a shell word. Only
+inside a JSON string or a double-quoted command does a run of
+backslashes that a double quote follows end the value, before the
+backslashes: in a JSON string inside a JSON string that is the escaped
+closing quote. A form that stands in a quoted command or in a JSON
+string, also a double-quoted string inside a single-quoted command, ends
+at the closing quote of that string, so a JSON log line still parses.
 
 A value that an earlier step hid already stays: a ``[REDACTED...]`` mark,
 an older mark (``***REDACTED***``, ``<redacted>``) or only the characters a
@@ -195,9 +198,25 @@ def _after(
 
 # -- the quoted command a form stands in ------------------------------------------
 
-_OUTSIDE_MARK: Final = re.compile(r"""['"\\\n]""")
-_IN_SINGLE_MARK: Final = re.compile(r"['\n]")
-_IN_DOUBLE_MARK: Final = re.compile(r'["\\\n]')
+#: The states of :class:`_OuterQuotes`: outside, in a single-quoted string,
+#: in a double-quoted string, and in a double-quoted string inside a
+#: single-quoted one.
+_SINGLE_DOUBLE: Final = "'\""
+_MARKS: Final[dict[str, re.Pattern[str]]] = {
+    "": re.compile(r"""['"\\\n]"""),
+    "'": re.compile(r"""['"\n]"""),
+    '"': re.compile(r'["\\\n]'),
+    _SINGLE_DOUBLE: re.compile(r"""['"\\\n]"""),
+}
+#: The state after a quote mark; a line end, and every pair not listed, ends all strings.
+_NEXT_STATE: Final[dict[tuple[str, str], str]] = {
+    ("", "'"): "'",
+    ("", '"'): '"',
+    ("'", '"'): _SINGLE_DOUBLE,
+    (_SINGLE_DOUBLE, '"'): "'",
+}
+#: A quote mark or a backslash, read inside a double-quoted string.
+_QUOTE_OR_ESCAPE: Final = re.compile(r"""['"\\]""")
 
 
 class _OuterQuotes:
@@ -220,6 +239,8 @@ class _OuterQuotes:
         self._quote = ""
         self._close: int | None = None
         self._line_end = -1
+        self._single = -1
+        self._single_line = -1
 
     def _end_of_line(self, index: int) -> int:
         if self._line_end < index:
@@ -227,11 +248,21 @@ class _OuterQuotes:
             self._line_end = len(self._text) if line_end == -1 else line_end
         return self._line_end
 
+    def _next_single(self, index: int, line_end: int) -> int:
+        """The first single quote from *index* on its line, or ``-1``.
+
+        The answer is kept while it lies ahead, so several inner strings of
+        one single-quoted string do not read its rest again.
+        """
+        if self._single_line != line_end or -1 < self._single < index:
+            self._single = self._text.find("'", index, line_end)
+            self._single_line = line_end
+        return self._single
+
     def _advance(self, index: int) -> None:
         text = self._text
         while self._pos < index:
-            pattern = {"": _OUTSIDE_MARK, "'": _IN_SINGLE_MARK}.get(self._quote, _IN_DOUBLE_MARK)
-            mark = pattern.search(text, self._pos, index)
+            mark = _MARKS[self._quote].search(text, self._pos, index)
             if mark is None:
                 self._pos = index
                 return
@@ -240,7 +271,7 @@ class _OuterQuotes:
                 self._pos = mark.start() + 2
                 continue
             self._pos = mark.end()
-            self._quote = "" if char == "\n" or self._quote else char
+            self._quote = _NEXT_STATE.get((self._quote, char), "")
             self._close = None
 
     def end(self, index: int) -> int | None:
@@ -251,16 +282,39 @@ class _OuterQuotes:
         if self._close is None:
             text = self._text
             line_end = self._end_of_line(index)
-            if self._quote == "'":
-                self._close = text.find("'", index, line_end)
-            else:
+            close = -1
+            if self._quote == _SINGLE_DOUBLE:
+                close = _closes_inner(text, index, line_end)
+            if close == -1 and self._quote != '"':
+                close = _closing(text, self._next_single(index, line_end))
+            elif close == -1:
                 after = _skip_double_quoted(text, index - 1, line_end)
-                self._close = after - 1 if after > 0 else -1
-            if self._close >= 0 and not _ends_string(text, self._close + 1):
-                # A quote with a word right behind it opens a quoted value
-                # (``don't --password 'a b'``): it does not close a string.
-                self._close = -1
+                close = _closing(text, after - 1 if after > 0 else -1)
+            self._close = close
         return self._close if self._close >= 0 else None
+
+
+def _closing(text: str, close: int) -> int:
+    """*close*, or ``-1`` when it is missing or a word stands right behind it.
+
+    A quote with a word right behind it opens a quoted value (``don't
+    --password 'a b'``): it does not close a string.
+    """
+    return close if close >= 0 and _ends_string(text, close + 1) else -1
+
+
+def _closes_inner(text: str, index: int, line_end: int) -> int:
+    """The double quote that closes a double-quoted string inside a single-quoted one.
+
+    A single quote before it ends both strings, so then there is none (``-1``).
+    """
+    pos = index
+    while (mark := _QUOTE_OR_ESCAPE.search(text, pos, line_end)) is not None:
+        if mark.group(0) == "\\":
+            pos = mark.start() + 2
+            continue
+        return _closing(text, mark.start()) if mark.group(0) == '"' else -1
+    return -1
 
 
 # -- long options -------------------------------------------------------------
@@ -465,8 +519,11 @@ def _tool_spans(text: str) -> list[tuple[int, int]]:
         first, size = match.end(), len(text) if close is None else close
         in_string = _in_double_quotes(text, close)
         if close is not None and _is_quoted_executable(text, match, close):
-            # The arguments follow the closing quote of the tool name.
-            first, size, in_string = close + 1, len(text), False
+            # The arguments follow the closing quote of the tool name, up to
+            # the closing quote of a single-quoted command around it.
+            outer = quotes.end(close + 1)
+            first, size = close + 1, len(text) if outer is None else outer
+            in_string = _in_double_quotes(text, outer)
         found, pos = _segment_spans(text, first, tool, size, in_string)
         spans.extend(found)
         pos = max(pos, match.end())

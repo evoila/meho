@@ -573,10 +573,23 @@ _ESCAPED_QUOTES: Final[list[tuple[str, str]]] = [
 ]
 #: A JSON log line with a mask of bullets after ``--token``, written as JSON escapes.
 _MASK_IN_JSON: Final = json.dumps({"msg": "run --token \u2022\u2022\u2022\u2022 x"})
+#: A double-quoted string inside a single-quoted command or string: the
+#: value ends at its closing double quote, and the words after it stay. An
+#: apostrophe in log text also opens a single-quoted string.
+_INNER_DOUBLE: Final[list[tuple[str, str]]] = [
+    ("bash -c 'echo \"DB_PASS=" + PW + '" > /tmp/env && echo "done"\'', PW),
+    ("sh -c 'run \"--db-pass=" + PW + '" "--target" "s3"\'', PW),
+    ('app --data \'{"args": "--token ' + PW + '", "mode": "fast"}\'', PW),
+    ("it's starting: sh -c \"mysql -p" + PW + '" --label "nightly" --owner "ops"', PW),
+]
+#: A quoted tool name inside a single-quoted command: its options end at the
+#: closing quote of that command.
+_QUOTED_TOOL_IN_SINGLE: Final = 'bash -c \'"mysql" -p' + PW + ' db\' && echo "ok"'
 #: Lines of :data:`_SECRETS_OF` that are read in plain text only. In a JSON
 #: string a quoted value starts with an escaped quote, and that ends the value.
 _PLAIN_TEXT_ONLY: Final = {
     _MASK_IN_JSON,
+    _QUOTED_TOOL_IN_SINGLE,
     *(line for line, _secret in _QUOTED_LOGINS),
     *(line for line, _secret in _ESCAPED_QUOTES),
 }
@@ -600,6 +613,8 @@ _SECRETS_OF: Final[list[tuple[str, tuple[str, ...]]]] = [
     (_MASK_IN_JSON, ()),
     *((line, (secret,)) for line, secret in _QUOTED_LOGINS),
     *((line, (secret,)) for line, secret in _ESCAPED_QUOTES),
+    *((line, (secret,)) for line, secret in _INNER_DOUBLE),
+    (_QUOTED_TOOL_IN_SINGLE, (PW,)),
     ("run --password=ab12cd next", ("ab12cd",)),
     ("DB_PASSWORD=ab12cd next", ("ab12cd",)),
     ("run --password=ab12cd; echo ok", ()),

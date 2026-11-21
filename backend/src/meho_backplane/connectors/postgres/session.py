@@ -57,9 +57,11 @@ __all__ = [
     "DEFAULT_STATEMENT_TIMEOUT_MS",
     "DEFAULT_TRUST_USER",
     "PostgresReadOnlyError",
+    "assert_no_nested_block_comment",
     "assert_read_only_sql",
     "connect_read_only",
     "first_significant_keyword",
+    "nested_block_comment_in",
 ]
 
 #: The wire-protocol default port (PostgreSQL frontend/backend protocol v3).
@@ -153,6 +155,41 @@ def first_significant_keyword(sql: str) -> str:
     return match.group(0).upper() if match else ""
 
 
+def nested_block_comment_in(sql: str) -> bool:
+    """Return ``True`` when a block comment in *sql* holds the start of another.
+
+    PostgreSQL nests block comments, so such a comment ends later than a plain
+    reading of ``/* … */`` sees. Each ``/*`` is matched with the next ``*/``,
+    as :func:`first_significant_keyword` reads it, and a ``/*`` between them
+    counts. The scan does not skip quoted text or line comments, so it can
+    find a hit where the server sees none; that only gives a clear refusal.
+    """
+    i = sql.find("/*")
+    while i != -1:
+        end = sql.find("*/", i + 2)
+        stop = len(sql) if end == -1 else end + 1
+        if sql.find("/*", i + 2, stop) != -1:
+            return True
+        if end == -1:
+            return False
+        i = sql.find("/*", end + 2)
+    return False
+
+
+def assert_no_nested_block_comment(sql: str) -> None:
+    """Raise :class:`PostgresReadOnlyError` when *sql* nests block comments.
+
+    With no nested block comment, :func:`first_significant_keyword` reads the
+    same first keyword as the server.
+    """
+    if nested_block_comment_in(sql):
+        raise PostgresReadOnlyError(
+            "postgres.query refuses a statement in which a block comment holds "
+            "the start of another block comment (/* inside /* ... */). Close "
+            "each comment before the next one starts."
+        )
+
+
 def assert_read_only_sql(sql: str) -> None:
     """Raise :class:`PostgresReadOnlyError` unless *sql* begins with a read verb.
 
@@ -161,8 +198,11 @@ def assert_read_only_sql(sql: str) -> None:
     of the double read-only enforcement; the server-side
     ``default_transaction_read_only`` session flag is the backstop for
     anything that begins with an allowed keyword but still tries to mutate
-    (a data-modifying CTE, ``EXPLAIN ANALYZE <write>``).
+    (a data-modifying CTE, ``EXPLAIN ANALYZE <write>``). A statement in
+    which a block comment holds the start of another block comment is refused
+    first (:func:`assert_no_nested_block_comment`).
     """
+    assert_no_nested_block_comment(sql)
     keyword = first_significant_keyword(sql)
     if keyword not in ALLOWED_FIRST_KEYWORDS:
         allowed = ", ".join(sorted(ALLOWED_FIRST_KEYWORDS))

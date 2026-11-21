@@ -45,6 +45,7 @@ from meho_backplane.connectors.postgres.ops import (
 from meho_backplane.connectors.postgres.query_guard import (
     PostgresSuperuserError,
     assert_no_admin_functions,
+    assert_no_secret_catalogs,
     assert_not_superuser,
 )
 from meho_backplane.connectors.postgres.session import (
@@ -115,6 +116,7 @@ __all__ = [
     "PostgresReadOnlyError",
     "PostgresSuperuserError",
     "assert_no_admin_functions",
+    "assert_no_secret_catalogs",
     "assert_not_superuser",
     "assert_read_only_sql",
     "register_postgres_typed_operations",

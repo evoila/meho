@@ -63,6 +63,7 @@ from meho_backplane.connectors.postgres.session import (
     DEFAULT_TRUST_USER,
     connect_read_only,
     first_significant_keyword,
+    nested_block_comment_in,
 )
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -446,6 +447,59 @@ async def test_run_query_rejects_write_without_opening_connection(
     with pytest.raises(PostgresReadOnlyError):
         await connector.run_query(_make_operator(), _PgTarget(), {"sql": "DELETE FROM t"})
     mock.assert_not_awaited()
+
+
+def _nested_comment_statements(word: str) -> list[str]:
+    """Statements in which a block comment holds the start of another one."""
+    return [
+        f"/* a /* b */ {word} */ SELECT 1",
+        f"/* a /* b */ SELECT */ {word} 1",
+        f"/* a /* b /* c */ */ VALUES */ {word} 1",
+        f"/* a /*/ {word} 1",
+        f"{word} 1 /* a /* b */ */",
+        f"{word} 1 /* unclosed /* nested",
+    ]
+
+
+_NESTED_COMMENT_CASES = [
+    pytest.param(sql, id=f"{word}-{i}")
+    for word in [*sorted(ALLOWED_FIRST_KEYWORDS), "DELETE", "INSERT"]
+    for i, sql in enumerate(_nested_comment_statements(word))
+]
+
+
+@pytest.mark.parametrize("sql", _NESTED_COMMENT_CASES)
+def test_read_only_gate_refuses_a_block_comment_inside_a_block_comment(sql: str) -> None:
+    """A block comment that holds the start of another one is refused for each first word."""
+    assert nested_block_comment_in(sql)
+    with pytest.raises(PostgresReadOnlyError, match="block comment holds the start"):
+        assert_read_only_sql(sql)
+
+
+@pytest.mark.parametrize("sql", _NESTED_COMMENT_CASES)
+@pytest.mark.asyncio
+async def test_run_query_refuses_nested_block_comments_before_a_connection_opens(
+    monkeypatch: pytest.MonkeyPatch, sql: str
+) -> None:
+    mock = _patch_connection(monkeypatch, _FakeConn())
+    with pytest.raises(PostgresReadOnlyError, match="block comment holds the start"):
+        await PostgresConnector().run_query(_make_operator(), _PgTarget(), {"sql": sql})
+    mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "/* a */ /* b */ SELECT 1",
+        "/**/ SELECT 1",
+        "SELECT 1 /* unclosed",
+        "SELECT '*/' AS t",
+        "-- /* line comment\nSELECT 1",
+    ],
+)
+def test_comments_that_do_not_nest_pass_the_gate(sql: str) -> None:
+    assert not nested_block_comment_in(sql)
+    assert_read_only_sql(sql)
 
 
 # ---------------------------------------------------------------------------

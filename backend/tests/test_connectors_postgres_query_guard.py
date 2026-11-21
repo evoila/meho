@@ -202,6 +202,18 @@ def test_denied_function_is_found_in_any_spelling(sql: str, name: str) -> None:
             "SELECT * FROM connectby('t', 'id', 'parent', '1', 0) AS c(id int, p int, l int)",
             "connectby",
         ),
+        # A table or schema chosen by a value the statement builds from
+        # pieces, which the word scan cannot see.
+        ("SELECT table_to_xml('orders', true, false, '')", "table_to_xml"),
+        ("SELECT table_to_xmlschema('orders', true, false, '')", "table_to_xmlschema"),
+        (
+            "SELECT TABLE_TO_XML_AND_XMLSCHEMA('orders', true, false, '')",
+            "table_to_xml_and_xmlschema",
+        ),
+        ("SELECT schema_to_xml('public', true, false, '')", "schema_to_xml"),
+        ("SELECT pg_catalog.schema_to_xmlschema('public', true, false, '')", "schema_to_xmlschema"),
+        ("SELECT database_to_xml(true, false, '')", "database_to_xml"),
+        ("SELECT database_to_xml_and_xmlschema(true, false, '')", "database_to_xml_and_xmlschema"),
     ],
 )
 def test_sql_running_function_is_refused(sql: str, name: str) -> None:
@@ -242,8 +254,6 @@ def test_unicode_escaped_identifier_is_refused(sql: str) -> None:
         "SELECT pg_database_size('postgres')",
         "SHOW statement_timeout",
         "EXPLAIN SELECT * FROM orders",
-        # Takes a table name, not SQL text; shares a stem with query_to_xml.
-        "SELECT table_to_xml('orders', true, false, '')",
         "SELECT to_tsvector('english', 'a fat cat'), ts_headline('a fat cat', 'cat'::tsquery)",
     ],
 )

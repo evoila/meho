@@ -354,7 +354,8 @@ questions, `meaning` and `exact`. Each has the count of expected pages in
 the top 3, the share found in the top 10, and MRR (the mean of 1 divided
 by the real place, also after place 10, and 0 when not found). Then the
 count per `wiki.reason`, the count of `partial` answers and the count of
-failed calls. A failed call is never counted as a miss.
+failed calls. A failed call is never counted as a miss: the three summary
+lines leave it out, and only the failed-call line counts it.
 
 **Report.** `--report` writes Markdown: the summary lines, a table with id,
 kind, result, place and reason, the knowledge search switch values from

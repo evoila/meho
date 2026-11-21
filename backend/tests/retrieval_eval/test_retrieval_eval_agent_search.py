@@ -221,6 +221,20 @@ def test_failed_call_is_an_error_not_a_miss(
     assert TOKEN not in out.out + out.err
 
 
+def test_failed_calls_are_left_out_of_the_summary_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MEHO_TOKEN", TOKEN)
+    answers = {"first": {"hits": [store_hit("a/one.md")]}}
+    argv = ["--url", "http://meho", "--questions", str(write_questions(tmp_path / "q.yaml"))]
+    code = runner.main(argv, transport=fake_meho(answers))
+    out = capfd.readouterr().out
+    assert code == 1
+    assert "all: 1 questions, top 3: 1, found in top 10: 100%, MRR: 1.000" in out
+    assert "exact: 0 questions" in out
+    assert "failed calls: 2" in out
+
+
 def test_missing_token_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:

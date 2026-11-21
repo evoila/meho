@@ -180,7 +180,10 @@ def _result_of(response: httpx.Response) -> dict[str, Any]:
 
 
 def ask_all(session: McpSession, questions: list[Question]) -> list[Outcome]:
-    """Ask every question. A failed call is an error outcome, never a miss."""
+    """Ask every question. A failed call is an error outcome, never a miss.
+
+    The summary lines leave failed calls out; the line ``failed calls: N`` counts them.
+    """
     outcomes: list[Outcome] = []
     for question in questions:
         try:
@@ -215,7 +218,8 @@ class Summary:
 
 
 def summarize(label: str, outcomes: list[Outcome]) -> Summary:
-    places = [o.place for o in outcomes]
+    """Count only the questions that got an answer. Failed calls have their own line."""
+    places = [o.place for o in outcomes if o.error is None]
     return Summary(
         label=label,
         total=len(places),

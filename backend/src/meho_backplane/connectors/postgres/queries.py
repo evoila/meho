@@ -26,6 +26,9 @@ from typing import Any
 
 import asyncpg
 
+from meho_backplane.connectors.postgres.query_guard import CONNECTION_TEXT_SETTINGS
+from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER
+
 __all__ = [
     "CURATED_SETTINGS",
     "fetch_activity",
@@ -311,11 +314,30 @@ async def fetch_activity(conn: asyncpg.Connection) -> dict[str, Any]:
     return {"sessions": _rows(records)}
 
 
+#: The value columns of a ``pg_settings`` row.
+_SETTING_VALUE_COLUMNS: tuple[str, ...] = ("setting", "boot_val", "reset_val")
+
+
+def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
+    """Put the fixed hide mark in place of the values of a connection-text setting."""
+    if str(row.get("name", "")).lower() not in CONNECTION_TEXT_SETTINGS:
+        return row
+    for column in _SETTING_VALUE_COLUMNS:
+        if row.get(column) is not None:
+            row[column] = SECRET_FIELD_MARKER
+    return row
+
+
 async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> dict[str, Any]:
-    """Return curated (or caller-named) runtime settings from ``pg_settings``."""
+    """Return curated (or caller-named) runtime settings from ``pg_settings``.
+
+    The value of a setting in
+    :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
+    is replaced by the fixed hide mark, for every caller.
+    """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)
-    return {"settings": _rows(records)}
+    return {"settings": [_hide_connection_text(row) for row in _rows(records)]}
 
 
 async def run_select(conn: asyncpg.Connection, sql: str, max_rows: int) -> dict[str, Any]:

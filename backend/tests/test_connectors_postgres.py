@@ -427,6 +427,7 @@ def test_read_only_gate_rejects_non_read_first_keyword(sql: str) -> None:
         ("EXPLAIN SELECT 1", "EXPLAIN"),
         ("TABLE pg_class", "TABLE"),
         ("VALUES (1), (2)", "VALUES"),
+        ("/* outer /* inner */ TABLE */ SELECT 1", "SELECT"),
     ],
 )
 def test_read_only_gate_accepts_read_verbs(sql: str, keyword: str) -> None:
@@ -434,6 +435,19 @@ def test_read_only_gate_accepts_read_verbs(sql: str, keyword: str) -> None:
     assert first_significant_keyword(sql) == keyword
     assert keyword in ALLOWED_FIRST_KEYWORDS
     assert_read_only_sql(sql)  # returns None; raises on violation
+
+
+@pytest.mark.parametrize(
+    ("sql", "keyword"),
+    [
+        ("/* a /* b */ SELECT */ DELETE FROM t", "DELETE"),
+        ("/* a /* b /* c */ */ SELECT */ SHOW all", "SHOW"),
+        ("/* a /* b */ SELECT 1", ""),
+    ],
+)
+def test_first_keyword_steps_over_nested_comments(sql: str, keyword: str) -> None:
+    """A nested block comment ends only at its own closing mark."""
+    assert first_significant_keyword(sql) == keyword
 
 
 @pytest.mark.asyncio

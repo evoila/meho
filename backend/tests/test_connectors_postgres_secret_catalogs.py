@@ -311,6 +311,8 @@ def _show_spellings(word: str) -> list[str]:
         f"SHOW /* settings */ {word}",
         f"-- settings\nSHOW {word}",
         f"/* settings */ SHOW\n\t{word}",
+        f"/* outer /* inner */ SELECT */ SHOW {word}",
+        f"/* a /* b /* c */ */ TABLE */ SHOW {word}",
     ]
 
 

@@ -96,7 +96,7 @@ are per-database); tables/indexes accept an optional `schema` filter.
    25006).
 2. **First-keyword allowlist** — `assert_read_only_sql` (used by
    `postgres.query`) parses the first significant keyword (skipping leading
-   comments and wrapping parens) and rejects anything not in
+   comments, also nested block comments, and wrapping parens) and rejects anything not in
    `{SELECT, SHOW, EXPLAIN, WITH, TABLE, VALUES}` **before a connection is
    opened**. `WITH`/`EXPLAIN` are admitted at the keyword level; a
    data-modifying CTE or `EXPLAIN ANALYZE <write>` that slips past is still
@@ -172,7 +172,7 @@ role's rights. So the free-form op adds three checks:
 
    The check also refuses `SHOW ALL` and a `SHOW` of a setting in
    `CONNECTION_TEXT_SETTINGS` (`primary_conninfo`), in any case, in double
-   quotes or after a comment. The refusal for settings names
+   quotes or after a comment, also a nested one. The refusal for settings names
    `postgres.settings`, which puts the fixed mark `[REDACTED:param_name]` in
    place of the value of such a setting, for every caller. The refusal for
    sessions names `postgres.activity`, which reads the same

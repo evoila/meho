@@ -128,8 +128,9 @@ def first_significant_keyword(sql: str) -> str:
     """Return the upper-cased first keyword of *sql*, skipping comments/whitespace.
 
     Leading whitespace, SQL line comments (``-- …`` to end of line), C-style
-    block comments (``/* … */``), and wrapping ``(`` characters are stepped
-    over so a query like ``/* audit */ (SELECT 1)`` resolves to ``SELECT``.
+    block comments (``/* … */``, nested as PostgreSQL nests them), and
+    wrapping ``(`` characters are stepped over so a query like
+    ``/* audit */ (SELECT 1)`` resolves to ``SELECT``.
     Returns ``""`` when no alphabetic keyword is found (an empty or
     punctuation-only statement), which :func:`assert_read_only_sql` treats as
     a rejection.
@@ -145,12 +146,32 @@ def first_significant_keyword(sql: str) -> str:
             i = n if newline == -1 else newline + 1
             continue
         if sql.startswith("/*", i):
-            end = sql.find("*/", i + 2)
-            i = n if end == -1 else end + 2
+            i = _end_of_block_comment(sql, i)
             continue
         break
     match = _KEYWORD_RE.match(sql, i)
     return match.group(0).upper() if match else ""
+
+
+def _end_of_block_comment(sql: str, start: int) -> int:
+    """Return the index just past the block comment that opens at *start*.
+
+    PostgreSQL nests block comments: each ``/*`` inside one needs its own
+    ``*/``. An unclosed comment runs to the end of *sql*.
+    """
+    depth, i, n = 1, start + 2, len(sql)
+    while i < n:
+        if sql.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif sql.startswith("*/", i):
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return i
+        else:
+            i += 1
+    return n
 
 
 def assert_read_only_sql(sql: str) -> None:

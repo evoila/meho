@@ -4134,6 +4134,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>An agent, runner, add-on or other service login now reads only the audit rows of its own calls, whatever role it has: in <code>POST /api/v1/audit/query</code> and its filters (also <code>has_trace</code>), the class counts, <code>show</code>, the trace read, <code>by-work-ref</code>, <code>who-touched</code>, the MCP tool <code>query_audit</code>, the operation <code>audit.loose_rows</code> and every session replay. A row or session of another login answers like one that does not exist. The <code>shape="tree"</code> replay of <code>query_audit</code> holds only the rows of the caller's own calls, for a person too; the <code>Mcp-Session-Id</code> header does not change which rows it shows. The agent or service login that asked for a call a person approved still reads the trace of that call. People keep every row of their tenant. A paired add-on that reads the audit log with its service login now gets only the rows of its own calls. An agent sees the run of a call a person approved through the trace of that call, not in the row list.</td>
+<td>A service login that read the audit rows of other logins now gets fewer rows. To look into the calls of others, a person runs the query.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A settings import with a token (the CLI, a script, an AI tool) that turns on <code>run_approval_target_kinds</code> or turns off <code>announce_gate_enabled</code> now gets 403, and MEHO writes nothing from that file. A preview with a token still works and names these changes. See https://evoila.github.io/meho/latest/guides/settings-file/#approval-policies-change-only-in-the-web-console.</td>
 <td>Until the web console has a settings page, these two changes cannot be made. A stored value stays as it is. Turn the announce gate on only if you want to keep it on: it cannot be turned off again until then.</td>
 </tr>

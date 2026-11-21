@@ -89,8 +89,18 @@ def test_no_difference_passes(tmp_path: Path) -> None:
 
 
 def test_an_input_only_in_the_head_is_not_compared(tmp_path: Path) -> None:
-    base = {"id": "other", "path": "redact", "hidden": [], "shown": [], "sha": "a"}
-    assert _judge(tmp_path, base, _record([], ["p0", "s2"], "b")) == 0
+    head = {"id": "other", "path": "redact", "hidden": [], "shown": ["s2"], "sha": "b"}
+    (tmp_path / "base.jsonl").write_text(json.dumps(_record([], [])) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text(
+        json.dumps(_record([], [])) + "\n" + json.dumps(head) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
+    assert (
+        judge_module.judge(
+            tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+        )
+        == 0
+    )
 
 
 _APPROVED_SHOWN = """approved:
@@ -117,3 +127,47 @@ def test_a_stale_approved_entry_fails(tmp_path: Path, capfd: pytest.CaptureFixtu
 def test_an_approved_entry_for_another_part_does_not_cover_the_difference(tmp_path: Path) -> None:
     other = _APPROVED_SHOWN.replace("part: s2", "part: s9")
     assert _judge(tmp_path, _record(["s2"], ["p0"]), _record([], ["p0", "s2"], "b"), other) == 1
+
+
+def test_a_record_removed_from_the_head_fails(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base = _record([], [])
+    other = {**base, "id": "other.input"}
+    (tmp_path / "base.jsonl").write_text(
+        json.dumps(base) + "\n" + json.dumps(other) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "head.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
+    code = judge_module.judge(
+        tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+    )
+    assert code == 1
+    assert "other.input redact: removed" in capfd.readouterr().out
+
+
+def test_an_empty_head_fails(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / "base.jsonl").write_text(json.dumps(_record([], [])) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
+    code = judge_module.judge(
+        tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+    )
+    assert code == 1
+    assert "removed" in capfd.readouterr().out
+
+
+def test_a_removed_record_can_be_approved(tmp_path: Path) -> None:
+    (tmp_path / "base.jsonl").write_text(json.dumps(_record([], [])) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text("", encoding="utf-8")
+    approved = (
+        "approved:\n  - id: form.plain.password.bare\n    path: redact\n"
+        "    part: removed\n    reason: the input was merged into another one\n"
+    )
+    (tmp_path / "approved.yaml").write_text(approved, encoding="utf-8")
+    assert (
+        judge_module.judge(
+            tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+        )
+        == 0
+    )

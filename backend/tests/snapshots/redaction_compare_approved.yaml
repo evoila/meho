@@ -9,5 +9,6 @@
 #     part: s2
 #     reason: one line that says why the change is wanted
 #
-# "part" is a part id, or "text" for any other change of the answer.
+# "part" is a part id, "text" for any other change of the answer, or
+# "removed" for an input that the head snapshot no longer has.
 approved: []

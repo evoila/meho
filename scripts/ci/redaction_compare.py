@@ -17,6 +17,7 @@ difference is one of:
   shown:<part>   the base hides the part, the head shows it
   hidden:<part>  a plain part the base shows is now hidden
   text           the answer changed in another way, no secret newly hidden
+  removed        the base has the input, the head snapshot does not
 A secret part that the base showed and the head hides passes: that is a fix.
 """
 
@@ -41,8 +42,8 @@ def load(path: Path) -> dict[tuple[str, str], dict]:
 
 
 def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
-    """The differences as (id, path, kind). Inputs only in one file are not compared."""
-    found = []
+    """The differences as (id, path, kind). Inputs only in the head are not compared."""
+    found = [(*key, "removed") for key in sorted(base.keys() - head.keys())]
     for key in sorted(base.keys() & head.keys()):
         old, new = base[key], head[key]
         newly_hidden_secret = False

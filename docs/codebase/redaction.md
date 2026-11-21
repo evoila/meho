@@ -1030,12 +1030,15 @@ before a reviewer reads the pull request.
   rule of `scripts/ci/redaction_compare.py --judge` on the base branch's
   snapshot and the pull request's snapshot. It fails when a part that the
   base hides is now shown, when a plain part that the base shows is now
-  hidden, or when the answer changed in another way. A secret part that
+  hidden, when the answer changed in another way, or when an input of the
+  base is missing from the pull request's snapshot (an empty snapshot
+  fails for every input). A secret part that
   the base showed and the pull request hides passes: that is the purpose
   of a fix.
 - **A wanted difference.** List it in
   `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
-  the step, the part id (or `text`) and a one-line reason. An entry that
+  the step, the part id (or `text`, or `removed` for a dropped input) and
+  a one-line reason. An entry that
   matches no difference fails the job, so remove the entry after the merge.
 - **The rules come from the base branch.** The job reads the script and
   the snapshot of the base with `git show`, so a pull request cannot weaken

@@ -1,0 +1,13 @@
+# Wanted differences from the base branch for the secret-hiding compare job.
+# One entry for each difference, with a one-line reason. Remove the entry after
+# the pull request is merged: an entry that matches no difference fails the job.
+# The file is read by a small script without a YAML library, so keep this shape:
+#
+# approved:
+#   - id: assign.plain.password.bare
+#     path: redact
+#     part: s2
+#     reason: one line that says why the change is wanted
+#
+# "part" is a part id, or "text" for any other change of the answer.
+approved: []

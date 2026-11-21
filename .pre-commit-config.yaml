@@ -58,6 +58,9 @@ repos:
       - id: check-json
       - id: check-added-large-files
         args: [--maxkb=500]
+        # The secret-hiding compare snapshot is a generated file of about
+        # 1.4 MB (docs/codebase/redaction.md, "Compare with main").
+        exclude: ^backend/tests/snapshots/redaction_compare\.jsonl$
       - id: check-merge-conflict
       - id: detect-private-key
       - id: mixed-line-ending

@@ -1483,6 +1483,58 @@ jobs:
           uv run pytest -n 3 --dist loadscope \
             --timeout=180 --timeout-method=signal "${FILES[@]}"
 
+  redaction-compare:
+    name: Secret hiding compared with the base branch
+    # Compares the secret-hiding snapshot of this pull request with the one
+    # on the base branch (backend/tests/snapshots/redaction_compare.jsonl).
+    # It fails when the base hides a part that the pull request shows, when a
+    # plain part that the base shows is now hidden, or when an answer changed
+    # in another way, unless backend/tests/snapshots/redaction_compare_approved.yaml
+    # lists the difference with a reason. A secret part that the pull request
+    # newly hides passes. See docs/codebase/redaction.md, "Compare with main".
+    #
+    # The rule script comes from the base branch (`git show`), so a pull
+    # request cannot weaken the check that judges it. Nothing is built or
+    # installed: the script uses only the Python standard library.
+    #
+    # Non-required check. Only when the change touches backend/.
+    needs: changes
+    if: >-
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.changes.outputs.backend_python == 'true'
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        # On a pull request or a merge-queue run, HEAD is a merge commit.
+        # Its first parent (HEAD^1) is the base branch, so depth 2 is enough.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Judge the snapshot against the base branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=HEAD^1
+          script=scripts/ci/redaction_compare.py
+          snapshot=backend/tests/snapshots/redaction_compare.jsonl
+          if ! git cat-file -e "${base}:${script}" 2>/dev/null \
+            || ! git cat-file -e "${base}:${snapshot}" 2>/dev/null; then
+            echo "no compare on the base branch yet"
+            exit 0
+          fi
+          dir="$(mktemp -d "${RUNNER_TEMP}/redaction-compare.XXXXXX")"
+          git show "${base}:${script}" > "${dir}/redaction_compare.py"
+          git show "${base}:${snapshot}" > "${dir}/base.jsonl"
+          python3 -I "${dir}/redaction_compare.py" \
+            --judge "${dir}/base.jsonl" "${snapshot}" \
+            --approved backend/tests/snapshots/redaction_compare_approved.yaml
+
   connector-package-template:
     name: Connector package template
     # #5564. Tests the made-up sample connector package in

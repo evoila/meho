@@ -1000,6 +1000,49 @@ provisioned.
 
 No new runtime dependencies were added by Task #1070, #1071, or #1073.
 
+## Compare with main
+
+A pull request that changes how MEHO hides secrets is compared with the
+base branch on a fixed set of made-up inputs. The author sees a fault
+before a reviewer reads the pull request.
+
+- **The inputs.** `backend/tests/redaction_compare/inputs.py` builds about
+  1,500 texts and structures from forms (`password=`, `--password`, a URL
+  with a login, JSON, YAML, XML, a command line, a shell script, a nested
+  result), value styles (plain, quoted, with a space, empty) and
+  containers. A fixed seed makes the same inputs on every run. Each
+  planted part has an id: `s...` is a secret value, `p...` is a plain word
+  that must stay visible.
+- **The steps.** `redact` with the default policy, `scrub_content`,
+  `scrub_broadcast_params`, `redact_error_payload`, the default view of an
+  answer, `hide_command_text` and `hide_shell_script`
+  (`backend/tests/redaction_compare/answers.py`).
+- **The snapshot.** `backend/tests/snapshots/redaction_compare.jsonl` has
+  one line for each input and step: the parts the step hides, the parts it
+  shows, and a hash of the whole answer.
+  `backend/tests/test_redaction_compare_snapshot.py` fails when the code's
+  answers differ from it. The same file checks three properties on main: a
+  text with no secret comes back unchanged, hiding twice gives the answer
+  of hiding once, and the time grows in a straight line with the size.
+- **Write the snapshot again.** From `backend/`:
+  `uv run python ../scripts/ci/redaction_compare.py --write`. Commit the file.
+- **The CI job** "Secret hiding compared with the base branch" runs the
+  rule of `scripts/ci/redaction_compare.py --judge` on the base branch's
+  snapshot and the pull request's snapshot. It fails when a part that the
+  base hides is now shown, when a plain part that the base shows is now
+  hidden, or when the answer changed in another way. A secret part that
+  the base showed and the pull request hides passes: that is the purpose
+  of a fix.
+- **A wanted difference.** List it in
+  `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
+  the step, the part id (or `text`) and a one-line reason. An entry that
+  matches no difference fails the job, so remove the entry after the merge.
+- **The rules come from the base branch.** The job reads the script and
+  the snapshot of the base with `git show`, so a pull request cannot weaken
+  the check that judges it. The approved file is the one of the pull
+  request: it is the open list that a reviewer reads. The first pull
+  request that adds the script has no base script yet, and the job passes.
+
 ## Known issues / future work
 
 - **Wide patterns benefit from policy ordering.** The engine applies

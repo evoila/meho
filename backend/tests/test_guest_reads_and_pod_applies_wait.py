@@ -10,11 +10,10 @@ and no standing grant, no agent grant and no run approval covers it.
   read such as ``file-read`` or ``exec-status``, the cloud-init data, a file
   from a backup), opens a console, or returns a stored secret. The plain
   reads (nodes, VM status and config, storage, tasks) run at once.
-* ``k8s.apply`` of an object that runs a pod, gives rights, or makes or
-  reads a Secret. An apply of other kinds keeps the rules of ``k8s.apply``.
+* ``k8s.apply`` of every kind of object.
 * An operation an ingest makes from a Kubernetes API file that reads or
   writes a Secret, runs a command in a pod, opens a proxy, makes a token,
-  or creates a pod or a role.
+  or writes or deletes an object of any kind.
 
 Each call waits for a person's own call, an agent login and a service
 login, with and without a standing grant. The approval card of a pod
@@ -40,10 +39,7 @@ from meho_backplane.checks import runner as sensor_runner
 from meho_backplane.checks.service import SensorRequiresNoPersonError, _require_read
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.kubernetes.ingested_paths import ingested_op_is_credential_call
-from meho_backplane.connectors.kubernetes.op_classes import (
-    manifest_holds_credential,
-    manifest_needs_a_person,
-)
+from meho_backplane.connectors.kubernetes.op_classes import manifest_holds_credential
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import ApplyRejectedError
 from meho_backplane.connectors.kubernetes.ops_write_preview import RUN_COMMANDS_KEY
 from meho_backplane.connectors.proxmox.op_classes import path_reads_guest_or_secret
@@ -228,15 +224,15 @@ def test_a_plain_read_runs_at_once(path: str) -> None:
     ],
 )
 def test_an_apply_of_a_pod_rights_or_secret_kind_waits(kind: str) -> None:
-    assert manifest_needs_a_person({"manifest": _manifest(kind)}) is True
+    assert call_always_waits("k8s.apply", {"manifest": _manifest(kind)}) is True
 
 
 def test_a_list_or_a_second_document_with_a_deployment_waits() -> None:
     listed = yaml.safe_dump(
         {"apiVersion": "v1", "kind": "List", "items": [yaml.safe_load(_DEPLOYMENT)]}
     )
-    assert manifest_needs_a_person({"manifest": listed}) is True
-    assert manifest_needs_a_person({"manifest": _CONFIG_MAP + "---\n" + _DEPLOYMENT}) is True
+    assert call_always_waits("k8s.apply", {"manifest": listed}) is True
+    assert call_always_waits("k8s.apply", {"manifest": _CONFIG_MAP + "---\n" + _DEPLOYMENT}) is True
 
 
 @pytest.mark.parametrize(
@@ -248,8 +244,8 @@ def test_a_list_or_a_second_document_with_a_deployment_waits() -> None:
         ("NetworkPolicy", "networking.k8s.io/v1"),
     ],
 )
-def test_an_apply_of_other_kinds_keeps_its_rules(kind: str, api_version: str) -> None:
-    assert manifest_needs_a_person({"manifest": _manifest(kind, api_version)}) is False
+def test_an_apply_of_other_kinds_waits_too(kind: str, api_version: str) -> None:
+    assert call_always_waits("k8s.apply", {"manifest": _manifest(kind, api_version)}) is True
 
 
 def test_only_the_manifest_of_a_secret_is_hidden_after_the_run() -> None:
@@ -290,6 +286,8 @@ def test_only_the_manifest_of_a_secret_is_hidden_after_the_run() -> None:
         "POST:/apis/cert-manager.io/v1/namespaces/{namespace}/certificates",
         "PUT:/apis/certificates.k8s.io/v1/certificatesigningrequests/{name}/approval",
         "GET:/api/v1/namespaces/{ns}/secrets/{secret}/",
+        "DELETE:/api/v1/namespaces/{namespace}/pods/{name}",
+        "POST:/api/v1/namespaces/{namespace}/serviceaccounts",
     ],
 )
 def test_a_kubernetes_api_call_that_handles_a_credential_waits(op_id: str) -> None:
@@ -307,8 +305,6 @@ def test_a_kubernetes_api_call_that_handles_a_credential_waits(op_id: str) -> No
         "GET:/apis/apps/v1/namespaces/{namespace}/deployments",
         "PATCH:/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
         "PUT:/apis/apps/v1/namespaces/{namespace}/deployments/{name}/status",
-        "DELETE:/api/v1/namespaces/{namespace}/pods/{name}",
-        "POST:/api/v1/namespaces/{namespace}/serviceaccounts",
         "GET:/apis/rbac.authorization.k8s.io/v1/clusterroles",
         "GET:/api/v1/repos/{owner}/{repo}/actions/secrets",
         "k8s.pod.list",
@@ -400,23 +396,20 @@ async def test_a_plain_proxmox_read_still_runs_at_once(operator: Operator) -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "manifest",
-    [_DEPLOYMENT, _manifest("ClusterRoleBinding"), _manifest("ExternalSecret")],
-    ids=["deployment", "cluster-role-binding", "external-secret"],
+    [
+        _DEPLOYMENT,
+        _manifest("ClusterRoleBinding"),
+        _manifest("ExternalSecret"),
+        _CONFIG_MAP,
+        _SERVICE_ACCOUNT,
+    ],
+    ids=["deployment", "cluster-role-binding", "external-secret", "config-map", "service-account"],
 )
-async def test_a_k8s_apply_of_a_pod_rights_or_secret_kind_waits_for_every_login(
+async def test_a_k8s_apply_of_every_kind_waits_for_every_login(
     manifest: str,
 ) -> None:
     rows = await _register_all()
     await _assert_waits_with_and_without_a_grant(_row(rows, "k8s.apply"), {"manifest": manifest})
-
-
-@pytest.mark.asyncio
-async def test_a_k8s_apply_of_a_service_account_keeps_its_grant() -> None:
-    rows = await _register_all()
-    apply_row = _row(rows, "k8s.apply")
-    await _name_in_every_grant([apply_row])
-    verdict, reason = await _verdict(_service(), apply_row, {"manifest": _SERVICE_ACCOUNT})
-    assert verdict is PermissionVerdict.AUTO_EXECUTE, reason
 
 
 def _ingested(op_id: str) -> EndpointDescriptor:

@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``k8s.exec``, ``proxmox.api.write`` and a ``k8s.apply`` of a Secret always wait for a person.
+"""``k8s.exec``, ``proxmox.api.write`` and every ``k8s.apply`` always wait for a person.
 
 A command in a container and a raw Proxmox write can read, write or make
-any credential. A ``k8s.apply`` whose manifest holds a Secret writes one.
-These calls get the rule of a credential call: a person approves each
-call, and no standing grant, no agent grant and no run approval covers
-it, also for a step of a multi-step operation. Making a standing grant,
-an agent grant or a run approval that names ``k8s.exec`` or
-``proxmox.api.write`` is refused. A ``k8s.apply`` of other kinds keeps
-the rules of ``k8s.apply``.
+any credential. A ``k8s.apply`` waits for every kind of object. These
+calls get the rule of a credential call: a person approves each call, and
+no standing grant, no agent grant and no run approval covers it, also for
+a step of a multi-step operation. Making a standing grant, an agent grant
+or a run approval that names ``k8s.exec`` or ``proxmox.api.write`` is
+refused. The manifest of an apply of a Secret is hidden after the run.
 """
 
 from __future__ import annotations
@@ -433,36 +432,33 @@ async def test_a_step_of_exec_or_a_raw_proxmox_write_waits_under_every_grant(
 
 
 # ---------------------------------------------------------------------------
-# k8s.apply: a Secret waits, other kinds keep the rules of k8s.apply
+# k8s.apply waits for every kind of object
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_grant_create_still_takes_k8s_apply() -> None:
-    rows = await _register_all()
-    apply_row = _row(rows, "k8s.apply")
-    assert credential_grant_reason("k8s.apply") is None
-    created = await ServicePrincipalGrantService().create(
-        _TENANT,
-        "op-admin",
-        ServiceGrantCreate(
-            principal_sub="svc-credential-calls",
-            op_id="k8s.apply",
-            connector_id=connector_id_of(apply_row),
-            reason="unattended deploy",
-        ),
-        creator_role=TenantRole.TENANT_ADMIN,
-    )
-    assert created.op_id == "k8s.apply"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "manifest",
-    [_SECRET, _TOKEN_SECRET, _LIST_WITH_SECRET, _CONFIG_MAP + "\n---\n" + _SECRET, "a: [b"],
-    ids=["secret", "token-secret", "list", "multi-document", "unreadable"],
+    [
+        _SECRET,
+        _TOKEN_SECRET,
+        _LIST_WITH_SECRET,
+        _CONFIG_MAP + "\n---\n" + _SECRET,
+        "a: [b",
+        _CONFIG_MAP,
+        _SERVICE_ACCOUNT,
+    ],
+    ids=[
+        "secret",
+        "token-secret",
+        "list",
+        "multi-document",
+        "unreadable",
+        "config-map",
+        "service-account",
+    ],
 )
-async def test_a_k8s_apply_of_a_secret_waits_under_a_grant_and_a_run_approval(
+async def test_a_k8s_apply_waits_under_a_grant_and_a_run_approval(
     manifest: str,
 ) -> None:
     rows = await _register_all()
@@ -475,18 +471,6 @@ async def test_a_k8s_apply_of_a_secret_waits_under_a_grant_and_a_run_approval(
     assert shadow is Verdict.WAIT, reason
     assert "auto-granted" not in reason
     assert reason.endswith(CREDENTIAL_WAIT_NOTE), reason
-
-
-@pytest.mark.asyncio
-async def test_a_k8s_apply_of_other_kinds_keeps_its_grant() -> None:
-    rows = await _register_all()
-    apply_row = _row(rows, "k8s.apply")
-    await _name_in_every_grant([apply_row])
-
-    today, reason, _ = await _gate(_service(), apply_row, {"manifest": _SERVICE_ACCOUNT})
-
-    assert today is PermissionVerdict.AUTO_EXECUTE, reason
-    assert "auto-granted by standing grant" in reason
 
 
 @pytest.mark.asyncio
@@ -503,7 +487,7 @@ async def test_a_k8s_apply_of_a_secret_waits_for_an_agent_with_an_auto_execute_r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operator", [_service(), _agent()], ids=["service", "agent"])
-async def test_a_step_that_applies_a_secret_waits_and_other_kinds_keep_their_grant(
+async def test_a_step_that_applies_a_secret_or_other_kinds_waits(
     operator: Operator,
 ) -> None:
     step = EndpointDescriptor(
@@ -526,11 +510,10 @@ async def test_a_step_that_applies_a_secret_waits_and_other_kinds_keep_their_gra
         finally:
             work_ref_var.reset(token)
 
-    waiting = await _step(_SECRET)
-    assert waiting is not None
-    assert waiting.status == "awaiting_approval", waiting.error
-    if operator.principal_kind is PrincipalKind.SERVICE:
-        assert await _step(_SERVICE_ACCOUNT) is None
+    for manifest in (_SECRET, _SERVICE_ACCOUNT):
+        waiting = await _step(manifest)
+        assert waiting is not None
+        assert waiting.status == "awaiting_approval", waiting.error
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +528,7 @@ async def test_a_step_that_applies_a_secret_waits_and_other_kinds_keep_their_gra
         ("k8s.exec", {"pod": "web", "namespace": "apps", "command": ["id"]}, True),
         ("proxmox.api.write", {"path": "nodes/a/qemu/1/config", "method": "PUT"}, True),
         ("k8s.apply", {"manifest": _SECRET}, True),
-        ("k8s.apply", {"manifest": _SERVICE_ACCOUNT}, False),
+        ("k8s.apply", {"manifest": _SERVICE_ACCOUNT}, True),
     ],
     ids=["exec", "proxmox-write", "apply-secret", "apply-service-account"],
 )

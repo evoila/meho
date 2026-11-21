@@ -5,6 +5,10 @@
 
 See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
+
+Every ``k8s.apply`` waits for a person, for every kind of object: there is
+no list of kinds that keep the rules of the operation. No standing grant, no
+agent grant and no run approval covers it.
 """
 
 from collections.abc import Callable, Mapping
@@ -14,7 +18,6 @@ import yaml
 
 from meho_backplane.op_classes import (
     declare_credential_capable,
-    declare_credential_check,
     declare_hidden_stored_param,
     declare_no_secret_value,
     declare_op_classes,
@@ -51,93 +54,15 @@ declare_op_classes(
 declare_no_secret_value(("k8s.secret.compare_to_ref",))
 
 # A command in a container can read or write any credential the container
-# holds. So every call waits for a person, and no standing grant, agent
+# holds. What an apply does to an object depends on the object as it is on
+# the cluster and on the fields other writers own, not only on the manifest.
+# So every call of both waits for a person, and no standing grant, agent
 # grant or run approval covers it.
-declare_credential_capable(("k8s.exec",))
+declare_credential_capable(("k8s.exec", "k8s.apply"))
 
 #: Kinds whose objects hold a credential, in lower case. A ServiceAccount
 #: token is a Secret too.
 CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
-
-#: The objects whose ``k8s.apply`` keeps the rules of ``k8s.apply``: one
-#: ``(API group, kind, plural)`` per entry, the core group as ``""``. An apply
-#: of any other object waits for a person, also a custom kind of a CRD. Each
-#: entry says why its objects cannot change what runs, give rights, make or
-#: read a Secret, change how the cluster checks requests, or send requests
-#: somewhere else. Add no kind without such a reason.
-PLAIN_OBJECTS: Final[tuple[tuple[str, str, str], ...]] = (
-    # Picks pods by label and gives them one address inside the cluster. It
-    # starts no pod and reads no Secret. A Service of another type or with
-    # an outside address opens the pods to other networks, so it waits
-    # (_PLAIN_ONLY_IF).
-    ("", "Service", "services"),
-    # A name for a group of objects. It holds no workload and no rights. A
-    # label or an annotation can change how the cluster checks the pods in
-    # it, so a Namespace with one waits (_PLAIN_ONLY_IF).
-    ("", "Namespace", "namespaces"),
-    # A name a pod can run as. Its rights come only from a role binding,
-    # and a binding waits.
-    ("", "ServiceAccount", "serviceaccounts"),
-    # A request for storage. It runs nothing and reads no Secret.
-    ("", "PersistentVolumeClaim", "persistentvolumeclaims"),
-    # Limits and quotas only cap what the pods of a namespace may use.
-    ("", "LimitRange", "limitranges"),
-    ("", "ResourceQuota", "resourcequotas"),
-    # Limits which pods may talk to each other.
-    ("networking.k8s.io", "NetworkPolicy", "networkpolicies"),
-    # Limits how many pods a voluntary stop may take down at once.
-    ("policy", "PodDisruptionBudget", "poddisruptionbudgets"),
-    # Changes the replica count of a workload that already exists. What the
-    # pods run stays as the workload says.
-    ("autoscaling", "HorizontalPodAutoscaler", "horizontalpodautoscalers"),
-    # A number that orders pods when the cluster is full.
-    ("scheduling.k8s.io", "PriorityClass", "priorityclasses"),
-)
-
-#: ``(API group, kind in lower case)`` of :data:`PLAIN_OBJECTS`.
-_PLAIN_KINDS: Final[frozenset[tuple[str, str]]] = frozenset(
-    (group, kind.lower()) for group, kind, _ in PLAIN_OBJECTS
-)
-
-
-def _metadata_is_bare(doc: Mapping[str, Any]) -> bool:
-    """True when *doc* has no labels and no annotations."""
-    metadata = doc.get("metadata")
-    if metadata is None:
-        return True
-    if not isinstance(metadata, Mapping):
-        return False
-    return not metadata.get("labels") and not metadata.get("annotations")
-
-
-def _service_is_plain(doc: Mapping[str, Any]) -> bool:
-    """True when the Service *doc* is of type ``ClusterIP`` or no type, with no ``externalIPs``."""
-    spec = doc.get("spec")
-    if spec is None:
-        return True
-    if not isinstance(spec, Mapping):
-        return False
-    return spec.get("type") in (None, "ClusterIP") and not spec.get("externalIPs")
-
-
-#: The plain kinds that are plain only when their object passes a check. The
-#: key is ``(API group, kind in lower case)``. Their write through an ingested
-#: API file waits on every call, as they are left out of
-#: :data:`PLAIN_PLURALS`: MEHO does not read the body of such a call.
-_PLAIN_ONLY_IF: Final[Mapping[tuple[str, str], Callable[[Mapping[str, Any]], bool]]] = {
-    ("", "namespace"): _metadata_is_bare,
-    ("", "service"): _service_is_plain,
-}
-
-#: ``(API group, plural)`` of the :data:`PLAIN_OBJECTS` that need no check of
-#: their object, for the paths of an ingested Kubernetes API file
-#: (:mod:`.ingested_paths`).
-PLAIN_PLURALS: Final[frozenset[tuple[str, str]]] = frozenset(
-    (group, plural)
-    for group, kind, plural in PLAIN_OBJECTS
-    if (group, kind.lower()) not in _PLAIN_ONLY_IF
-)
-
 
 #: The most objects the check reads in one manifest: each document and each
 #: entry of an ``items`` array counts. A manifest with more counts as one MEHO
@@ -219,40 +144,6 @@ def _is_credential_kind(doc: Mapping[str, Any]) -> bool:
     return str(doc["kind"]).lower() in CREDENTIAL_KINDS
 
 
-def _api_group(api_version: Any) -> str | None:
-    """The API group of an ``apiVersion``: ``""`` for ``v1``, ``None`` when unreadable."""
-    if api_version == "v1":
-        return ""
-    if not isinstance(api_version, str):
-        return None
-    group, sep, version = api_version.partition("/")
-    if not sep or not group or not version or "/" in version:
-        return None
-    return group
-
-
-def _is_not_plain(doc: Mapping[str, Any]) -> bool:
-    """True when *doc* is not one of :data:`PLAIN_OBJECTS`.
-
-    The kind is read without case, the group as written. A list object is
-    plain when it is a ``List`` (in any case) or a ``<Kind>List`` of a plain kind; its
-    items are then read one by one. A kind of :data:`_PLAIN_ONLY_IF` is plain
-    only when its object passes the check there.
-    """
-    group = _api_group(doc.get("apiVersion"))
-    if group is None:
-        return True
-    kind = str(doc["kind"])
-    if _is_list_kind(kind):
-        kind = kind[: -len("List")]
-        return bool(kind) and (group, kind.lower()) not in _PLAIN_KINDS
-    key = (group, kind.lower())
-    if key not in _PLAIN_KINDS:
-        return True
-    passes = _PLAIN_ONLY_IF.get(key)
-    return passes is not None and not passes(doc)
-
-
 def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
     """True when the ``k8s.apply`` manifest in *params* holds a credential kind.
 
@@ -263,22 +154,6 @@ def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
     """
     return _manifest_has(params, _is_credential_kind)
 
-
-def manifest_needs_a_person(params: Mapping[str, Any]) -> bool:
-    """True when an object of the ``k8s.apply`` manifest in *params* is not plain.
-
-    Each document and each item of a list object must be one of
-    :data:`PLAIN_OBJECTS`, by API group and kind. An object without a
-    readable ``apiVersion`` or ``kind`` counts, and so does a manifest MEHO
-    cannot read, as in :func:`manifest_holds_credential`.
-    """
-    return _manifest_has(params, _is_not_plain)
-
-
-# Only an apply of plain objects keeps the rules of k8s.apply. Any other
-# object can run a pod, give rights, make or read a Secret, or change how
-# the cluster checks requests, so its apply waits for a person on every call.
-declare_credential_check("k8s.apply", manifest_needs_a_person)
 
 # The manifest of an apply of a Secret holds the Secret's values. A stored
 # request keeps it only in the encrypted handoff of the run

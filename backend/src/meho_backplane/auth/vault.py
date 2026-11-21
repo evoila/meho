@@ -100,7 +100,6 @@ _REQUEST_TAIL = re.compile(r",? on [A-Za-z]+ \S+")
 #: The status the store answered, by the class hvac raises for it.
 _STATUS_BY_CLASS = {
     "InvalidRequest": 400,
-    "Unauthorized": 401,
     "Forbidden": 403,
     "InvalidPath": 404,
     "RateLimitExceeded": 429,

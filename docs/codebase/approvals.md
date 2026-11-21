@@ -1482,7 +1482,15 @@ as every other change of rights does, when:
 Then `may_make_alone` runs the check of who may make the change on that
 card, the same rule as `check_grant_approval` on approve. When the admin
 may not make it alone (in the login realm: an admin who is not a platform
-admin), the call waits, and a platform admin approves it. The dispatcher
+admin), the call waits, and a platform admin approves it. In the login
+realm a change that can change the approval sign-in never runs alone and
+is never approved by the login that asked: a connector registers a check
+of such a request with `register_approval_sign_in_check`
+(`operations/approval_sign_in_writes.py`; the Keycloak checks are in
+`connectors/keycloak/approval_sign_in_writes.py`). The key
+`asked_in_web_console` of `proposed_effect` is internal
+(`INTERNAL_EFFECT_KEYS` in `operations/_preview.py`): no approval response
+returns it. The dispatcher
 marks the audit row of a call that runs at once with `rights_change_run: admin_in_web_console`
 (an `audit_*` context key), and sets its `policy_rule` column to
 `default:rights_change.admin_in_web_console` (`CONSOLE_RUN_POLICY_RULE`),

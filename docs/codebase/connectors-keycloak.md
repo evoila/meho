@@ -501,7 +501,12 @@ For such a write:
   own login realm only a platform admin makes such a write alone in the
   web console, or approves it; a tenant admin's call waits. There the
   login that asked approves the request only when it asked in the web
-  console;
+  console. A write that can change the approval sign-in
+  (`approval_sign_in_writes.py`: a `client.update` of the approval clients
+  or the console login client, a protocol mapper on them or of a sign-in
+  claim, a scope mapper of a sign-in claim, a `realm.update` of other keys
+  than names, mail, events and languages) never runs alone there, and the
+  login that asked never approves it;
 - a standing grant, an older grant row and a run approval never cover it:
   each call that waits needs its own approval;
 - no operation setting turns its approval off. An edit that tries is

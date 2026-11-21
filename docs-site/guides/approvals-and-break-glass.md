@@ -404,6 +404,13 @@ and for the approval of a waiting request:
   a fresh sign-in the change waits. A tenant admin who is not a platform
   admin never makes such a change alone and never approves it: the change
   waits, and only a platform admin approves it.
+- In MEHO's own login realm, a write that can change the sign-in MEHO asks
+  for before an approval never runs alone, also not for a platform admin
+  with a fresh sign-in. It waits, and a second platform admin approves it:
+  the login that asked never does. Such a write is a change of the clients
+  of the approval sign-in or of the console login, a protocol mapper of the
+  `acr`, `amr`, `auth_time` or `azp` claim or of the sign-in level, and a
+  realm change of other settings than names, mail, events and languages.
 - In MEHO's own login realm, a platform admin who asked for a change in
   the web console may approve it there, after a fresh sign-in, when it
   waits (for example because it reads, writes or makes a credential). A

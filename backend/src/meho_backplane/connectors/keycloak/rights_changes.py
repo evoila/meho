@@ -52,6 +52,9 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.connectors.keycloak.approval_sign_in_writes import (
+    register_approval_sign_in_checks,
+)
 from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.operations.rights_change_console import register_credential_params_check
 
@@ -197,11 +200,14 @@ def carries_credential(value: Any) -> bool:
 def register_rights_change_ops() -> None:
     """Register every write of :data:`RIGHTS_CHANGE_OPS` as a change of rights.
 
-    Also registers :func:`carries_credential` as the check of its params.
+    Also registers :func:`carries_credential` as the check of its params,
+    and the checks of the writes that can change the approval sign-in
+    (:func:`~.approval_sign_in_writes.register_approval_sign_in_checks`).
     """
     for op_id in RIGHTS_CHANGE_OPS:
         register_rights_change_op(op_id)
         register_credential_params_check(op_id, carries_credential)
+    register_approval_sign_in_checks()
 
 
 register_rights_change_ops()

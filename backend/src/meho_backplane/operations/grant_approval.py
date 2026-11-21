@@ -107,6 +107,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.op_classes import declare_per_call_approval
+from meho_backplane.operations.approval_sign_in_writes import approval_sign_in_check
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
@@ -477,8 +478,11 @@ def _check_login_realm_approver(
     """In the login realm: a platform admin approves every change of rights.
 
     The login that asked approves it only when it asked in the web console
-    and approves there too. A person behind the agent, service or runner
-    login that asked may approve it.
+    and approves there too, and never when the change can change the
+    approval sign-in
+    (:func:`~meho_backplane.operations.approval_sign_in_writes.approval_sign_in_check`).
+    A person behind the agent, service or runner login that asked may
+    approve it.
     """
     if not operator.platform_admin:
         denial = (
@@ -498,16 +502,27 @@ def _check_login_realm_approver(
             "with a token, the command line, MCP or an agent. A second person who is a "
             "platform admin must approve it",
         )
+    if own and approval_sign_in_check(request):
+        raise _refusal(
+            request,
+            operator,
+            "it can change the sign-in that MEHO asks for before an approval. A second "
+            "person who is a platform admin must approve it",
+        )
 
 
 def may_make_alone(operator: Operator, request: ApprovalRequest) -> bool:
     """True when *operator* may make the change of rights *request* alone in the web console.
 
     The same rule of who may as :func:`check_grant_approval`: in MEHO's own
-    login realm only a platform admin.
+    login realm only a platform admin, and never for a change that can
+    change the approval sign-in
+    (:func:`~meho_backplane.operations.approval_sign_in_writes.approval_sign_in_check`).
     """
     facts = grant_facts(request)
-    return facts is None or not facts.login_realm or operator.platform_admin
+    if facts is None or not facts.login_realm:
+        return True
+    return operator.platform_admin and not approval_sign_in_check(request)
 
 
 def _refusal(request: ApprovalRequest, operator: Operator, denial: str) -> Exception:

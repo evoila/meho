@@ -1605,6 +1605,17 @@ a "200 but nothing happened" apply can be explained from the trace.
 - When capture is off the wrapper costs one contextvar read.
 - Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
 
+What the span holds depends on who reads it. A person reads the stored
+span: the whole object of the answer, with Secret data masked as above. An
+agent reads a copy (`trace_agent_view.py`): an `env` value is hidden by
+the same secret rules as in the direct answer of an operation (a
+secret-named entry is hidden; plain values, the names and `valueFrom`
+references stay), the secret values on each `command` / `args` line and in
+`sh -c` scripts are hidden, and annotation values are cleaned (the
+last-applied object is cleaned like the object). `managedFields` stays. A
+service login reads the stored span of its own calls as it is. The rules and who reads which copy are in
+[redaction.md](redaction.md#what-an-agent-reads-in-the-trace-of-a-kubernetes-call).
+
 The shared recorder is
 `flight_recorder/sdk_http.py::record_sdk_vendor_call`; it reuses the
 generic-connector redaction path so both span sources look the same.

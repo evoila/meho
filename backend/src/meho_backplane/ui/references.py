@@ -278,7 +278,10 @@ class ParentRef:
 
 @dataclass(frozen=True)
 class SessionRef:
-    """Resolved originating agent session (``agent_session_id``)."""
+    """Resolved originating agent session (``agent_session_id``).
+
+    Empty on a row of a CLI login session (``session_from_client``).
+    """
 
     id: str | None
     replay_href: str | None
@@ -635,7 +638,12 @@ async def resolve_audit_references(
         else resolve_status(row.status_code)
     )
 
-    session_id = str(row.agent_session_id) if row.agent_session_id is not None else None
+    # A CLI login session is not an agent session: no replay link, as in the list.
+    session_id = (
+        str(row.agent_session_id)
+        if row.agent_session_id is not None and not payload_session_from_client(row.payload)
+        else None
+    )
     session = SessionRef(
         id=session_id,
         replay_href=(f"/ui/audit/sessions/{session_id}/replay" if session_id else None),

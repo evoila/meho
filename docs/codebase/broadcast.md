@@ -63,10 +63,11 @@ was closed as not planned).
    `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. This end
    also stops an archive read that is still running (a slow Valkey or
    database call), and a read error after the end sends no
-   `feed_error` frame. Each read stops by itself at the end, so the
-   stream cancels a read only when it is still running one second
-   later. A cancel in the middle of a statement is not safe on SQLite:
-   the connection keeps its read lock, and the next write fails with
+   `feed_error` frame. The end stops the stream at once, but it never
+   stops a database statement in the middle: each archive read runs in
+   its own task (`broadcast/read_to_end.py`), ends there and closes its
+   session. A cancel in the middle of a statement is not safe on
+   SQLite: the connection keeps its lock, and the next write fails with
    "database is locked". The stream never holds a database session
    while it waits: each archive read opens a short session and closes
    it before the wait.

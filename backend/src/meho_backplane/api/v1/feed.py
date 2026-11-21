@@ -155,14 +155,6 @@ _HEARTBEAT_INTERVAL_SECONDS: Final[float] = 30.0
 #: Matches the MCP ``tenant_feed`` resource snapshot size.
 _BACKLOG_PRELUDE_COUNT: Final[int] = 50
 
-#: How long a read may run past ``ends_at`` before it is cancelled. Every
-#: read already stops at ``ends_at`` by itself (its wait never goes past
-#: it), so a healthy read returns inside this time. The cancel is only for
-#: a read that is stuck. Cancelling a read in the middle of a statement
-#: leaves a SQLite connection holding its read lock, and the next write
-#: waits for it ("database is locked").
-_END_GRACE_SECONDS: Final[float] = 1.0
-
 _FEED_ERROR_CODE: Final[str] = "broadcast_subsystem_unavailable"
 _FEED_ERROR_DOC: Final[str] = "docs/codebase/error-message-shape.md"
 
@@ -218,18 +210,14 @@ class _StreamEndedError(Exception):
 
 
 async def _read_until_end[T](liveness: StreamLiveness, read: Awaitable[T]) -> T:
-    """Await *read*, but stop it shortly after ``liveness.ends_at``.
+    """Await *read*, but stop it at ``liveness.ends_at``.
 
     A Valkey or database call that hangs does not keep the stream open
-    past the end of its login: the read is cancelled
-    :data:`_END_GRACE_SECONDS` after ``ends_at`` and
-    :class:`_StreamEndedError` is raised. A read that is still healthy
-    at ``ends_at`` is not cancelled: it stops by itself, because its wait
-    ends at ``ends_at``. A read error once ``ends_at`` has passed raises
-    :class:`_StreamEndedError` too.
+    past the end of its login: the read is cancelled at ``ends_at`` and
+    :class:`_StreamEndedError` is raised. A read error once ``ends_at``
+    has passed raises :class:`_StreamEndedError` too.
     """
-    left = liveness.seconds_left()
-    timeout = asyncio.timeout(None if left is None else left + _END_GRACE_SECONDS)
+    timeout = asyncio.timeout(liveness.seconds_left())
     try:
         async with timeout:
             return await read

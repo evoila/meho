@@ -411,7 +411,7 @@ async def test_stalled_first_read_ends_the_stream_at_the_deadline(
         )
     )
     assert frames == []
-    assert time.monotonic() - started < 4.0
+    assert time.monotonic() - started < 2.0
 
 
 async def test_stalled_live_read_ends_the_stream_at_the_deadline(
@@ -432,29 +432,33 @@ async def test_stalled_live_read_ends_the_stream_at_the_deadline(
         )
     )
     assert frames == []
-    assert time.monotonic() - started < 4.0
+    assert time.monotonic() - started < 2.0
 
 
-async def test_read_still_running_at_the_deadline_is_not_cancelled(
+async def test_database_read_cut_off_at_the_deadline_ends_and_a_write_follows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A healthy read that runs a little past the end finishes by itself.
+    """The stream ends on time while a database read is still running.
 
-    Cancelling it in the middle of a database statement leaves a SQLite
-    connection holding its read lock, and the next write fails with
-    "database is locked".
+    The read is not stopped in the middle: it runs to its end and closes
+    its session. A write right after it then succeeds, well inside the
+    SQLite wait time, so no lock is left behind.
     """
-    from meho_backplane.api.v1 import feed as feed_module
-    from meho_backplane.broadcast.archive_reader import AnnouncementWatch
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    real_filter = archive_reader._without_ended_claims
 
-    finished: list[bool] = []
+    async def _held_filter(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        result = await real_filter(*args, **kwargs)
+        finished.set()
+        return result
 
-    async def _slow_read(*_args: object, **_kwargs: object) -> AnnouncementWatch:
-        await asyncio.sleep(0.6)
-        finished.append(True)
-        return AnnouncementWatch(events=[], after=0, gap=None)
-
-    monkeypatch.setattr(feed_module, "watch_announcement_rows", _slow_read)
+    await seed_announcement(_TENANT, activity="stored before the stream")
+    monkeypatch.setattr(archive_reader, "_without_ended_claims", _held_filter)
+    started = time.monotonic()
     frames = await _collect(
         announcement_feed_frames(
             _reader(),
@@ -465,7 +469,14 @@ async def test_read_still_running_at_the_deadline_is_not_cancelled(
         )
     )
     assert frames == []
-    assert finished == [True]
+    assert time.monotonic() - started < 2.0
+    assert entered.is_set()
+    assert not finished.is_set()
+
+    release.set()
+    async with asyncio.timeout(2.0):
+        await finished.wait()
+        await seed_announcement(_TENANT, activity="written after the cut-off read")
 
 
 async def test_read_error_after_the_deadline_sends_no_error_frame(

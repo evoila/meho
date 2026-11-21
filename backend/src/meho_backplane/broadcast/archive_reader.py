@@ -87,6 +87,7 @@ from meho_backplane.broadcast.history import (
     row_to_announcement,
     stream_key,
 )
+from meho_backplane.broadcast.read_to_end import run_to_end
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.settings import get_settings
@@ -491,7 +492,7 @@ async def watch_announcement_rows(
     seen: set[str] = set()
     while True:
         await wake.mark()
-        scan = await _watch_scan(tenant_id, after, flt, seen)
+        scan = await run_to_end(_watch_scan(tenant_id, after, flt, seen))
         after = scan.after
         remaining = deadline - loop.time()
         if scan.matched or scan.full or scan.gap is not None or remaining <= 0:
@@ -547,8 +548,12 @@ async def latest_announcements(
     time of the read: a watcher that starts there misses nothing after
     this read. DB errors propagate (fail-loud).
     """
-    tenant_id = operator.tenant_id
-    active_filter = flt or AnnouncementFilter()
+    return await run_to_end(_latest(operator.tenant_id, limit, since, flt or AnnouncementFilter()))
+
+
+async def _latest(
+    tenant_id: UUID, limit: int, since: datetime | None, active_filter: AnnouncementFilter
+) -> LatestAnnouncements:
     async with get_sessionmaker()() as session:
         await _number_older_writes(session, tenant_id)
         watermark = await archive_watermark(session, tenant_id)
@@ -579,7 +584,10 @@ async def first_seq_since(operator: Operator, since: datetime) -> tuple[int, dic
     announcements from that time may be gone, and a later scan cannot
     count them because the resume point is already past them.
     """
-    tenant_id = operator.tenant_id
+    return await run_to_end(_first_seq_since(operator.tenant_id, since))
+
+
+async def _first_seq_since(tenant_id: UUID, since: datetime) -> tuple[int, dict[str, Any] | None]:
     async with get_sessionmaker()() as session:
         await _number_older_writes(session, tenant_id)
         position, gap = await _history_start(session, tenant_id, since)

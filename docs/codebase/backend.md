@@ -1408,8 +1408,9 @@ Two examples. "database is locked" in the console tests came from a
 background readiness check that outlived its test (#1776); the fix was
 to reset it after every test. "database is locked" in
 `test_feed_stream_ends_with_login.py` came from the announcement stream
-cancelling a read in the middle of a statement; the fix was to let a
-healthy read end by itself. Start by running the failing test file with
+cancelling a read in the middle of a statement; the fix was to run
+each archive read in its own task, so a cancel stops the wait but never
+the statement. Start by running the failing test file with
 the files of its CI shard, several times, with the CPU busy.
 
 ## Known issues

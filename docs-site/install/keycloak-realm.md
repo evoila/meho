@@ -1144,6 +1144,15 @@ asks the person to run `meho login` again. With the Admin REST API:
 The **Offline Access** tab of each client lists all long logins of
 that client.
 
+**To stop a person at once:** disabling the person in Keycloak is not
+enough on its own. MEHO checks sign-in tokens itself, so a token that
+was already issued keeps working until it ends. Block the person in MEHO
+too: `meho principal block <sub> --reason "<why>"`. MEHO then refuses
+every request of that person within 5 seconds, on every MEHO process.
+`<sub>` is the person's login id (the user id in Keycloak). To undo it,
+run `meho principal unblock <sub>`. `meho principal blocked` lists the
+blocks.
+
 If the realm does not offer `offline_access` to `meho-cli` (an older
 realm), `meho login` logs in without it. It prints one line: the login
 ends after a short time without use, and how to fix the realm. MEHO's

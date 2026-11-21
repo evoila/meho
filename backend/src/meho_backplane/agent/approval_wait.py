@@ -500,6 +500,7 @@ async def _resume_approved_or_already_resumed(
         claim_resume,
         get_request,
         persist_resume_result,
+        refuse_resume_if_asker_blocked,
         refuse_resume_if_preview_changed,
         refuse_resume_if_release_changed,
         refuse_resume_if_target_changed,
@@ -538,6 +539,17 @@ async def _resume_approved_or_already_resumed(
                 approval_request_id=approval_request_id,
             )
         return release_refusal.model_dump(mode="json")
+
+    # The login that asked must not be blocked when the approved call runs.
+    blocked_refusal = await refuse_resume_if_asker_blocked(operator, request)
+    if blocked_refusal is not None:
+        if blocked_refusal.status == "already_resumed":
+            return await _lost_claim_envelope(
+                operator=operator,
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return blocked_refusal.model_dump(mode="json")
 
     # The re-dispatch runs against the target the row saved by id, the same
     # check the operator surface runs, not the name the agent used when it

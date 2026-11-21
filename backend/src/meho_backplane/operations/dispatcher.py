@@ -438,6 +438,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
+from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -4117,6 +4118,10 @@ async def dispatch(
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
                 )
+        blocked_result = await refuse_if_principal_blocked(op_id, operator.sub, operator.tenant_id)
+        if blocked_result is not None:
+            _log.info("dispatch_refused_principal_blocked", op_id=op_id, operator_sub=operator.sub)
+            return blocked_result
         if is_draining() and not _approved:
             _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
             return shutting_down_result(op_id)

@@ -105,6 +105,11 @@ from sqlalchemy import select
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.auth.client_identity import bind_request_client_block
+from meho_backplane.auth.principal_block import (
+    PRINCIPAL_BLOCKED_MESSAGE,
+    PrincipalBlockUnavailableError,
+    is_principal_blocked,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import SandboxDeleteGrant, Tenant
 from meho_backplane.health import ui_readiness_verdict
@@ -398,6 +403,22 @@ async def _send_redirect(send: Send, location: str, *, is_htmx: bool) -> None:
     await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
+class PrincipalBlockedError(Exception):
+    """An admin blocked the login of this session."""
+
+
+async def _send_text(send: Send, status_code: int, text: str) -> None:
+    """Answer the request with a short plain-text body."""
+    body = text.encode("utf-8")
+    headers = [
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"cache-control", b"no-store"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    await send({"type": "http.response.start", "status": status_code, "headers": headers})
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
 async def _load_session_context(cookie_value: str | None, *, path: str) -> UISessionContext | None:
     """Load the session row named by the cookie, or ``None`` for "no session".
 
@@ -429,6 +450,10 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
                 select(Tenant.slug, Tenant.name).where(Tenant.id == decrypted.tenant_id),
             )
         ).one_or_none()
+    # The admin block list is read on every request (a few seconds old at
+    # most), not only at the drift-gated token check below.
+    if await is_principal_blocked(decrypted.operator_sub, decrypted.tenant_id):
+        raise PrincipalBlockedError
     # ``None`` means the stored token failed the JWT chain terminally;
     # collapse to the same redirect-to-login as a missing session.
     revalidated = await revalidate_read_session(decrypted)
@@ -519,6 +544,14 @@ class UISessionMiddleware:
                 send,
                 f"{TENANT_PICKER_PATH}?notice={TENANT_REMOVED_NOTICE}",
                 is_htmx=_request_is_htmx(scope),
+            )
+            return
+        except PrincipalBlockedError:
+            await _send_text(send, status.HTTP_403_FORBIDDEN, PRINCIPAL_BLOCKED_MESSAGE)
+            return
+        except PrincipalBlockUnavailableError:
+            await _send_text(
+                send, status.HTTP_503_SERVICE_UNAVAILABLE, "MEHO cannot check the block list."
             )
             return
 

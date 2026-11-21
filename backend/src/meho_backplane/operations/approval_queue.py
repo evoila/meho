@@ -142,6 +142,7 @@ from meho_backplane.operations._errors import (
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
+from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._target_connector_limit import (
     restored_connector_limit,
@@ -264,6 +265,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_asker_blocked",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "refuse_resume_if_target_changed",
@@ -2786,6 +2788,10 @@ async def resume_dispatch_after_approval(
     if release_refusal is not None:
         return release_refusal
 
+    blocked_refusal = await refuse_resume_if_asker_blocked(operator, request)
+    if blocked_refusal is not None:
+        return blocked_refusal
+
     resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
     if target_refusal is not None:
         return target_refusal
@@ -2944,6 +2950,37 @@ async def refuse_resume_if_release_changed(
         request,
         refusal,
         audit_payload={"request_release": request.release_id, "running_release": running},
+    )
+
+
+async def refuse_resume_if_asker_blocked(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> OperationResult | None:
+    """Refuse an approved run when the login that asked is blocked.
+
+    Returns ``None`` when the asker (``request.principal_sub``) is not
+    blocked, so the caller runs the request. Otherwise the operation never
+    runs and the vendor gets no call. The refusal is recorded like the
+    release refusal (:func:`refuse_resume_if_release_changed`): the claim
+    is taken, so the request never runs later, the stored run input is
+    deleted, one audit row records it, and the refusal is the stored run
+    result. A block-list read that fails refuses the run the same way.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    refusal = await refuse_if_principal_blocked(
+        request.op_id, request.principal_sub, request.tenant_id
+    )
+    if refusal is None:
+        return None
+    return await _refuse_resume(
+        operator,
+        request,
+        refusal,
+        audit_payload={"asker_sub": request.principal_sub},
     )
 
 

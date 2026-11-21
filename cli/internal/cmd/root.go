@@ -44,6 +44,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
 	"github.com/evoila/meho/cli/internal/cmd/policy"
+	"github.com/evoila/meho/cli/internal/cmd/principal"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/runbook"
 	runnerprincipal "github.com/evoila/meho/cli/internal/cmd/runner-principal"
@@ -312,6 +313,10 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot shadow the
 	// built-in `runner-principal` parent.
 	root.AddCommand(runnerprincipal.NewRootCmd())
+
+	// The admin block list (`meho principal block / unblock / blocked`).
+	// Wraps /api/v1/principals/blocked. tenant_admin, people only.
+	root.AddCommand(principal.NewRootCmd())
 
 	// #3533 — standing service-principal grant management. The generated
 	// client owns the REST schema; this command tree adds the operator UX.

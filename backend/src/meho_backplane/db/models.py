@@ -5315,6 +5315,31 @@ class MachineLogin(Base):
     )
 
 
+class PrincipalBlock(Base):
+    """One admin block of a person in MEHO.
+
+    ``sub`` is the person's login id. ``scope`` is ``"*"`` for a block of a
+    platform admin (every tenant) or the tenant id as text for a block of a
+    tenant admin (that tenant only). MEHO reads the whole table with a cache
+    of a few seconds (:mod:`meho_backplane.auth.principal_block`) and refuses
+    every request of a blocked login. ``tenant_id`` has no foreign key: a
+    block must still hold when the tenant row is gone.
+    """
+
+    __tablename__ = "principal_block"
+
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    blocked_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    blocked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+
 class RunnerWriteAllowlistEntry(Base):
     """One ``remote-write`` capability a runner principal is allowed to execute (#3190).
 

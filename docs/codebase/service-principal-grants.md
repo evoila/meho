@@ -146,8 +146,10 @@ and no run approval covers it.
   call" (`_validate.CREDENTIAL_WAIT_NOTE`).
 - Some operations can read, write or make any credential, because the
   caller says what they do. A connector marks them with
-  `declare_credential_capable` (`op_classes.py`; today `k8s.exec` and
-  `proxmox.api.write`). Their class stays as it is, so the approval card
+  `declare_credential_capable` (`op_classes.py`; today `k8s.exec`,
+  `k8s.apply` and `proxmox.api.write`). Every `k8s.apply` counts, for
+  every kind of object: there is no list of kinds that keep the rules of
+  `k8s.apply` (see [connectors-kubernetes.md](connectors-kubernetes.md)). Their class stays as it is, so the approval card
   and the feed still show the call. `credential_grant_reason` and
   `credential_call_waits` count them as credential calls, so every rule
   in this list holds for them: each call waits for a person, grant
@@ -162,25 +164,14 @@ and no run approval covers it.
   Kubernetes API file (`connectors/kubernetes/ingested_paths.py`): every
   call that reads or writes a Secret, runs a command in a pod (`exec`,
   `attach`), opens a port forward or a proxy, or makes a ServiceAccount
-  token, and every write (`POST`, `PUT`, `PATCH`) of an object that is
-  not one of the plain objects of `k8s.apply` (read by API group and
-  plural, also for a cluster-wide core object; a `Namespace` and a
-  `Service` always wait here, as MEHO does not read the body), an
-  ephemeral container, or the approval of a certificate
-  signing request. A path can have any prefix in front.
+  token, and every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path
+  of an object or of a collection of objects, of every kind, namespaced
+  or cluster-wide, of an ephemeral container, or of the approval of a
+  certificate signing request. A path can have any prefix in front. A
+  `/status` or `/scale` subresource keeps the rules of the operation.
 - A connector can also tell from the params of one call that it writes a
-  credential: `declare_credential_check` (`op_classes.py`). Today two
-  operations use it:
-  - `k8s.apply`: a manifest that holds (in any document, or any item of a
-    list object such as `kind: List`) an object that is not plain, or a
-    manifest MEHO cannot read, makes the call a credential call
-    (`connectors/kubernetes/op_classes.py::manifest_needs_a_person`). The
-    plain objects are the table `PLAIN_OBJECTS` in the same file (see
-    [connectors-kubernetes.md](connectors-kubernetes.md)); a `Namespace`
-    or a `Service` is plain only when it passes the check of
-    `_PLAIN_ONLY_IF` there. So a grant, an
-    agent grant or a run approval on `k8s.apply` covers only an apply of
-    plain objects.
+  credential: `declare_credential_check` (`op_classes.py`). Today one
+  operation uses it:
   - `proxmox.api.get`: a path that reads inside a guest, opens a console
     or returns a stored secret
     (`connectors/proxmox/op_classes.py::path_reads_guest_or_secret`, see
@@ -192,8 +183,8 @@ and no run approval covers it.
   `requires_approval` and `credential_call` on the row of that call, and
   `descriptor_credential_reason` and `descriptor_credential_waits` read
   it. So such a call waits for a person, and no grant and no run approval
-  covers it. Grant create still takes `k8s.apply` and `proxmox.api.get`:
-  an apply of plain objects and a plain read keep their rules.
+  covers it. Grant create still takes `proxmox.api.get`: a plain read
+  keeps its rules.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
   (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.

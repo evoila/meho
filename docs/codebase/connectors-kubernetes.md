@@ -31,48 +31,14 @@ agent grant and no run approval covers them
 - every `k8s.exec` call: a command in a container can read or write any
   credential the container holds. Grant create, agent grant create and
   run approval create refuse `k8s.exec`.
-- a `k8s.apply` whose manifest holds, in any document or any item of a
-  list object (`kind: List` in any case, or `<Kind>List`), an object that
-  is not plain, or a manifest MEHO cannot read. The plain objects are the
-  table `PLAIN_OBJECTS` in `op_classes.py`, one `(API group, kind,
-  plural)` per entry:
-  - core group: `Service`, `Namespace`, `ServiceAccount`,
-    `PersistentVolumeClaim`, `LimitRange`, `ResourceQuota`;
-  - `networking.k8s.io`: `NetworkPolicy`;
-  - `policy`: `PodDisruptionBudget`;
-  - `autoscaling`: `HorizontalPodAutoscaler`;
-  - `scheduling.k8s.io`: `PriorityClass`.
-
-  A plain object cannot run a pod, give rights, make or read a Secret,
-  or change how the cluster checks requests. Each entry of the table
-  says why in a comment. Every other object waits: a `Secret`, a
-  `ConfigMap`, an `Ingress`, an `IngressClass`, a pod or
-  a workload, a role or a binding, a webhook or an admission policy, an
-  API service, a CRD, a certificate signing request, and every custom
-  kind of a CRD (for example a Helm chart, a workflow, a pipeline run or
-  a GitOps application). A new custom kind waits until someone adds it
-  to the table in code, with its reason.
-
-  Two plain kinds are plain only when their object passes a check
-  (`_PLAIN_ONLY_IF`): a `Namespace` with a label or an annotation waits,
-  because a label can change how the cluster checks the pods in it. A
-  `Service` is plain only when its type is `ClusterIP` or not set and it
-  has no `externalIPs`; every other `Service` waits, because it opens
-  the pods to other networks.
-
-  MEHO reads the API group from `apiVersion` (`v1` is the core group,
-  `<group>/<version>` otherwise) and compares it as written; the table
-  holds it in lower case. It reads the kind without case. So a Knative `Service` waits and
-  a core `Service` does not. An object without a readable `apiVersion`
-  or `kind` waits. A `<Kind>List` waits unless its kind is plain in
-  the same group.
-  MEHO reads the manifest when the call is made. It reads each object
-  and each `items` array once, also when YAML aliases name them many
-  times. It reads at most 10,000 objects (each document and each entry
-  of an `items` array counts); a larger manifest counts as one MEHO
-  cannot read. The `items` field of any other kind (for example a
-  custom resource) is not read. An apply of only plain objects keeps the
-  rules of `k8s.apply`, so a grant on `k8s.apply` covers only those.
+- every `k8s.apply` call, for every kind of object, in every document of
+  a manifest and every item of a list object, and also a manifest MEHO
+  cannot read. What an apply does to an object depends on the object as
+  it is on the cluster and on the fields other writers own, not only on
+  the manifest. So there is no list of kinds that keep the rules of
+  `k8s.apply`. Grant create, agent grant create and run approval create
+  refuse `k8s.apply`. A person's own call waits for approval, as every
+  `k8s.apply` call does.
 
 Both are declared in `op_classes.py` of the connector. The approval card
 says in one line why the call waits; only a person reads that line. The
@@ -103,17 +69,15 @@ template of the CronJob.
 An operator can also ingest a Kubernetes API file as a generic connector.
 The operations it makes that read or write a Secret, run a command in a
 pod, open a proxy or a port forward, or make a token get the same rule.
-So does every write (`POST`, `PUT`, `PATCH`) of an object that is not
-plain: MEHO reads the API group and the plural from the path and looks
-them up in the same `PLAIN_OBJECTS` table. MEHO does not read the body of
-such a call, so a write of a `Namespace` or a `Service` always waits
-(`PLAIN_PLURALS` leaves out the kinds of `_PLAIN_ONLY_IF`). The same
-rule holds for a cluster-wide core object (`/api/v1/<plural>` for a
-namespace, a node, a persistent volume or a component status): its write
-waits unless its plural is in `PLAIN_PLURALS`. A trailing `/` counts the same as none. A `/status` or
-`/scale` subresource, and the `status` and `finalize` subresources of a
-Namespace, keep their rules. A path can have any prefix in
-front, for example the base path of a proxy
+So does every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path of an
+object or of a collection of objects, of every kind: `/api/v1/...` and
+`/apis/<group>/<version>/...`, namespaced or cluster-wide (for the core
+group: a namespace, a node, a persistent volume or a component status).
+There is no list of kinds that keep their rules. A trailing `/` counts
+the same as none. A path can have any prefix in front, for example the
+base path of a proxy. A read, a `/status` or `/scale` subresource, and
+the `status` and `finalize` subresources of a Namespace keep the rules
+of the operation
 (`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.

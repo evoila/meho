@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1251,5 +1252,23 @@ func TestIsInvalidScope(t *testing.T) {
 		if got := IsInvalidScope(c.err); got != c.want {
 			t.Errorf("%s: IsInvalidScope = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestNewSessionID_IsAUniqueVersion4UUID(t *testing.T) {
+	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	a, b := NewSessionID(), NewSessionID()
+	if !re.MatchString(a) || !re.MatchString(b) {
+		t.Fatalf("session ids %q and %q are not version-4 UUIDs", a, b)
+	}
+	if a == b {
+		t.Errorf("two session ids are equal: %q", a)
+	}
+}
+
+func TestConvertOAuthToken_MakesASessionID(t *testing.T) {
+	st := ConvertOAuthToken(&oauth2.Token{AccessToken: "x"}, "https://bp.example", "https://idp.example", "meho-cli")
+	if st.SessionID == "" {
+		t.Error("ConvertOAuthToken left SessionID empty")
 	}
 }

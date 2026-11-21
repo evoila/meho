@@ -89,7 +89,10 @@ than 180 days.
 
 Precise enough that a second implementation reproduces the numbers.
 Only successful rows (`status_code == 200`) count. Let a *session* be a
-distinct non-null `agent_session_id`.
+distinct non-null `agent_session_id` of an agent run or an MCP session.
+A row whose id is a CLI login session (payload
+`session_from_client: true`, from the `Meho-Session-Id` header) is not
+a session here.
 
 **Surface split.** Every metric is reported for two surfaces,
 partitioned by the presence of `agent_session_id` on the row:
@@ -97,7 +100,9 @@ partitioned by the presence of `agent_session_id` on the row:
 - `agent` — rows **with** `agent_session_id` (MCP/agent-run traffic,
   where client-side reflex levers such as plugin hooks apply).
 - `cli_rest` — rows **without** `agent_session_id` (CLI/REST traffic,
-  which can only ever get server-side levers).
+  which can only ever get server-side levers). A dispatch row whose
+  `agent_session_id` is a CLI login session counts here too, as a row
+  without a session, so it is never announce-covered.
 
 The MCP-meta-tool metrics (read-before-act, write-back) are structurally
 computable only on the `agent` surface (envelope rows always carry a

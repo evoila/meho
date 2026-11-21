@@ -1836,7 +1836,7 @@ async def _record_grant_use(
     """
     from meho_backplane.operations._audit import (
         parent_audit_id_var,
-        resolve_agent_session_id,
+        resolve_audit_session_id,
         work_ref_var,
     )
     from meho_backplane.request_usage.collector import current_request_id
@@ -1873,7 +1873,7 @@ async def _record_grant_use(
             tenant_id=operator.tenant_id,
             target_id=target_id,
             parent_audit_id=parent_audit_id_var.get(),
-            agent_session_id=resolve_agent_session_id(),
+            agent_session_id=resolve_audit_session_id(),
             method=_GRANT_USE_METHOD,
             path=_GRANT_USE_PATH,
             status_code=_GRANT_USE_STATUS_CODE,

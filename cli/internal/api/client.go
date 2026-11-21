@@ -152,6 +152,7 @@ func NewAuthedClient(ctx context.Context, backplaneURL string, opts AuthedClient
 			return errors.New("meho: stored token has no access_token")
 		}
 		req.Header.Set("Authorization", authorizationHeader(bearer))
+		SetSessionIDHeader(req, box.sessionID())
 		SetWorkRefHeader(req)
 		SetTenantHeader(req)
 		return nil
@@ -284,6 +285,13 @@ func (c *AuthedClient) HTTPClient() *http.Client {
 // goroutine can't surface a torn string.
 func (c *AuthedClient) AccessToken() string {
 	return c.box.snapshot()
+}
+
+// SessionID returns the login session id of the stored token, or ""
+// for a token saved before login made one. Hand-rolled backplane
+// requests send it with SetSessionIDHeader, as the request editor does.
+func (c *AuthedClient) SessionID() string {
+	return c.box.sessionID()
 }
 
 // SignInClient returns the realm URL and the OAuth client id of the

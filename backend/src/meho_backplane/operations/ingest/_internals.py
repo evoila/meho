@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
-from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
+from meho_backplane.operations._audit import resolve_audit_session_id, work_ref_var
 from meho_backplane.operations.embed import build_embedding_text, encode_endpoint_text
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.connector_registration import (
@@ -578,7 +578,7 @@ async def write_audit_row(
     was supplied.
 
     ``agent_session_id`` comes from
-    :func:`~meho_backplane.operations._audit.resolve_agent_session_id`:
+    :func:`~meho_backplane.operations._audit.resolve_audit_session_id`:
     the agent run's session when the action runs inside an agent loop,
     else the MCP session the client sent. It is set here, on every
     service-level row, so a session search finds the action whether or
@@ -604,7 +604,7 @@ async def write_audit_row(
         status_code=200,
         request_id=None,
         duration_ms=Decimal("0"),
-        agent_session_id=resolve_agent_session_id(),
+        agent_session_id=resolve_audit_session_id(),
         work_ref=work_ref_var.get(),
         payload=payload,
     )

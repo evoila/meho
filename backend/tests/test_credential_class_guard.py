@@ -32,7 +32,6 @@ import pytest
 
 from meho_backplane.broadcast.events import is_secret_param_name, resolve_op_class
 from meho_backplane.db.models import EndpointDescriptor
-from meho_backplane.op_classes import params_make_credential_call
 from meho_backplane.operations._secret_values import plain_fields_of
 from meho_backplane.operations.service_grants import CREDENTIAL_CLASSES, credential_call_waits
 from meho_backplane.settings import get_settings
@@ -193,7 +192,7 @@ def test_the_guard_passes_a_made_up_op_with_a_credential_class_or_no_secret() ->
 
 @pytest.mark.asyncio
 async def test_the_operations_that_can_send_any_credential_get_the_credential_rule() -> None:
-    """A command in a container, a raw Proxmox write and a k8s.apply of a Secret.
+    """A command in a container, a raw Proxmox write and every k8s.apply.
 
     They have no credential class, because their approval card must show the
     call. The rule holds for them all the same.
@@ -203,6 +202,4 @@ async def test_the_operations_that_can_send_any_credential_get_the_credential_ru
 
     assert credential_call_waits("k8s.exec")
     assert credential_call_waits("proxmox.api.write")
-    assert not credential_call_waits("k8s.apply")
-    secret = "apiVersion: v1\nkind: Secret\nmetadata: {name: a}\n"
-    assert params_make_credential_call("k8s.apply", {"manifest": secret})
+    assert credential_call_waits("k8s.apply")

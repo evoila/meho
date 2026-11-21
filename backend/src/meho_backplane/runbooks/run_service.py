@@ -134,7 +134,7 @@ from meho_backplane.db.models import (
     RunbookTemplate,
 )
 from meho_backplane.operations._audit import (
-    resolve_agent_session_id,
+    resolve_audit_session_id,
     run_id_var,
     step_id_var,
     work_ref_var,
@@ -1574,7 +1574,7 @@ class RunbookRunService:
             "path": _CONFIRM_AUDIT_PATH,
             "status_code": _ABORT_AUDIT_STATUS_CODE,
             "duration_ms": Decimal("0"),
-            "agent_session_id": resolve_agent_session_id(),
+            "agent_session_id": resolve_audit_session_id(),
             "payload": {
                 "op_id": _CONFIRM_AUDIT_PATH,
                 "result_status": "ok" if passed else "failed",

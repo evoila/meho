@@ -457,8 +457,11 @@ async def test_env_and_header_entries_are_walked_past_their_hidden_value(
     assert header["exec"]["command"] == {"hidden": True, "bytes": 4 + len(_ARG_VALUE)}
 
     text = json.dumps(preview)
-    for value in (_ENV_VALUE, _SECRET_VALUE, _HEADER_VALUE, _ARG_VALUE):
+    for value in (_ENV_VALUE, _SECRET_VALUE, _HEADER_VALUE):
         assert value not in text
+    assert _ARG_VALUE not in json.dumps(preview["manifest"])
+    # The person-only list names the command line the echo shows only by size.
+    assert [entry.get("command") for entry in preview["run_commands"]] == [["sh", "-c", _ARG_VALUE]]
 
 
 @pytest.mark.asyncio

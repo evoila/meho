@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, LessonRetrieval, Tenant
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 
 
 async def seed_tenant(tenant_id: uuid.UUID) -> None:
@@ -27,6 +28,7 @@ async def seed_dispatch(
     op_id: str = "k8s.pod.list",
     target_id: uuid.UUID | None = None,
     status_code: int = 200,
+    from_client: bool = False,
 ) -> None:
     async with get_sessionmaker()() as session:
         session.add(
@@ -42,7 +44,7 @@ async def seed_dispatch(
                 status_code=status_code,
                 request_id=None,
                 duration_ms=Decimal("1.00"),
-                payload={},
+                payload={SESSION_FROM_CLIENT_KEY: True} if from_client else {},
             )
         )
         await session.commit()

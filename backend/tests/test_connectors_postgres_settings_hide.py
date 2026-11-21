@@ -8,13 +8,14 @@ rules of libpq (the PostgreSQL pages "Connection Strings" and "Parameter Key
 Words"). The fixed hide mark stands in place of each secret value, in the key
 word form and in the address form. Every other character stays as the server
 sent it, so each test compares the whole result with the expected text. A
-text that libpq cannot read becomes the mark as a whole when it holds a secret
-name or an address password, and stays as it is otherwise.
+text that libpq cannot read (also one with a name that is not a libpq key
+word) makes the call refused when it holds a secret name or an address
+password, and stays as it is otherwise.
 
 Through ``dispatch``, for a person, an agent login and a service login, the
-made-up password is in none of the result, the flight recorder trace, the
-event outbox (the activity feed) and the audit row. The plain setting keeps
-its value.
+made-up password is in none of the result or the error, the flight recorder
+trace, the event outbox (the activity feed) and the audit row. The plain
+setting keeps its value. A call without ``names`` is never refused.
 """
 
 from __future__ import annotations
@@ -29,9 +30,15 @@ import pytest
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.checks import runner as sensor_runner
+from meho_backplane.checks.runner import _run_evaluation, _SensorSnapshot
 from meho_backplane.connectors.postgres import PostgresConnector
 from meho_backplane.connectors.postgres import connector as connector_module
-from meho_backplane.connectors.postgres.queries import fetch_settings
+from meho_backplane.connectors.postgres.queries import (
+    CURATED_SETTINGS,
+    PostgresSettingsRefusedError,
+    fetch_settings,
+)
 from meho_backplane.connectors.postgres.query_guard import CONNECTION_TEXT_SETTINGS
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -411,53 +418,57 @@ _ADDRESS_CASES = [
     ),
 ]
 
-#: Texts that libpq cannot read: (value, expected).
-_UNREADABLE_CASES = [
+#: Texts that libpq cannot read and that hold a secret: the call is refused.
+_REFUSED_CASES = [
     pytest.param(
         "host=db.example.test password='pw-0815",  # trufflehog:ignore
-        _M,
         id="unclosed-quote-with-a-secret-name",
     ),
     pytest.param(
         "host=db.example.test password pw-0815",  # trufflehog:ignore
-        _M,
         id="missing-equals-with-a-secret-name",
     ),
     pytest.param(
         "=pw-0815 password=pw-0815",  # trufflehog:ignore
-        _M,
         id="empty-name-with-a-secret-name",
     ),
     pytest.param(
+        "application_name='password rotation",
+        id="unclosed-quote-with-a-secret-name-in-a-value",
+    ),
+    pytest.param(
+        "host=db.example.test unknownopt=1 password=pw-0815",  # trufflehog:ignore
+        id="unknown-key-word-with-a-secret-name",
+    ),
+    pytest.param(
         "postgresql://db.test/app?password=pw%zz0815",  # trufflehog:ignore
-        _M,
         id="broken-percent-code-with-a-secret-name",
     ),
     pytest.param(
         "postgresql://db.test/app?pass%77ord=pw-0815&broken",  # trufflehog:ignore
-        _M,
         id="percent-encoded-secret-name-in-an-unreadable-text",
     ),
     pytest.param(
         "postgresql://db.test/app?password=pw=0815",  # trufflehog:ignore
-        _M,
         id="two-equals-in-a-secret-parameter",
     ),
     pytest.param(
-        "host='db.example.test port=5432",
-        "host='db.example.test port=5432",
-        id="unclosed-quote-without-a-secret-name",
+        "postgresql://db.test/app?unknownopt=1&password=pw-0815",  # trufflehog:ignore
+        id="unknown-address-parameter-with-a-secret-name",
     ),
     pytest.param(
-        "host=db.example.test port",
-        "host=db.example.test port",
-        id="missing-equals-without-a-secret-name",
+        "postgresql://repl:pw-0815@db.test/app?ssl=false",  # trufflehog:ignore
+        id="unknown-address-parameter-with-an-address-password",
     ),
-    pytest.param(
-        "postgresql://db.test/app?sslmode=require&broken",
-        "postgresql://db.test/app?sslmode=require&broken",
-        id="parameter-without-equals-and-without-a-secret",
-    ),
+]
+
+#: Texts that libpq cannot read and that hold no secret: they stay as they are.
+_UNREADABLE_KEPT_CASES = [
+    pytest.param("host='db.example.test port=5432", id="unclosed-quote"),
+    pytest.param("host=db.example.test port", id="missing-equals"),
+    pytest.param("postgresql://db.test/app?sslmode=require&broken", id="parameter-without-equals"),
+    pytest.param("host=db.example.test unknownopt=1", id="unknown-key-word"),
+    pytest.param("postgresql://db.test/app?unknownopt=1", id="unknown-address-parameter"),
 ]
 
 #: Texts with no secret part, in each form: they stay equal to the input.
@@ -483,6 +494,10 @@ _NO_SECRET_CASES = [
         id="address-with-white-space",
     ),
     pytest.param(
+        "postgresql://db.test/app?ssl=true",
+        id="address-with-ssl-true",
+    ),
+    pytest.param(
         "postgresql://db.test:5432/app@repl:x",  # trufflehog:ignore
         id="address-with-an-at-sign-after-the-slash",
     ),
@@ -505,12 +520,22 @@ async def test_settings_hide_each_secret_value_of_an_address(value: str, expecte
     assert await _hidden(value) == expected
 
 
-@pytest.mark.parametrize(("value", "expected"), _UNREADABLE_CASES)
+@pytest.mark.parametrize("value", _REFUSED_CASES)
 @pytest.mark.asyncio
-async def test_settings_hide_an_unreadable_text_whole_only_with_a_secret(
-    value: str, expected: str
-) -> None:
-    assert await _hidden(value) == expected
+async def test_settings_hide_an_unreadable_text_whole_only_with_a_secret(value: str) -> None:
+    with pytest.raises(PostgresSettingsRefusedError) as refused:
+        await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
+    message = str(refused.value)
+    assert _SETTING in message
+    assert "out of names" in message
+    assert "0815" not in message
+    assert "rotation" not in message
+
+
+@pytest.mark.parametrize("value", _UNREADABLE_KEPT_CASES)
+@pytest.mark.asyncio
+async def test_settings_keep_an_unreadable_text_without_a_secret(value: str) -> None:
+    assert await _hidden(value) == value
 
 
 @pytest.mark.parametrize("value", _NO_SECRET_CASES)
@@ -529,3 +554,106 @@ async def test_settings_hide_the_value_for_a_setting_name_in_upper_case() -> Non
 
     result = await fetch_settings(_UpperConn(), [_SETTING])  # type: ignore[arg-type]
     assert result["settings"][0]["setting"] == f"{_VISIBLE_PART}{_M}"
+
+
+#: A value of the setting that libpq cannot read and that holds the password.
+_UNREADABLE_TEXT = f"host=standby.example.test password='{_PASSWORD}"
+
+
+class _UnreadableConn:
+    """Answers each asked name; the connection-text setting holds a broken value."""
+
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        wanted = list(args[0])
+        rows = [_setting_row(name, "4096") for name in wanted if name != _SETTING]
+        if _SETTING in wanted:
+            rows.append(_setting_row(_SETTING, _UNREADABLE_TEXT))
+        return rows
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [PrincipalKind.USER, PrincipalKind.AGENT, PrincipalKind.SERVICE],
+    ids=["person", "agent", "service"],
+)
+@pytest.mark.asyncio
+async def test_settings_refuse_an_unreadable_text_with_a_secret_for_every_login(
+    monkeypatch: pytest.MonkeyPatch, tenant_id: UUID, kind: PrincipalKind
+) -> None:
+    monkeypatch.setattr(
+        connector_module, "connect_read_only", AsyncMock(return_value=_UnreadableConn())
+    )
+    result = await dispatch(
+        operator=_login(kind, tenant_id),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target=_Target(tenant_id),
+        params={"names": [_SETTING, "work_mem"]},
+    )
+    assert result.status != "ok"
+    assert result.error == "connector_error: PostgresSettingsRefusedError"
+    assert result.result is None
+    assert _PASSWORD not in repr(result.model_dump())
+
+    traces = await _rows(DispatchTrace) + await _rows(DispatchTraceSpan)
+    audit = await _rows(AuditLog)
+    assert traces
+    assert audit
+    for row in [*traces, *await _rows(EventOutbox), *audit]:
+        assert _PASSWORD not in _row_text(row), type(row).__name__
+
+
+@pytest.mark.asyncio
+async def test_settings_without_names_are_never_refused(
+    monkeypatch: pytest.MonkeyPatch, tenant_id: UUID
+) -> None:
+    assert not CONNECTION_TEXT_SETTINGS & {name.lower() for name in CURATED_SETTINGS}
+    monkeypatch.setattr(
+        connector_module, "connect_read_only", AsyncMock(return_value=_UnreadableConn())
+    )
+    result = await dispatch(
+        operator=_login(PrincipalKind.AGENT, tenant_id),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target=_Target(tenant_id),
+        params={},
+    )
+    assert result.status == "ok", result.error
+    names = [row["name"] for row in (result.result or {})["settings"]]
+    assert names == list(CURATED_SETTINGS)
+
+
+@pytest.mark.asyncio
+async def test_a_sensor_of_a_refused_setting_reads_unknown(
+    monkeypatch: pytest.MonkeyPatch, tenant_id: UUID
+) -> None:
+    target = _Target(tenant_id)
+
+    async def _resolve(*args: Any, **kwargs: Any) -> tuple[Any, None]:
+        return target, None
+
+    monkeypatch.setattr(sensor_runner, "_resolve_target_or_error", _resolve)
+    monkeypatch.setattr(
+        connector_module, "connect_read_only", AsyncMock(return_value=_UnreadableConn())
+    )
+    snap = _SensorSnapshot(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        name="pg-standby-link",
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target={"name": target.name},
+        params={"names": [_SETTING]},
+        assertion={
+            "select": {"path": "$.settings[0].setting"},
+            "compare": {"type": "equals", "value": "x"},
+        },
+        identity_sub="__sensor__",
+    )
+    outcome = await _run_evaluation(snap)
+    assert outcome.state == "unknown"
+    assert outcome.evidence["dispatch_error"] == "connector_error: PostgresSettingsRefusedError"
+    assert _PASSWORD not in repr(outcome.evidence)

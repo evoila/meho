@@ -37,6 +37,7 @@ from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER
 
 __all__ = [
     "CURATED_SETTINGS",
+    "PostgresSettingsRefusedError",
     "fetch_activity",
     "fetch_databases",
     "fetch_fingerprint",
@@ -334,12 +335,80 @@ _ASCII_SPACE = frozenset(" \t\n\r\v\f")
 #: or the forbidden ``%00``.
 _BROKEN_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})|%00")
 
+#: The parameter key words libpq reads, pinned to the PostgreSQL 16 page
+#: "Parameter Key Words"
+#: (https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-PARAMKEYWORDS),
+#: plus the ``oauth_*`` key words of the current page, where
+#: ``oauth_client_secret`` comes from. libpq refuses a text with any other name.
+_LIBPQ_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "host",
+        "hostaddr",
+        "port",
+        "dbname",
+        "user",
+        "password",
+        "passfile",
+        "require_auth",
+        "channel_binding",
+        "connect_timeout",
+        "client_encoding",
+        "options",
+        "application_name",
+        "fallback_application_name",
+        "keepalives",
+        "keepalives_idle",
+        "keepalives_interval",
+        "keepalives_count",
+        "tcp_user_timeout",
+        "replication",
+        "gssencmode",
+        "sslmode",
+        "requiressl",
+        "sslcompression",
+        "sslcert",
+        "sslkey",
+        "sslpassword",
+        "sslcertmode",
+        "sslrootcert",
+        "sslcrl",
+        "sslcrldir",
+        "sslsni",
+        "requirepeer",
+        "ssl_min_protocol_version",
+        "ssl_max_protocol_version",
+        "krbsrvname",
+        "gsslib",
+        "gssdelegation",
+        "service",
+        "target_session_attrs",
+        "load_balance_hosts",
+        "oauth_issuer",
+        "oauth_client_id",
+        "oauth_client_secret",
+        "oauth_scope",
+    }
+)
+
 #: One span ``(start, end)`` of a connection text.
 _Span = tuple[int, int]
 
 
+class PostgresSettingsRefusedError(ValueError):
+    """``postgres.settings`` refused the call for a setting it cannot hide.
+
+    Subclasses :class:`ValueError` so the dispatcher's ``connector_error``
+    branch renders the message verbatim. The message holds no part of the
+    value.
+    """
+
+
 def _is_secret_name(name: str) -> bool:
     return name.lower() in CONNECTION_TEXT_SECRET_KEYWORDS
+
+
+def _is_libpq_name(name: str) -> bool:
+    return name.lower() in _LIBPQ_KEYWORDS
 
 
 def _skip_space(text: str, i: int) -> int:
@@ -374,7 +443,8 @@ def _keyword_secret_spans(text: str) -> list[_Span] | None:
     value before it directly; a backslash takes the next character, whatever
     it is, in a bare value and in a quoted one. The span of a quoted value is
     the text between its quotes. Returns ``None`` when libpq cannot read the
-    text (a name with no ``=``, an empty name, an unclosed quote).
+    text (a name with no ``=``, an empty name, a name that is not a libpq
+    key word, an unclosed quote).
     """
     spans: list[_Span] = []
     i, n = _skip_space(text, 0), len(text)
@@ -384,7 +454,7 @@ def _keyword_secret_spans(text: str) -> list[_Span] | None:
             i += 1
         name = text[name_start:i]
         i = _skip_space(text, i)
-        if not name or i >= n or text[i] != "=":
+        if not _is_libpq_name(name) or i >= n or text[i] != "=":
             return None
         value = _read_value(text, _skip_space(text, i + 1))
         if value is None:
@@ -446,7 +516,8 @@ def _address_secret_spans(text: str) -> list[_Span] | None:
     percent decoding, is a secret name. A query parameter runs to the next
     ``&``. White space is part of a value. Returns ``None`` when libpq cannot
     read the text (a broken percent code, an unclosed ``[``, a query
-    parameter without exactly one ``=``).
+    parameter without exactly one ``=``, a parameter name that is not a libpq
+    key word after percent decoding). libpq also takes ``ssl=true``.
     """
     if _BROKEN_PERCENT.search(text):
         return None
@@ -460,9 +531,12 @@ def _address_secret_spans(text: str) -> list[_Span] | None:
         amp = text.find("&", i)
         end = n if amp == -1 else amp
         name, equals, value = text[i:end].partition("=")
+        decoded = unquote(name)
         if not equals or "=" in value:
             return None
-        if value and _is_secret_name(unquote(name)):
+        if not _is_libpq_name(decoded) and (decoded.lower(), value) != ("ssl", "true"):
+            return None
+        if value and _is_secret_name(decoded):
             spans.append((end - len(value), end))
         i = end + 1
     return spans
@@ -501,16 +575,24 @@ def _connection_text_secret_spans(text: str) -> list[_Span] | None:
     return _keyword_secret_spans(text)
 
 
-def _hide_connection_secrets(text: str) -> str:
+def _hide_connection_secrets(setting: str, text: str) -> str:
     """Put the hide mark in place of each secret value of one connection text.
 
     Every other character stays as the server sent it. A text that libpq
-    cannot read becomes the mark as a whole when it holds a secret name or an
-    address password, and stays as it is otherwise.
+    cannot read stays as it is when it holds no secret name and no address
+    password. When it holds one, the call is refused with
+    :class:`PostgresSettingsRefusedError`.
     """
     spans = _connection_text_secret_spans(text)
     if spans is None:
-        return SECRET_FIELD_MARKER if _holds_secret_shape(text) else text
+        if _holds_secret_shape(text):
+            raise PostgresSettingsRefusedError(
+                f"postgres.settings refused the call: the value of the setting "
+                f"'{setting}' is a connection text that libpq cannot read, and it "
+                f"holds a secret. Fix the value of '{setting}' on the server, or "
+                f"leave '{setting}' out of names."
+            )
+        return text
     parts: list[str] = []
     last = 0
     for start, end in spans:
@@ -526,12 +608,13 @@ def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
 
     An empty value and a null value stay as they are.
     """
-    if str(row.get("name", "")).lower() not in CONNECTION_TEXT_SETTINGS:
+    setting = str(row.get("name", "")).lower()
+    if setting not in CONNECTION_TEXT_SETTINGS:
         return row
     for column in _SETTING_VALUE_COLUMNS:
         value = row.get(column)
         if isinstance(value, str) and value:
-            row[column] = _hide_connection_secrets(value)
+            row[column] = _hide_connection_secrets(setting, value)
     return row
 
 
@@ -543,9 +626,10 @@ async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> d
     is read with the rules of libpq, for every caller. The fixed hide mark
     stands in place of each secret value (``password``, ``sslpassword``,
     ``oauth_client_secret`` and the password of an address); every other
-    character stays. A value that libpq cannot read becomes the mark as a
-    whole when it holds a secret name or an address password, and stays as
-    it is otherwise.
+    character stays. A value that libpq cannot read stays as it is when it
+    holds no secret name and no address password. When it holds one, the call
+    is refused with :class:`PostgresSettingsRefusedError`. The curated list
+    holds no such setting, so a call without *names* is never refused.
     """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)

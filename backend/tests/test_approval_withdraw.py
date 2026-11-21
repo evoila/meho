@@ -382,6 +382,7 @@ _MAIN_ANSWER: dict[str, Any] = {
     "created_at": "2026-01-05T09:30:00",
     "expires_at": "2026-01-19T09:30:00",
     "work_ref": None,
+    "agent_session_id": None,
     "reviewer_context": None,
     "delegation": None,
     "may_approve": False,

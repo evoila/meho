@@ -48,7 +48,9 @@ from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.main import app
 from meho_backplane.operations import approval_queue, dispatcher, shutdown_drain
 from meho_backplane.operations._audit import (
+    SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
+    client_session_id_var,
     parent_audit_id_var,
     run_id_var,
     work_ref_var,
@@ -417,12 +419,45 @@ async def test_interrupted_agent_call_is_found_by_the_session_replay(
     assert row.work_ref == "CHG-1"
     assert row.payload["agent_session_id"] == str(session_id)
     assert row.payload["parent_audit_id"] == str(parent_id)
+    assert SESSION_FROM_CLIENT_KEY not in row.payload
     async with get_sessionmaker()() as session:
         roots = await replay_session(session_id, tenant_id=_TENANT, session=session)
     assert [node.path for node in roots] == ["call_operation"]
     (child,) = roots[0].children
     assert child.path == "demo.thing.agent"
     assert child.payload["result_status"] == "unfinished"
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_interrupted_cli_call_keeps_its_session_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unfinished row of a CLI call is marked as a CLI session.
+
+    The row is written after the request context ended, so the source
+    must come from the saved running call, not from the context.
+    """
+    cli_session = uuid.uuid4()
+    entered, _release = _block_body(monkeypatch)
+    token = client_session_id_var.set(cli_session)
+    try:
+        running = asyncio.create_task(_call("demo.thing.cli"))
+    finally:
+        client_session_id_var.reset(token)
+    await entered.wait()
+    shutdown_drain.begin_drain()
+
+    still_running = await shutdown_drain.wait_for_running_operations(time.monotonic() + 0.2)
+    assert client_session_id_var.get() is None
+    assert await shutdown_drain.record_unfinished_operations(still_running) == 1
+
+    (row,) = await _audit_rows("demo.thing.cli")
+    assert row.agent_session_id == cli_session
+    assert row.payload["agent_session_id"] == str(cli_session)
+    assert row.payload[SESSION_FROM_CLIENT_KEY] is True
 
     running.cancel()
     with pytest.raises(asyncio.CancelledError):

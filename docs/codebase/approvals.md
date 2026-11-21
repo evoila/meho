@@ -666,6 +666,47 @@ bound) and an autonomous agent run both resolve to `principal_act=NULL`.
 (Before #1481 the field read a nonexistent `Operator.identity_act`
 attribute and was always `NULL`.)
 
+### The session of a CLI call, and the origin columns
+
+Every request and audit row can say which session made it, also when
+several sessions share one login. `meho login` makes a random session id
+(a version-4 UUID) and saves it with the token. The CLI sends it in the
+`Meho-Session-Id` header on every call. A token refresh keeps the id. The
+next `meho login` makes a new one.
+
+The audit middleware (`backend/src/meho_backplane/audit.py`) reads the
+header and binds it to `client_session_id_var`
+(`backend/src/meho_backplane/operations/_audit.py`). A header that is not
+a UUID is ignored. `resolve_audit_session_id()` returns it last, after an
+agent run and an MCP session. So the operation rows of a CLI call, the
+HTTP row of the call and a parked approval request all carry it in
+`agent_session_id`. Only the writers of these rows use it. The coordination
+hints for agents (`resolve_agent_session_id()`) never see it, and the
+console does not treat such a row as an agent row. The id is a label the
+client sends. It tells sessions apart; it does not say who the caller is. A CLI that has no saved session id (a login from an
+older CLI) sends no header; running `meho login` again fixes that.
+
+The CLI sets the header with `api.SetSessionIDHeader` on every backplane
+call: the generated client, and the hand-built requests too (`meho
+targets import`, `meho event-source`, `meho broadcast watch`, `meho
+status --watch`). The retry after a token refresh sends it again.
+
+A parked approval request stores `session_from_client=true` when its
+session id came from the CLI header (migration 0180). When the approved
+operation runs, `resume_dispatch_after_approval()` binds that id to
+`client_session_id_var`, not to `agent_session_id_var`. So the audit rows
+of the run carry the requester's CLI session, and the run is not an agent
+session: the coordination hints add nothing to its answer. The approver's
+own CLI session never labels the requester's run. The approve, reject and
+expiry rows of such a request also store `session_from_client: true`,
+written by `_write_audit_row`.
+
+`ApprovalRequestView` has `agent_session_id` next to `work_ref`.
+`meho approvals list` shows two more columns: `WORK-REF` and `SESSION`
+(the first 8 characters of the session id; `--json` has the whole id).
+Both show `-` when empty. With them, a person can see which session
+parked a request and for which change ticket.
+
 ### Display-name resolution alongside the sub (#3300)
 
 Every operator-facing approvals surface — CLI `approve` / `show` /
@@ -3331,13 +3372,18 @@ row. `keycloak.role_mapping.assign` populates
 names). Further connectors register their own builders as needed.
 
 For a person the `k8s.apply` preview also has `run_commands`: one entry
-per container (init, main and ephemeral, at any depth) with the object,
+per container (init, main and ephemeral, at any depth, and every other
+object with a `command` or `args` list, under any field, such as the
+`container`, `script` or `steps` of a custom kind) with the object,
 the container name, the image, the `command` and `args`, and in
 `exec_commands` the `exec` command of each lifecycle hook (`postStart`,
 `preStop`) and exec probe (`startupProbe`, `livenessProbe`,
 `readinessProbe`), with secret values hidden by the rules of the Job
-preview. The `manifest` echo above shows only the size of each command
-line. When the dry run fails, the stored request has the
+preview. The list keeps at most 16 KB and always keeps room for the
+name of every later container: an entry that is too large keeps
+the object, the container and the image, the start of what it runs in
+`command_cut`, and a `cut` note. The `manifest` echo above shows only the
+size of each command line. When the dry run fails, the stored request has the
 `preview_unavailable` marker and, for a person, a top-level `run_commands`
 built from the manifest text (`register_preview_failure_keys` in
 `operations/_preview.py`). The console card shows that list in a "What

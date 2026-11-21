@@ -49,7 +49,9 @@ of ``agent_session_id`` on the row:
 * ``agent`` — rows **with** ``agent_session_id`` (MCP/agent-run
   traffic, where client-side reflex levers such as plugin hooks apply).
 * ``cli_rest`` — rows **without** ``agent_session_id`` (CLI/REST
-  traffic, which can only ever receive server-side levers).
+  traffic, which can only ever receive server-side levers). A row whose
+  ``agent_session_id`` is the CLI login session (payload key
+  ``session_from_client``) counts here too, as a row without a session.
 
 The split is the comparison the reflex work needs: read-before-act and
 write-back are structurally computable only on the ``agent`` surface
@@ -147,6 +149,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AgentAnnouncement, AuditLog
 from meho_backplane.lessons.metrics import LearningMetrics, compute_learning_metrics
+from meho_backplane.operations._audit import agent_session_rows
 from meho_backplane.request_usage.reader import (
     MCP_TOOL_ROUTE_PREFIX,
     UsageSource,
@@ -279,7 +282,7 @@ class ReflexReport(BaseModel):
 
 
 class _MetaToolRow(NamedTuple):
-    """A meta-tool call read from usage events, in the audit row shape."""
+    """A meta-tool call or a dispatch row, in the audit row shape."""
 
     occurred_at: datetime
     agent_session_id: UUID | None
@@ -360,13 +363,16 @@ async def _fetch_dispatch_rows(
     Returns ``(occurred_at, agent_session_id, path)``. ``path`` is the
     descriptor ``op_id``; the write-class filter is applied in Python via
     :func:`classify_op` because the classifier is match-order-significant
-    Python, not expressible in portable SQL.
+    Python, not expressible in portable SQL. A row whose session id is the
+    CLI login session comes back without a session id, so it stays on the
+    ``cli_rest`` surface.
     """
     stmt = (
         select(
             AuditLog.occurred_at,
             AuditLog.agent_session_id,
             AuditLog.path,
+            agent_session_rows().label("agent_session"),
         )
         .where(AuditLog.occurred_at >= since)
         .where(AuditLog.occurred_at <= until)
@@ -375,7 +381,14 @@ async def _fetch_dispatch_rows(
     )
     if tenant_id is not None:
         stmt = stmt.where(AuditLog.tenant_id == tenant_id)
-    return list((await session.execute(stmt)).all())
+    return [
+        _MetaToolRow(
+            occurred_at=row.occurred_at,
+            agent_session_id=row.agent_session_id if row.agent_session else None,
+            path=row.path,
+        )
+        for row in (await session.execute(stmt)).all()
+    ]
 
 
 async def _fetch_announce_first_seen(

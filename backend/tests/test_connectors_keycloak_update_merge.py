@@ -164,7 +164,9 @@ async def _seed_keycloak_target() -> None:
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     from meho_backplane.settings import get_settings
 
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    # MEHO signs in with another realm: these tests are about the merge, and
+    # MEHO refuses most changes of its own login realm.
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho-sign-in")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()

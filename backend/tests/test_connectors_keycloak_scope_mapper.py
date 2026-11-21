@@ -218,10 +218,12 @@ async def _run(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mount_token(mock: respx.MockRouter) -> respx.Route:
-    """Mount the admin login and the scope read; return the scope read."""
+    """Mount the admin login, the scope read and the client list; return the scope read."""
     mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
         200, json={"access_token": "kc-admin-token", "expires_in": 300}
     )
+    # No client of MEHO's own sign-in uses the scope.
+    mock.get(f"/admin/realms/{_REALM}/clients").respond(200, json=[])
     return mock.get(_SCOPE_PATH).respond(200, json={"id": _SCOPE_UUID, "name": _SCOPE_NAME})
 
 

@@ -1369,6 +1369,8 @@ Writes on a realm, client or group, not on the user, are outside this
 check. `realm.delete` refuses the realm the target signs in to, and
 `client.delete` refuses the target's own client. `group.delete`,
 `client.update`, `realm.update` and the sign-in flow ops have no such check.
+In MEHO's own login realm, `client.update`, `client.delete` and
+`realm.update` have the check of the next sections.
 
 ### Writes that could take MEHO's own access away
 
@@ -1456,6 +1458,80 @@ check is `ops_user_meho_access_guard.py` for user writes and
   approval as any other write in the login realm: an operator cannot
   approve it, another admin can.
 - **Other realms.** The check reads nothing and refuses nothing.
+
+### Writes that could break MEHO's own sign-in clients or login realm
+
+In MEHO's own login realm, MEHO also refuses a write that changes MEHO's
+own sign-in clients or the realm itself so that MEHO's sign-in stops
+working (`ops_meho_own_login_guard.py`):
+
+| Write | What MEHO refuses | What stays allowed |
+|---|---|---|
+| `client.delete` | deleting a client MEHO itself signs in with | deleting any other client |
+| `client.update` | every other change of a client MEHO itself signs in with | `name`, `description`; a new address in `redirectUris` or `webOrigins` when every address the client has stays; `enabled: true`; `authenticationFlowBindingOverrides` set to `""` (the client uses the realm's login flow again), but not on the approval clients (`KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_APPROVE_CLIENT_ID`): their own login flow is the approval sign-in, so MEHO refuses every change of it |
+| `protocol_mapper.create` | a new mapper on a client MEHO itself signs in with: it changes the client's `protocolMappers`, which `client.update` refuses too | a new mapper on any other client |
+| `client_scope.protocol_mapper.update` | a change of a mapper of a client scope that a client MEHO itself signs in with has in `defaultClientScopes` or `optionalClientScopes` (`refuse_scope_mapper_write`) | a mapper change on any other client scope |
+| `realm.update` | every other change of the login realm, for example `enabled: false`, a new `realm` name, `sslRequired`, `attributes` such as `frontendUrl`, a login flow, `defaultSignatureAlgorithm` | `displayName`, `displayNameHtml`; `smtpServer`; the event settings (`eventsEnabled`, `eventsExpiration`, `eventsListeners`, `enabledEventTypes`, `adminEventsEnabled`, `adminEventsDetailsEnabled`); the languages (`internationalizationEnabled`, `supportedLocales`, `defaultLocale`); `enabled: true`; `browserFlow: "browser"` |
+
+- **MEHO's own clients** come from MEHO's settings
+  (`meho_own_client_ids`): `KEYCLOAK_ADMIN_CLIENT_ID`,
+  `CHECK_RUNNER_CLIENT_ID`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_CLI_CLIENT_ID`,
+  `KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_CLIENT_ID`,
+  `UI_KEYCLOAK_APPROVE_CLIENT_ID`, and the sign-in clients of the AI tools
+  (`meho-mcp`, `meho-mcp-code`, `meho-mcp-desktop`). A param of the call
+  never adds or removes one. MEHO reads the client from Keycloak first, by
+  its internal `id` or its `client_id`, and compares the stored `clientId`
+  without letter case.
+- **A change** is a key whose value after the write differs from the value
+  Keycloak holds now, after the merge of the update
+  (`blocked_changes`). A key sent with its current value is no change. A
+  map such as `attributes` counts as one key. Every key that is not on the
+  allowed list counts as a change that can lock MEHO out.
+- **Which realm.** For `client.update`, `client.delete` and the two mapper
+  writes, the target's managed realm. For `realm.update`, the `realm` param or the target's
+  managed realm. In both cases MEHO also reads the realm from Keycloak and
+  takes the name Keycloak answers with: the realm is the login realm when
+  the typed name or the answered name is a login realm. So a realm name in
+  another spelling that Keycloak takes for the login realm counts as the
+  login realm. For the client writes MEHO reads the realm only when the
+  client may be one of its own. For `client_scope.protocol_mapper.update`
+  MEHO first lists the clients of the realm, and reads the realm only when
+  one of its own clients may use the scope.
+- **When.** Before the request waits for approval (the park checks of
+  `register_meho_own_login_checks`, and for `realm.update` after the check
+  of the SMTP password) and again when the call runs
+  (`keycloak_client_update`, `keycloak_client_delete`,
+  `keycloak_realm_update`, `keycloak_protocol_mapper_create`,
+  `keycloak_client_scope_protocol_mapper_update`). The run-time check reads the client or realm
+  once and writes back that same read. So no approval, no standing grant
+  and no run approval lets these writes through. A client that becomes one
+  of MEHO's own while the request waits is refused when it runs.
+- **On doubt MEHO refuses.** At the run, settings MEHO cannot read, a
+  client without a `clientId`, a realm MEHO cannot read for a client
+  write, a realm in an odd shape, or a client list MEHO cannot read for a
+  scope mapper write refuse the write (`meho_access_not_checked`). Before
+  approval, a client, a client list or a realm MEHO cannot read is let
+  through to wait; the run checks again.
+- **The refusal.** `MehoAccessRefusedError` with the reason
+  `meho_own_client`, `meho_login_realm` or `meho_access_not_checked`. The
+  text says what was refused and why, names the keys the caller sent,
+  names no client the caller did not name, and gives no advice to change
+  rights. It says that a realm administrator makes such a change in the
+  Keycloak admin console. Nothing is written. `realm.update` can send a secret, so the
+  error of its run shows no text.
+- **Other realms.** In another realm MEHO refuses only when it cannot
+  check:
+  - `realm.update`: Keycloak's answer for the realm has no realm name
+    (`refuse_login_realm_write`).
+  - The client writes: the client may be one of MEHO's own (its client id
+    is the client id of one of MEHO's own clients, it has no client id, or
+    MEHO cannot read its settings), and MEHO cannot read the realm
+    (`refuse_own_client_write`).
+  - `client_scope.protocol_mapper.update`: one of MEHO's own clients may
+    use the scope, and MEHO cannot read the realm
+    (`refuse_scope_mapper_write`).
+
+  When the realm answer names another realm, MEHO refuses nothing.
 
 ### One-time code set-up
 

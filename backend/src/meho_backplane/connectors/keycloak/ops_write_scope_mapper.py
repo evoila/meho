@@ -47,6 +47,10 @@ or when MEHO cannot read the mapper (:mod:`.ops_write_platform_reach`).
 A person approves each call: no standing grant and no run approval covers
 it (:func:`~meho_backplane.op_classes.declare_per_call_approval`).
 
+MEHO refuses the change, before approval and at the run, when a client MEHO
+itself signs in with has the scope as a default or optional scope
+(:func:`~.ops_meho_own_login_guard.refuse_scope_mapper_write`).
+
 Safe to run twice: the same fields written again is a success.
 
 The op-metadata row is in
@@ -68,6 +72,10 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_SCOPE_PROTOCOL_MAPPERS_PATH,
     _CLIENT_SCOPES_PATH,
     fill_path,
+)
+from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+    refuse_scope_mapper_write,
+    scope_mapper_park_reason,
 )
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
@@ -313,6 +321,9 @@ async def keycloak_client_scope_protocol_mapper_update(
             "config is not the one on the approval card. Nothing was changed. A new "
             "request is needed."
         )
+    await refuse_scope_mapper_write(
+        self, operator, target, resolve_realm_config(target).managed_realm, found.scope_name
+    )
     try:
         check = await read_merge_write(
             self,
@@ -438,6 +449,24 @@ async def _refuse_names_of_other_objects(ctx: PreviewContext) -> str | None:
     return None
 
 
+async def _park_check(ctx: PreviewContext) -> str | None:
+    """The check before approval: the names first, then MEHO's own sign-in clients.
+
+    A scope or mapper MEHO cannot find is left to the run, which checks again.
+    """
+    reason = await _refuse_names_of_other_objects(ctx)
+    if reason is not None:
+        return reason
+    connector = _live_connector(ctx)
+    if connector is None:
+        return None
+    try:
+        found = await _resolve(connector, ctx.operator, ctx.target, ctx.params)
+    except Exception:
+        return None
+    return await scope_mapper_park_reason(ctx, found.scope_name)
+
+
 async def _sets_platform_admin(ctx: PreviewContext, realm: str) -> bool | None:
     """Whether the mapper puts the platform admin claim or role into tokens, now or after it.
 
@@ -466,7 +495,7 @@ async def _sets_platform_admin(ctx: PreviewContext, realm: str) -> bool | None:
 
 register_rights_change_op(_OP_ID)
 declare_per_call_approval([_OP_ID])
-register_park_check(_OP_ID, _refuse_names_of_other_objects)
+register_park_check(_OP_ID, _park_check)
 register_preview_builder(
     _OP_ID,
     with_platform_facts(_OP_ID, _scope_mapper_preview, (_sets_platform_admin, REASON_MAPPER)),

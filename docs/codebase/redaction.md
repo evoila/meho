@@ -555,7 +555,47 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     values: a JSON or YAML file in a string, such as a ConfigMap entry or
     the last-applied note of kubectl (`redaction/secret_text.py`: the
     quoted-pair text step, then a YAML read that replaces each secret value
-    in place; a YAML file inside a JSON note is read too). The YAML read
+    in place; a YAML file inside a JSON note is read too). Two more steps
+    (`redaction/secret_markup.py`) hide what the YAML read does not see:
+    a comment line such as `# dbPassword: ...` in a YAML text (with the
+    comment lines below it whose text after the `#` is indented deeper:
+    a commented-out block value or a value over more lines), every
+    `key: value` line of a text that does not read as YAML (the key bare
+    or in quotes; the lines below a secret-named key that are indented
+    deeper are hidden with the value; a quoted value ends at its closing
+    quote, also when it holds an escaped quote (`\"` or `''`); a note after
+    the value such as `# rotate monthly` stays, and so does a comment line
+    below the key that is not part of a block value or of a quoted value
+    that is still open, with its own secret-named value hidden; a byte
+    order mark at the start of the text is skipped), and XML text: the text of a secret-named
+    element (`<password>...</password>`, child elements and CDATA
+    included; a closing tag closes the nearest open element with its
+    name, tags inside CDATA are text, and the text of an XML comment is
+    read on its own, in one pass, as comments do not nest), a
+    secret-named attribute (`dbPassword="..."`), the `value` attribute and
+    the text of an element whose `name` or `key` attribute is a secret
+    name (`<add key="DbPassword" value="..."/>`), and the `<value>` child
+    of an element whose `<name>` child is a secret name (the name/value
+    form of many Java and Hadoop configuration files). The name of such a
+    pair is read as XML text first, so a name in CDATA or with a character
+    reference (`&#x50;`) is the same name. In a JSON text each
+    string is read on its own, and as text: its escapes (`\"`, `\u003c`)
+    are read before its XML. The XML step itself changes only the hidden
+    value and keeps the other escapes of the string. When the YAML step
+    also reads the JSON text, it writes the changed string back, and a
+    `\u` escape can then become the plain character; the JSON still
+    parses and means the same. A start tag and a closing tag in two
+    different strings are no element. In a YAML text each value (with
+    its key on the same entry) and each comment is read on its own in the
+    same way, so a start tag and a closing tag in two different YAML
+    values or comment lines are no element, and the keys and values
+    between them stay. A text that is one complete XML document (such as
+    one root element with `key: value` lines in it), or reads as neither
+    YAML nor JSON, is read as XML whole, so an element over more lines is
+    still hidden. These steps
+    write the marker without quotes. A step that is too deep to read hides
+    the whole text. An element with no closing tag is not touched, and
+    text without a secret-named field comes back unchanged. The YAML read
     uses the same rules as the key-name walk: a bare `community` in an SNMP
     place, and the `value` of a secret-named pair also when it is a list
     or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one

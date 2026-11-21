@@ -6,7 +6,7 @@
 An operator can ingest a Kubernetes API file as a generic connector. Each
 operation then has the op id ``<METHOD>:<path>``, for example
 ``POST:/api/v1/namespaces/{namespace}/pods/{name}/exec``. These operations
-get the same rule as ``k8s.exec`` and as a ``k8s.apply`` that waits
+get the same rule as ``k8s.exec`` and ``k8s.apply``
 (:mod:`~meho_backplane.connectors.kubernetes.op_classes`): a person approves
 each call, and no standing grant, no agent grant and no run approval covers
 it (:func:`~meho_backplane.op_classes.declare_credential_capable_match`).
@@ -14,14 +14,25 @@ it (:func:`~meho_backplane.op_classes.declare_credential_capable_match`).
 * Every method: the Secrets (read, list, watch and write), a command in a
   pod (``exec``, ``attach``), a port forward and a proxy to a pod, a service
   or a node, and a new ServiceAccount token.
-* A write (``POST``, ``PUT``, ``PATCH``): a pod or an object that runs one,
-  an ephemeral container, a role or a binding, an object that makes or
-  reads a Secret (External Secrets, Sealed Secrets, cert-manager) and a
-  certificate signing request.
+* A write (``POST``, ``PUT``, ``PATCH``, ``DELETE``) of an object or of a
+  collection of objects, of every kind, read by path: ``/api/v1/...`` and
+  ``/apis/<group>/<version>/...``, namespaced or cluster-wide. There is no
+  list of kinds that keep their rules. The cluster-wide core objects are the
+  namespaces, nodes, persistent volumes and component statuses. Also an
+  ephemeral container and the approval of a certificate signing request.
 
 A path segment in braces or with a value counts the same, so the names of
-the path params in the API file do not matter. A ``/status`` or ``/scale``
-subresource of a workload keeps its rules: it does not change what runs.
+the path params in the API file do not matter. A path can have any prefix
+in front, for example the base path of a proxy: each rule is read from
+every ``/`` of the path on. A ``/status`` or ``/scale`` subresource keeps
+its rules: it does not change what runs. So do the ``status`` and
+``finalize`` subresources of a Namespace.
+
+The rule reads the path of every operation made from an ingested API file,
+whatever the product. So an API file of another product whose paths have
+the same form (``/api/v1/namespaces/...``, ``/api/v1/<cluster-wide core
+kind>/...`` or ``/apis/<group>/<version>/...``) gets the same rule. The
+method is read without case: ``post:`` counts the same as ``POST:``.
 """
 
 from __future__ import annotations
@@ -35,7 +46,6 @@ __all__ = ["ingested_op_is_credential_call"]
 
 _SEG = r"[^/]+"
 _NS = rf"(?:/namespaces/{_SEG})?"
-_GROUP = rf"/apis/{_SEG}/{_SEG}"
 
 #: Paths that make a call of every method a credential call.
 _ANY_METHOD: Final[tuple[re.Pattern[str], ...]] = (
@@ -45,31 +55,45 @@ _ANY_METHOD: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(rf"/api/v1/namespaces/{_SEG}/serviceaccounts/{_SEG}/token"),
 )
 
-#: Paths that make a write a credential call.
-_WRITE: Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(
-        rf"/api/v1/namespaces/{_SEG}/(?:pods|podtemplates|replicationcontrollers)(?:/{_SEG})?"
-    ),
+#: Write subresources that make a write a credential call.
+_WRITE_SUBRESOURCES: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(rf"/api/v1/namespaces/{_SEG}/pods/{_SEG}/ephemeralcontainers"),
-    re.compile(
-        rf"/apis/(?:apps|batch|extensions)/{_SEG}/namespaces/{_SEG}/"
-        rf"(?:cronjobs|daemonsets|deployments|jobs|replicasets|statefulsets)(?:/{_SEG})?"
-    ),
-    re.compile(
-        rf"/apis/rbac\.authorization\.k8s\.io/{_SEG}{_NS}/"
-        rf"(?:clusterrolebindings|clusterroles|rolebindings|roles)(?:/{_SEG})?"
-    ),
-    re.compile(
-        rf"{_GROUP}{_NS}/(?:certificates|clusterexternalsecrets|clustersecretstores|"
-        rf"externalsecrets|pushsecrets|sealedsecrets|secretstores)(?:/{_SEG})?"
-    ),
-    re.compile(
-        rf"/apis/certificates\.k8s\.io/{_SEG}/certificatesigningrequests"
-        rf"(?:/{_SEG}(?:/approval)?)?"
-    ),
+    re.compile(rf"/apis/certificates\.k8s\.io/{_SEG}/certificatesigningrequests/{_SEG}/approval"),
 )
 
-_WRITE_METHODS: Final[frozenset[str]] = frozenset({"PATCH", "POST", "PUT"})
+#: The ``status`` and ``finalize`` subresources of a Namespace keep their rules.
+_NAMESPACE_SUBRESOURCE: Final[re.Pattern[str]] = re.compile(
+    rf"/api/v1/namespaces/{_SEG}/(?:status|finalize)"
+)
+
+#: The cluster-wide objects of the core group. The core group has no other
+#: cluster-wide kind, and ``/api/v1/<plural>`` of another API is not one.
+_CLUSTER_CORE_PLURALS = "namespaces|nodes|persistentvolumes|componentstatuses"
+
+#: A core object, namespaced or cluster-wide, or a list of them.
+_CORE_OBJECT: Final[re.Pattern[str]] = re.compile(
+    rf"/api/v1(?:/namespaces/{_SEG}/{_SEG}"
+    rf"|/(?:{_CLUSTER_CORE_PLURALS}))(?:/{_SEG})?"
+)
+
+#: An object of an API group, namespaced or cluster-wide, or a list of them.
+_GROUP_OBJECT: Final[re.Pattern[str]] = re.compile(rf"/apis/{_SEG}/{_SEG}{_NS}/{_SEG}(?:/{_SEG})?")
+
+_WRITE_METHODS: Final[frozenset[str]] = frozenset({"DELETE", "PATCH", "POST", "PUT"})
+
+
+def _tails(path: str) -> list[str]:
+    """*path* and each part of it that starts at a later ``/``."""
+    return [path[index:] for index, char in enumerate(path) if char == "/"]
+
+
+def _write_waits(tail: str) -> bool:
+    """True when a write to the path *tail* is a credential call."""
+    if any(pattern.fullmatch(tail) for pattern in _WRITE_SUBRESOURCES):
+        return True
+    if _NAMESPACE_SUBRESOURCE.fullmatch(tail):
+        return False
+    return any(pattern.fullmatch(tail) for pattern in (_CORE_OBJECT, _GROUP_OBJECT))
 
 
 def ingested_op_is_credential_call(op_id: str) -> bool:
@@ -77,15 +101,15 @@ def ingested_op_is_credential_call(op_id: str) -> bool:
 
     *op_id* is ``<METHOD>:<path>``. An op id without a ``:`` is not an
     ingested operation and does not count. A trailing ``/`` counts the same
-    as none.
+    as none. Each rule is read from every ``/`` of the path on.
     """
     method, sep, path = op_id.partition(":")
     if not sep or not path.startswith("/"):
         return False
-    path = path.rstrip("/") or "/"
-    if any(pattern.fullmatch(path) for pattern in _ANY_METHOD):
+    tails = _tails(path.rstrip("/") or "/")
+    if any(pattern.fullmatch(tail) for tail in tails for pattern in _ANY_METHOD):
         return True
-    return method.upper() in _WRITE_METHODS and any(pattern.fullmatch(path) for pattern in _WRITE)
+    return method.upper() in _WRITE_METHODS and any(_write_waits(tail) for tail in tails)
 
 
 declare_credential_capable_match(ingested_op_is_credential_call)

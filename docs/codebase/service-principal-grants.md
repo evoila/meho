@@ -171,6 +171,11 @@ and no run approval covers it.
   or cluster-wide, of an ephemeral container, or of the approval of a
   certificate signing request. A path can have any prefix in front. A
   `/status` or `/scale` subresource keeps the rules of the operation.
+  The match reads the path of every operation made from an ingested API
+  file, whatever the product: an API file of another product whose paths
+  have the same form (`/api/v1/namespaces/...`,
+  `/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+  gets the same rule. The method is read without case.
 - A connector can also tell from the params of one call that it writes a
   credential: `declare_credential_check` (`op_classes.py`). Today three
   operations use it:

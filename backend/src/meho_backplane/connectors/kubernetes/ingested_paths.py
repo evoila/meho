@@ -27,6 +27,12 @@ in front, for example the base path of a proxy: each rule is read from
 every ``/`` of the path on. A ``/status`` or ``/scale`` subresource keeps
 its rules: it does not change what runs. So do the ``status`` and
 ``finalize`` subresources of a Namespace.
+
+The rule reads the path of every operation made from an ingested API file,
+whatever the product. So an API file of another product whose paths have
+the same form (``/api/v1/namespaces/...``, ``/api/v1/<cluster-wide core
+kind>/...`` or ``/apis/<group>/<version>/...``) gets the same rule. The
+method is read without case: ``post:`` counts the same as ``POST:``.
 """
 
 from __future__ import annotations

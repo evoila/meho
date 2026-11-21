@@ -79,6 +79,13 @@ base path of a proxy. A read, a `/status` or `/scale` subresource, and
 the `status` and `finalize` subresources of a Namespace keep the rules
 of the operation
 (`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The rule reads the path of every operation made from an ingested API
+file, whatever the product. So an API file of another product whose
+paths have the same form (`/api/v1/namespaces/...`,
+`/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+gets the same rule: its writes wait for a person on every call, and
+grant create refuses them. The method is read without case: `post:`
+counts the same as `POST:`.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 

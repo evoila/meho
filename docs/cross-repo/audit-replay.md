@@ -25,7 +25,7 @@ Like the query surface, replay reads the **WORM-grade** (write-once, read-many) 
 
 ## How to get a session id
 
-Replay is keyed on `agent_session_id` — the MCP-session correlation id (the `Mcp-Session-Id` the client sent, bound onto each audit row that request writes). There are two ways to find one:
+Replay is keyed on `agent_session_id` — usually the MCP-session correlation id (the `Mcp-Session-Id` the client sent, bound onto each audit row that request writes). It can also be the id of a CLI login (see [Why some rows have a NULL session id](#why-some-rows-have-a-null-session-id)). There are two ways to find one:
 
 ### From an audit row
 
@@ -49,7 +49,20 @@ The session id is the `Mcp-Session-Id` header the MCP client established on its 
 
 ### Why some rows have a NULL session id
 
-`agent_session_id` is populated **only on MCP-originated rows** — the MCP audit writer ([`mcp/audit.py`](../../backend/src/meho_backplane/mcp/audit.py)) reads the bound `Mcp-Session-Id` and writes it onto the row. Plain HTTP requests through the chassis middleware ([`audit.py`](../../backend/src/meho_backplane/audit.py)) do **not** carry an MCP session, so those rows have `agent_session_id = NULL` by design. A session id you can replay therefore always traces back to an MCP-originated row. CLI verbs themselves dispatch over HTTP, so a `meho audit ...` invocation's own audit row has no session id.
+`agent_session_id` comes from one of three places:
+
+- **An MCP session.** The MCP audit writer ([`mcp/audit.py`](../../backend/src/meho_backplane/mcp/audit.py)) reads the bound `Mcp-Session-Id` and writes it onto the row.
+- **An agent run** inside MEHO. Its rows carry the run id.
+- **A CLI login.** `meho login` makes a session id, and the CLI sends it in the `Meho-Session-Id` header on every request. The chassis middleware ([`audit.py`](../../backend/src/meho_backplane/audit.py)) stores it on the rows of that request when no agent run or MCP session is bound.
+
+To tell them apart, look at the row's payload: a row whose id came from a CLI login has `"session_from_client": true`. Rows of an MCP session or an agent run do not have this key. Pull it out with `--json`:
+
+```bash
+meho audit query --session-id <id> --json \
+  | jq -r '.rows[] | [.agent_session_id, (.payload.session_from_client // false)] | @tsv'
+```
+
+A plain HTTP request without that header (a script with a token, or a login stored by an older `meho`, until the next `meho login`) has `agent_session_id = NULL`.
 
 There is one exception for plain HTTP. When a **client-credential service principal** (a service account, for example an automation add-on) calls `call_operation` over REST with a `work_ref`, MEHO gives that run a session id. The first call for a `work_ref` writes one start row (`method=ORCHESTRATION`). Every call for the same `work_ref` carries the same session id and sits under that start row. So the run replays as one tree. To replay it:
 

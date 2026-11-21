@@ -133,6 +133,7 @@ func sendFeedRequest(ctx context.Context, client *api.AuthedClient, feedURL, las
 	}
 	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
 	req.Header.Set("Accept", "text/event-stream")
+	api.SetSessionIDHeader(req, client.SessionID())
 	if lastEventID != "" {
 		req.Header.Set("Last-Event-Id", lastEventID)
 	}

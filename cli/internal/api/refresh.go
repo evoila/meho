@@ -71,6 +71,14 @@ func (b *tokenBox) snapshot() string {
 	return b.current.AccessToken
 }
 
+// sessionID returns the login session id of the stored token under the
+// mutex. It is empty for a token saved before login made one.
+func (b *tokenBox) sessionID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.current.SessionID
+}
+
 // refresh performs a one-shot refresh exchange against the IdP.
 // Returns errNoRefreshToken when the stored token didn't carry a
 // refresh_token. Any other refresh failure (IdP rejected, network

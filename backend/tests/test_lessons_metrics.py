@@ -104,6 +104,34 @@ async def test_repeat_mistakes_count_only_across_sessions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_cli_login_session_is_not_an_agent_session() -> None:
+    """Rows whose session id came from the CLI count in no learning number."""
+    cli, agent = uuid.uuid4(), uuid.uuid4()
+    # The CLI fails first, then the agent fails the same way: not a repeat.
+    await seed_dispatch(
+        tenant_id=TENANT,
+        session_id=cli,
+        at=_at(1),
+        target_id=TARGET,
+        status_code=500,
+        from_client=True,
+    )
+    await seed_dispatch(
+        tenant_id=TENANT, session_id=agent, at=_at(5), target_id=TARGET, status_code=500
+    )
+    # A CLI success does not make TARGET_2 known for the agent session.
+    await seed_dispatch(
+        tenant_id=TENANT, session_id=cli, at=_at(2), target_id=TARGET_2, from_client=True
+    )
+    await seed_dispatch(tenant_id=TENANT, session_id=agent, at=_at(8), target_id=TARGET_2)
+
+    numbers = await _numbers()
+    assert numbers.repeat_mistake_failures == 1
+    assert numbers.repeat_mistake_repeats == 0
+    assert numbers.first_correct_action_sessions == 0
+
+
+@pytest.mark.asyncio
 async def test_hit_rate_counts_retrievals_followed_by_a_success_in_the_session() -> None:
     used_session, idle_session, failed_session = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     entry = uuid.uuid4()

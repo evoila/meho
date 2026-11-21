@@ -458,9 +458,11 @@ def test_an_api_write_whose_body_meho_does_not_read_waits(
         f"PATCH:{_PREFIX}/api/v1/namespaces/{{name}}/status/",
         "GET:/api/v1/namespaces/{name}",
         "GET:/api/v1/nodes",
+        "POST:/api/v1/accounts",
+        f"PUT:{_PREFIX}/api/v1/accounts/{{id}}",
     ],
 )
-def test_reads_and_status_scale_and_finalize_writes_keep_their_rules(
+def test_reads_subresource_writes_and_other_apis_keep_their_rules(
     op_id: str,
 ) -> None:
     assert ingested_op_is_credential_call(op_id) is False

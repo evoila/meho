@@ -108,9 +108,9 @@ plain: MEHO reads the API group and the plural from the path and looks
 them up in the same `PLAIN_OBJECTS` table. MEHO does not read the body of
 such a call, so a write of a `Namespace` or a `Service` always waits
 (`PLAIN_PLURALS` leaves out the kinds of `_PLAIN_ONLY_IF`). The same
-rule holds for a cluster-wide core object (`/api/v1/<plural>`, for
-example a node or a volume): its write waits unless its plural is in
-`PLAIN_PLURALS`. A trailing `/` counts the same as none. A `/status` or
+rule holds for a cluster-wide core object (`/api/v1/<plural>` for a
+namespace, a node, a persistent volume or a component status): its write
+waits unless its plural is in `PLAIN_PLURALS`. A trailing `/` counts the same as none. A `/status` or
 `/scale` subresource, and the `status` and `finalize` subresources of a
 Namespace, keep their rules. A path can have any prefix in
 front, for example the base path of a proxy

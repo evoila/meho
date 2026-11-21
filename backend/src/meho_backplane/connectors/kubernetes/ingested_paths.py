@@ -20,8 +20,9 @@ it (:func:`~meho_backplane.op_classes.declare_credential_capable_match`).
   read by API group and plural: a pod or a workload, a role or a binding, a
   webhook, a ConfigMap, an Ingress, a Service, a Namespace, a node, a
   volume, a custom resource and every other kind, namespaced or
-  cluster-wide. Also an ephemeral container and the approval of a
-  certificate signing request.
+  cluster-wide. The cluster-wide core objects are the namespaces, nodes,
+  persistent volumes and component statuses. Also an ephemeral container
+  and the approval of a certificate signing request.
 
 A path segment in braces or with a value counts the same, so the names of
 the path params in the API file do not matter. A path can have any prefix
@@ -63,8 +64,15 @@ _NAMESPACE_SUBRESOURCE: Final[re.Pattern[str]] = re.compile(
     rf"/api/v1/namespaces/{_SEG}/(?:status|finalize)"
 )
 
+#: The cluster-wide objects of the core group. The core group has no other
+#: cluster-wide kind, and ``/api/v1/<plural>`` of another API is not one.
+_CLUSTER_CORE_PLURALS = "namespaces|nodes|persistentvolumes|componentstatuses"
+
 #: A core object, namespaced or cluster-wide, or a list of them.
-_CORE_OBJECT: Final[re.Pattern[str]] = re.compile(rf"/api/v1{_NS}/(?P<plural>{_SEG})(?:/{_SEG})?")
+_CORE_OBJECT: Final[re.Pattern[str]] = re.compile(
+    rf"/api/v1(?:/namespaces/{_SEG}/(?P<plural>{_SEG})"
+    rf"|/(?P<cluster_plural>{_CLUSTER_CORE_PLURALS}))(?:/{_SEG})?"
+)
 
 #: An object of an API group, namespaced or cluster-wide, or a list of them.
 _GROUP_OBJECT: Final[re.Pattern[str]] = re.compile(
@@ -87,7 +95,7 @@ def _write_waits(tail: str) -> bool:
         return False
     core = _CORE_OBJECT.fullmatch(tail)
     if core is not None:
-        return ("", core["plural"]) not in PLAIN_PLURALS
+        return ("", core["plural"] or core["cluster_plural"]) not in PLAIN_PLURALS
     grouped = _GROUP_OBJECT.fullmatch(tail)
     if grouped is not None:
         return (grouped["group"], grouped["plural"]) not in PLAIN_PLURALS

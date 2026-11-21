@@ -47,8 +47,8 @@ it. So ``postgres.query`` adds three checks:
   on a target that allows a superuser. Settings are read with the curated
   ``postgres.settings``. It reads a connection text with the rules of libpq
   and puts a fixed mark in place of each secret value; the rest of the value
-  stays. A text that libpq cannot read is hidden whole when it holds a
-  secret name.
+  stays. A text that libpq cannot read makes ``postgres.settings`` refuse
+  the call when it holds a secret name.
 
 * :func:`assert_not_superuser` refuses to run the statement when the login
   role is a superuser, unless the target sets
@@ -245,7 +245,8 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
 #: refuses a ``SHOW`` of them. ``postgres.settings`` reads their value with
 #: the rules of libpq and puts a fixed mark in place of each secret value (see
 #: :data:`CONNECTION_TEXT_SECRET_KEYWORDS`). The rest of the value stays. A
-#: value that libpq cannot read is hidden whole when it holds a secret name.
+#: value that libpq cannot read makes ``postgres.settings`` refuse the call
+#: when it holds a secret name.
 CONNECTION_TEXT_SETTINGS: frozenset[str] = frozenset({"primary_conninfo"})
 
 #: The key words of a connection text whose value is a secret. Pinned to the

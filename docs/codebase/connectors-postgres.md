@@ -79,7 +79,7 @@ Ops:
 | `postgres.tables` | `pg_stat_user_tables` + size helpers | vacuum/analyze stats + total/table/index bytes |
 | `postgres.indexes` | `pg_stat_user_indexes` + `pg_relation_size` | scan counters + index size |
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
-| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **each secret value of a connection text is hidden**: a value of `primary_conninfo` is read with the rules of libpq, and the fixed mark `[REDACTED:param_name]` stands in place of each secret value (`password`, `sslpassword`, `oauth_client_secret`, and the password of an address); every other character stays; a value that libpq cannot read is hidden whole when it holds a secret name |
+| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **each secret value of a connection text is hidden**: a value of `primary_conninfo` is read with the rules of libpq, and the fixed mark `[REDACTED:param_name]` stands in place of each secret value (`password`, `sslpassword`, `oauth_client_secret`, and the password of an address); every other character stays; a value that libpq cannot read (also one with a parameter name that is not a libpq key word) makes `postgres.settings` refuse the call when it holds a secret name or an address password, and stays as it is otherwise; a call without `names` is never refused |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
 | `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions and secret catalogs denied + no superuser role + server read-only; row-capped |
 
@@ -194,9 +194,12 @@ role's rights. So the free-form op adds three checks:
    `oauth_client_secret` (any case) in the key word form and in the query part
    of the address form, and the password of the address. In the address form,
    white space is part of a value, as libpq reads it. Every other
-   character stays as the server sent it. A value that libpq cannot read is
-   hidden whole when it holds a secret name or an address password; else it
-   stays as it is. The refusal for
+   character stays as the server sent it. A value that libpq cannot read
+   (also one with a parameter name that is not a libpq key word) makes
+   `postgres.settings` refuse the call when it holds a secret name or an
+   address password; the error names the setting and holds no part of the
+   value. Else the value stays as it is. A call without `names` is never
+   refused. The refusal for
    sessions names `postgres.activity`, which reads the same
    view without the `query` column. Views that show no secret value stay
    allowed: `pg_roles` and `pg_user` (the password is shown as stars),

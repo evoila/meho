@@ -1359,10 +1359,12 @@ example the full pod definition of a pod list. Who reads what:
 - **A person** (the console, `meho audit trace`, `GET /api/v1/audit/{id}/trace`
   and `GET /api/v1/audit/traces`) reads the stored trace as it is.
 - **A service login** (a paired add-on) reads the stored traces of its own
-  calls as they are.
-- **An agent login** reads a copy. It gets the copy through the trace handle
-  on a `call_operation` answer (`flight_recorder_trace_handle`, paged with
-  `result_query`) and through the two REST trace routes.
+  calls as they are, on the same REST routes.
+- **An agent login** reads a copy on the two REST trace routes.
+- **The trace handle** on a `call_operation` answer
+  (`flight_recorder_trace_handle`, paged with `result_query`) holds the copy
+  for every caller. A person and a service login read the stored trace on
+  the REST routes, in the console and with `meho audit trace`.
 
 In the agent's copy, each span of a Kubernetes call (connector product
 `k8s`, or an operation id that starts with `k8s.`) goes through
@@ -1387,7 +1389,9 @@ CronJobs, pod templates in custom resources, the items of a list):
   value on a command line), the
   password in `user:password` after `-u`, the password in a URL and tokens
   with a known vendor prefix. The script after `sh -c` is read as a shell
-  script.
+  script. On a container command line, the pass counts `-p` as a password
+  flag after any program. So the word after it is hidden in the copy, also
+  when it is not a password (for example the folder of `mkdir -p`).
 - An annotation value that is a JSON object or list (the
   `kubectl.kubernetes.io/last-applied-configuration` annotation holds a
   whole earlier object) is cleaned by the same walk. Each text inside it

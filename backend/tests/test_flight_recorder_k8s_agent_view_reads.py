@@ -230,15 +230,12 @@ async def test_agent_reads_cleaned_trace_through_the_rest_routes(client: TestCli
     assert single.json()["trace_present"] is True
     _assert_cleaned(single.json()["trace"])
 
-    # A fixed window around the seeded time, so the test passes on any day.
-    since = (_BASE - timedelta(hours=1)).isoformat()
-    until = (_BASE + timedelta(hours=1)).isoformat()
     search = _get(
         client,
         "/api/v1/audit/traces",
         principal_kind="agent",
         sub=_AGENT_SUB,
-        params={"since": since, "until": until},
+        params=_search_window(),
     )
     assert search.status_code == 200, search.text
     items = search.json()["items"]
@@ -262,10 +259,29 @@ async def test_person_and_service_login_read_the_stored_trace(
     assert container["args"] == ["--password", _FAKE]
 
 
+def _search_window() -> dict[str, str]:
+    """A fixed window around the seeded time, so a search passes on any day."""
+    return {
+        "since": (_BASE - timedelta(hours=1)).isoformat(),
+        "until": (_BASE + timedelta(hours=1)).isoformat(),
+    }
+
+
 async def test_agent_gets_no_trace_when_the_copy_fails(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     audit_id = await _seed()
+
+    # While the copy works, the search finds the trace.
+    found = _get(
+        client,
+        "/api/v1/audit/traces",
+        principal_kind="agent",
+        sub=_AGENT_SUB,
+        params=_search_window(),
+    )
+    assert found.status_code == 200, found.text
+    assert len(found.json()["items"]) == 1
 
     async def _boom(view: Any) -> Any:
         raise RecursionError("too deep")
@@ -277,7 +293,13 @@ async def test_agent_gets_no_trace_when_the_copy_fails(
     assert single.json()["trace_present"] is False
     assert _FAKE not in single.text
 
-    search = _get(client, "/api/v1/audit/traces", principal_kind="agent", sub=_AGENT_SUB)
+    search = _get(
+        client,
+        "/api/v1/audit/traces",
+        principal_kind="agent",
+        sub=_AGENT_SUB,
+        params=_search_window(),
+    )
     assert search.status_code == 200, search.text
     assert search.json()["items"] == []
 

@@ -10,8 +10,8 @@ Covers :mod:`meho_backplane.connectors.kubernetes.trace_agent_view` and
   of an operation: a secret-named entry is hidden, a plain value stays, and
   the password in a database URL that the stored trace hides stays hidden;
   the env names and a ``valueFrom`` reference stay;
-* ``--password x`` on a command line and a token in an ``sh -c`` script are
-  hidden; the other words stay;
+* a password flag and its value on a command line, and a token in an
+  ``sh -c`` script, are hidden; the other words stay;
 * the last-applied annotation, which holds a whole object, is cleaned like
   the object; other annotation values are checked for secret shapes;
 * ``managedFields`` stays;

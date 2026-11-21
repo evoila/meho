@@ -3,9 +3,11 @@
 
 """``targets.register``: the credential path a machine login may give a new target.
 
-A service login whose standing grant covers ``targets.register`` runs the
-call at once. Such a call may use only the new target's own credential
-path (``tenants/<tenant_id>/<name>``) or no path. MEHO refuses:
+Every ``targets.register`` call waits for a person, also under a standing
+grant: such a call is sent for approval and stores nothing. The handler
+keeps its own check for a machine login's call that runs with no person's
+approval: it may use only the new target's own credential path
+(``tenants/<tenant_id>/<name>``) or no path. MEHO refuses:
 
 * the path of another target of the tenant;
 * the own path when another target, live or removed, already uses it.
@@ -42,7 +44,6 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.operations._audit import policy_decision_var
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -126,6 +127,15 @@ def _register(client: TestClient, arguments: dict[str, Any]) -> Any:
     ).json()
 
 
+async def _run_unapproved(params: dict[str, Any]) -> dict[str, Any]:
+    """Run the handler as a machine login's call that no person approved."""
+    token = policy_decision_var.set(PermissionVerdict.AUTO_EXECUTE.value)
+    try:
+        return await targets_register(_service_operator(), None, params)
+    finally:
+        policy_decision_var.reset(token)
+
+
 async def _stored_ref(name: str) -> list[str | None]:
     async with get_sessionmaker()() as session:
         rows = await session.scalars(
@@ -155,16 +165,19 @@ async def _set_ref(name: str, secret_ref: str, *, removed: bool) -> None:
     [_OTHER_REF, f"/{_OTHER_REF}/", f"tenants/{OPERATOR_TENANT_ID}/other-name"],
     ids=["other-target", "other-target-with-slashes", "not-own-path"],
 )
-async def test_granted_service_login_with_another_path_is_refused(
-    _service_client: TestClient, _seeded: None, secret_ref: str
+async def test_unapproved_machine_call_with_another_path_is_refused(
+    _seeded: None, secret_ref: str
 ) -> None:
-    body = _register(
-        _service_client,
-        {"name": "new-vc", "product": "vault", "host": "vault-c.example", "secret_ref": secret_ref},
-    )
+    with pytest.raises(ValueError, match="own credential path"):
+        await _run_unapproved(
+            {
+                "name": "new-vc",
+                "product": "vault",
+                "host": "vault-c.example",
+                "secret_ref": secret_ref,
+            }
+        )
 
-    assert body["error"]["code"] == INVALID_PARAMS
-    assert "own credential path" in body["error"]["message"]
     assert await _stored_ref("new-vc") == []
 
 
@@ -178,17 +191,13 @@ async def test_granted_service_login_with_another_path_is_refused(
     ],
     ids=["omitted", "own-path", "own-path-with-scheme", "null"],
 )
-async def test_granted_service_login_with_own_or_no_path_runs(
-    _service_client: TestClient, _seeded: None, extra: dict[str, Any]
+async def test_unapproved_machine_call_with_own_or_no_path_runs(
+    _seeded: None, extra: dict[str, Any]
 ) -> None:
-    body = _register(
-        _service_client,
-        {"name": "new-vc", "product": "vault", "host": "vault-c.example", **extra},
+    await _run_unapproved(
+        {"name": "new-vc", "product": "vault", "host": "vault-c.example", **extra}
     )
 
-    result = body["result"]
-    assert result["isError"] is False, body
-    assert result["structuredContent"].get("status") != "awaiting_approval"
     expected = extra.get("secret_ref", _own_ref("new-vc"))
     assert await _stored_ref("new-vc") == [expected]
 
@@ -204,16 +213,25 @@ async def test_granted_service_login_with_own_or_no_path_runs(
     ids=["live", "removed", "live-with-scheme", "live-with-scheme-and-slashes"],
 )
 async def test_own_path_of_another_target_is_refused(
-    _service_client: TestClient, _seeded: None, removed: bool, stored: str
+    _seeded: None, removed: bool, stored: str
 ) -> None:
     await _set_ref("shared-login", stored, removed=removed)
 
+    with pytest.raises(ValueError, match="belongs to another target"):
+        await _run_unapproved({"name": "new-vc", "product": "vault", "host": "vault-c.example"})
+
+    assert await _stored_ref("new-vc") == []
+
+
+async def test_granted_service_call_waits_and_stores_nothing(
+    _service_client: TestClient, _seeded: None
+) -> None:
     body = _register(
-        _service_client, {"name": "new-vc", "product": "vault", "host": "vault-c.example"}
+        _service_client,
+        {"name": "new-vc", "product": "vault", "host": "vault-c.example", "secret_ref": _OTHER_REF},
     )
 
-    assert body["error"]["code"] == INVALID_PARAMS
-    assert "belongs to another target" in body["error"]["message"]
+    assert body["result"]["structuredContent"]["status"] == "awaiting_approval", body
     assert await _stored_ref("new-vc") == []
 
 

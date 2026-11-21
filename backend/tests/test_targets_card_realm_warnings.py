@@ -158,7 +158,7 @@ async def test_register_with_no_warning_has_a_card_without_the_part(
 
     card = await _card()
     assert "target_warnings" not in card
-    assert "params_echo" in card
+    assert card["preview"]["action"] == TARGETS_REGISTER_OP_ID
 
 
 async def test_update_that_changes_only_the_managed_realm_shows_the_warning() -> None:
